@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "0.1.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "0.1.0",
+			"CompanyName": "Nice Codex",
+			"FileDescription": "A lightweight Codex-compatible desktop client.",
+			"LegalCopyright": "Copyright 2026 Nice Codex",
+			"ProductName": "Nice Codex",
+			"Comments": "Unofficial Codex-compatible desktop client."
+		}
+	}
+}

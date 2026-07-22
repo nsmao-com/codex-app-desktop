@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=Nice Codex
+Comment=A lightweight Codex-compatible desktop client.
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/nicecodex %u
+Terminal=false
+Type=Application
+Icon=nicecodex
+Categories=Utility;
+StartupWMClass=nicecodex
+
+ 

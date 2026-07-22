@@ -1,0 +1,45 @@
+{
+  "name": "nice-codex-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "vue-tsc --noEmit",
+    "build:dev": "vue-tsc --noEmit && vite build --minify false --mode development",
+    "build": "vue-tsc --noEmit && vite build --mode production",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@fontsource-variable/manrope": "^5.2.8",
+    "@lucide/vue": "^1.24.0",
+    "@vueuse/core": "^14.3.0",
+    "@wailsio/runtime": "3.0.0-alpha.97",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "dompurify": "^3.4.11",
+    "marked": "^18.0.6",
+    "motion-v": "^2.3.0",
+    "pinia": "^3.0.4",
+    "radix-vue": "^1.9.17",
+    "reka-ui": "^2.10.1",
+    "tailwind-merge": "^3.6.0",
+    "vue": "^3.5.39",
+    "vue-i18n": "^11.4.6",
+    "vue-router": "^4.6.4",
+    "vue-sonner": "^2.0.9"
+  },
+  "devDependencies": {
+    "@tailwindcss/typography": "^0.5.20",
+    "@tailwindcss/vite": "^4.3.2",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "tailwindcss": "^4.3.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.1.4",
+    "vue-tsc": "^3.3.7"
+  },
+  "packageManager": "pnpm@10.18.3"
+}

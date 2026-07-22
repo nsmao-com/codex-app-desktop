@@ -1,0 +1,205 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to build (e.g. v1.0.0). Leave empty to use the pushed tag.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.25.x'
+  NODE_VERSION: '22'
+  WAILS_VERSION: 'v3.0.0-alpha2.117'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          raw="${{ github.event.inputs.tag }}"
+          if [ -z "$raw" ]; then
+            raw="${GITHUB_REF_NAME}"
+          fi
+          tag="${raw#v}"
+          tag="v${tag}"
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building release $tag ($version)"
+
+  build-windows:
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+
+      - name: Install Wails CLI
+        shell: bash
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+
+      - name: Sync release version
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:VERSION
+          (Get-Content version.go -Raw) -replace 'var AppVersion = "[^"]+"', "var AppVersion = `"$version`"" | Set-Content version.go -NoNewline
+          (Get-Content build/config.yml -Raw) -replace 'version: "[0-9]+\.[0-9]+\.[0-9]+"', "version: `"$version`"" | Set-Content build/config.yml -NoNewline
+          (Get-Content frontend/package.json -Raw) -replace '"version": "[0-9]+\.[0-9]+\.[0-9]+"', "`"version`": `"$version`"" | Set-Content frontend/package.json -NoNewline
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows
+        shell: bash
+        run: wails3 build GOOS=windows
+
+      - name: Stage Windows artifact
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $src = Get-ChildItem -Path bin -Filter *.exe | Select-Object -First 1
+          if (-not $src) { throw 'Windows binary not found in bin/' }
+          $dest = "release/NiceCodex-${env:VERSION}-windows-amd64.exe"
+          Copy-Item $src.FullName $dest -Force
+          Get-ChildItem release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64
+          path: release/*.exe
+          if-no-files-found: error
+
+  build-macos:
+    needs: prepare
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            suffix: darwin-arm64
+          - arch: amd64
+            suffix: darwin-amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install Task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+
+      - name: Sync release version
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          sed -i.bak -E "s/var AppVersion = \"[^\"]+\"/var AppVersion = \"${VERSION}\"/" version.go
+          sed -i.bak -E "s/version: \"[0-9]+\.[0-9]+\.[0-9]+\"/version: \"${VERSION}\"/" build/config.yml
+          sed -i.bak -E "s/\"version\": \"[0-9]+\.[0-9]+\.[0-9]+\"/\"version\": \"${VERSION}\"/" frontend/package.json
+          rm -f version.go.bak build/config.yml.bak frontend/package.json.bak
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build & package macOS
+        run: wails3 task darwin:package ARCH=${{ matrix.arch }}
+
+      - name: Stage macOS artifact
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          APP_PATH=$(find bin -maxdepth 2 -name '*.app' | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "macOS .app not found" >&2
+            ls -la bin || true
+            exit 1
+          fi
+          ZIP_NAME="NiceCodex-${VERSION}-${SUFFIX}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release/${ZIP_NAME}"
+          ls -la release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.suffix }}
+          path: release/*.zip
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f \( -name '*.exe' -o -name '*.zip' \) -print -exec cp {} dist/ \;
+          ls -la dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: Nice Codex ${{ needs.prepare.outputs.tag }}
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
