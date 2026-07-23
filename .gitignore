@@ -22,3 +22,11 @@ tmp/
 *.log
 .DS_Store
 Thumbs.db
+
+# Local AI / agent tooling — do not publish to GitHub
+.cursor/
+.claude/
+.codex/
+.agents/
+agent-transcripts/
+AGENTS.override.md

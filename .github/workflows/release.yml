@@ -15,7 +15,8 @@ permissions:
   contents: write
 
 env:
-  GO_VERSION: '1.25.x'
+  # Pin exact Go — wildcard like 1.25.x forces GitHub API lookups and can hit rate limits.
+  GO_VERSION: '1.25.0'
   NODE_VERSION: '22'
   WAILS_VERSION: 'v3.0.0-alpha2.117'
 
@@ -45,27 +46,36 @@ jobs:
     needs: prepare
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Enable pnpm
         run: corepack enable
 
       - name: Install Task
-        uses: arduino/setup-task@v2
-        with:
-          version: 3.x
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -c "$(curl --proto '=https' --tlsv1.2 -fsSL https://taskfile.dev/install.sh)" -- -d -b "$HOME/bin"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
 
       - name: Install Wails CLI
         shell: bash
-        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+          go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
 
       - name: Sync release version
         shell: pwsh
@@ -99,7 +109,7 @@ jobs:
           Copy-Item $src.FullName $dest -Force
           Get-ChildItem release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: windows-amd64
           path: release/*.exe
@@ -110,6 +120,8 @@ jobs:
     runs-on: macos-latest
     strategy:
       fail-fast: false
+      # Avoid bursting unauthenticated GitHub API from parallel matrix jobs on shared runners.
+      max-parallel: 1
       matrix:
         include:
           - arch: arm64
@@ -117,26 +129,34 @@ jobs:
           - arch: amd64
             suffix: darwin-amd64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Enable pnpm
         run: corepack enable
 
       - name: Install Task
-        uses: arduino/setup-task@v2
-        with:
-          version: 3.x
+        run: |
+          set -euo pipefail
+          sh -c "$(curl --proto '=https' --tlsv1.2 -fsSL https://taskfile.dev/install.sh)" -- -d -b "$HOME/bin"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
 
       - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+          go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
 
       - name: Sync release version
         env:
@@ -171,7 +191,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "release/${ZIP_NAME}"
           ls -la release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.suffix }}
           path: release/*.zip
@@ -181,9 +201,9 @@ jobs:
     needs: [prepare, build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
 
