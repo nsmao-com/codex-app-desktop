@@ -26,7 +26,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { easeOutQuick } from '@/lib/motion'
 import { useBrowserStore, useCodexStore, useWorkspaceStore } from '@/stores'
+import { Motion } from 'motion-v'
 
 const codexStore = useCodexStore()
 const workspaceStore = useWorkspaceStore()
@@ -38,7 +40,15 @@ const emit = defineEmits<{
 }>()
 
 const draft = shallowRef('')
+const welcomeEpoch = shallowRef(0)
 const hasConversation = computed(() => codexStore.activeItems.length > 0)
+
+watch(
+  [hasConversation, () => codexStore.activeThreadId],
+  ([hasItems, threadId]) => {
+    if (!hasItems && !threadId) welcomeEpoch.value += 1
+  },
+)
 
 const workspaceTag = computed(() => workspaceStore.workspace?.name || '')
 const branchLabel = computed(() => workspaceStore.branch || 'detached')
@@ -206,13 +216,25 @@ watch(() => codexStore.activeThreadId, () => {
     </div>
 
     <div class="min-h-0 flex-1 overflow-hidden">
-      <WorkspaceWelcome v-if="!hasConversation && !codexStore.activeThread" @suggestion="useSuggestion" />
-      <ChatTimeline
-        v-else
-        @retry="onRetry"
-        @rollback="onRollback"
-        @inspect-diff="onInspectDiff"
-      />
+      <Motion
+        :key="codexStore.activeThreadId || (hasConversation ? 'conversation' : 'welcome')"
+        class="h-full"
+        :initial="{ opacity: 0, y: 8 }"
+        :animate="{ opacity: 1, y: 0 }"
+        :transition="easeOutQuick"
+      >
+        <WorkspaceWelcome
+          v-if="!hasConversation && !codexStore.activeThread"
+          :key="`welcome-${welcomeEpoch}`"
+          @suggestion="useSuggestion"
+        />
+        <ChatTimeline
+          v-else
+          @retry="onRetry"
+          @rollback="onRollback"
+          @inspect-diff="onInspectDiff"
+        />
+      </Motion>
     </div>
 
     <div

@@ -14,6 +14,7 @@ export type {
     GitChange,
     MCPServerWriteRequest,
     PluginInstallRequest,
+    ProjectInstructionsInfo,
     ReviewStartRequest,
     SendMessageRequest,
     SessionPreferencesRequest,

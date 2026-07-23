@@ -1,7 +1,9 @@
 import { computed, ref } from 'vue'
 
+import { isAppAccent, type AppAccent } from '@/lib/accents'
+
 export type AppTheme = 'light' | 'dark' | 'system'
-export type AppAccent = 'amber' | 'emerald' | 'coral' | 'graphite'
+export type { AppAccent }
 export type BuiltinFont = 'manrope' | 'system' | 'mono'
 export type AppFont = BuiltinFont | string
 
@@ -32,7 +34,8 @@ function applyAttributes(): void {
     return
   }
   document.documentElement.setAttribute(FONT_ATTR, 'custom')
-  const escaped = font.value.replaceAll('"', '\\"')
+  // Quote the family so names with spaces / CJK characters apply correctly.
+  const escaped = font.value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
   document.documentElement.style.setProperty(FONT_CUSTOM_VAR, `"${escaped}"`)
 }
 
@@ -46,7 +49,7 @@ const isDark = computed(() => resolvedTheme.value === 'dark')
 function initAppearance(initial: { theme?: AppTheme; accent?: AppAccent; font?: AppFont } = {}): void {
   if (initialized.value) return
   theme.value = initial.theme ?? 'light'
-  accent.value = initial.accent ?? 'amber'
+  accent.value = initial.accent && isAppAccent(initial.accent) ? initial.accent : 'amber'
   font.value = initial.font ?? 'manrope'
 
   applyAttributes()
@@ -63,8 +66,8 @@ function setTheme(value: AppTheme): void {
   applyAttributes()
 }
 
-function setAccent(value: AppAccent): void {
-  accent.value = value
+function setAccent(value: AppAccent | string): void {
+  accent.value = isAppAccent(value) ? value : 'amber'
   applyAttributes()
 }
 

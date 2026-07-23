@@ -17,6 +17,8 @@ type commandSpec struct {
 }
 
 func Detect() Detection {
+	enrichProcessPath()
+
 	spec, err := resolveCommand()
 	if err != nil {
 		return Detection{Error: err.Error()}
@@ -42,6 +44,8 @@ func Detect() Detection {
 }
 
 func resolveCommand() (commandSpec, error) {
+	enrichProcessPath()
+
 	if configured := strings.TrimSpace(os.Getenv("CODEX_BIN")); configured != "" {
 		path, err := filepath.Abs(configured)
 		if err != nil {
@@ -54,24 +58,27 @@ func resolveCommand() (commandSpec, error) {
 	}
 
 	if runtime.GOOS == "windows" {
-		if path, err := exec.LookPath("codex.exe"); err == nil {
+		if path, err := execLookPath("codex.exe"); err == nil {
 			return commandSpec{path: path}, nil
 		}
 
 		if spec, ok := resolveWindowsNPMCommand(); ok {
 			return spec, nil
 		}
+		if spec, ok := resolveWindowsExtraCommands(); ok {
+			return spec, nil
+		}
 	}
 
-	path, err := exec.LookPath("codex")
+	path, err := execLookPath("codex")
 	if err != nil {
-		return commandSpec{}, errors.New("Codex CLI was not found; install it with pnpm add -g @openai/codex")
+		return commandSpec{}, errors.New("Codex CLI was not found; install it with pnpm add -g @openai/codex, then restart Nice Codex (GUI apps need Node/pnpm on the User PATH)")
 	}
 	return commandSpec{path: path}, nil
 }
 
 func resolveWindowsNPMCommand() (commandSpec, bool) {
-	commandPath, err := exec.LookPath("codex.cmd")
+	commandPath, err := execLookPath("codex.cmd")
 	if err != nil {
 		return commandSpec{}, false
 	}
@@ -81,13 +88,17 @@ func resolveWindowsNPMCommand() (commandSpec, bool) {
 		return commandSpec{}, false
 	}
 
-	nodePath, err := exec.LookPath("node.exe")
+	nodePath, err := execLookPath("node.exe")
 	if err != nil {
-		nodePath, err = exec.LookPath("node")
+		nodePath, err = execLookPath("node")
 	}
 	if err != nil {
 		return commandSpec{}, false
 	}
 
 	return commandSpec{path: nodePath, prefixArgs: []string{scriptPath}}, true
+}
+
+func execLookPath(name string) (string, error) {
+	return exec.LookPath(name)
 }

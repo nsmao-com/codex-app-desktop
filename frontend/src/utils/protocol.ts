@@ -210,13 +210,23 @@ export function normalizeAccountRateLimits(
 export function normalizeAccountUsage(value: unknown): AccountUsageSummary | null {
   const response = asRecord(value)
   const summary = asRecord(response.summary)
-  if (!Object.keys(summary).length) return null
+  const bucketsRaw = response.dailyUsageBuckets ?? response.daily_usage_buckets
+  const dailyBuckets = asArray(bucketsRaw).map((item) => {
+    const record = asRecord(item)
+    return {
+      startDate: asString(record.startDate, asString(record.start_date)),
+      tokens: asNumber(record.tokens),
+    }
+  }).filter((item) => item.startDate)
+
+  if (!Object.keys(summary).length && !dailyBuckets.length) return null
   return {
-    lifetimeTokens: nullableNumber(summary.lifetimeTokens),
-    peakDailyTokens: nullableNumber(summary.peakDailyTokens),
-    currentStreakDays: nullableNumber(summary.currentStreakDays),
-    longestStreakDays: nullableNumber(summary.longestStreakDays),
-    longestRunningTurnSec: nullableNumber(summary.longestRunningTurnSec),
+    lifetimeTokens: nullableNumber(summary.lifetimeTokens ?? summary.lifetime_tokens),
+    peakDailyTokens: nullableNumber(summary.peakDailyTokens ?? summary.peak_daily_tokens),
+    currentStreakDays: nullableNumber(summary.currentStreakDays ?? summary.current_streak_days),
+    longestStreakDays: nullableNumber(summary.longestStreakDays ?? summary.longest_streak_days),
+    longestRunningTurnSec: nullableNumber(summary.longestRunningTurnSec ?? summary.longest_running_turn_sec),
+    dailyBuckets,
   }
 }
 

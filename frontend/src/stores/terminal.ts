@@ -70,6 +70,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   async function closeTerminal(): Promise<void> {
+    // Hide the panel immediately; teardown must never block or take down the app.
     terminalPanelOpen.value = false
     terminalGeneration += 1
     terminalStarting.value = false
@@ -77,11 +78,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     const processID = terminalProcessId.value
     terminalProcessId.value = ''
     if (!processID) return
-    try {
-      await backend.StopTerminalSession(processID)
-    } catch {
-      // The process may already have exited between the UI action and this request.
-    }
+    void backend.StopTerminalSession(processID).catch(() => undefined)
   }
 
   function clearTerminal(): void {

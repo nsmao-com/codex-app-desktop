@@ -8,6 +8,8 @@ import {
   ListOrdered,
   ListTodo,
   LoaderCircle,
+  Maximize2,
+  Minimize2,
   Octagon,
   Paperclip,
   RotateCcw,
@@ -20,7 +22,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
-import { Badge } from '@/components/ui/badge'
+import SearchableSelect from '@/components/SearchableSelect.vue'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -41,7 +43,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
-import { useAppStore, useCodexStore } from '@/stores'
+import { useAppStore, useCapabilitiesStore, useCodexStore } from '@/stores'
+import { forgetImagePreview, rememberLocalImagePreview, resolveImagePreview } from '@/utils/imagePreview'
 import { notify } from '@/utils/notify'
 import {
   DEFAULT_CODEX_REASONING,
@@ -51,6 +54,7 @@ import {
 
 const appStore = useAppStore()
 const codexStore = useCodexStore()
+const capabilitiesStore = useCapabilitiesStore()
 const router = useRouter()
 const { t } = useI18n()
 
@@ -58,7 +62,13 @@ const modelValue = defineModel<string>({ required: true })
 const composer = useTemplateRef<HTMLElement>('composer')
 const composing = shallowRef(false)
 const attachedImages = shallowRef<string[]>([])
+const attachmentPreviews = shallowRef<Record<string, string>>({})
 const slashIndex = shallowRef(0)
+const skillIndex = shallowRef(0)
+const dragDepth = shallowRef(0)
+const composerExpanded = shallowRef(false)
+const COMPOSER_MAX_COLLAPSED = 200
+const COMPOSER_MAX_EXPANDED = 480
 
 type SlashCommand = {
   id: string
@@ -135,6 +145,32 @@ const filteredSlashCommands = computed(() => {
 watch(filteredSlashCommands, (commands) => {
   if (slashIndex.value >= commands.length) slashIndex.value = Math.max(0, commands.length - 1)
 })
+
+const skillQuery = computed(() => {
+  const text = modelValue.value
+  const match = text.match(/(?:^|\s)\$([^\s]*)$/)
+  return match ? (match[1] || '').toLocaleLowerCase() : ''
+})
+const skillOpen = computed(() => /(?:^|\s)\$[^\s]*$/.test(modelValue.value) && !modelValue.value.includes('\n'))
+const skillOptions = computed(() => {
+  const skills = capabilitiesStore.skills.filter((skill) => skill.enabled && skill.name)
+  const query = skillQuery.value
+  const filtered = query
+    ? skills.filter((skill) =>
+      skill.name.toLocaleLowerCase().includes(query)
+      || skill.displayName.toLocaleLowerCase().includes(query),
+    )
+    : skills
+  return filtered.slice(0, 12)
+})
+watch(skillOpen, (open) => {
+  if (open) void capabilitiesStore.loadCapabilities()
+})
+watch(skillOptions, (options) => {
+  if (skillIndex.value >= options.length) skillIndex.value = Math.max(0, options.length - 1)
+})
+
+const isDraggingFiles = computed(() => dragDepth.value > 0)
 const sessionLocked = computed(() => Boolean(
   codexStore.activeThreadId
   && !codexStore.activeThreadId.startsWith('pending-thread-')
@@ -148,6 +184,16 @@ const displayEffort = computed(() => sessionLocked.value
   : appStore.settings.effort)
 const selectedModel = computed(() => appStore.models.find((model) => model.model === displayModel.value))
 const selectableModels = computed(() => modelsForRuntime(appStore.models, appStore.settings.customModels ?? []))
+const composerModelOptions = computed(() => selectableModels.value.map((model) => ({
+  value: model.model,
+  label: model.displayName || formatModelLabel(model.model),
+  description: model.model,
+  badge: model.isDefault ? t('common.recommended') : '',
+})))
+const composerModelSelection = computed({
+  get: () => displayModel.value,
+  set: (value: string) => { void applyModelSelection(value) },
+})
 const reasoningOptions = computed(() => {
   const fromModel = selectedModel.value?.supportedReasoningEfforts ?? []
   return fromModel.length ? fromModel : [...DEFAULT_CODEX_REASONING]
@@ -156,11 +202,6 @@ const permissionLabel = computed(() => {
   if (appStore.settings.sandbox === 'danger-full-access' && appStore.settings.approvalPolicy === 'never') return t('settings.permissionAuto')
   if (appStore.settings.sandbox === 'read-only') return t('settings.permissionStrict')
   return t('settings.permissionAsk')
-})
-const selectedModelLabel = computed(() => {
-  const id = displayModel.value
-  const hit = selectableModels.value.find((model) => model.model === id)
-  return hit?.displayName || formatModelLabel(id || '')
 })
 const selectedEffortLabel = computed(() => {
   const effort = displayEffort.value
@@ -173,9 +214,14 @@ const selectedEffortLabel = computed(() => {
 const showQueueStrip = computed(() =>
   codexStore.activeQueuedMessages.some((message) => message.state === 'queued' || message.state === 'failed'),
 )
-const canSend = computed(() => Boolean(modelValue.value.trim()) && codexStore.isReady && !codexStore.creatingThread)
+const canSend = computed(() =>
+  (Boolean(modelValue.value.trim()) || attachedImages.value.length > 0)
+  && codexStore.isReady
+  && !codexStore.creatingThread,
+)
 const canSteer = computed(() =>
-  codexStore.isTurnRunning
+  (appStore.settings.followUpBehavior || 'steer') !== 'queue'
+  && codexStore.isTurnRunning
   && Boolean(codexStore.activeTurnId)
   && !codexStore.activeThreadId.startsWith('pending-thread-'),
 )
@@ -184,8 +230,16 @@ const composerPlaceholder = computed(() => {
   if (showQueueStrip.value || (codexStore.isTurnRunning && !canSteer.value)) return t('chat.queuePlaceholder')
   return t('chat.placeholder')
 })
+const composerShortcutHint = computed(() => {
+  const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'
+  if (appStore.settings.sendWithModifier) {
+    return t('chat.shortcutModifier', { key: mod })
+  }
+  return t('chat.shortcut')
+})
 
 watch(modelValue, resize, { flush: 'post' })
+watch(composerExpanded, resize, { flush: 'post' })
 watch(
   [selectableModels, displayModel],
   () => {
@@ -204,12 +258,44 @@ function resize(): void {
   void nextTick(() => {
     const textarea = composer.value?.querySelector('textarea')
     if (!textarea) return
+    const max = composerExpanded.value ? COMPOSER_MAX_EXPANDED : COMPOSER_MAX_COLLAPSED
     textarea.style.height = '0px'
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+    if (composerExpanded.value) {
+      textarea.style.height = `${max}px`
+      return
+    }
+    textarea.style.height = `${Math.min(textarea.scrollHeight, max)}px`
   })
 }
 
+function toggleComposerHeight(): void {
+  composerExpanded.value = !composerExpanded.value
+  resize()
+}
+
 function onKeydown(event: KeyboardEvent): void {
+  if (skillOpen.value && skillOptions.value.length) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      skillIndex.value = (skillIndex.value + 1) % skillOptions.value.length
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      skillIndex.value = (skillIndex.value - 1 + skillOptions.value.length) % skillOptions.value.length
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      modelValue.value = modelValue.value.replace(/(?:^|\s)\$[^\s]*$/, (chunk) => chunk.startsWith(' ') ? ' ' : '')
+      return
+    }
+    if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
+      event.preventDefault()
+      insertSkill(skillOptions.value[skillIndex.value]?.name)
+      return
+    }
+  }
   if (slashOpen.value && filteredSlashCommands.value.length) {
     if (event.key === 'ArrowDown') {
       event.preventDefault()
@@ -238,9 +324,27 @@ function onKeydown(event: KeyboardEvent): void {
     void togglePlanMode()
     return
   }
-  if (event.key !== 'Enter' || event.shiftKey || composing.value) return
+  if (event.key !== 'Enter' || composing.value) return
+  const requireModifier = Boolean(appStore.settings.sendWithModifier)
+  if (requireModifier) {
+    if (!(event.metaKey || event.ctrlKey) || event.shiftKey) return
+    event.preventDefault()
+    void send()
+    return
+  }
+  if (event.shiftKey) return
   event.preventDefault()
   void send()
+}
+
+function insertSkill(name?: string): void {
+  if (!name) return
+  modelValue.value = modelValue.value.replace(/(?:^|\s)\$[^\s]*$/, (chunk) => {
+    const prefix = chunk.startsWith(' ') ? ' ' : ''
+    return `${prefix}$${name} `
+  })
+  skillIndex.value = 0
+  resize()
 }
 
 async function runSlashCommand(command?: SlashCommand): Promise<void> {
@@ -262,14 +366,17 @@ async function togglePlanMode(): Promise<void> {
 
 async function send(): Promise<void> {
   const message = modelValue.value.trim()
-  if (!message || !codexStore.isReady) return
   const images = [...attachedImages.value]
+  if ((!message && !images.length) || !codexStore.isReady) return
   modelValue.value = ''
   attachedImages.value = []
   const ok = await codexStore.sendMessage(message, images)
   if (!ok) {
     modelValue.value = message
     attachedImages.value = images
+  } else {
+    for (const path of images) forgetImagePreview(path)
+    attachmentPreviews.value = {}
   }
 }
 
@@ -281,22 +388,144 @@ async function attachImages(): Promise<void> {
   if (attachedImages.value.length >= 4) return
   try {
     const selected = await backend.SelectImages() ?? []
-    if (selected.length) attachedImages.value = [...new Set([...attachedImages.value, ...selected])].slice(0, 4)
+    if (!selected.length) return
+    const next = [...new Set([...attachedImages.value, ...selected])].slice(0, 4)
+    attachedImages.value = next
+    for (const path of selected) void loadAttachmentPreview(path)
   } catch (error) {
     notify('error', t('notifications.imagesNotSelected'), error instanceof Error ? error.message : t('notifications.unexpected'))
   }
 }
 
+function isImageFile(file: File): boolean {
+  if (file.type.startsWith('image/')) return true
+  return /\.(png|jpe?g|webp|gif)$/i.test(file.name)
+}
+
+function collectImageFiles(list: FileList | File[] | null | undefined): File[] {
+  if (!list) return []
+  return Array.from(list).filter(isImageFile)
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer()
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
+}
+
+async function loadAttachmentPreview(path: string): Promise<void> {
+  if (!path || attachmentPreviews.value[path]) return
+  const url = await resolveImagePreview(path)
+  if (!url) return
+  attachmentPreviews.value = { ...attachmentPreviews.value, [path]: url }
+}
+
+async function attachImageFiles(files: File[]): Promise<void> {
+  const images = files.filter(isImageFile)
+  if (!images.length) return
+  const room = 4 - attachedImages.value.length
+  if (room <= 0) {
+    notify('warning', t('chat.attachLimitTitle'), t('chat.attachLimit'))
+    return
+  }
+  const next = [...attachedImages.value]
+  const previewPatch: Record<string, string> = {}
+  try {
+    for (const file of images.slice(0, room)) {
+      const dataBase64 = await fileToBase64(file)
+      const path = await backend.AttachImageData(
+        file.name || `paste-${Date.now()}.png`,
+        file.type || '',
+        dataBase64,
+      )
+      if (path && !next.includes(path)) {
+        next.push(path)
+        const localPreview = URL.createObjectURL(file)
+        rememberLocalImagePreview(path, localPreview)
+        previewPatch[path] = localPreview
+      }
+    }
+    attachedImages.value = next.slice(0, 4)
+    if (Object.keys(previewPatch).length) {
+      attachmentPreviews.value = { ...attachmentPreviews.value, ...previewPatch }
+    }
+  } catch (error) {
+    notify('error', t('notifications.imagesNotSelected'), error instanceof Error ? error.message : t('notifications.unexpected'))
+  }
+}
+
+function onPaste(event: ClipboardEvent): void {
+  const data = event.clipboardData
+  if (!data) return
+  const fromItems: File[] = []
+  for (const item of Array.from(data.items || [])) {
+    if (item.kind !== 'file') continue
+    const file = item.getAsFile()
+    if (file) fromItems.push(file)
+  }
+  const images = [
+    ...collectImageFiles(fromItems),
+    ...collectImageFiles(data.files),
+  ]
+  // Deduplicate by name+size+lastModified when possible.
+  const seen = new Set<string>()
+  const unique = images.filter((file) => {
+    const key = `${file.name}:${file.size}:${file.lastModified}:${file.type}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  if (!unique.length) return
+  event.preventDefault()
+  void attachImageFiles(unique)
+}
+
+function onDragEnter(event: DragEvent): void {
+  if (!event.dataTransfer) return
+  const hasFiles = Array.from(event.dataTransfer.types || []).includes('Files')
+  if (!hasFiles) return
+  event.preventDefault()
+  dragDepth.value += 1
+}
+
+function onDragOver(event: DragEvent): void {
+  if (!event.dataTransfer) return
+  const hasFiles = Array.from(event.dataTransfer.types || []).includes('Files')
+  if (!hasFiles) return
+  event.preventDefault()
+  event.dataTransfer.dropEffect = 'copy'
+}
+
+function onDragLeave(event: DragEvent): void {
+  if (!event.dataTransfer) return
+  const hasFiles = Array.from(event.dataTransfer.types || []).includes('Files')
+  if (!hasFiles) return
+  dragDepth.value = Math.max(0, dragDepth.value - 1)
+}
+
+function onDrop(event: DragEvent): void {
+  dragDepth.value = 0
+  const files = collectImageFiles(event.dataTransfer?.files)
+  if (!files.length) return
+  event.preventDefault()
+  void attachImageFiles(files)
+}
+
 function removeAttachment(path: string): void {
   attachedImages.value = attachedImages.value.filter((item) => item !== path)
+  const next = { ...attachmentPreviews.value }
+  delete next[path]
+  attachmentPreviews.value = next
+  forgetImagePreview(path)
 }
 
 function attachmentName(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path
-}
-
-function onModelChange(value: string): void {
-  void applyModelSelection(value)
 }
 
 async function applyModelSelection(value: string): Promise<void> {
@@ -369,30 +598,63 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
   <div class="shrink-0 px-4 pb-4 pt-1 sm:px-6">
     <div
       ref="composer"
-      class="mx-auto flex max-w-[680px] flex-col gap-1.5 rounded-xl border bg-card p-2 transition-colors"
-      :class="codexStore.isTurnRunning || codexStore.sendingMessage
-        ? 'border-primary/35'
-        : 'border-border'"
+      class="relative mx-auto flex max-w-[680px] flex-col gap-1.5 rounded-xl border bg-card p-2 transition-colors"
+      :class="[
+        isDraggingFiles
+          ? 'border-primary border-dashed bg-primary/5'
+          : (codexStore.isTurnRunning || codexStore.sendingMessage ? 'border-primary/35' : 'border-border'),
+      ]"
+      @dragenter="onDragEnter"
+      @dragover="onDragOver"
+      @dragleave="onDragLeave"
+      @drop="onDrop"
     >
-      <div v-if="attachedImages.length" class="flex flex-wrap gap-1.5 px-1">
-        <Badge
+      <div
+        v-if="isDraggingFiles"
+        class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-xl bg-primary/8 text-xs font-medium text-primary"
+      >
+        {{ t('chat.dropImages') }}
+      </div>
+
+      <div class="absolute right-1.5 top-1.5 z-[2]">
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          class="size-6 text-muted-foreground"
+          :aria-label="composerExpanded ? t('chat.collapseComposer') : t('chat.expandComposer')"
+          :title="composerExpanded ? t('chat.collapseComposer') : t('chat.expandComposer')"
+          @click="toggleComposerHeight"
+        >
+          <Minimize2 v-if="composerExpanded" :size="12" />
+          <Maximize2 v-else :size="12" />
+        </Button>
+      </div>
+
+      <div v-if="attachedImages.length" class="flex flex-wrap gap-1.5 px-1 pr-8">
+        <div
           v-for="path in attachedImages"
           :key="path"
-          variant="secondary"
-          class="h-6 gap-1.5 rounded-md pl-2 pr-1 text-[11px] font-normal"
+          class="group relative overflow-hidden rounded-lg border border-border/70 bg-muted/40"
         >
-          <ImageIcon :size="12" />
-          <span class="max-w-[140px] truncate">{{ attachmentName(path) }}</span>
+          <img
+            v-if="attachmentPreviews[path]"
+            :src="attachmentPreviews[path]"
+            :alt="attachmentName(path)"
+            class="h-14 w-14 object-cover"
+          >
+          <div v-else class="flex h-14 w-14 items-center justify-center px-1">
+            <ImageIcon :size="14" class="text-muted-foreground" />
+          </div>
           <Button
             variant="ghost"
             size="icon-xs"
-            class="size-5"
+            class="absolute right-0.5 top-0.5 size-5 rounded-full bg-background/90 opacity-0 transition-opacity group-hover:opacity-100"
             :aria-label="t('chat.removeAttachment')"
             @click="removeAttachment(path)"
           >
             <X :size="11" />
           </Button>
-        </Badge>
+        </div>
       </div>
 
       <div
@@ -492,14 +754,38 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         </button>
       </div>
 
+      <div v-else-if="skillOpen && skillOptions.length" class="rounded-md border border-border/60 bg-muted/30 p-1">
+        <div class="flex items-center gap-1.5 px-2 py-1 text-[10px] text-muted-foreground">
+          <Zap :size="11" />
+          {{ t('slash.skillsTitle') }}
+        </div>
+        <button
+          v-for="(skill, index) in skillOptions"
+          :key="skill.path || skill.name"
+          type="button"
+          class="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors"
+          :class="index === skillIndex ? 'bg-background text-foreground' : 'text-foreground/85 hover:bg-background/70'"
+          @mousedown.prevent="insertSkill(skill.name)"
+          @mouseenter="skillIndex = index"
+        >
+          <span class="shrink-0 font-mono text-[11px] font-medium">${{ skill.name }}</span>
+          <span class="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+            {{ skill.displayName || skill.shortDescription || skill.description }}
+          </span>
+        </button>
+      </div>
+
       <Textarea
         v-model="modelValue"
         rows="1"
         :placeholder="composerPlaceholder"
-        class="min-h-[44px] resize-none border-0 bg-transparent px-2 py-1.5 text-[13.5px] leading-6 shadow-none placeholder:text-muted-foreground/70 focus-visible:ring-0"
+        :title="composerShortcutHint"
+        class="min-h-[44px] resize-none border-0 bg-transparent px-2 py-1.5 pr-8 text-[13.5px] leading-6 shadow-none placeholder:text-muted-foreground/70 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
+        :class="composerExpanded ? 'overflow-y-auto' : ''"
         @compositionend="composing = false"
         @compositionstart="composing = true"
         @keydown="onKeydown"
+        @paste="onPaste"
       />
 
       <div class="flex items-center justify-between gap-1">
@@ -551,22 +837,16 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         </div>
 
         <div class="flex min-w-0 items-center gap-0.5">
-          <Select
-            :model-value="displayModel"
-            @update:model-value="(value) => onModelChange(String(value))"
-          >
-            <SelectTrigger
-              :aria-label="t('chat.model')"
-              class="h-7 w-auto max-w-40 gap-1 border-0 bg-transparent px-2 text-[11px] font-normal text-muted-foreground shadow-none"
-            >
-              <SelectValue :placeholder="t('chat.defaultModel')">{{ selectedModelLabel }}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem v-for="model in selectableModels" :key="model.model" :value="model.model">
-                {{ model.displayName }}
-              </SelectItem>
-            </SelectContent>
-          </Select>
+          <SearchableSelect
+            v-model="composerModelSelection"
+            class="h-7 w-auto max-w-44 border-0 bg-transparent px-2 text-[11px] text-muted-foreground shadow-none hover:bg-muted/50"
+            content-class="min-w-[280px]"
+            align="end"
+            :options="composerModelOptions"
+            :aria-label="t('chat.model')"
+            :placeholder="t('chat.defaultModel')"
+            :search-placeholder="t('settings.modelSearch')"
+          />
 
           <Select
             :model-value="displayEffort"

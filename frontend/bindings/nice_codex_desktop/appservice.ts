@@ -21,6 +21,14 @@ export function ArchiveThread(threadID: string): $CancellablePromise<void> {
     return $Call.ByID(404527456, threadID);
 }
 
+/**
+ * AttachImageData saves a pasted/dropped image into the NiceCodex temp folder
+ * and registers it for SendMessage (same allow-list as SelectImages).
+ */
+export function AttachImageData(fileName: string, mimeType: string, dataBase64: string): $CancellablePromise<string> {
+    return $Call.ByID(3374776048, fileName, mimeType, dataBase64);
+}
+
 export function Bootstrap(): $CancellablePromise<$models.BootstrapData> {
     return $Call.ByID(4177956144);
 }
@@ -153,6 +161,13 @@ export function OpenTerminal(): $CancellablePromise<void> {
     return $Call.ByID(3614603658);
 }
 
+/**
+ * PreviewImage returns a data-URL for an allow-listed attachment so the UI can show thumbnails.
+ */
+export function PreviewImage(path: string): $CancellablePromise<string> {
+    return $Call.ByID(2624332779, path);
+}
+
 export function ReadAccount(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3417819837);
 }
@@ -163,6 +178,13 @@ export function ReadAccountRateLimits(): $CancellablePromise<{ [_ in string]?: a
 
 export function ReadAccountUsage(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3812997328);
+}
+
+/**
+ * ReadProjectInstructions returns the current workspace AGENTS.md content.
+ */
+export function ReadProjectInstructions(): $CancellablePromise<$models.ProjectInstructionsInfo> {
+    return $Call.ByID(1112136990);
 }
 
 export function ReadThread(threadID: string): $CancellablePromise<{ [_ in string]?: any } | null> {
@@ -199,6 +221,13 @@ export function RollbackThread(threadID: string, numTurns: number): $Cancellable
 
 export function SavePreferences(settings: $models.UserSettings): $CancellablePromise<$models.UserSettings> {
     return $Call.ByID(3258666379, settings);
+}
+
+/**
+ * SaveProjectInstructions writes the current workspace AGENTS.md (project-scoped Codex guidance).
+ */
+export function SaveProjectInstructions(content: string): $CancellablePromise<$models.ProjectInstructionsInfo> {
+    return $Call.ByID(437632509, content);
 }
 
 export function SelectImages(): $CancellablePromise<string[] | null> {

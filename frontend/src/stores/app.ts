@@ -11,6 +11,7 @@ import type {
 } from '../../bindings/nice_codex_desktop/models'
 import { setLocale, supportedLocales } from '../i18n'
 import { useAppearance } from '../composables/useAppearance'
+import type { AppAccent } from '../lib/accents'
 import { notify } from '../utils/notify'
 import {
   asRecord,
@@ -21,7 +22,7 @@ import {
 } from '../utils/protocol'
 import { translate } from '../i18n'
 
-const AppVersionFallback = '1.0.0'
+const AppVersionFallback = '1.0.1'
 
 const defaultSettings: UserSettings = {
   workspace: '',
@@ -43,6 +44,10 @@ const defaultSettings: UserSettings = {
   language: 'zh-CN',
   autoConnect: true,
   workMode: 'code',
+  sendWithModifier: false,
+  followUpBehavior: 'steer',
+  notifyOnTurnComplete: true,
+  customInstructions: '',
 }
 
 export interface AccountInfo {
@@ -69,7 +74,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.0.0')
+  const appVersion = shallowRef('1.0.1')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -80,6 +85,9 @@ export const useAppStore = defineStore('app', () => {
     downloadUrl: string
     releaseNotes: string
   } | null>(null)
+  const updateDialogOpen = shallowRef(false)
+  const updateChecking = shallowRef(false)
+  const updateCheckError = shallowRef('')
   const terminalProfiles = shallowRef<TerminalProfile[]>([])
   const account = shallowRef<AccountInfo>({ ...emptyAccount })
   const accountRateLimits = shallowRef<ReturnType<typeof normalizeAccountRateLimits>>(null)
@@ -118,6 +126,10 @@ export const useAppStore = defineStore('app', () => {
       modelProvider: '',
       recentWorkspaces: data.settings.recentWorkspaces ?? [],
       customModels: data.settings.customModels ?? [],
+      followUpBehavior: data.settings.followUpBehavior === 'queue' ? 'queue' : 'steer',
+      notifyOnTurnComplete: data.settings.notifyOnTurnComplete !== false,
+      customInstructions: data.settings.customInstructions ?? '',
+      sendWithModifier: Boolean(data.settings.sendWithModifier),
     }
     // Codex-only: ignore leftover Claude/Gemini/Grok model preferences until catalog loads.
     if (/claude|gemini|grok|sonnet|opus|haiku|fable/i.test(settings.value.model) && !/^(gpt-|o[1-9]|codex)/i.test(settings.value.model)) {
@@ -127,7 +139,7 @@ export const useAppStore = defineStore('app', () => {
     workspace.value = data.workspace ? { ...data.workspace, changes: data.workspace.changes ?? [] } : null
     initAppearance({
       theme: settings.value.theme as 'light' | 'dark' | 'system',
-      accent: settings.value.accentColor as 'amber' | 'emerald' | 'coral' | 'graphite',
+      accent: settings.value.accentColor as AppAccent,
       font: settings.value.fontFamily || 'manrope',
     })
     applyLocale(settings.value.language)
@@ -146,7 +158,9 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  async function checkForUpdates(silent = false): Promise<void> {
+  async function checkForUpdates(silent = false): Promise<boolean> {
+    updateChecking.value = true
+    updateCheckError.value = ''
     try {
       const info = await backend.CheckForUpdates()
       const next = {
@@ -159,12 +173,30 @@ export const useAppStore = defineStore('app', () => {
       }
       updateInfo.value = next
       appVersion.value = next.currentVersion || appVersion.value
-      if (next.updateAvailable && !silent) {
-        notify('info', translate('updates.available'), translate('updates.availableHint', { version: next.latestVersion }))
+      // Toast only for background/manual paths that are not using the dialog.
+      if (!silent && !updateDialogOpen.value) {
+        if (next.updateAvailable) {
+          notify('info', translate('updates.available'), translate('updates.availableDialogHint', { version: next.latestVersion }))
+        } else {
+          notify('info', translate('updates.upToDate'), translate('updates.upToDateHint'))
+        }
       }
+      return true
     } catch (error) {
-      if (!silent) notify('warning', translate('updates.checkFailed'), errorMessage(error))
+      const message = errorMessage(error)
+      updateCheckError.value = message
+      if (!silent && !updateDialogOpen.value) {
+        notify('warning', translate('updates.checkFailed'), message)
+      }
+      return false
+    } finally {
+      updateChecking.value = false
     }
+  }
+
+  async function openUpdateCheckDialog(): Promise<void> {
+    updateDialogOpen.value = true
+    await checkForUpdates(true)
   }
 
   async function openUpdatePage(): Promise<void> {
@@ -172,6 +204,23 @@ export const useAppStore = defineStore('app', () => {
     if (!url) return
     try {
       await backend.OpenExternal(url)
+    } catch (error) {
+      notify('error', translate('updates.openFailed'), errorMessage(error))
+    }
+  }
+
+  async function openReleasesPage(): Promise<void> {
+    const url = updateInfo.value?.releaseUrl || `https://github.com/${updateRepo.value}/releases`
+    try {
+      await backend.OpenExternal(url)
+    } catch (error) {
+      notify('error', translate('updates.openFailed'), errorMessage(error))
+    }
+  }
+
+  async function openGitHubRepo(): Promise<void> {
+    try {
+      await backend.OpenExternal(`https://github.com/${updateRepo.value}`)
     } catch (error) {
       notify('error', translate('updates.openFailed'), errorMessage(error))
     }
@@ -228,7 +277,7 @@ export const useAppStore = defineStore('app', () => {
 
   function applyAppearance(appearance: Pick<UserSettings, 'theme' | 'accentColor' | 'fontFamily'>): void {
     setTheme(appearance.theme as 'light' | 'dark' | 'system')
-    setAccent(appearance.accentColor as 'amber' | 'emerald' | 'coral' | 'graphite')
+    setAccent(appearance.accentColor as AppAccent)
     setFont(appearance.fontFamily || 'manrope')
   }
 
@@ -341,6 +390,9 @@ export const useAppStore = defineStore('app', () => {
     updateRepo,
     systemFonts,
     updateInfo,
+    updateDialogOpen,
+    updateChecking,
+    updateCheckError,
     terminalProfiles,
     account,
     accountRateLimits,
@@ -357,7 +409,10 @@ export const useAppStore = defineStore('app', () => {
     restoreAppearance,
     loadSystemFonts,
     checkForUpdates,
+    openUpdateCheckDialog,
     openUpdatePage,
+    openReleasesPage,
+    openGitHubRepo,
     loadAccount,
     loadAccountInsights,
     refreshAccountData,

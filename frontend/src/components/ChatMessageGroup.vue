@@ -11,10 +11,10 @@ import {
   ListTodo,
   LoaderCircle,
   Pencil,
+  Plug,
   RefreshCcw,
   RotateCcw,
   Terminal,
-  Wrench,
 } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -38,6 +38,7 @@ import type { TimelineItem, TurnMetrics } from '@/types/codex'
 import { extractFileDiff, parseUnifiedDiff } from '@/utils/diff'
 import { formatToolPayload, renderToolPayloadHTML } from '@/utils/formatPayload'
 import { renderMarkdown } from '@/utils/markdown'
+import { resolveImagePreview } from '@/utils/imagePreview'
 
 const props = defineProps<{
   kind: 'user' | 'agent'
@@ -58,6 +59,7 @@ const { t } = useI18n()
 const codexStore = useCodexStore()
 const openRows = shallowRef<Record<string, boolean>>({})
 const copiedKey = shallowRef('')
+const attachmentPreviews = shallowRef<Record<string, string>>({})
 let stepEnterBatch = 0
 let stepEnterBatchAt = 0
 const stepAnimCleanups = new Set<() => void>()
@@ -66,6 +68,29 @@ onBeforeUnmount(() => {
   for (const cleanup of stepAnimCleanups) cleanup()
   stepAnimCleanups.clear()
 })
+
+watch(
+  () => props.items[0]?.attachments?.map((item) => item.source).join('\0') ?? '',
+  (signature) => {
+    if (props.kind !== 'user' || !signature) return
+    for (const attachment of props.items[0]?.attachments ?? []) {
+      if (attachmentPreviews.value[attachment.source]) continue
+      void resolveImagePreview(attachment.source).then((url) => {
+        if (!url) return
+        attachmentPreviews.value = { ...attachmentPreviews.value, [attachment.source]: url }
+      })
+    }
+  },
+  { immediate: true },
+)
+
+function attachmentPreview(path: string): string {
+  return attachmentPreviews.value[path] || ''
+}
+
+function markdownHTML(source: string): string {
+  return renderMarkdown(source, t('timeline.copyMessage'), t('timeline.showMoreCode'))
+}
 
 function prefersReducedMotion(): boolean {
   return typeof window !== 'undefined'
@@ -244,9 +269,26 @@ type StreamBlock =
   | { kind: 'plan'; item: TimelineItem }
   | { kind: 'command'; item: TimelineItem }
   | { kind: 'patch'; item: TimelineItem; nestedCommand?: TimelineItem }
-  | { kind: 'tool'; item: TimelineItem }
+  | {
+      kind: 'toolGroup'
+      id: string
+      integrationKey: string
+      integrationName: string
+      items: TimelineItem[]
+    }
 
 type PlanStep = { step: string; status: 'pending' | 'in_progress' | 'completed' }
+
+const TOOL_GROUP_TYPES = new Set([
+  'mcpToolCall',
+  'dynamicToolCall',
+  'collabAgentToolCall',
+  'webSearch',
+  'imageGeneration',
+  'imageView',
+  'sleep',
+  'subAgentActivity',
+])
 
 const stream = computed<StreamBlock[]>(() => {
   const blocks: StreamBlock[] = []
@@ -279,10 +321,41 @@ const stream = computed<StreamBlock[]>(() => {
       blocks.push({ kind: 'patch', item, nestedCommand })
       continue
     }
-    blocks.push({ kind: 'tool', item })
+    if (TOOL_GROUP_TYPES.has(item.type)) {
+      const integrationKey = toolIntegrationKey(item)
+      const last = blocks.at(-1)
+      if (last?.kind === 'toolGroup' && last.integrationKey === integrationKey) {
+        blocks[blocks.length - 1] = {
+          ...last,
+          items: [...last.items, item],
+        }
+        continue
+      }
+      blocks.push({
+        kind: 'toolGroup',
+        id: `tool-group:${item.id}`,
+        integrationKey,
+        integrationName: toolIntegrationName(item),
+        items: [item],
+      })
+      continue
+    }
+    // Fallback: treat unknown activity as its own integration group.
+    blocks.push({
+      kind: 'toolGroup',
+      id: `tool-group:${item.id}`,
+      integrationKey: toolIntegrationKey(item),
+      integrationName: toolIntegrationName(item),
+      items: [item],
+    })
   }
   return blocks
 })
+
+function streamBlockKey(block: StreamBlock): string {
+  if (block.kind === 'toolGroup') return block.id
+  return block.item.id
+}
 
 type DisplayFileChange = {
   path: string
@@ -612,6 +685,18 @@ function requestRollback(mode: 'single' | 'fromHere'): void {
 }
 
 function onMarkdownClick(event: MouseEvent): void {
+  const collapseTarget = event.target instanceof HTMLElement
+    ? event.target.closest<HTMLElement>('[data-collapse-code]')
+    : null
+  if (collapseTarget) {
+    const block = collapseTarget.closest('.markdown-code')
+    if (!block) return
+    const collapsed = block.classList.toggle('is-collapsed')
+    collapseTarget.setAttribute('aria-expanded', collapsed ? 'false' : 'true')
+    collapseTarget.textContent = collapsed ? t('timeline.showMoreCode') : t('timeline.showLessCode')
+    return
+  }
+
   const target = event.target instanceof HTMLElement ? event.target.closest<HTMLElement>('[data-copy-code]') : null
   const code = target?.parentElement?.querySelector('code')?.textContent
   if (!target || !code) return
@@ -646,6 +731,62 @@ function commandLabel(command: string): string {
   return `${compact.slice(0, 72)}…`
 }
 
+function splitToolTitle(item: TimelineItem): { integration: string; action: string } {
+  const raw = (item.title || item.type || '').trim()
+  const parts = raw.split(/\s*\/\s*/).map((part) => part.trim()).filter(Boolean)
+  if (parts.length >= 2) {
+    return { integration: parts[0] || raw, action: parts.slice(1).join(' / ') }
+  }
+  if (item.type === 'webSearch') return { integration: 'Web Search', action: item.detail || raw || 'Search' }
+  if (item.type === 'mcpToolCall') return { integration: raw || 'MCP', action: t('timeline.mcpTool') }
+  if (item.type === 'dynamicToolCall') return { integration: raw || 'Tool', action: raw || t('timeline.mcpTool') }
+  return { integration: humanizeToolLabel(raw || item.type), action: humanizeToolLabel(raw || item.type) }
+}
+
+function toolIntegrationKey(item: TimelineItem): string {
+  return splitToolTitle(item).integration.toLowerCase()
+}
+
+function toolIntegrationName(item: TimelineItem): string {
+  return humanizeToolLabel(splitToolTitle(item).integration)
+}
+
+function toolActionLabel(item: TimelineItem): string {
+  return humanizeToolLabel(splitToolTitle(item).action)
+}
+
+function humanizeToolLabel(value: string): string {
+  const raw = value.trim()
+  if (!raw) return ''
+  if (!/[_-]/.test(raw) && /[A-Z]/.test(raw[0] || '')) return raw
+  return raw
+    .split(/[_.\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+/** Official Cursor: same MCP consecutive calls collapse under one integration header. */
+function toolGroupOpen(groupId: string, _items: TimelineItem[]): boolean {
+  if (Object.prototype.hasOwnProperty.call(openRows.value, groupId)) {
+    return openRows.value[groupId] === true
+  }
+  // Match official: show nested tool names by default; click header to collapse.
+  return true
+}
+
+function toggleToolGroup(groupId: string, items: TimelineItem[]): void {
+  openRows.value = { ...openRows.value, [groupId]: !toolGroupOpen(groupId, items) }
+}
+
+function toolGroupHasError(items: TimelineItem[]): boolean {
+  return items.some((item) => isError(item.status, item.failed))
+}
+
+function toolGroupRunning(items: TimelineItem[]): boolean {
+  return items.some((item) => isRunning(item.status))
+}
+
 function diffStats(diff: string): { add: number; del: number } {
   let add = 0
   let del = 0
@@ -660,8 +801,9 @@ function diffStats(diff: string): { add: number; del: number } {
 <template>
   <div
     v-motion
-    :initial="animated ? { opacity: 0, y: 6 } : false"
-    :animate="animated ? { opacity: 1, y: 0, transition: { duration: 0.22, ease: [0.16, 1, 0.3, 1] } } : undefined"
+    :initial="animated ? { opacity: 0, y: 8 } : false"
+    :animate="{ opacity: 1, y: 0 }"
+    :transition="{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }"
     class="group w-full"
     :class="streaming ? '' : '[content-visibility:auto] [contain-intrinsic-size:72px]'"
   >
@@ -669,15 +811,27 @@ function diffStats(diff: string): { add: number; del: number } {
     <div v-if="kind === 'user'" class="flex flex-col items-end gap-1">
       <div class="max-w-[min(100%,42rem)] rounded-2xl bg-muted/70 px-3.5 py-2.5 text-[14px] leading-6 text-foreground">
         <p class="whitespace-pre-wrap break-words">{{ items[0]?.text }}</p>
-        <div v-if="items[0]?.attachments.length" class="mt-1.5 flex flex-wrap gap-1">
-          <Badge
+        <div v-if="items[0]?.attachments.length" class="mt-1.5 flex flex-wrap gap-1.5">
+          <div
             v-for="attachment in items[0].attachments"
             :key="attachment.source"
-            variant="secondary"
-            class="h-5 rounded-full text-[10px] font-normal"
+            class="overflow-hidden rounded-lg border border-border/60 bg-background/70"
           >
-            {{ attachmentName(attachment.source) }}
-          </Badge>
+            <img
+              v-if="attachmentPreview(attachment.source)"
+              :src="attachmentPreview(attachment.source)"
+              :alt="attachmentName(attachment.source)"
+              class="max-h-36 max-w-[180px] object-cover"
+              loading="lazy"
+            >
+            <Badge
+              v-else
+              variant="secondary"
+              class="h-5 rounded-full text-[10px] font-normal"
+            >
+              {{ attachmentName(attachment.source) }}
+            </Badge>
+          </div>
         </div>
       </div>
       <div class="flex h-6 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
@@ -745,7 +899,7 @@ function diffStats(diff: string): { add: number; del: number } {
 
         <div
           v-for="block in stream"
-          :key="block.item.id"
+          :key="streamBlockKey(block)"
           class="timeline-step-item"
         >
           <!-- Reasoning — Codex-style: show streamed summary text, not just a spinner -->
@@ -790,7 +944,7 @@ function diffStats(diff: string): { add: number; del: number } {
                 <div
                   class="prose prose-sm max-w-none reasoning-prose prose-headings:mb-1.5 prose-headings:mt-2.5 prose-headings:text-[0.95em] prose-headings:font-semibold prose-p:my-1.5 prose-p:leading-6 prose-li:my-0.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-pre:my-2 prose-pre:rounded-lg prose-code:rounded prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:before:content-none prose-code:after:content-none prose-strong:font-semibold"
                   @click="onMarkdownClick"
-                  v-html="renderMarkdown(plainStreamText(block.item), t('timeline.copyMessage'))"
+                  v-html="markdownHTML(plainStreamText(block.item))"
                 />
                 <span
                   v-if="liveReasoningId === block.item.id"
@@ -835,7 +989,7 @@ function diffStats(diff: string): { add: number; del: number } {
                 v-else
                 class="prose prose-sm max-w-none reasoning-prose"
                 @click="onMarkdownClick"
-                v-html="renderMarkdown(block.item.text, t('timeline.copyMessage'))"
+                v-html="markdownHTML(block.item.text)"
               />
             </template>
           </div>
@@ -949,53 +1103,92 @@ function diffStats(diff: string): { add: number; del: number } {
             </div>
           </div>
 
-          <!-- Tool -->
-          <div v-else-if="block.kind === 'tool'">
+          <!-- Tool group — official Cursor: collapse consecutive same-MCP calls -->
+          <div v-else-if="block.kind === 'toolGroup'" class="tool-integration-group">
             <button
               type="button"
-              class="inline-flex max-w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-              :class="isError(block.item.status, block.item.failed) ? 'text-destructive' : ''"
-              @click="toggle(block.item.id)"
+              class="inline-flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[12px] text-muted-foreground/80 transition-colors hover:bg-muted/40 hover:text-foreground"
+              :class="toolGroupHasError(block.items) ? 'text-destructive' : ''"
+              @click="toggleToolGroup(block.id, block.items)"
             >
               <LoaderCircle
-                v-if="isRunning(block.item.status)"
+                v-if="toolGroupRunning(block.items)"
                 :size="12"
                 class="shrink-0 animate-spin opacity-70"
               />
-              <Wrench v-else :size="12" class="shrink-0 opacity-50" />
-              <span class="min-w-0 truncate">{{ block.item.title || block.item.type }}</span>
-              <span v-if="itemDuration(block.item)" class="shrink-0 tabular-nums text-[10px] opacity-50">{{ itemDuration(block.item) }}</span>
+              <Plug v-else :size="12" class="shrink-0 opacity-45" />
+              <span class="min-w-0 truncate">{{ t('timeline.usedIntegration', { name: block.integrationName }) }}</span>
+              <span
+                v-if="block.items.length > 1"
+                class="shrink-0 tabular-nums text-[10px] opacity-50"
+              >{{ block.items.length }}</span>
+              <component
+                :is="toolGroupOpen(block.id, block.items) ? ChevronDown : ChevronRight"
+                :size="11"
+                class="shrink-0 opacity-40"
+              />
             </button>
-            <div v-if="isOpen(block.item.id)" class="mt-1 ml-1 space-y-1.5">
-              <div v-if="block.item.detail" class="relative">
+
+            <div
+              v-if="toolGroupOpen(block.id, block.items)"
+              class="mt-0.5 space-y-0.5 pl-1"
+            >
+              <div
+                v-for="item in block.items"
+                :key="item.id"
+                class="min-w-0"
+              >
                 <button
                   type="button"
-                  class="absolute right-1.5 top-1.5 z-[1] inline-flex size-5 items-center justify-center rounded bg-card/80 text-muted-foreground hover:text-foreground"
-                  :aria-label="isCopied(`tool-d:${block.item.id}`) ? t('timeline.copied') : t('timeline.copyMessage')"
-                  @click="copyText(payloadText(block.item.detail), `tool-d:${block.item.id}`)"
+                  class="inline-flex max-w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[12px] text-muted-foreground/75 transition-colors hover:bg-muted/35 hover:text-foreground"
+                  :class="isError(item.status, item.failed) ? 'text-destructive' : ''"
+                  @click="toggle(item.id)"
                 >
-                  <Check v-if="isCopied(`tool-d:${block.item.id}`)" :size="11" class="text-positive" />
-                  <Copy v-else :size="11" />
+                  <LoaderCircle
+                    v-if="isRunning(item.status)"
+                    :size="11"
+                    class="shrink-0 animate-spin opacity-70"
+                  />
+                  <Plug v-else :size="11" class="shrink-0 opacity-40" />
+                  <span class="min-w-0 truncate">{{ toolActionLabel(item) }}</span>
+                  <span
+                    v-if="itemDuration(item)"
+                    class="shrink-0 tabular-nums text-[10px] opacity-45"
+                  >{{ itemDuration(item) }}</span>
                 </button>
-                <pre
-                  class="tool-payload max-h-40 overflow-auto rounded-xl bg-muted/45 px-3 py-2 pr-8 font-mono text-[11px] leading-5 text-foreground"
-                  v-html="renderToolPayloadHTML(block.item.detail)"
-                />
-              </div>
-              <div v-if="block.item.output" class="relative">
-                <button
-                  type="button"
-                  class="absolute right-1.5 top-1.5 z-[1] inline-flex size-5 items-center justify-center rounded bg-card/80 text-muted-foreground hover:text-foreground"
-                  :aria-label="isCopied(`tool-o:${block.item.id}`) ? t('timeline.copied') : t('timeline.copyMessage')"
-                  @click="copyText(payloadText(block.item.output), `tool-o:${block.item.id}`)"
-                >
-                  <Check v-if="isCopied(`tool-o:${block.item.id}`)" :size="11" class="text-positive" />
-                  <Copy v-else :size="11" />
-                </button>
-                <pre
-                  class="tool-payload max-h-48 overflow-auto rounded-xl bg-muted/45 px-3 py-2 pr-8 font-mono text-[11px] leading-5 text-foreground"
-                  v-html="renderToolPayloadHTML(block.item.output)"
-                />
+
+                <div v-if="isOpen(item.id)" class="mt-1 ml-1 space-y-1.5">
+                  <div v-if="item.detail" class="relative">
+                    <button
+                      type="button"
+                      class="absolute right-1.5 top-1.5 z-[1] inline-flex size-5 items-center justify-center rounded bg-card/80 text-muted-foreground hover:text-foreground"
+                      :aria-label="isCopied(`tool-d:${item.id}`) ? t('timeline.copied') : t('timeline.copyMessage')"
+                      @click="copyText(payloadText(item.detail), `tool-d:${item.id}`)"
+                    >
+                      <Check v-if="isCopied(`tool-d:${item.id}`)" :size="11" class="text-positive" />
+                      <Copy v-else :size="11" />
+                    </button>
+                    <pre
+                      class="tool-payload max-h-40 overflow-auto rounded-xl bg-muted/45 px-3 py-2 pr-8 font-mono text-[11px] leading-5 text-foreground"
+                      v-html="renderToolPayloadHTML(item.detail)"
+                    />
+                  </div>
+                  <div v-if="item.output" class="relative">
+                    <button
+                      type="button"
+                      class="absolute right-1.5 top-1.5 z-[1] inline-flex size-5 items-center justify-center rounded bg-card/80 text-muted-foreground hover:text-foreground"
+                      :aria-label="isCopied(`tool-o:${item.id}`) ? t('timeline.copied') : t('timeline.copyMessage')"
+                      @click="copyText(payloadText(item.output), `tool-o:${item.id}`)"
+                    >
+                      <Check v-if="isCopied(`tool-o:${item.id}`)" :size="11" class="text-positive" />
+                      <Copy v-else :size="11" />
+                    </button>
+                    <pre
+                      class="tool-payload max-h-48 overflow-auto rounded-xl bg-muted/45 px-3 py-2 pr-8 font-mono text-[11px] leading-5 text-foreground"
+                      v-html="renderToolPayloadHTML(item.output)"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -1006,18 +1199,21 @@ function diffStats(diff: string): { add: number; del: number } {
             class="claude-prose text-[14.5px] leading-7 text-foreground"
           >
             <template v-if="block.item.id === liveTextId">
-              <div class="stream-plain whitespace-pre-wrap break-words">
-                {{ plainStreamText(block.item) }}<span
-                  class="streaming-caret ml-0.5 inline-block h-[1em] w-[2px] translate-y-[0.15em] bg-foreground/80 align-baseline"
-                  aria-hidden="true"
-                />
-              </div>
+              <div
+                class="prose max-w-none prose-headings:mb-2.5 prose-headings:mt-4 prose-headings:text-[1.05em] prose-headings:font-semibold prose-headings:tracking-tight prose-p:my-2.5 prose-p:leading-7 prose-li:my-1 prose-ul:my-2.5 prose-ol:my-2.5 prose-pre:my-3 prose-pre:rounded-xl prose-code:rounded-md prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:before:content-none prose-code:after:content-none prose-a:font-medium prose-strong:font-semibold"
+                @click="onMarkdownClick"
+                v-html="markdownHTML(stripProposedPlanTags(plainStreamText(block.item)))"
+              />
+              <span
+                class="streaming-caret ml-0.5 inline-block h-[1em] w-[2px] translate-y-[0.15em] bg-foreground/80 align-baseline"
+                aria-hidden="true"
+              />
             </template>
             <div
               v-else
               class="prose max-w-none stream-settle prose-headings:mb-2.5 prose-headings:mt-4 prose-headings:text-[1.05em] prose-headings:font-semibold prose-headings:tracking-tight prose-p:my-2.5 prose-p:leading-7 prose-li:my-1 prose-ul:my-2.5 prose-ol:my-2.5 prose-pre:my-3 prose-pre:rounded-xl prose-code:rounded-md prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:before:content-none prose-code:after:content-none prose-a:font-medium prose-strong:font-semibold"
               @click="onMarkdownClick"
-              v-html="renderMarkdown(stripProposedPlanTags(block.item.text), t('timeline.copyMessage'))"
+              v-html="markdownHTML(stripProposedPlanTags(block.item.text))"
             />
           </div>
         </div>

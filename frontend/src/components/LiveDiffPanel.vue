@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { FileDiff, PanelRightClose } from '@lucide/vue'
+import { Motion } from 'motion-v'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { Button } from '@/components/ui/button'
+import { panelFromRight } from '@/lib/motion'
 import { useCodexStore, useWorkspaceStore } from '@/stores'
 import DiffViewer from './DiffViewer.vue'
 
@@ -40,8 +42,13 @@ function close(): void {
 </script>
 
 <template>
-  <aside
+  <Motion
+    as="aside"
     class="flex h-full w-[min(48vw,640px)] shrink-0 flex-col border-l bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-40 max-lg:w-[min(100vw,640px)] max-lg:shadow-xl"
+    :initial="panelFromRight.initial"
+    :animate="panelFromRight.animate"
+    :exit="panelFromRight.exit"
+    :transition="panelFromRight.transition"
   >
     <header class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
       <FileDiff :size="14" class="shrink-0 text-warning" />
@@ -57,5 +64,5 @@ function close(): void {
     <div class="flex min-h-0 flex-1 flex-col p-2">
       <DiffViewer :diff="diffText" class="min-h-0 flex-1" />
     </div>
-  </aside>
+  </Motion>
 </template>

@@ -1,8 +1,13 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
+import { MotionConfig } from 'motion-v'
+import { onMounted, onUnmounted, shallowRef } from 'vue'
 import { RouterView } from 'vue-router'
 
+import CommandPalette from '@/components/CommandPalette.vue'
+import TitleBar from '@/components/TitleBar.vue'
+import UpdateCheckDialog from '@/components/UpdateCheckDialog.vue'
 import { Toaster } from '@/components/ui/sonner'
+import { useNavigationHistory } from '@/composables/useNavigationHistory'
 import { useAppStore, useBrowserStore, useCodexStore, useTerminalStore, useWorkspaceStore } from '@/stores'
 
 const appStore = useAppStore()
@@ -10,6 +15,9 @@ const codexStore = useCodexStore()
 const workspaceStore = useWorkspaceStore()
 const terminalStore = useTerminalStore()
 const browserStore = useBrowserStore()
+const commandPaletteOpen = shallowRef(false)
+
+useNavigationHistory()
 
 onMounted(() => {
   codexStore.bootstrapEvents()
@@ -32,8 +40,13 @@ onUnmounted(() => {
 
 function onGlobalKeydown(event: KeyboardEvent): void {
   if (!(event.ctrlKey || event.metaKey) || event.altKey) return
-  if (event.target instanceof HTMLElement && (event.target.isContentEditable || event.target.matches('input, textarea, [role="textbox"]'))) return
   const key = event.key.toLowerCase()
+  if (!event.shiftKey && key === 'k') {
+    event.preventDefault()
+    commandPaletteOpen.value = !commandPaletteOpen.value
+    return
+  }
+  if (event.target instanceof HTMLElement && (event.target.isContentEditable || event.target.matches('input, textarea, [role="textbox"]'))) return
   if (event.shiftKey && key === 'b') {
     event.preventDefault()
     browserStore.openBrowser('')
@@ -48,10 +61,21 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 </script>
 
 <template>
-  <RouterView v-slot="{ Component }">
-    <KeepAlive include="WorkbenchView" :max="1">
-      <component :is="Component" />
-    </KeepAlive>
-  </RouterView>
-  <Toaster position="bottom-right" :rich-colors="true" />
+  <MotionConfig :reducedMotion="'user'">
+    <div class="app-shell flex h-screen w-screen flex-col overflow-hidden text-foreground">
+      <TitleBar />
+      <div class="relative min-h-0 flex-1 overflow-hidden">
+        <RouterView v-slot="{ Component, route }">
+          <Transition :name="route.name === 'workbench' ? 'route-fade' : 'route-slide'" mode="out-in">
+            <KeepAlive include="WorkbenchView" :max="1">
+              <component :is="Component" :key="String(route.name || route.path)" />
+            </KeepAlive>
+          </Transition>
+        </RouterView>
+      </div>
+      <Toaster position="bottom-right" :rich-colors="true" />
+      <UpdateCheckDialog />
+      <CommandPalette v-model:open="commandPaletteOpen" />
+    </div>
+  </MotionConfig>
 </template>

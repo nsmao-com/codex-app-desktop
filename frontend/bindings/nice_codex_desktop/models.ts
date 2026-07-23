@@ -66,6 +66,16 @@ export interface PluginInstallRequest {
     "remoteMarketplaceName": string;
 }
 
+/**
+ * ProjectInstructionsInfo is the workspace-root AGENTS.md (project-scoped Codex guidance).
+ */
+export interface ProjectInstructionsInfo {
+    "content": string;
+    "workspace": string;
+    "path": string;
+    "available": boolean;
+}
+
 export interface ReviewStartRequest {
     "threadId": string;
     "targetType": string;
@@ -147,6 +157,10 @@ export interface UserSettings {
     "language": string;
     "autoConnect": boolean;
     "workMode": string;
+    "sendWithModifier": boolean;
+    "followUpBehavior": string;
+    "notifyOnTurnComplete": boolean;
+    "customInstructions": string;
 }
 
 export interface WorkspaceInfo {

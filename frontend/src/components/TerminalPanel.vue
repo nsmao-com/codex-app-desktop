@@ -2,10 +2,12 @@
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import { SquareTerminal, Trash2, X } from '@lucide/vue'
+import { Motion } from 'motion-v'
 import { nextTick, onBeforeUnmount, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { Button } from '@/components/ui/button'
+import { panelFromRight } from '@/lib/motion'
 import { useAppStore, useTerminalStore } from '@/stores'
 
 import '@xterm/xterm/css/xterm.css'
@@ -140,50 +142,51 @@ function clearTerminal(): void {
   terminalStore.clearTerminal()
 }
 
+function onCloseTerminal(): void {
+  void terminalStore.closeTerminal()
+}
+
 function focusTerminal(): void {
   termRef.value?.focus()
 }
 </script>
 
 <template>
-  <Teleport to="body">
-    <div
-      v-if="terminalStore.terminalPanelOpen"
-      class="fixed inset-y-0 right-0 z-[360] flex w-[min(720px,100vw)] flex-col border-l bg-card shadow-2xl"
-      :aria-label="t('terminal.title')"
-    >
-      <section class="flex h-full flex-col">
-        <header class="flex h-12 shrink-0 items-center gap-3 border-b px-3">
-          <div class="flex size-7 items-center justify-center rounded-md bg-foreground text-background">
-            <SquareTerminal :size="16" />
-          </div>
-          <div class="min-w-0 flex-1">
-            <h2 class="text-xs font-semibold">{{ t('terminal.title') }}</h2>
-            <p class="truncate text-[10px] text-muted-foreground">
-              {{ appStore.settings.terminalProfile }} · {{ terminalStore.terminalStarting ? t('terminal.starting') : terminalStore.terminalRunning ? t('terminal.running') : t('terminal.exited') }}
-            </p>
-          </div>
-          <Button variant="ghost" size="icon-xs" :aria-label="t('terminal.clear')" @click="clearTerminal">
-            <Trash2 :size="15" />
-          </Button>
-          <Button variant="ghost" size="icon-xs" :aria-label="t('common.close')" @click="terminalStore.closeTerminal">
-            <X :size="16" />
-          </Button>
-        </header>
+  <Motion
+    as="aside"
+    class="flex h-full w-[min(42vw,480px)] shrink-0 flex-col border-l bg-panel"
+    :aria-label="t('terminal.title')"
+    :initial="panelFromRight.initial"
+    :animate="panelFromRight.animate"
+    :exit="panelFromRight.exit"
+    :transition="panelFromRight.transition"
+  >
+    <header class="flex h-11 shrink-0 items-center gap-2 border-b px-3">
+      <div class="flex size-7 items-center justify-center rounded-md bg-foreground text-background">
+        <SquareTerminal :size="15" />
+      </div>
+      <div class="min-w-0 flex-1">
+        <h2 class="text-xs font-semibold">{{ t('terminal.title') }}</h2>
+        <p class="truncate text-[10px] text-muted-foreground">
+          {{ appStore.settings.terminalProfile }} · {{ terminalStore.terminalStarting ? t('terminal.starting') : terminalStore.terminalRunning ? t('terminal.running') : t('terminal.exited') }}
+        </p>
+      </div>
+      <Button type="button" variant="ghost" size="icon-xs" :aria-label="t('terminal.clear')" :title="t('terminal.clear')" @click.stop="clearTerminal">
+        <Trash2 :size="14" />
+      </Button>
+      <Button type="button" variant="ghost" size="icon-xs" :aria-label="t('terminal.close')" :title="t('terminal.close')" @click.stop.prevent="onCloseTerminal">
+        <X :size="15" />
+      </Button>
+    </header>
 
-        <div
-          class="relative min-h-0 flex-1 bg-[#181817] p-2"
-          @click="focusTerminal"
-        >
-          <div ref="hostRef" class="h-full w-full overflow-hidden" />
-          <p
-            v-if="terminalStore.terminalStarting && !terminalStore.terminalRunning"
-            class="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-[11px] text-[#9c9a93]"
-          >
-            {{ t('terminal.starting') }}
-          </p>
-        </div>
-      </section>
+    <div class="relative min-h-0 flex-1 bg-[#181817] p-2" @click="focusTerminal">
+      <div ref="hostRef" class="h-full w-full overflow-hidden" />
+      <p
+        v-if="terminalStore.terminalStarting && !terminalStore.terminalRunning"
+        class="pointer-events-none absolute inset-0 flex items-center justify-center font-mono text-[11px] text-[#9c9a93]"
+      >
+        {{ t('terminal.starting') }}
+      </p>
     </div>
-  </Teleport>
+  </Motion>
 </template>

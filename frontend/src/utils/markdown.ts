@@ -5,6 +5,7 @@ import { escapeHTML, highlightCode } from './highlight'
 
 const MAX_CACHE_ENTRIES = 320
 const MAX_CACHE_WEIGHT = 8_000_000
+const CODE_COLLAPSE_LINES = 18
 const markdownCache = new Map<string, { html: string; weight: number }>()
 let markdownCacheWeight = 0
 
@@ -16,11 +17,18 @@ renderer.code = ({ text, lang }: Tokens.Code): string => {
   const langLabel = language
     ? `<span class="markdown-code-lang">${escapeHTML(language)}</span>`
     : ''
+  const lineCount = text.split('\n').length
+  const tall = lineCount > CODE_COLLAPSE_LINES
+  const tallClass = tall ? ' markdown-code--tall is-collapsed' : ''
+  const expandButton = tall
+    ? '<button type="button" class="markdown-code-expand" data-collapse-code aria-expanded="false">__EXPAND_LABEL__</button>'
+    : ''
   return [
-    '<div class="markdown-code">',
+    `<div class="markdown-code${tallClass}">`,
     langLabel,
     '<button type="button" class="markdown-code-copy" data-copy-code aria-label="__COPY_LABEL__">__COPY_LABEL__</button>',
     `<pre><code class="tool-payload${langClass}">${highlighted}</code></pre>`,
+    expandButton,
     '</div>',
   ].join('')
 }
@@ -31,8 +39,8 @@ marked.use({
   renderer,
 })
 
-export function renderMarkdown(source: string, copyLabel = 'Copy'): string {
-  const key = copyLabel + '\0' + source
+export function renderMarkdown(source: string, copyLabel = 'Copy', expandLabel = 'Show more'): string {
+  const key = copyLabel + '\0' + expandLabel + '\0' + source
   const cached = markdownCache.get(key)
   if (cached) {
     markdownCache.delete(key)
@@ -41,14 +49,16 @@ export function renderMarkdown(source: string, copyLabel = 'Copy'): string {
   }
 
   const raw = marked.parse(source, { async: false }) as string
-  const withLabel = raw.replaceAll('__COPY_LABEL__', escapeHTML(copyLabel))
-  const sanitized = DOMPurify.sanitize(withLabel, {
+  const withLabels = raw
+    .replaceAll('__COPY_LABEL__', escapeHTML(copyLabel))
+    .replaceAll('__EXPAND_LABEL__', escapeHTML(expandLabel))
+  const sanitized = DOMPurify.sanitize(withLabels, {
     ALLOWED_TAGS: [
       'p', 'br', 'strong', 'em', 'del', 'a', 'ul', 'ol', 'li', 'code', 'pre',
       'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'hr', 'table', 'thead',
       'tbody', 'tr', 'th', 'td', 'div', 'button', 'span',
     ],
-    ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'type', 'aria-label', 'data-copy-code'],
+    ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'type', 'aria-label', 'aria-expanded', 'data-copy-code', 'data-collapse-code'],
   })
   cacheMarkdown(key, sanitized)
   return sanitized

@@ -220,83 +220,86 @@ async function saveMcpImport(): Promise<void> {
 </script>
 
 <template>
-  <div class="grid h-screen overflow-hidden bg-foreground/10 p-3 backdrop-blur-sm sm:p-6">
-    <div class="mx-auto flex h-full w-full max-w-6xl flex-col overflow-hidden rounded-xl border bg-card shadow-2xl">
-    <header class="flex h-14 shrink-0 items-center gap-3 border-b bg-card px-4">
-      <Button variant="ghost" size="icon-sm" :aria-label="t('common.close')" @click="closeCapabilities">
-        <ArrowLeft :size="17" />
-      </Button>
-      <div class="min-w-0 flex-1">
-        <p class="text-[10px] font-semibold uppercase tracking-wider text-primary">{{ t('capabilities.kicker') }}</p>
-        <h1 class="text-sm font-semibold">{{ t('capabilities.title') }}</h1>
+  <div class="flex h-full w-full overflow-hidden bg-transparent text-foreground">
+    <!-- Left tab rail on the gray shell -->
+    <aside class="flex w-[248px] shrink-0 flex-col">
+      <div class="space-y-2 px-3 pb-2 pt-1">
+        <Button variant="ghost" class="h-8 w-full justify-start px-2 text-xs text-muted-foreground" @click="closeCapabilities">
+          <ArrowLeft :size="14" class="mr-2" />
+          {{ t('settings.backToApp') }}
+        </Button>
+        <div class="px-1">
+          <p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{{ t('capabilities.kicker') }}</p>
+          <h1 class="text-[15px] font-semibold tracking-tight">{{ t('capabilities.title') }}</h1>
+        </div>
       </div>
-      <Button variant="outline" size="sm" :disabled="capabilitiesStore.capabilitiesLoading" @click="capabilitiesStore.loadCapabilities(true)">
-        <RefreshCw :size="14" class="mr-1.5" :class="{ 'animate-spin': capabilitiesStore.capabilitiesLoading }" />
-        {{ t('common.refresh') }}
-      </Button>
-    </header>
 
-    <main class="flex min-h-0 flex-1">
-      <Tabs v-model="activeTab" class="flex min-h-0 w-full flex-1 flex-col overflow-hidden">
-        <div class="flex shrink-0 items-center gap-2 border-b px-4 py-2">
-          <div class="relative flex-1">
+      <nav class="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3" :aria-label="t('capabilities.title')">
+        <button
+          v-for="tab in tabs"
+          :key="tab.value"
+          type="button"
+          class="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[12.5px] transition-colors"
+          :class="activeTab === tab.value
+            ? 'bg-card font-medium text-foreground shadow-sm'
+            : 'text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground'"
+          :aria-current="activeTab === tab.value ? 'page' : undefined"
+          @click="setTab(tab.value)"
+        >
+          <component :is="tab.icon" :size="14" class="shrink-0 opacity-70" />
+          <span class="min-w-0 flex-1 truncate">{{ tab.label }}</span>
+          <span class="rounded-full bg-foreground/[0.06] px-1.5 text-[10px] tabular-nums text-muted-foreground">{{ tab.count }}</span>
+        </button>
+      </nav>
+    </aside>
+
+    <!-- Rounded content card -->
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col pb-2 pr-2 pl-1.5 pt-0">
+      <section class="workbench-card relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[14px] border bg-card">
+        <header class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+          <div class="relative min-w-0 flex-1">
             <Search class="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input v-model="query" type="search" :placeholder="t('capabilities.search')" class="h-8 pl-8 text-xs" />
           </div>
-          <Button v-if="activeTab === 'mcp'" variant="outline" size="sm" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="openMcpEditor()">
+          <Button v-if="activeTab === 'mcp'" variant="outline" size="sm" class="h-8" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="openMcpEditor()">
             <Plus :size="13" class="mr-1.5" />
             {{ t('capabilities.addMcp') }}
           </Button>
-          <Button v-if="activeTab === 'mcp'" variant="outline" size="sm" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="openMcpImport">
+          <Button v-if="activeTab === 'mcp'" variant="outline" size="sm" class="h-8" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="openMcpImport">
             <Bot :size="13" class="mr-1.5" />
             {{ t('capabilities.importMcpJson') }}
           </Button>
-          <Button v-if="activeTab === 'mcp'" variant="outline" size="sm" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="capabilitiesStore.refreshMCPServers()">
+          <Button v-if="activeTab === 'mcp'" variant="outline" size="sm" class="h-8" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="capabilitiesStore.refreshMCPServers()">
             <RefreshCw :size="13" class="mr-1.5" />
             {{ t('capabilities.reloadMcp') }}
           </Button>
-        </div>
+          <Button variant="outline" size="sm" class="h-8" :disabled="capabilitiesStore.capabilitiesLoading" @click="capabilitiesStore.loadCapabilities(true)">
+            <RefreshCw :size="14" class="mr-1.5" :class="{ 'animate-spin': capabilitiesStore.capabilitiesLoading }" />
+            {{ t('common.refresh') }}
+          </Button>
+        </header>
 
-        <div class="scrollbar-thin min-h-11 shrink-0 overflow-x-auto border-b bg-card px-4">
-          <nav class="flex min-w-max items-center gap-1 py-1.5" :aria-label="t('capabilities.title')">
-            <Button
-              v-for="tab in tabs"
-              :key="tab.value"
-              type="button"
-              variant="ghost"
-              size="sm"
-              class="h-8 flex-none gap-1.5 rounded-md border border-transparent px-2.5 text-xs text-muted-foreground transition-[color,background-color,border-color] duration-200 hover:bg-muted/70 hover:text-foreground"
-              :class="activeTab === tab.value ? 'border-primary/30 bg-primary/10 text-foreground shadow-none' : ''"
-              :aria-current="activeTab === tab.value ? 'page' : undefined"
-              @click="setTab(tab.value)"
-            >
-              <component :is="tab.icon" :size="14" />
-              <span>{{ tab.label }}</span>
-              <Badge variant="secondary" class="text-[9px]">{{ tab.count }}</Badge>
-            </Button>
-          </nav>
-        </div>
-
-        <ScrollArea class="min-h-0 flex-1 overflow-hidden">
-          <div class="mx-auto max-w-5xl p-4">
-            <div class="mb-5 grid grid-cols-2 gap-x-8 gap-y-4 border-b pb-5 lg:grid-cols-4">
-              <div v-for="stat in capabilityStats" :key="stat.label" class="min-w-0">
-                <div class="mb-1.5 flex items-end justify-between gap-2">
-                  <span class="truncate text-[10px] font-medium text-muted-foreground">{{ stat.label }}</span>
-                  <strong class="text-sm tabular-nums">{{ stat.value }}<span class="font-normal text-muted-foreground">/{{ stat.total }}</span></strong>
-                </div>
-                <div class="h-1.5 overflow-hidden rounded-full bg-muted">
-                  <div class="h-full rounded-full bg-primary transition-[width] duration-300" :style="{ width: `${stat.total ? Math.round(stat.value / stat.total * 100) : 0}%` }" />
+        <Tabs v-model="activeTab" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <ScrollArea class="min-h-0 flex-1 overflow-hidden">
+            <div class="mx-auto max-w-5xl p-4">
+              <div class="mb-5 grid grid-cols-2 gap-x-8 gap-y-4 border-b pb-5 lg:grid-cols-4">
+                <div v-for="stat in capabilityStats" :key="stat.label" class="min-w-0">
+                  <div class="mb-1.5 flex items-end justify-between gap-2">
+                    <span class="truncate text-[10px] font-medium text-muted-foreground">{{ stat.label }}</span>
+                    <strong class="text-sm tabular-nums">{{ stat.value }}<span class="font-normal text-muted-foreground">/{{ stat.total }}</span></strong>
+                  </div>
+                  <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div class="h-full rounded-full bg-primary transition-[width] duration-300" :style="{ width: `${stat.total ? Math.round(stat.value / stat.total * 100) : 0}%` }" />
+                  </div>
                 </div>
               </div>
-            </div>
-            <div v-if="!appStore.codexAvailable" class="rounded-lg border border-warning/30 bg-warning/10 p-4 text-xs text-warning">
-              {{ t('capabilities.connectionRequired') }}
-            </div>
+              <div v-if="!appStore.codexAvailable" class="rounded-lg border border-warning/30 bg-warning/10 p-4 text-xs text-warning">
+                {{ t('capabilities.connectionRequired') }}
+              </div>
 
-            <div v-else-if="activeError" class="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
-              {{ activeError }}
-            </div>
+              <div v-else-if="activeError" class="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+                {{ activeError }}
+              </div>
 
             <TabsContent value="plugins" class="mt-0 space-y-3">
               <Card v-for="plugin in visiblePlugins" :key="plugin.id" class="gap-0 rounded-md py-0 shadow-none">
@@ -543,10 +546,10 @@ async function saveMcpImport(): Promise<void> {
                 </Button>
               </div>
             </div>
-          </div>
-        </ScrollArea>
-      </Tabs>
-    </main>
+            </div>
+          </ScrollArea>
+        </Tabs>
+      </section>
     </div>
   </div>
 </template>

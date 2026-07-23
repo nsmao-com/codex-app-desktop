@@ -287,12 +287,18 @@ export interface AccountRateLimits {
   } | null
 }
 
+export interface AccountUsageDailyBucket {
+  startDate: string
+  tokens: number
+}
+
 export interface AccountUsageSummary {
   lifetimeTokens: number | null
   peakDailyTokens: number | null
   currentStreakDays: number | null
   longestStreakDays: number | null
   longestRunningTurnSec: number | null
+  dailyBuckets: AccountUsageDailyBucket[]
 }
 
 export interface PendingServerRequest {

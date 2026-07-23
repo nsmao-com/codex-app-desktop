@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,25 +46,29 @@ type BootstrapData struct {
 }
 
 type UserSettings struct {
-	Workspace         string   `json:"workspace"`
-	RecentWorkspaces  []string `json:"recentWorkspaces"`
-	Model             string   `json:"model"`
-	ModelProvider     string   `json:"modelProvider"`
-	CustomModels      []string `json:"customModels"`
-	Effort            string   `json:"effort"`
-	ServiceTier       string   `json:"serviceTier"`
-	CollaborationMode string   `json:"collaborationMode"`
-	Personality       string   `json:"personality"`
-	MultiAgentMode    string   `json:"multiAgentMode"`
-	Sandbox           string   `json:"sandbox"`
-	ApprovalPolicy    string   `json:"approvalPolicy"`
-	Theme             string   `json:"theme"`
-	AccentColor       string   `json:"accentColor"`
-	FontFamily        string   `json:"fontFamily"`
-	TerminalProfile   string   `json:"terminalProfile"`
-	Language          string   `json:"language"`
-	AutoConnect       bool     `json:"autoConnect"`
-	WorkMode          string   `json:"workMode"`
+	Workspace              string   `json:"workspace"`
+	RecentWorkspaces       []string `json:"recentWorkspaces"`
+	Model                  string   `json:"model"`
+	ModelProvider          string   `json:"modelProvider"`
+	CustomModels           []string `json:"customModels"`
+	Effort                 string   `json:"effort"`
+	ServiceTier            string   `json:"serviceTier"`
+	CollaborationMode      string   `json:"collaborationMode"`
+	Personality            string   `json:"personality"`
+	MultiAgentMode         string   `json:"multiAgentMode"`
+	Sandbox                string   `json:"sandbox"`
+	ApprovalPolicy         string   `json:"approvalPolicy"`
+	Theme                  string   `json:"theme"`
+	AccentColor            string   `json:"accentColor"`
+	FontFamily             string   `json:"fontFamily"`
+	TerminalProfile        string   `json:"terminalProfile"`
+	Language               string   `json:"language"`
+	AutoConnect            bool     `json:"autoConnect"`
+	WorkMode               string   `json:"workMode"`
+	SendWithModifier       bool     `json:"sendWithModifier"`
+	FollowUpBehavior       string   `json:"followUpBehavior"`
+	NotifyOnTurnComplete   bool     `json:"notifyOnTurnComplete"`
+	CustomInstructions     string   `json:"customInstructions"`
 }
 
 type WorkspaceInfo struct {
@@ -73,6 +78,14 @@ type WorkspaceInfo struct {
 	Branch   string      `json:"branch"`
 	Changes  []GitChange `json:"changes"`
 	GitError string      `json:"gitError,omitempty"`
+}
+
+// ProjectInstructionsInfo is the workspace-root AGENTS.md (project-scoped Codex guidance).
+type ProjectInstructionsInfo struct {
+	Content   string `json:"content"`
+	Workspace string `json:"workspace"`
+	Path      string `json:"path"`
+	Available bool   `json:"available"`
 }
 
 type GitChange struct {
@@ -188,7 +201,7 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	if !isAllowed(settings.Theme, "dark", "light", "system") {
 		return UserSettings{}, errors.New("invalid theme")
 	}
-	if !isAllowed(settings.AccentColor, "amber", "emerald", "coral", "graphite") {
+	if !isAllowed(settings.AccentColor, "amber", "gold", "rose", "coral", "emerald", "moss", "ocean", "sky", "slate", "graphite") {
 		return UserSettings{}, errors.New("invalid accent color")
 	}
 	if !isValidFontFamily(settings.FontFamily) {
@@ -219,6 +232,8 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	if !isAllowed(settings.MultiAgentMode, "explicitRequestOnly", "proactive") {
 		return UserSettings{}, errors.New("invalid multi-agent mode")
 	}
+	settings.FollowUpBehavior = normalizeFollowUpBehavior(settings.FollowUpBehavior)
+	settings.CustomInstructions = sanitizeCustomInstructions(settings.CustomInstructions)
 	settings.WorkMode = normalizeWorkMode(settings.WorkMode)
 	if settings.Effort == "" {
 		settings.Effort = "high"
@@ -228,9 +243,13 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 		return UserSettings{}, errors.New("model preferences are too long")
 	}
 	s.mu.Lock()
+	previousInstructions := s.settings.CustomInstructions
 	err := writeSettings(s.settingsPath, settings)
 	if err == nil {
 		s.settings = cloneSettings(settings)
+		if sanitizeCustomInstructions(settings.CustomInstructions) != sanitizeCustomInstructions(previousInstructions) {
+			_ = writeCodexPersonalInstructions(settings.CustomInstructions)
+		}
 	}
 	result := cloneSettings(settings)
 	s.mu.Unlock()
@@ -293,6 +312,56 @@ func (s *AppService) SelectImages() ([]string, error) {
 	}
 	s.mu.Unlock()
 	return result, nil
+}
+
+// AttachImageData saves a pasted/dropped image into the NiceCodex temp folder
+// and registers it for SendMessage (same allow-list as SelectImages).
+func (s *AppService) AttachImageData(fileName string, mimeType string, dataBase64 string) (string, error) {
+	dataBase64 = strings.TrimSpace(dataBase64)
+	if dataBase64 == "" {
+		return "", errors.New("image data is required")
+	}
+	if strings.Contains(dataBase64, ",") {
+		// Accept data URL payloads: data:image/png;base64,....
+		dataBase64 = dataBase64[strings.LastIndex(dataBase64, ",")+1:]
+	}
+	raw, err := base64.StdEncoding.DecodeString(dataBase64)
+	if err != nil {
+		// Some paste paths use URL-safe / raw encodings.
+		raw, err = base64.RawStdEncoding.DecodeString(dataBase64)
+		if err != nil {
+			return "", errors.New("invalid image data encoding")
+		}
+	}
+	if len(raw) == 0 {
+		return "", errors.New("image data is empty")
+	}
+	if len(raw) > 20*1024*1024 {
+		return "", errors.New("image attachments must be 20 MB or smaller")
+	}
+
+	ext := imageExtensionForMime(mimeType, fileName, raw)
+	if ext == "" {
+		return "", errors.New("unsupported image format")
+	}
+	dir := filepath.Join(filepath.Dir(s.settingsPath), "attachments")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	safeName := sanitizeAttachmentFileName(fileName, ext)
+	path := filepath.Join(dir, fmt.Sprintf("%d-%s", time.Now().UnixNano(), safeName))
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return "", err
+	}
+	cleanPath, err := validateImageAttachment(path)
+	if err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	s.mu.Lock()
+	s.allowedImages[imageAttachmentKey(cleanPath)] = struct{}{}
+	s.mu.Unlock()
+	return cleanPath, nil
 }
 
 func (s *AppService) UseWorkspace(path string) (WorkspaceInfo, error) {
@@ -1029,9 +1098,6 @@ func (s *AppService) SteerTurn(request SteerTurnRequest) (map[string]any, error)
 
 func (s *AppService) buildUserInput(text string, images []string) ([]any, error) {
 	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil, errors.New("message cannot be empty")
-	}
 	if len(images) > 4 {
 		return nil, errors.New("attach up to 4 images per message")
 	}
@@ -1056,8 +1122,37 @@ func (s *AppService) buildUserInput(text string, images []string) ([]any, error)
 		seenImages[key] = struct{}{}
 		input = append(input, map[string]any{"type": "localImage", "path": cleanPath})
 	}
-	input = append(input, map[string]any{"type": "text", "text": text, "text_elements": []any{}})
+	if text == "" && len(input) == 0 {
+		return nil, errors.New("message cannot be empty")
+	}
+	if text != "" {
+		input = append(input, map[string]any{"type": "text", "text": text, "text_elements": []any{}})
+	}
 	return input, nil
+}
+
+// PreviewImage returns a data-URL for an allow-listed attachment so the UI can show thumbnails.
+func (s *AppService) PreviewImage(path string) (string, error) {
+	cleanPath, err := validateImageAttachment(path)
+	if err != nil {
+		return "", err
+	}
+	key := imageAttachmentKey(cleanPath)
+	s.mu.Lock()
+	_, allowed := s.allowedImages[key]
+	s.mu.Unlock()
+	if !allowed {
+		return "", errors.New("select image attachments through Nice Codex before previewing")
+	}
+	raw, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) == 0 {
+		return "", errors.New("image data is empty")
+	}
+	mime := mimeFromImageExt(filepath.Ext(cleanPath))
+	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw), nil
 }
 
 func (s *AppService) InterruptTurn(threadID string, turnID string) error {
@@ -1130,13 +1225,9 @@ func (s *AppService) ListModels() (map[string]any, error) {
 }
 
 func readCodexConfiguredModel() string {
-	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	codexHome := resolveCodexHome()
 	if codexHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		codexHome = filepath.Join(home, ".codex")
+		return ""
 	}
 	return readTOMLModel(filepath.Join(codexHome, "config.toml"))
 }
@@ -1697,21 +1788,25 @@ func defaultSettings() UserSettings {
 		}
 	}
 	return UserSettings{
-		Effort:            "high",
-		CollaborationMode: "default",
-		Personality:       "pragmatic",
-		MultiAgentMode:    "explicitRequestOnly",
-		Sandbox:           "workspace-write",
-		ApprovalPolicy:    "on-request",
-		Theme:             "dark",
-		AccentColor:       "amber",
-		FontFamily:        "manrope",
-		TerminalProfile:   profile,
-		Language:          "zh-CN",
-		AutoConnect:       true,
-		WorkMode:          "code",
-		RecentWorkspaces:  []string{},
-		CustomModels:      []string{},
+		Effort:               "high",
+		CollaborationMode:    "default",
+		Personality:          "pragmatic",
+		MultiAgentMode:       "explicitRequestOnly",
+		Sandbox:              "workspace-write",
+		ApprovalPolicy:       "on-request",
+		Theme:                "dark",
+		AccentColor:          "amber",
+		FontFamily:           "manrope",
+		TerminalProfile:      profile,
+		Language:             "zh-CN",
+		AutoConnect:          true,
+		WorkMode:             "code",
+		SendWithModifier:      false,
+		FollowUpBehavior:     "steer",
+		NotifyOnTurnComplete: true,
+		CustomInstructions:   "",
+		RecentWorkspaces:     []string{},
+		CustomModels:         []string{},
 	}
 }
 
@@ -1746,6 +1841,13 @@ func readSettings(path string) (UserSettings, error) {
 	settings.CustomModels = sanitizeCustomModels(settings.CustomModels)
 	if settings.MultiAgentMode == "proactiveAgents" {
 		settings.MultiAgentMode = "proactive"
+	}
+	settings.FollowUpBehavior = normalizeFollowUpBehavior(settings.FollowUpBehavior)
+	settings.CustomInstructions = sanitizeCustomInstructions(settings.CustomInstructions)
+	if strings.TrimSpace(settings.CustomInstructions) == "" {
+		if fromCodex := readCodexPersonalInstructions(); fromCodex != "" {
+			settings.CustomInstructions = fromCodex
+		}
 	}
 	settings.WorkMode = normalizeWorkMode(settings.WorkMode)
 	settings.ModelProvider = sanitizeWorkbenchProvider(settings.ModelProvider)
@@ -1841,6 +1943,63 @@ func validateImageAttachment(path string) (string, error) {
 	return filepath.Clean(absolute), nil
 }
 
+func imageExtensionForMime(mimeType, fileName string, raw []byte) string {
+	mimeType = strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	switch mimeType {
+	case "image/png":
+		return ".png"
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	}
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(fileName)))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif":
+		if ext == ".jpeg" {
+			return ".jpg"
+		}
+		return ext
+	}
+	if len(raw) >= 8 && string(raw[:8]) == "\x89PNG\r\n\x1a\n" {
+		return ".png"
+	}
+	if len(raw) >= 3 && raw[0] == 0xff && raw[1] == 0xd8 && raw[2] == 0xff {
+		return ".jpg"
+	}
+	if len(raw) >= 6 && (string(raw[:6]) == "GIF87a" || string(raw[:6]) == "GIF89a") {
+		return ".gif"
+	}
+	if len(raw) >= 12 && string(raw[:4]) == "RIFF" && string(raw[8:12]) == "WEBP" {
+		return ".webp"
+	}
+	return ""
+}
+
+func sanitizeAttachmentFileName(fileName, ext string) string {
+	base := strings.TrimSpace(filepath.Base(fileName))
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	var b strings.Builder
+	for _, r := range base {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		case r == ' ':
+			b.WriteByte('-')
+		}
+		if b.Len() >= 48 {
+			break
+		}
+	}
+	name := b.String()
+	if name == "" {
+		name = "paste"
+	}
+	return name + ext
+}
+
 func imageAttachmentKey(path string) string {
 	path = filepath.Clean(path)
 	if runtime.GOOS == "windows" {
@@ -1849,10 +2008,152 @@ func imageAttachmentKey(path string) string {
 	return path
 }
 
+func mimeFromImageExt(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	default:
+		return "application/octet-stream"
+	}
+}
+
 func cloneSettings(settings UserSettings) UserSettings {
 	settings.RecentWorkspaces = append([]string(nil), settings.RecentWorkspaces...)
 	settings.CustomModels = append([]string(nil), settings.CustomModels...)
 	return settings
+}
+
+func normalizeFollowUpBehavior(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "queue" {
+		return "queue"
+	}
+	return "steer"
+}
+
+func sanitizeCustomInstructions(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.TrimSpace(value)
+	if len(value) > 16_000 {
+		value = value[:16_000]
+	}
+	return value
+}
+
+func resolveCodexHome() string {
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome != "" {
+		return codexHome
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".codex")
+}
+
+func readCodexPersonalInstructions() string {
+	home := resolveCodexHome()
+	if home == "" {
+		return ""
+	}
+	payload, err := os.ReadFile(filepath.Join(home, "AGENTS.md"))
+	if err != nil {
+		return ""
+	}
+	return sanitizeCustomInstructions(string(payload))
+}
+
+func writeCodexPersonalInstructions(value string) error {
+	home := resolveCodexHome()
+	if home == "" {
+		return errors.New("codex home unavailable")
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(home, "AGENTS.md")
+	trimmed := sanitizeCustomInstructions(value)
+	if trimmed == "" {
+		// Keep an empty file so Codex still sees personal instructions cleared.
+		return os.WriteFile(path, []byte(""), 0o600)
+	}
+	if !strings.HasSuffix(trimmed, "\n") {
+		trimmed += "\n"
+	}
+	return os.WriteFile(path, []byte(trimmed), 0o600)
+}
+
+func projectAgentsPath(workspace string) string {
+	return filepath.Join(workspace, "AGENTS.md")
+}
+
+func readProjectAgentsInstructions(workspace string) string {
+	payload, err := os.ReadFile(projectAgentsPath(workspace))
+	if err != nil {
+		return ""
+	}
+	return sanitizeCustomInstructions(string(payload))
+}
+
+func writeProjectAgentsInstructions(workspace string, value string) error {
+	path := projectAgentsPath(workspace)
+	trimmed := sanitizeCustomInstructions(value)
+	if trimmed == "" {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	if !strings.HasSuffix(trimmed, "\n") {
+		trimmed += "\n"
+	}
+	return os.WriteFile(path, []byte(trimmed), 0o644)
+}
+
+// ReadProjectInstructions returns the current workspace AGENTS.md content.
+func (s *AppService) ReadProjectInstructions() ProjectInstructionsInfo {
+	workspace := strings.TrimSpace(s.Settings().Workspace)
+	if workspace == "" {
+		return ProjectInstructionsInfo{}
+	}
+	clean, err := validateWorkspace(workspace)
+	if err != nil {
+		return ProjectInstructionsInfo{}
+	}
+	return ProjectInstructionsInfo{
+		Content:   readProjectAgentsInstructions(clean),
+		Workspace: clean,
+		Path:      projectAgentsPath(clean),
+		Available: true,
+	}
+}
+
+// SaveProjectInstructions writes the current workspace AGENTS.md (project-scoped Codex guidance).
+func (s *AppService) SaveProjectInstructions(content string) (ProjectInstructionsInfo, error) {
+	workspace := strings.TrimSpace(s.Settings().Workspace)
+	if workspace == "" {
+		return ProjectInstructionsInfo{}, errors.New("no workspace is selected")
+	}
+	clean, err := validateWorkspace(workspace)
+	if err != nil {
+		return ProjectInstructionsInfo{}, err
+	}
+	if err := writeProjectAgentsInstructions(clean, content); err != nil {
+		return ProjectInstructionsInfo{}, err
+	}
+	return ProjectInstructionsInfo{
+		Content:   sanitizeCustomInstructions(content),
+		Workspace: clean,
+		Path:      projectAgentsPath(clean),
+		Available: true,
+	}, nil
 }
 
 func sanitizeCustomModels(items []string) []string {
@@ -2134,16 +2435,28 @@ func (s *AppService) sessionIDForBackendRef(backendID string) string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if record := s.sessions[backendID]; record != nil && !record.Archived {
-		return backendID
-	}
+
+	// Prefer NiceCodex UUID sessions that own this app-server thread.
+	// Codex-id mirrors (id == backendRef) must not win, or events/UI can split
+	// across two rows that share the same backend conversation context.
+	var mirrorID string
 	for id, record := range s.sessions {
 		if record == nil || record.Archived {
 			continue
 		}
-		if record.BackendRef == backendID {
+		if strings.TrimSpace(record.BackendRef) != backendID && id != backendID {
+			continue
+		}
+		ownsBackend := strings.TrimSpace(record.BackendRef) == backendID
+		if ownsBackend && id != backendID {
 			return id
 		}
+		if id == backendID {
+			mirrorID = id
+		}
+	}
+	if mirrorID != "" {
+		return mirrorID
 	}
 	return backendID
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Activity, Coins, FileDiff, Gauge, GitBranch, PanelRightClose, RefreshCw, ShieldCheck } from '@lucide/vue'
-
+import { Motion } from 'motion-v'
 import { computed, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -10,6 +10,7 @@ import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { panelFromRight } from '@/lib/motion'
 import { useAppStore, useCodexStore, useWorkspaceStore } from '@/stores'
 
 const appStore = useAppStore()
@@ -47,7 +48,14 @@ function statusClass(status: string): string {
 </script>
 
 <template>
-  <aside class="flex h-full w-80 shrink-0 flex-col border-l bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-30 max-lg:shadow-xl">
+  <Motion
+    as="aside"
+    class="flex h-full w-80 shrink-0 flex-col border-l bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-30 max-lg:shadow-xl"
+    :initial="panelFromRight.initial"
+    :animate="panelFromRight.animate"
+    :exit="panelFromRight.exit"
+    :transition="panelFromRight.transition"
+  >
     <Tabs v-model="activeTab" class="flex h-full flex-col">
       <div class="flex items-center justify-between border-b px-3 py-2">
         <TooltipProvider>
@@ -204,5 +212,5 @@ function statusClass(status: string): string {
         </ScrollArea>
       </TabsContent>
     </Tabs>
-  </aside>
+  </Motion>
 </template>

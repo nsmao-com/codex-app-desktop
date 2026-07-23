@@ -20,11 +20,21 @@ type TerminalProfile struct {
 }
 
 type terminalSession struct {
-	pty     gopty.Pty
-	cmd     *gopty.Cmd
-	writeMu sync.Mutex
-	stateMu sync.Mutex
-	stopped bool
+	pty       gopty.Pty
+	cmd       *gopty.Cmd
+	writeMu   sync.Mutex
+	stateMu   sync.Mutex
+	stopped   bool
+	closeOnce sync.Once
+}
+
+func (session *terminalSession) closePty() {
+	if session == nil || session.pty == nil {
+		return
+	}
+	session.closeOnce.Do(func() {
+		_ = session.pty.Close()
+	})
 }
 
 func listTerminalProfiles() []TerminalProfile {
@@ -75,6 +85,7 @@ func (s *AppService) StartTerminalSession(processID string) error {
 
 	cmd := ptySession.Command(command[0], command[1:]...)
 	cmd.Dir = workspace
+	configureTerminalCmd(cmd)
 	if err := cmd.Start(); err != nil {
 		_ = ptySession.Close()
 		return err
@@ -130,12 +141,20 @@ func (s *AppService) StopTerminalSession(processID string) error {
 		return nil
 	}
 	session.stateMu.Lock()
+	if session.stopped {
+		session.stateMu.Unlock()
+		return nil
+	}
 	session.stopped = true
 	session.stateMu.Unlock()
+
+	// Close ConPTY first. Per Microsoft docs this ends attached console clients.
+	// Avoid racing a second Close from Wait — closePty is once-only.
+	session.closePty()
 	if session.cmd != nil && session.cmd.Process != nil {
 		_ = session.cmd.Process.Kill()
 	}
-	return session.pty.Close()
+	return nil
 }
 
 func (s *AppService) readTerminalStream(processID string, reader io.Reader) {
@@ -171,7 +190,7 @@ func (s *AppService) waitTerminalSession(processID string, session *terminalSess
 	session.stateMu.Lock()
 	stopped := session.stopped
 	session.stateMu.Unlock()
-	_ = session.pty.Close()
+	session.closePty()
 	result := map[string]any{"processId": processID}
 	if waitErr != nil && !stopped {
 		result["error"] = waitErr.Error()
@@ -190,9 +209,9 @@ func (s *AppService) stopAllTerminalSessions() {
 		session.stateMu.Lock()
 		session.stopped = true
 		session.stateMu.Unlock()
+		session.closePty()
 		if session.cmd != nil && session.cmd.Process != nil {
 			_ = session.cmd.Process.Kill()
 		}
-		_ = session.pty.Close()
 	}
 }
