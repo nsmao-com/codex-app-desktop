@@ -1,0 +1,8 @@
+#!/bin/sh
+# Strip Cursor Agent commit attribution so it never reaches GitHub.
+msg_file="$1"
+[ -n "$msg_file" ] && [ -f "$msg_file" ] || exit 0
+tmp="${msg_file}.tmp"
+grep -v -E '^Co-authored-by:[[:space:]]*Cursor[[:space:]]*<cursoragent@cursor\.com>[[:space:]]*$' "$msg_file" > "$tmp" || cp "$msg_file" "$tmp"
+mv "$tmp" "$msg_file"
+exit 0
