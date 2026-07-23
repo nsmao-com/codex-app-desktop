@@ -124,6 +124,46 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     clearDiff()
   }
 
+  async function createBranch(name: string): Promise<boolean> {
+    const branchName = name.trim()
+    if (!branchName) return false
+    try {
+      const result = await backend.CreateGitBranch({ name: branchName })
+      notify('success', translate('git.branchCreated'), result.branch || branchName)
+      await refreshWorkspace()
+      return true
+    } catch (error) {
+      notify('error', translate('git.branchFailed'), errorMessage(error))
+      return false
+    }
+  }
+
+  async function commitChanges(message: string): Promise<boolean> {
+    const text = message.trim()
+    if (!text) return false
+    try {
+      const result = await backend.CommitGitChanges({ message: text })
+      notify('success', translate('git.committed'), result.branch || '')
+      await refreshWorkspace()
+      return true
+    } catch (error) {
+      notify('error', translate('git.commitFailed'), errorMessage(error))
+      return false
+    }
+  }
+
+  async function pushBranch(): Promise<boolean> {
+    try {
+      const result = await backend.PushGitBranch()
+      notify('success', translate('git.pushed'), result.prUrl || result.message || '')
+      await refreshWorkspace()
+      return true
+    } catch (error) {
+      notify('error', translate('git.pushFailed'), errorMessage(error))
+      return false
+    }
+  }
+
   return {
     workspace,
     switchingWorkspace,
@@ -146,6 +186,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     openLiveTurnDiff,
     clearDiff,
     closeDiffSidebar,
+    createBranch,
+    commitChanges,
+    pushBranch,
   }
 })
 

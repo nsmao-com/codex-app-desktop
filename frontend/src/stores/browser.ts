@@ -26,6 +26,17 @@ export const useBrowserStore = defineStore('browser', () => {
       const candidate = /^https?:\/\//i.test(raw) ? raw : `${local ? 'http' : 'https'}://${raw}`
       const parsed = new URL(candidate)
       if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Only http and https URLs are supported')
+      const hostname = parsed.hostname.toLocaleLowerCase()
+      const { useAppStore } = await import('./app')
+      const settings = useAppStore().settings
+      const blocked = (settings.browserBlockedHosts ?? []).map((item) => item.toLocaleLowerCase())
+      if (blocked.some((item) => hostname === item || hostname.endsWith(`.${item}`))) {
+        throw new Error(translate('notifications.browserBlocked'))
+      }
+      const allowed = (settings.browserAllowedHosts ?? []).map((item) => item.toLocaleLowerCase())
+      if (allowed.length > 0 && !allowed.some((item) => hostname === item || hostname.endsWith(`.${item}`))) {
+        throw new Error(translate('notifications.browserNotAllowed'))
+      }
       const nextURL = parsed.toString()
       const currentURL = browserHistory.value[browserHistoryIndex.value]
       if (currentURL !== nextURL) {

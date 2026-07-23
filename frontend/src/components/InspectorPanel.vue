@@ -195,12 +195,19 @@ function statusClass(status: string): string {
               </CardTitle>
             </CardHeader>
             <CardContent class="space-y-3">
-              <div v-for="window in [appStore.accountRateLimits?.primary, appStore.accountRateLimits?.secondary].filter(Boolean)" :key="window?.usedPercent">
+              <div v-if="appStore.accountRateLimits?.primary" class="space-y-1">
                 <div class="mb-1 flex justify-between text-[10px]">
                   <span class="text-muted-foreground">{{ t('inspector.primaryLimit') }}</span>
-                  <span class="tabular-nums">{{ window?.usedPercent }}%</span>
+                  <span class="tabular-nums">{{ appStore.accountRateLimits.primary.usedPercent }}%</span>
                 </div>
-                <Progress :model-value="window?.usedPercent" class="h-1.5" />
+                <Progress :model-value="appStore.accountRateLimits.primary.usedPercent" class="h-1.5" />
+              </div>
+              <div v-if="appStore.accountRateLimits?.secondary" class="space-y-1">
+                <div class="mb-1 flex justify-between text-[10px]">
+                  <span class="text-muted-foreground">{{ t('inspector.secondaryLimit') }}</span>
+                  <span class="tabular-nums">{{ appStore.accountRateLimits.secondary.usedPercent }}%</span>
+                </div>
+                <Progress :model-value="appStore.accountRateLimits.secondary.usedPercent" class="h-1.5" />
               </div>
             </CardContent>
           </Card>

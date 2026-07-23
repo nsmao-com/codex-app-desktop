@@ -4,6 +4,7 @@ import {
   ArrowUp,
   Clock3,
   Command,
+  Ellipsis,
   Image as ImageIcon,
   ListOrdered,
   ListTodo,
@@ -28,6 +29,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import {
@@ -65,6 +67,7 @@ const attachedImages = shallowRef<string[]>([])
 const attachmentPreviews = shallowRef<Record<string, string>>({})
 const slashIndex = shallowRef(0)
 const skillIndex = shallowRef(0)
+const pluginIndex = shallowRef(0)
 const dragDepth = shallowRef(0)
 const composerExpanded = shallowRef(false)
 const COMPOSER_MAX_COLLAPSED = 200
@@ -121,6 +124,12 @@ const slashCommands = computed<SlashCommand[]>(() => [
     run: () => { void router.push({ name: 'capabilities', query: { tab: 'mcp' } }) },
   },
   {
+    id: 'memories',
+    label: '/memories',
+    description: t('slash.memories'),
+    run: () => { window.dispatchEvent(new Event('nice-codex:open-memories')) },
+  },
+  {
     id: 'plan',
     label: '/plan',
     description: t('chat.planModeToggleHint'),
@@ -168,6 +177,30 @@ watch(skillOpen, (open) => {
 })
 watch(skillOptions, (options) => {
   if (skillIndex.value >= options.length) skillIndex.value = Math.max(0, options.length - 1)
+})
+
+const pluginQuery = computed(() => {
+  const text = modelValue.value
+  const match = text.match(/(?:^|\s)@([^\s]*)$/)
+  return match ? (match[1] || '').toLocaleLowerCase() : ''
+})
+const pluginOpen = computed(() => /(?:^|\s)@[^\s]*$/.test(modelValue.value) && !modelValue.value.includes('\n') && !slashOpen.value && !skillOpen.value)
+const pluginOptions = computed(() => {
+  const plugins = capabilitiesStore.plugins.filter((plugin) => plugin.installed && plugin.name)
+  const query = pluginQuery.value
+  const filtered = query
+    ? plugins.filter((plugin) =>
+      plugin.name.toLocaleLowerCase().includes(query)
+      || plugin.displayName.toLocaleLowerCase().includes(query),
+    )
+    : plugins
+  return filtered.slice(0, 12)
+})
+watch(pluginOpen, (open) => {
+  if (open) void capabilitiesStore.loadCapabilities()
+})
+watch(pluginOptions, (options) => {
+  if (pluginIndex.value >= options.length) pluginIndex.value = Math.max(0, options.length - 1)
 })
 
 const isDraggingFiles = computed(() => dragDepth.value > 0)
@@ -274,6 +307,28 @@ function toggleComposerHeight(): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  if (pluginOpen.value && pluginOptions.value.length) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      pluginIndex.value = (pluginIndex.value + 1) % pluginOptions.value.length
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      pluginIndex.value = (pluginIndex.value - 1 + pluginOptions.value.length) % pluginOptions.value.length
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      modelValue.value = modelValue.value.replace(/(?:^|\s)@[^\s]*$/, (chunk) => chunk.startsWith(' ') ? ' ' : '')
+      return
+    }
+    if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
+      event.preventDefault()
+      insertPlugin(pluginOptions.value[pluginIndex.value]?.name)
+      return
+    }
+  }
   if (skillOpen.value && skillOptions.value.length) {
     if (event.key === 'ArrowDown') {
       event.preventDefault()
@@ -344,6 +399,16 @@ function insertSkill(name?: string): void {
     return `${prefix}$${name} `
   })
   skillIndex.value = 0
+  resize()
+}
+
+function insertPlugin(name?: string): void {
+  if (!name) return
+  modelValue.value = modelValue.value.replace(/(?:^|\s)@[^\s]*$/, (chunk) => {
+    const prefix = chunk.startsWith(' ') ? ' ' : ''
+    return `${prefix}@${name} `
+  })
+  pluginIndex.value = 0
   resize()
 }
 
@@ -775,6 +840,27 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         </button>
       </div>
 
+      <div v-else-if="pluginOpen && pluginOptions.length" class="rounded-md border border-border/60 bg-muted/30 p-1">
+        <div class="flex items-center gap-1.5 px-2 py-1 text-[10px] text-muted-foreground">
+          <Command :size="11" />
+          {{ t('slash.pluginsTitle') }}
+        </div>
+        <button
+          v-for="(plugin, index) in pluginOptions"
+          :key="plugin.id || plugin.name"
+          type="button"
+          class="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors"
+          :class="index === pluginIndex ? 'bg-background text-foreground' : 'text-foreground/85 hover:bg-background/70'"
+          @mousedown.prevent="insertPlugin(plugin.name)"
+          @mouseenter="pluginIndex = index"
+        >
+          <span class="shrink-0 font-mono text-[11px] font-medium">@{{ plugin.name }}</span>
+          <span class="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+            {{ plugin.displayName || plugin.description }}
+          </span>
+        </button>
+      </div>
+
       <Textarea
         v-model="modelValue"
         rows="1"
@@ -806,7 +892,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               <Button
                 variant="ghost"
                 size="sm"
-                class="hidden h-7 gap-1.5 px-2 text-[11px] font-normal text-muted-foreground sm:inline-flex"
+                class="hidden h-7 gap-1.5 px-2 text-[11px] font-normal text-muted-foreground md:inline-flex"
               >
                 <Shield :size="12" />
                 {{ permissionLabel }}
@@ -832,8 +918,41 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             @click="togglePlanMode"
           >
             <ListTodo :size="12" />
-            {{ isPlanMode ? t('chat.planModeOn') : t('chat.planModeOff') }}
+            <span class="hidden sm:inline">{{ isPlanMode ? t('chat.planModeOn') : t('chat.planModeOff') }}</span>
           </Button>
+
+          <!-- Narrow screens: permission + reasoning in one overflow menu -->
+          <DropdownMenu>
+            <DropdownMenuTrigger as-child>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                class="size-7 text-muted-foreground md:hidden"
+                :aria-label="t('chat.composerMore')"
+              >
+                <Ellipsis :size="14" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" class="w-52">
+              <DropdownMenuItem disabled class="text-[10px] text-muted-foreground">
+                {{ t('settings.permissions') }} · {{ permissionLabel }}
+              </DropdownMenuItem>
+              <DropdownMenuItem @click="setPermission('ask')">{{ t('settings.permissionAsk') }}</DropdownMenuItem>
+              <DropdownMenuItem @click="setPermission('auto')">{{ t('settings.permissionAuto') }}</DropdownMenuItem>
+              <DropdownMenuItem @click="setPermission('strict')">{{ t('settings.permissionStrict') }}</DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled class="text-[10px] text-muted-foreground">
+                {{ t('chat.reasoning') }} · {{ selectedEffortLabel }}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                v-for="option in reasoningOptions"
+                :key="`mobile-${option.effort}`"
+                @click="onEffortChange(option.effort)"
+              >
+                {{ 'displayName' in option ? option.displayName : option.effort }}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         <div class="flex min-w-0 items-center gap-0.5">

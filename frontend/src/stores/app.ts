@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, shallowRef } from 'vue'
+import { Events } from '@wailsio/runtime'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type {
@@ -38,8 +39,8 @@ const defaultSettings: UserSettings = {
   sandbox: 'workspace-write',
   approvalPolicy: 'on-request',
   theme: 'light',
-  accentColor: 'amber',
-  fontFamily: 'manrope',
+  accentColor: 'codex',
+  fontFamily: 'system',
   terminalProfile: 'powershell',
   language: 'zh-CN',
   autoConnect: true,
@@ -48,6 +49,27 @@ const defaultSettings: UserSettings = {
   followUpBehavior: 'steer',
   notifyOnTurnComplete: true,
   customInstructions: '',
+  translucentSidebar: true,
+  highContrast: false,
+  pointerCursor: false,
+  reduceMotion: false,
+  uiFontSize: 'md',
+  codeFontSize: 'md',
+  preventSleepWhileRunning: false,
+  alwaysOnTop: false,
+  gitBranchPrefix: '',
+  gitCommitPrefix: '',
+  gitOpenPRAfterPush: false,
+  gitPRBodyTemplate: '',
+  browserAllowedHosts: [],
+  browserBlockedHosts: [],
+  browserDownloadDir: '',
+  browserFullCDP: false,
+  shortcutCommandPalette: 'Ctrl+K',
+  shortcutNewThread: 'Ctrl+N',
+  shortcutTerminal: 'Ctrl+`',
+  shortcutBrowser: 'Ctrl+Shift+B',
+  onboardingCompleted: false,
 }
 
 export interface AccountInfo {
@@ -67,7 +89,7 @@ const emptyAccount: AccountInfo = {
 }
 
 export const useAppStore = defineStore('app', () => {
-  const { initAppearance, setTheme, setAccent, setFont } = useAppearance()
+  const { initAppearance, setTheme, setAccent, setFont, setUiPrefs } = useAppearance()
 
   const bootstrapping = shallowRef(true)
   const settings = shallowRef<UserSettings>({ ...defaultSettings })
@@ -88,6 +110,17 @@ export const useAppStore = defineStore('app', () => {
   const updateDialogOpen = shallowRef(false)
   const updateChecking = shallowRef(false)
   const updateCheckError = shallowRef('')
+  const updateProgress = shallowRef<{
+    phase: string
+    percent: number
+    bytesReceived: number
+    bytesTotal: number
+    message: string
+    error: string
+    readyToRestart: boolean
+  } | null>(null)
+  const updateInstalling = shallowRef(false)
+  let updateEventUnsub: (() => void) | null = null
   const terminalProfiles = shallowRef<TerminalProfile[]>([])
   const account = shallowRef<AccountInfo>({ ...emptyAccount })
   const accountRateLimits = shallowRef<ReturnType<typeof normalizeAccountRateLimits>>(null)
@@ -130,6 +163,27 @@ export const useAppStore = defineStore('app', () => {
       notifyOnTurnComplete: data.settings.notifyOnTurnComplete !== false,
       customInstructions: data.settings.customInstructions ?? '',
       sendWithModifier: Boolean(data.settings.sendWithModifier),
+      translucentSidebar: data.settings.translucentSidebar !== false,
+      highContrast: Boolean(data.settings.highContrast),
+      pointerCursor: Boolean(data.settings.pointerCursor),
+      reduceMotion: Boolean(data.settings.reduceMotion),
+      uiFontSize: data.settings.uiFontSize === 'sm' || data.settings.uiFontSize === 'lg' ? data.settings.uiFontSize : 'md',
+      codeFontSize: data.settings.codeFontSize === 'sm' || data.settings.codeFontSize === 'lg' ? data.settings.codeFontSize : 'md',
+      preventSleepWhileRunning: Boolean(data.settings.preventSleepWhileRunning),
+      alwaysOnTop: Boolean(data.settings.alwaysOnTop),
+      gitBranchPrefix: data.settings.gitBranchPrefix ?? '',
+      gitCommitPrefix: data.settings.gitCommitPrefix ?? '',
+      gitOpenPRAfterPush: Boolean(data.settings.gitOpenPRAfterPush),
+      gitPRBodyTemplate: data.settings.gitPRBodyTemplate ?? '',
+      browserAllowedHosts: data.settings.browserAllowedHosts ?? [],
+      browserBlockedHosts: data.settings.browserBlockedHosts ?? [],
+      browserDownloadDir: data.settings.browserDownloadDir ?? '',
+      browserFullCDP: Boolean(data.settings.browserFullCDP),
+      shortcutCommandPalette: data.settings.shortcutCommandPalette || 'Ctrl+K',
+      shortcutNewThread: data.settings.shortcutNewThread || 'Ctrl+N',
+      shortcutTerminal: data.settings.shortcutTerminal || 'Ctrl+`',
+      shortcutBrowser: data.settings.shortcutBrowser || 'Ctrl+Shift+B',
+      onboardingCompleted: Boolean(data.settings.onboardingCompleted) || Boolean(data.settings.workspace),
     }
     // Codex-only: ignore leftover Claude/Gemini/Grok model preferences until catalog loads.
     if (/claude|gemini|grok|sonnet|opus|haiku|fable/i.test(settings.value.model) && !/^(gpt-|o[1-9]|codex)/i.test(settings.value.model)) {
@@ -140,7 +194,13 @@ export const useAppStore = defineStore('app', () => {
     initAppearance({
       theme: settings.value.theme as 'light' | 'dark' | 'system',
       accent: settings.value.accentColor as AppAccent,
-      font: settings.value.fontFamily || 'manrope',
+      font: settings.value.fontFamily || 'system',
+      uiFontSize: settings.value.uiFontSize,
+      codeFontSize: settings.value.codeFontSize,
+      translucentSidebar: settings.value.translucentSidebar,
+      highContrast: settings.value.highContrast,
+      pointerCursor: settings.value.pointerCursor,
+      reduceMotion: settings.value.reduceMotion,
     })
     applyLocale(settings.value.language)
     void loadSystemFonts()
@@ -200,12 +260,111 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function openUpdatePage(): Promise<void> {
-    const url = updateInfo.value?.downloadUrl || updateInfo.value?.releaseUrl || `https://github.com/${updateRepo.value}/releases`
+    const url = updateInfo.value?.releaseUrl || `https://github.com/${updateRepo.value}/releases`
     if (!url) return
     try {
       await backend.OpenExternal(url)
     } catch (error) {
       notify('error', translate('updates.openFailed'), errorMessage(error))
+    }
+  }
+
+  function bindUpdateEvents(): void {
+    if (updateEventUnsub) return
+    updateEventUnsub = Events.On('nice:update', (event) => {
+      const data = asRecord(event?.data)
+      updateProgress.value = {
+        phase: asString(data.phase),
+        percent: typeof data.percent === 'number' ? data.percent : 0,
+        bytesReceived: typeof data.bytesReceived === 'number' ? data.bytesReceived : 0,
+        bytesTotal: typeof data.bytesTotal === 'number' ? data.bytesTotal : 0,
+        message: asString(data.message),
+        error: asString(data.error),
+        readyToRestart: data.readyToRestart === true,
+      }
+      if (data.phase === 'error' && data.error) {
+        updateCheckError.value = asString(data.error)
+        updateInstalling.value = false
+      }
+      if (data.phase === 'ready') {
+        updateInstalling.value = false
+      }
+    }) as unknown as () => void
+  }
+
+  async function downloadAndInstallUpdate(): Promise<void> {
+    if (!updateInfo.value?.updateAvailable || updateInstalling.value) return
+    bindUpdateEvents()
+    updateInstalling.value = true
+    updateCheckError.value = ''
+    updateProgress.value = {
+      phase: 'downloading',
+      percent: 0,
+      bytesReceived: 0,
+      bytesTotal: 0,
+      message: translate('updates.downloading'),
+      error: '',
+      readyToRestart: false,
+    }
+    try {
+      const status = await backend.DownloadAndStageUpdate()
+      updateProgress.value = {
+        phase: status.phase || 'downloading',
+        percent: status.percent || 0,
+        bytesReceived: status.bytesReceived || 0,
+        bytesTotal: status.bytesTotal || 0,
+        message: status.message || translate('updates.downloading'),
+        error: status.error || '',
+        readyToRestart: Boolean(status.readyToRestart),
+      }
+      if (status.phase === 'ready' || status.phase === 'error' || status.phase === 'idle') {
+        updateInstalling.value = false
+      }
+    } catch (error) {
+      updateCheckError.value = errorMessage(error)
+      updateProgress.value = {
+        phase: 'error',
+        percent: 0,
+        bytesReceived: 0,
+        bytesTotal: 0,
+        message: translate('updates.installFailed'),
+        error: errorMessage(error),
+        readyToRestart: false,
+      }
+      notify('error', translate('updates.installFailed'), errorMessage(error))
+      updateInstalling.value = false
+    }
+  }
+
+  async function applyUpdateAndRestart(): Promise<void> {
+    updateInstalling.value = true
+    try {
+      await backend.ApplyUpdateAndRestart()
+      notify('info', translate('updates.restarting'), translate('updates.restartingHint'))
+    } catch (error) {
+      updateCheckError.value = errorMessage(error)
+      notify('error', translate('updates.installFailed'), errorMessage(error))
+      updateInstalling.value = false
+    }
+  }
+
+  async function completeOnboarding(options: { theme: string; language: string }): Promise<void> {
+    const next = {
+      ...settings.value,
+      theme: options.theme,
+      language: options.language,
+      onboardingCompleted: true,
+    }
+    // Optimistic: leave the wizard immediately; persist must not regress this flag.
+    settings.value = next
+    applyAppearance(next)
+    applyLocale(options.language)
+    try {
+      await savePreferences(next, { silent: true })
+    } finally {
+      if (!settings.value.onboardingCompleted) {
+        settings.value = { ...settings.value, onboardingCompleted: true }
+      }
     }
   }
 
@@ -232,7 +391,16 @@ export const useAppStore = defineStore('app', () => {
         ...next,
         recentWorkspaces: next.recentWorkspaces ?? [],
       })
-      settings.value = { ...saved, recentWorkspaces: saved.recentWorkspaces ?? [], customModels: saved.customModels ?? [] }
+      // Older backends may omit newer bools; never let a round-trip clear onboarding.
+      const onboardingCompleted = Boolean(saved.onboardingCompleted)
+        || Boolean(next.onboardingCompleted)
+        || Boolean(saved.workspace || next.workspace)
+      settings.value = {
+        ...saved,
+        recentWorkspaces: saved.recentWorkspaces ?? [],
+        customModels: saved.customModels ?? [],
+        onboardingCompleted,
+      }
       applyAppearance(settings.value)
       supportedLocales.find((item) => item.value === saved.language)
         ? setLocale(saved.language)
@@ -267,7 +435,7 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  function previewAppearance(appearance: Pick<UserSettings, 'theme' | 'accentColor' | 'fontFamily'>): void {
+  function previewAppearance(appearance: Pick<UserSettings, 'theme' | 'accentColor' | 'fontFamily' | 'uiFontSize' | 'codeFontSize' | 'translucentSidebar' | 'highContrast' | 'pointerCursor' | 'reduceMotion'>): void {
     applyAppearance(appearance)
   }
 
@@ -275,10 +443,18 @@ export const useAppStore = defineStore('app', () => {
     applyAppearance(settings.value)
   }
 
-  function applyAppearance(appearance: Pick<UserSettings, 'theme' | 'accentColor' | 'fontFamily'>): void {
+  function applyAppearance(appearance: Pick<UserSettings, 'theme' | 'accentColor' | 'fontFamily' | 'uiFontSize' | 'codeFontSize' | 'translucentSidebar' | 'highContrast' | 'pointerCursor' | 'reduceMotion'>): void {
     setTheme(appearance.theme as 'light' | 'dark' | 'system')
     setAccent(appearance.accentColor as AppAccent)
-    setFont(appearance.fontFamily || 'manrope')
+    setFont(appearance.fontFamily || 'system')
+    setUiPrefs({
+      uiFontSize: appearance.uiFontSize,
+      codeFontSize: appearance.codeFontSize,
+      translucentSidebar: appearance.translucentSidebar,
+      highContrast: appearance.highContrast,
+      pointerCursor: appearance.pointerCursor,
+      reduceMotion: appearance.reduceMotion,
+    })
   }
 
   async function loadAccount(): Promise<void> {
@@ -286,21 +462,28 @@ export const useAppStore = defineStore('app', () => {
     account.value = normalizeAccount(response)
   }
 
+  async function loadLocalUsage(): Promise<void> {
+    try {
+      const usage = await backend.ReadAccountUsage()
+      accountUsage.value = normalizeAccountUsage(usage)
+    } catch {
+      // Keep previous snapshot if the local store is temporarily unavailable.
+    }
+  }
+
   async function loadAccountInsights(): Promise<void> {
+    const usagePromise = loadLocalUsage()
     if (!account.value.authenticated || account.value.type.toLocaleLowerCase() !== 'chatgpt') {
       accountRateLimits.value = null
-      accountUsage.value = null
+      await usagePromise
       return
     }
-    const [rateLimitsResult, usageResult] = await Promise.allSettled([
+    const [rateLimitsResult] = await Promise.allSettled([
       backend.ReadAccountRateLimits(),
-      backend.ReadAccountUsage(),
+      usagePromise,
     ])
     if (rateLimitsResult.status === 'fulfilled') {
       accountRateLimits.value = normalizeAccountRateLimits(rateLimitsResult.value)
-    }
-    if (usageResult.status === 'fulfilled') {
-      accountUsage.value = normalizeAccountUsage(usageResult.value)
     }
   }
 
@@ -310,7 +493,7 @@ export const useAppStore = defineStore('app', () => {
       await loadAccountInsights()
     } catch {
       accountRateLimits.value = null
-      accountUsage.value = null
+      await loadLocalUsage()
     }
   }
 
@@ -334,7 +517,7 @@ export const useAppStore = defineStore('app', () => {
       await backend.LogoutAccount()
       account.value = { ...emptyAccount }
       accountRateLimits.value = null
-      accountUsage.value = null
+      await loadLocalUsage()
       notify('success', translate('notifications.signedOut'), translate('notifications.signedOutHint'))
     } catch (error) {
       notify('error', translate('notifications.signOutFailed'), errorMessage(error))
@@ -393,6 +576,8 @@ export const useAppStore = defineStore('app', () => {
     updateDialogOpen,
     updateChecking,
     updateCheckError,
+    updateProgress,
+    updateInstalling,
     terminalProfiles,
     account,
     accountRateLimits,
@@ -411,10 +596,14 @@ export const useAppStore = defineStore('app', () => {
     checkForUpdates,
     openUpdateCheckDialog,
     openUpdatePage,
+    downloadAndInstallUpdate,
+    applyUpdateAndRestart,
+    completeOnboarding,
     openReleasesPage,
     openGitHubRepo,
     loadAccount,
     loadAccountInsights,
+    loadLocalUsage,
     refreshAccountData,
     startLogin,
     logout,

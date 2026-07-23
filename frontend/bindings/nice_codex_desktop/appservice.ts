@@ -17,6 +17,10 @@ export function AppVersion(): $CancellablePromise<string> {
     return $Call.ByID(257367811);
 }
 
+export function ApplyUpdateAndRestart(): $CancellablePromise<void> {
+    return $Call.ByID(3133742711);
+}
+
 export function ArchiveThread(threadID: string): $CancellablePromise<void> {
     return $Call.ByID(404527456, threadID);
 }
@@ -45,6 +49,10 @@ export function BrowserReload(): $CancellablePromise<void> {
     return $Call.ByID(2544793859);
 }
 
+export function CancelUpdateDownload(): $CancellablePromise<void> {
+    return $Call.ByID(1670800741);
+}
+
 export function CheckForUpdates(): $CancellablePromise<$models.UpdateInfo> {
     return $Call.ByID(3671876993);
 }
@@ -53,8 +61,16 @@ export function CodexStatus(): $CancellablePromise<codex$0.Status> {
     return $Call.ByID(3760924599);
 }
 
+export function CommitGitChanges(request: $models.GitCommitRequest): $CancellablePromise<$models.GitActionResult> {
+    return $Call.ByID(3986674178, request);
+}
+
 export function CompactThread(threadID: string): $CancellablePromise<void> {
     return $Call.ByID(2159280559, threadID);
+}
+
+export function CreateGitBranch(request: $models.GitBranchRequest): $CancellablePromise<$models.GitActionResult> {
+    return $Call.ByID(376396278, request);
 }
 
 export function CreateThread(): $CancellablePromise<{ [_ in string]?: any } | null> {
@@ -65,8 +81,16 @@ export function DeleteMCPServer(name: string): $CancellablePromise<void> {
     return $Call.ByID(1611204592, name);
 }
 
+export function DeleteScheduledTask(id: string): $CancellablePromise<void> {
+    return $Call.ByID(3352537869, id);
+}
+
 export function DeleteThread(threadID: string): $CancellablePromise<void> {
     return $Call.ByID(1472565121, threadID);
+}
+
+export function DownloadAndStageUpdate(): $CancellablePromise<$models.UpdateProgress> {
+    return $Call.ByID(3358895366);
 }
 
 export function FocusBrowser(): $CancellablePromise<void> {
@@ -105,6 +129,10 @@ export function ListHooks(): $CancellablePromise<{ [_ in string]?: any } | null>
     return $Call.ByID(2720002358);
 }
 
+export function ListLocalMemories(): $CancellablePromise<$models.MemoriesOverview> {
+    return $Call.ByID(1204786654);
+}
+
 export function ListMCPServerStatus(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(2306388879);
 }
@@ -123,6 +151,10 @@ export function ListModels(): $CancellablePromise<{ [_ in string]?: any } | null
 
 export function ListPlugins(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(442045366);
+}
+
+export function ListScheduledTasks(): $CancellablePromise<$models.ScheduledTask[] | null> {
+    return $Call.ByID(2711200733);
 }
 
 export function ListSkills(): $CancellablePromise<{ [_ in string]?: any } | null> {
@@ -153,8 +185,19 @@ export function OpenBrowserDevTools(): $CancellablePromise<void> {
     return $Call.ByID(1516554564);
 }
 
+/**
+ * OpenBrowserDownloadDir reveals the configured download folder in the OS file manager.
+ */
+export function OpenBrowserDownloadDir(): $CancellablePromise<void> {
+    return $Call.ByID(4097011765);
+}
+
 export function OpenExternal(rawURL: string): $CancellablePromise<void> {
     return $Call.ByID(2121391737, rawURL);
+}
+
+export function OpenMemoriesFolder(): $CancellablePromise<void> {
+    return $Call.ByID(2340956881);
 }
 
 export function OpenTerminal(): $CancellablePromise<void> {
@@ -168,6 +211,10 @@ export function PreviewImage(path: string): $CancellablePromise<string> {
     return $Call.ByID(2624332779, path);
 }
 
+export function PushGitBranch(): $CancellablePromise<$models.GitActionResult> {
+    return $Call.ByID(2060389666);
+}
+
 export function ReadAccount(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3417819837);
 }
@@ -176,8 +223,24 @@ export function ReadAccountRateLimits(): $CancellablePromise<{ [_ in string]?: a
     return $Call.ByID(3284885595);
 }
 
+/**
+ * ReadAccountUsage prefers local usage.json.
+ * When empty, it backfills from ~/.codex session rollouts (true local history),
+ * then optionally seeds from ChatGPT account/usage/read as a fallback.
+ */
 export function ReadAccountUsage(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3812997328);
+}
+
+export function ReadCodexFeatureFlags(): $CancellablePromise<$models.CodexFeatureFlags> {
+    return $Call.ByID(1079251556);
+}
+
+/**
+ * ReadGlobalInstructions returns personal Codex AGENTS.md content from disk.
+ */
+export function ReadGlobalInstructions(): $CancellablePromise<$models.GlobalInstructionsInfo> {
+    return $Call.ByID(2724052924);
 }
 
 /**
@@ -193,6 +256,13 @@ export function ReadThread(threadID: string): $CancellablePromise<{ [_ in string
 
 export function ReadWorkspaceDiff(relativePath: string): $CancellablePromise<string> {
     return $Call.ByID(3681597200, relativePath);
+}
+
+/**
+ * RecordLocalTurnUsage lets the frontend persist per-turn totals (belt-and-suspenders with event hook).
+ */
+export function RecordLocalTurnUsage(threadID: string, turnID: string, totalTokens: number): $CancellablePromise<void> {
+    return $Call.ByID(657737560, threadID, turnID, totalTokens);
 }
 
 export function RefreshMCPServers(): $CancellablePromise<void> {
@@ -219,6 +289,17 @@ export function RollbackThread(threadID: string, numTurns: number): $Cancellable
     return $Call.ByID(4017068374, threadID, numTurns);
 }
 
+export function SaveCodexFeatureFlags(flags: $models.CodexFeatureFlags): $CancellablePromise<$models.CodexFeatureFlags> {
+    return $Call.ByID(199517151, flags);
+}
+
+/**
+ * SaveGlobalInstructions writes personal Codex AGENTS.md and mirrors settings cache.
+ */
+export function SaveGlobalInstructions(content: string): $CancellablePromise<$models.GlobalInstructionsInfo> {
+    return $Call.ByID(4035646133, content);
+}
+
 export function SavePreferences(settings: $models.UserSettings): $CancellablePromise<$models.UserSettings> {
     return $Call.ByID(3258666379, settings);
 }
@@ -228,6 +309,17 @@ export function SavePreferences(settings: $models.UserSettings): $CancellablePro
  */
 export function SaveProjectInstructions(content: string): $CancellablePromise<$models.ProjectInstructionsInfo> {
     return $Call.ByID(437632509, content);
+}
+
+export function SaveScheduledTask(task: $models.ScheduledTask): $CancellablePromise<$models.ScheduledTask> {
+    return $Call.ByID(993084139, task);
+}
+
+/**
+ * SelectBrowserDownloadDir opens a folder picker for the preferred download directory.
+ */
+export function SelectBrowserDownloadDir(): $CancellablePromise<string> {
+    return $Call.ByID(3603113877);
 }
 
 export function SelectImages(): $CancellablePromise<string[] | null> {
@@ -242,6 +334,10 @@ export function SendMessage(request: $models.SendMessageRequest): $CancellablePr
     return $Call.ByID(4154529951, request);
 }
 
+export function SetAlwaysOnTop(enabled: boolean): $CancellablePromise<void> {
+    return $Call.ByID(4224477541, enabled);
+}
+
 export function SetAppEnabled(appID: string, enabled: boolean): $CancellablePromise<void> {
     return $Call.ByID(2274727570, appID, enabled);
 }
@@ -252,6 +348,14 @@ export function SetExperimentalFeature(name: string, enabled: boolean): $Cancell
 
 export function SetHookEnabled(hookKey: string, enabled: boolean): $CancellablePromise<void> {
     return $Call.ByID(133382174, hookKey, enabled);
+}
+
+/**
+ * SetPreventSleepActive keeps the machine awake while a Codex turn is running
+ * when the user enabled Prevent sleep while running.
+ */
+export function SetPreventSleepActive(active: boolean): $CancellablePromise<void> {
+    return $Call.ByID(3145083505, active);
 }
 
 export function SetSkillEnabled(request: $models.SkillConfigRequest): $CancellablePromise<void> {
@@ -306,8 +410,16 @@ export function UninstallPlugin(pluginID: string): $CancellablePromise<void> {
     return $Call.ByID(1232784559, pluginID);
 }
 
+export function UpdateSessionMemories(request: $models.SessionMemoriesRequest): $CancellablePromise<void> {
+    return $Call.ByID(2079433278, request);
+}
+
 export function UpdateSessionPreferences(request: $models.SessionPreferencesRequest): $CancellablePromise<void> {
     return $Call.ByID(3877948261, request);
+}
+
+export function UpdateStatus(): $CancellablePromise<$models.UpdateProgress> {
+    return $Call.ByID(3590124437);
 }
 
 export function UpsertMCPServer(request: $models.MCPServerWriteRequest): $CancellablePromise<void> {

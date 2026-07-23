@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Download, ExternalLink, LoaderCircle, RefreshCw } from '@lucide/vue'
+import { Download, ExternalLink, LoaderCircle, RefreshCw, RotateCw } from '@lucide/vue'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -27,6 +27,10 @@ const open = computed({
 const info = computed(() => appStore.updateInfo)
 const checking = computed(() => appStore.updateChecking)
 const error = computed(() => appStore.updateCheckError)
+const progress = computed(() => appStore.updateProgress)
+const installing = computed(() => appStore.updateInstalling)
+const readyToRestart = computed(() => Boolean(progress.value?.readyToRestart || progress.value?.phase === 'ready'))
+const downloading = computed(() => progress.value?.phase === 'downloading' || (installing.value && !readyToRestart.value))
 
 const releaseNotesPreview = computed(() => {
   const notes = info.value?.releaseNotes?.trim() || ''
@@ -36,11 +40,15 @@ const releaseNotesPreview = computed(() => {
 
 const statusLabel = computed(() => {
   if (checking.value) return t('updates.checking')
+  if (readyToRestart.value) return t('updates.ready')
+  if (downloading.value) return t('updates.downloading')
   if (error.value) return t('updates.checkFailed')
   if (info.value?.updateAvailable) return t('updates.available')
   if (info.value) return t('updates.upToDate')
   return t('updates.checkNow')
 })
+
+const progressPercent = computed(() => Math.max(0, Math.min(100, progress.value?.percent || 0)))
 
 async function onOpenChange(value: boolean): Promise<void> {
   open.value = value
@@ -50,8 +58,12 @@ async function recheck(): Promise<void> {
   await appStore.openUpdateCheckDialog()
 }
 
-async function download(): Promise<void> {
-  await appStore.openUpdatePage()
+async function install(): Promise<void> {
+  await appStore.downloadAndInstallUpdate()
+}
+
+async function restart(): Promise<void> {
+  await appStore.applyUpdateAndRestart()
 }
 
 async function viewReleases(): Promise<void> {
@@ -73,7 +85,7 @@ async function viewReleases(): Promise<void> {
         <div class="rounded-lg border bg-muted/30 px-4 py-3">
           <div class="flex items-start gap-3">
             <LoaderCircle
-              v-if="checking"
+              v-if="checking || downloading"
               :size="18"
               class="mt-0.5 shrink-0 animate-spin text-muted-foreground"
             />
@@ -89,10 +101,16 @@ async function viewReleases(): Promise<void> {
               </p>
               <p v-if="error" class="text-[12px] text-destructive">{{ error }}</p>
               <p
-                v-else-if="info?.updateAvailable && !checking"
+                v-else-if="readyToRestart"
                 class="text-[12px] text-muted-foreground"
               >
-                {{ t('updates.availableDialogHint', { version: info.latestVersion }) }}
+                {{ t('updates.readyHint') }}
+              </p>
+              <p
+                v-else-if="info?.updateAvailable && !checking && !downloading"
+                class="text-[12px] text-muted-foreground"
+              >
+                {{ t('updates.availableInstallHint', { version: info.latestVersion }) }}
               </p>
               <p
                 v-else-if="info && !info.updateAvailable && !checking"
@@ -102,6 +120,21 @@ async function viewReleases(): Promise<void> {
               </p>
             </div>
           </div>
+        </div>
+
+        <div v-if="downloading || readyToRestart" class="space-y-2">
+          <div class="h-2 overflow-hidden rounded-full bg-muted">
+            <div
+              class="h-full rounded-full bg-primary transition-[width] duration-200"
+              :style="{ width: `${readyToRestart ? 100 : progressPercent}%` }"
+            />
+          </div>
+          <p class="text-[11px] text-muted-foreground">
+            {{ progress?.message || (readyToRestart ? t('updates.ready') : t('updates.downloading')) }}
+            <template v-if="!readyToRestart && progressPercent > 0">
+              · {{ progressPercent }}%
+            </template>
+          </p>
         </div>
 
         <div
@@ -119,25 +152,36 @@ async function viewReleases(): Promise<void> {
           variant="ghost"
           size="sm"
           class="justify-start"
-          :disabled="checking"
+          :disabled="checking || downloading"
           @click="viewReleases"
         >
           <ExternalLink :size="14" />
           {{ t('updates.viewReleases') }}
         </Button>
         <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <Button type="button" variant="outline" size="sm" :disabled="checking" @click="recheck">
+          <Button type="button" variant="outline" size="sm" :disabled="checking || downloading" @click="recheck">
             <RefreshCw :size="14" :class="checking ? 'animate-spin' : ''" />
             {{ checking ? t('updates.checking') : t('updates.checkAgain') }}
           </Button>
           <Button
-            v-if="info?.updateAvailable && !checking"
+            v-if="readyToRestart"
             type="button"
             size="sm"
-            @click="download"
+            :disabled="installing"
+            @click="restart"
+          >
+            <RotateCw :size="14" />
+            {{ t('updates.restartNow') }}
+          </Button>
+          <Button
+            v-else-if="info?.updateAvailable && !checking"
+            type="button"
+            size="sm"
+            :disabled="downloading || installing"
+            @click="install"
           >
             <Download :size="14" />
-            {{ t('updates.download') }}
+            {{ downloading ? t('updates.downloading') : t('updates.downloadInstall') }}
           </Button>
           <Button
             v-else

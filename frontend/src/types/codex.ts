@@ -14,6 +14,8 @@ export interface ThreadSummary {
   effort?: string
   collaborationMode?: string
   workMode?: string
+  useMemories?: boolean
+  generateMemories?: boolean
   turns?: unknown[]
 }
 

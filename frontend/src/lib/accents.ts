@@ -1,6 +1,7 @@
 /** Accent palette shared by settings UI and appearance runtime. */
 
 export const APP_ACCENTS = [
+  'codex',
   'amber',
   'gold',
   'rose',
@@ -22,6 +23,7 @@ export type AccentOption = {
 }
 
 export const ACCENT_OPTIONS: AccentOption[] = [
+  { value: 'codex', color: '#339CFF' },
   { value: 'amber', color: '#d97757' },
   { value: 'gold', color: '#d4a017' },
   { value: 'rose', color: '#cf5f84' },

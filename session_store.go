@@ -32,6 +32,9 @@ type SessionRecord struct {
 	CreatedAt         int64          `json:"createdAt"`
 	UpdatedAt         int64          `json:"updatedAt"`
 	Archived          bool           `json:"archived"`
+	// Per-chat memory overrides (nil = inherit global config.toml settings).
+	UseMemories       *bool          `json:"useMemories,omitempty"`
+	GenerateMemories  *bool          `json:"generateMemories,omitempty"`
 	Turns             []externalTurn `json:"turns,omitempty"`
 }
 
@@ -279,6 +282,12 @@ func (s *AppService) sessionThreadMap(record *SessionRecord, includeTurns bool) 
 		"collaborationMode": collaborationMode,
 		"workMode":          normalizeWorkMode(record.WorkMode),
 		"backendRef":        record.BackendRef,
+	}
+	if record.UseMemories != nil {
+		thread["useMemories"] = *record.UseMemories
+	}
+	if record.GenerateMemories != nil {
+		thread["generateMemories"] = *record.GenerateMemories
 	}
 	if includeTurns && isExternalSession(record) {
 		turns := make([]any, 0, len(record.Turns))

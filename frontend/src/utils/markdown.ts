@@ -39,7 +39,28 @@ marked.use({
   renderer,
 })
 
-export function renderMarkdown(source: string, copyLabel = 'Copy', expandLabel = 'Show more'): string {
+export type RenderMarkdownOptions = {
+  /** Skip marked/highlight while streaming — escape + line breaks only. */
+  lite?: boolean
+}
+
+/** Cheap streaming path: no marked/highlight, just escaped text with line breaks. */
+export function renderMarkdownLite(source: string): string {
+  const escaped = escapeHTML(source)
+  return DOMPurify.sanitize(
+    `<p class="markdown-lite whitespace-pre-wrap break-words">${escaped}</p>`,
+    { ALLOWED_TAGS: ['p', 'br'], ALLOWED_ATTR: ['class'] },
+  )
+}
+
+export function renderMarkdown(
+  source: string,
+  copyLabel = 'Copy',
+  expandLabel = 'Show more',
+  options?: RenderMarkdownOptions,
+): string {
+  if (options?.lite) return renderMarkdownLite(source)
+
   const key = copyLabel + '\0' + expandLabel + '\0' + source
   const cached = markdownCache.get(key)
   if (cached) {

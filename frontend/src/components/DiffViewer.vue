@@ -21,15 +21,24 @@ interface SplitRow {
 const { t } = useI18n()
 const mode = shallowRef<'unified' | 'split'>('unified')
 const selectedIndex = shallowRef(0)
+const lineLimit = shallowRef(600)
 const truncated = computed(() => props.diff.length > 300_000)
 const files = computed(() => parseUnifiedDiff(props.diff.slice(0, 300_000)))
 const selectedFile = computed(() => files.value[selectedIndex.value] ?? files.value[0] ?? null)
+const splitRowsCache = new WeakMap<DiffLineView[], SplitRow[]>()
 
 watch(files, (next) => {
   if (selectedIndex.value >= next.length) selectedIndex.value = 0
+  lineLimit.value = 600
+})
+
+watch(selectedIndex, () => {
+  lineLimit.value = 600
 })
 
 function splitRows(lines: DiffLineView[]): SplitRow[] {
+  const cached = splitRowsCache.get(lines)
+  if (cached) return cached
   const rows: SplitRow[] = []
   let index = 0
   while (index < lines.length) {
@@ -55,7 +64,38 @@ function splitRows(lines: DiffLineView[]): SplitRow[] {
       rows.push({ left: deletes[pair] ?? null, right: additions[pair] ?? null })
     }
   }
+  splitRowsCache.set(lines, rows)
   return rows
+}
+
+const selectedHunkViews = computed(() => {
+  const file = selectedFile.value
+  if (!file) return []
+  let remaining = lineLimit.value
+  return file.hunks.map((hunk) => {
+    if (remaining <= 0) {
+      return { hunk, unifiedLines: [] as DiffLineView[], split: [] as SplitRow[], hidden: hunk.lines.length }
+    }
+    const take = Math.min(remaining, hunk.lines.length)
+    remaining -= take
+    const unifiedLines = hunk.lines.slice(0, take)
+    const split = splitRows(hunk.lines).slice(0, take)
+    return {
+      hunk,
+      unifiedLines,
+      split,
+      hidden: Math.max(0, hunk.lines.length - take),
+    }
+  })
+})
+
+const hasMoreLines = computed(() =>
+  selectedHunkViews.value.some((view) => view.hidden > 0)
+    || (selectedFile.value?.hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0) ?? 0) > lineLimit.value,
+)
+
+function showMoreLines(): void {
+  lineLimit.value += 800
 }
 </script>
 
@@ -81,13 +121,13 @@ function splitRows(lines: DiffLineView[]): SplitRow[] {
       </div>
     </header>
 
-    <div v-if="files.length > 1" class="flex gap-1 border-b px-2 py-1.5">
+    <div v-if="files.length > 1" class="flex gap-1 overflow-x-auto border-b px-2 py-1.5">
       <Button
         v-for="(file, index) in files"
         :key="`${file.displayPath}:${index}`"
         variant="ghost"
         size="xs"
-        class="h-6 max-w-44 justify-start gap-1.5 px-2 text-[10px]"
+        class="h-6 max-w-44 shrink-0 justify-start gap-1.5 px-2 text-[10px]"
         :class="selectedIndex === index ? 'bg-accent text-accent-foreground' : ''"
         :title="file.displayPath"
         @click="selectedIndex = index"
@@ -100,12 +140,12 @@ function splitRows(lines: DiffLineView[]): SplitRow[] {
 
     <ScrollArea class="flex-1">
       <div v-if="selectedFile" class="min-w-max font-mono text-[10px] leading-relaxed">
-        <section v-for="hunk in selectedFile.hunks" :key="hunk.header" class="border-b last:border-0">
-          <header class="sticky top-0 z-[1] bg-muted px-3 py-1 text-[9px] text-muted-foreground">{{ hunk.header }}</header>
+        <section v-for="view in selectedHunkViews" :key="view.hunk.header" class="border-b last:border-0">
+          <header class="sticky top-0 z-[1] bg-muted px-3 py-1 text-[9px] text-muted-foreground">{{ view.hunk.header }}</header>
 
           <template v-if="mode === 'unified'">
             <div
-              v-for="(line, index) in hunk.lines"
+              v-for="(line, index) in view.unifiedLines"
               :key="index"
               class="grid grid-cols-[40px_40px_minmax(420px,1fr)]"
               :class="{
@@ -124,7 +164,7 @@ function splitRows(lines: DiffLineView[]): SplitRow[] {
 
           <template v-else>
             <div
-              v-for="(row, index) in splitRows(hunk.lines)"
+              v-for="(row, index) in view.split"
               :key="index"
               class="grid min-w-[760px] grid-cols-2 border-b last:border-0"
             >
@@ -139,6 +179,11 @@ function splitRows(lines: DiffLineView[]): SplitRow[] {
             </div>
           </template>
         </section>
+        <div v-if="hasMoreLines" class="border-t px-3 py-2">
+          <Button variant="ghost" size="sm" class="h-7 px-2 text-[11px]" @click="showMoreLines">
+            {{ t('timeline.showMoreCode') }}
+          </Button>
+        </div>
       </div>
       <div v-else class="grid h-full place-items-center text-xs text-muted-foreground">
         {{ t('inspector.noFileDiff') }}

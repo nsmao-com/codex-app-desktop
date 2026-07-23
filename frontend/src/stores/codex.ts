@@ -10,6 +10,7 @@ import type {
 import type { Event as CodexEvent, Status as CodexStatus } from '../../bindings/nice_codex_desktop/internal/codex/models'
 import { useAppStore } from './app'
 import { useCapabilitiesStore } from './capabilities'
+import { useDialogStore } from './dialog'
 import { useTerminalStore } from './terminal'
 import { useWorkspaceStore } from './workspace'
 import { notify } from '../utils/notify'
@@ -73,6 +74,7 @@ export const useCodexStore = defineStore('codex', () => {
   const workspaceStore = useWorkspaceStore()
   const capabilitiesStore = useCapabilitiesStore()
   const terminalStore = useTerminalStore()
+  const dialogStore = useDialogStore()
 
   const busy = shallowRef(false)
   const sendingThreadIds = shallowRef<string[]>([])
@@ -132,6 +134,8 @@ export const useCodexStore = defineStore('codex', () => {
   let queuedMessageSequence = 0
   const deltaBuffers = new Map<string, DeltaBuffer>()
   const pendingDiffs = new Map<string, { threadId: string; turnId: string; diff: string }>()
+  /** turnId → threadId for complete eviction of diffsByTurn. */
+  const diffTurnOwners = new Map<string, string>()
   const pendingTokenUsage = new Map<string, { threadId: string; turnId: string; usage: ReturnType<typeof normalizeThreadTokenUsage> }>()
   const threadModelIdentity: Record<string, ThreadModelIdentity> = loadThreadModelIdentity()
 
@@ -794,11 +798,19 @@ export const useCodexStore = defineStore('codex', () => {
     const id = threadID.trim()
     if (!id || threadMutation.value) return false
     const current = findThreadSummary(id) || (activeThread.value?.id === id ? activeThread.value : null)
-    const nextName = (
-      name !== undefined
-        ? name
-        : (window.prompt(translate('threadActions.renamePrompt'), current?.name || '') || '')
-    ).trim()
+    let nextName = name
+    if (nextName === undefined) {
+      const prompted = await dialogStore.prompt({
+        title: translate('threadActions.rename'),
+        description: translate('threadActions.renamePrompt'),
+        defaultValue: current?.name || '',
+        placeholder: translate('threadActions.renamePrompt'),
+        confirmLabel: translate('common.save'),
+        maxlength: 120,
+      })
+      nextName = prompted ?? ''
+    }
+    nextName = nextName.trim()
     if (!nextName || nextName === current?.name) return false
 
     if (id.startsWith('pending-thread-')) {
@@ -839,7 +851,13 @@ export const useCodexStore = defineStore('codex', () => {
   async function deleteThread(threadID: string): Promise<void> {
     const id = threadID.trim()
     if (!id || threadMutation.value) return
-    if (!window.confirm(translate('threadActions.deleteConfirm'))) return
+    const confirmed = await dialogStore.confirm({
+      title: translate('threadActions.delete'),
+      description: translate('threadActions.deleteConfirm'),
+      confirmLabel: translate('common.delete'),
+      destructive: true,
+    })
+    if (!confirmed) return
     if (id.startsWith('pending-thread-')) {
       discardLocalThread(id)
       notify('success', translate('threadActions.deleted'), translate('threadActions.deletedHint'))
@@ -1712,17 +1730,26 @@ export const useCodexStore = defineStore('codex', () => {
         }
         break
       }
-      case 'item/reasoning/summaryPartAdded':
+      case 'item/reasoning/summaryPartAdded': {
         if (Number(payload.summaryIndex) <= 0) break
+        const threadID = asString(payload.threadId)
+        const itemID = asString(payload.itemId)
+        if (!threadID || !itemID) break
+        // Avoid leaving a whitespace-only summary that expands to an empty body.
+        const existing = (itemsByThread.value[threadID] ?? []).find((item) => item.id === itemID)
+        const buffered = deltaBuffers.get(`${threadID}:${itemID}:reasoningSummary`)?.delta ?? ''
+        const current = `${existing?.reasoningSummary ?? ''}${buffered}`.trim()
+        if (!current) break
         queueDelta({
-          threadId: asString(payload.threadId),
+          threadId: threadID,
           turnId: asString(payload.turnId),
-          itemId: asString(payload.itemId),
+          itemId: itemID,
           field: 'reasoningSummary',
           type: 'reasoning',
           delta: '\n\n',
         })
         break
+      }
       case 'item/plan/delta':
         queueDelta({
           threadId: asString(payload.threadId),
@@ -1878,6 +1905,7 @@ export const useCodexStore = defineStore('codex', () => {
     if (!pendingTokenUsage.size) return
     const next = { ...tokenUsageByThread.value }
     const nextMetrics = { ...turnMetricsByThread.value }
+    const persistJobs: Array<Promise<unknown>> = []
     for (const { threadId, turnId, usage } of pendingTokenUsage.values()) {
       next[threadId] = usage
       if (turnId) {
@@ -1885,11 +1913,22 @@ export const useCodexStore = defineStore('codex', () => {
         const current = threadMetrics[turnId] ?? emptyTurnMetrics()
         threadMetrics[turnId] = { ...current, tokenUsage: usage.last }
         nextMetrics[threadId] = threadMetrics
+        const tokens = Math.max(
+          0,
+          Number(usage.last?.totalTokens)
+            || ((usage.last?.inputTokens || 0) + (usage.last?.outputTokens || 0) + (usage.last?.reasoningOutputTokens || 0)),
+        )
+        if (tokens > 0) {
+          persistJobs.push(backend.RecordLocalTurnUsage(threadId, turnId, tokens).catch(() => undefined))
+        }
       }
     }
     pendingTokenUsage.clear()
     tokenUsageByThread.value = next
     turnMetricsByThread.value = nextMetrics
+    void Promise.allSettled(persistJobs).finally(() => {
+      void appStore.loadLocalUsage()
+    })
   }
 
   function notifyTurnCompleted(threadID: string, status: string): void {
@@ -1940,9 +1979,11 @@ export const useCodexStore = defineStore('codex', () => {
     }
     deltaBuffers.clear()
 
-    const nextByThread = { ...itemsByThread.value }
+    const current = itemsByThread.value
+    const activeID = activeThreadId.value
+    let activeChanged = false
     for (const [threadID, deltas] of grouped) {
-      const nextItems = [...(nextByThread[threadID] ?? [])]
+      const nextItems = [...(current[threadID] ?? [])]
       for (const delta of deltas) {
         let index = nextItems.findIndex((item) => item.id === delta.itemId)
         if (index < 0) {
@@ -1982,9 +2023,11 @@ export const useCodexStore = defineStore('codex', () => {
           nextItems[index] = { ...item, [delta.field]: appendBoundedDelta(item[delta.field], delta.delta, limit) }
         }
       }
-      nextByThread[threadID] = nextItems
+      // Background threads: mutate without shallowRef notify (timeline only watches active).
+      current[threadID] = nextItems
+      if (threadID === activeID) activeChanged = true
     }
-    itemsByThread.value = nextByThread
+    if (activeChanged) itemsByThread.value = { ...current }
   }
 
   function flushBufferedItem(threadID: string, itemID: string): void {
@@ -2016,6 +2059,7 @@ export const useCodexStore = defineStore('codex', () => {
     for (const value of pendingDiffs.values()) {
       nextByTurn[value.turnId] = value.diff
       nextByThread[value.threadId] = value.diff
+      if (value.turnId) diffTurnOwners.set(value.turnId, value.threadId)
     }
     pendingDiffs.clear()
     diffsByTurn.value = nextByTurn
@@ -2065,6 +2109,19 @@ export const useCodexStore = defineStore('codex', () => {
     activeThread.value = next
     addOrUpdateThread(next)
     rememberThreadModelIdentity(next.id, next.model, next.modelProvider)
+  }
+
+  function patchActiveThreadMemories(useMemories: boolean, generateMemories: boolean): void {
+    const thread = activeThread.value
+    if (!thread) return
+    const next: ThreadSummary = {
+      ...thread,
+      useMemories,
+      generateMemories,
+      updatedAt: Math.floor(Date.now() / 1000),
+    }
+    activeThread.value = next
+    addOrUpdateThread(next)
   }
 
   async function setCollaborationMode(mode: 'default' | 'plan'): Promise<void> {
@@ -2325,7 +2382,6 @@ export const useCodexStore = defineStore('codex', () => {
 
   function evictCachedThread(threadID: string): void {
     loadedThreadIDs.delete(threadID)
-    const latest = latestDiffByThread.value[threadID]
     const nextItems = { ...itemsByThread.value }
     const nextUsage = { ...tokenUsageByThread.value }
     const nextDiffs = { ...latestDiffByThread.value }
@@ -2335,10 +2391,13 @@ export const useCodexStore = defineStore('codex', () => {
     delete nextUsage[threadID]
     delete nextDiffs[threadID]
     delete nextMetrics[threadID]
-    if (latest) {
-      for (const [turnID, diff] of Object.entries(nextByTurn)) {
-        if (diff === latest) delete nextByTurn[turnID]
-      }
+    for (const [turnID, owner] of [...diffTurnOwners.entries()]) {
+      if (owner !== threadID) continue
+      delete nextByTurn[turnID]
+      diffTurnOwners.delete(turnID)
+    }
+    for (const [key, pending] of [...pendingDiffs.entries()]) {
+      if (pending.threadId === threadID) pendingDiffs.delete(key)
     }
     itemsByThread.value = nextItems
     tokenUsageByThread.value = nextUsage
@@ -2572,6 +2631,7 @@ export const useCodexStore = defineStore('codex', () => {
     turnMetricsByThread.value = {}
     diffsByTurn.value = {}
     latestDiffByThread.value = {}
+    diffTurnOwners.clear()
     loadedThreadIDs.clear()
     deltaBuffers.clear()
     pendingDiffs.clear()
@@ -2663,6 +2723,7 @@ export const useCodexStore = defineStore('codex', () => {
     clearActiveSession,
     switchWorkMode,
     patchActiveSessionPreferences,
+    patchActiveThreadMemories,
     setCollaborationMode,
     dismissPlanImplementation,
     acceptPlanImplementation,

@@ -33,7 +33,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { useCodexStore } from '@/stores'
+import { useAppStore, useCodexStore } from '@/stores'
 import type { TimelineItem, TurnMetrics } from '@/types/codex'
 import { extractFileDiff, parseUnifiedDiff } from '@/utils/diff'
 import { formatToolPayload, renderToolPayloadHTML } from '@/utils/formatPayload'
@@ -47,6 +47,9 @@ const props = defineProps<{
   animated?: boolean
   streaming?: boolean
   turnDiff?: string
+  /** Precomputed in ChatTimeline to avoid per-group O(n) scans. */
+  turnIndex?: number
+  turnCount?: number
 }>()
 
 const emit = defineEmits<{
@@ -56,6 +59,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const appStore = useAppStore()
 const codexStore = useCodexStore()
 const openRows = shallowRef<Record<string, boolean>>({})
 const copiedKey = shallowRef('')
@@ -63,6 +67,7 @@ const attachmentPreviews = shallowRef<Record<string, string>>({})
 let stepEnterBatch = 0
 let stepEnterBatchAt = 0
 const stepAnimCleanups = new Set<() => void>()
+const parsedTurnDiffCache = new Map<string, ReturnType<typeof parseUnifiedDiff>>()
 
 onBeforeUnmount(() => {
   for (const cleanup of stepAnimCleanups) cleanup()
@@ -88,13 +93,23 @@ function attachmentPreview(path: string): string {
   return attachmentPreviews.value[path] || ''
 }
 
-function markdownHTML(source: string): string {
-  return renderMarkdown(source, t('timeline.copyMessage'), t('timeline.showMoreCode'))
+function markdownHTML(source: string, lite = false): string {
+  return renderMarkdown(
+    source,
+    t('timeline.copyMessage'),
+    t('timeline.showMoreCode'),
+    { lite: lite || Boolean(props.streaming) },
+  )
 }
 
 function prefersReducedMotion(): boolean {
+  if (appStore.settings.reduceMotion) return true
   return typeof window !== 'undefined'
     && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+function shouldAnimateSteps(): boolean {
+  return Boolean(props.streaming) && !prefersReducedMotion()
 }
 
 function nextStepDelay(): number {
@@ -125,20 +140,15 @@ function clearStepInlineStyles(el: HTMLElement): void {
 }
 
 function onStepBeforeEnter(el: Element): void {
-  if (!props.streaming || prefersReducedMotion()) return
+  // Opacity only — avoid layout thrash while tools stream in.
+  if (!shouldAnimateSteps()) return
   const html = el as HTMLElement
   html.style.opacity = '0'
-  html.style.transform = 'translateY(14px) scale(0.985)'
-  html.style.filter = 'blur(4px)'
-  html.style.overflow = 'hidden'
-  html.style.height = '0px'
-  html.style.marginTop = '0px'
-  html.style.marginBottom = '0px'
-  html.style.willChange = 'height, opacity, transform, filter'
+  html.style.willChange = 'opacity'
 }
 
 function onStepEnter(el: Element, done: () => void): void {
-  if (!props.streaming || prefersReducedMotion()) {
+  if (!shouldAnimateSteps()) {
     done()
     return
   }
@@ -161,27 +171,16 @@ function onStepEnter(el: Element, done: () => void): void {
 
   const onEnd = (event: TransitionEvent): void => {
     if (event.target !== html) return
-    if (event.propertyName !== 'height' && event.propertyName !== 'opacity') return
+    if (event.propertyName !== 'opacity') return
     finish()
   }
 
   void nextTick(() => {
     requestAnimationFrame(() => {
-      const target = Math.max(html.scrollHeight, 1)
-      html.style.transition = [
-        `height 480ms cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms`,
-        `opacity 420ms cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms`,
-        `transform 480ms cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms`,
-        `filter 420ms ease ${delay}ms`,
-        `margin-bottom 480ms cubic-bezier(0.22, 1, 0.36, 1) ${delay}ms`,
-      ].join(', ')
-      html.style.height = `${target}px`
+      html.style.transition = `opacity 160ms ease ${delay}ms`
       html.style.opacity = '1'
-      html.style.transform = 'translateY(0) scale(1)'
-      html.style.filter = 'blur(0)'
-      html.style.marginBottom = ''
       html.addEventListener('transitionend', onEnd)
-      timer = window.setTimeout(finish, delay + 700)
+      timer = window.setTimeout(finish, delay + 240)
     })
   })
 }
@@ -191,16 +190,13 @@ function onStepAfterEnter(el: Element): void {
 }
 
 function onStepBeforeLeave(el: Element): void {
-  if (!props.streaming || prefersReducedMotion()) return
+  if (!shouldAnimateSteps()) return
   const html = el as HTMLElement
-  html.style.overflow = 'hidden'
-  html.style.height = `${html.scrollHeight}px`
   html.style.opacity = '1'
-  html.style.position = 'relative'
 }
 
 function onStepLeave(el: Element, done: () => void): void {
-  if (!props.streaming || prefersReducedMotion()) {
+  if (!shouldAnimateSteps()) {
     done()
     return
   }
@@ -218,36 +214,31 @@ function onStepLeave(el: Element, done: () => void): void {
   stepAnimCleanups.add(finish)
   const onEnd = (event: TransitionEvent): void => {
     if (event.target !== html) return
-    if (event.propertyName !== 'height' && event.propertyName !== 'opacity') return
+    if (event.propertyName !== 'opacity') return
     finish()
   }
   requestAnimationFrame(() => {
-    html.style.transition = [
-      'height 320ms cubic-bezier(0.4, 0, 0.2, 1)',
-      'opacity 240ms ease',
-      'transform 320ms cubic-bezier(0.4, 0, 0.2, 1)',
-      'filter 240ms ease',
-    ].join(', ')
-    html.style.height = '0px'
+    html.style.transition = 'opacity 140ms ease'
     html.style.opacity = '0'
-    html.style.transform = 'translateY(-6px) scale(0.99)'
-    html.style.filter = 'blur(2px)'
-    html.style.marginTop = '0px'
-    html.style.marginBottom = '0px'
     html.addEventListener('transitionend', onEnd)
-    timer = window.setTimeout(finish, 450)
+    timer = window.setTimeout(finish, 200)
   })
 }
 
 const turnId = computed(() => props.items[0]?.turnId ?? '')
-const turnIds = computed(() => [
-  ...new Set(codexStore.activeItems.map((item) => item.turnId).filter(Boolean)),
-])
-const turnIndex = computed(() => turnIds.value.indexOf(turnId.value))
-const isLastTurn = computed(() => turnIndex.value >= 0 && turnIndex.value === turnIds.value.length - 1)
+const turnIndex = computed(() => {
+  if (typeof props.turnIndex === 'number' && props.turnIndex >= 0) return props.turnIndex
+  const ids = [...new Set(codexStore.activeItems.map((item) => item.turnId).filter(Boolean))]
+  return ids.indexOf(turnId.value)
+})
+const turnCount = computed(() => {
+  if (typeof props.turnCount === 'number' && props.turnCount > 0) return props.turnCount
+  return [...new Set(codexStore.activeItems.map((item) => item.turnId).filter(Boolean))].length
+})
+const isLastTurn = computed(() => turnIndex.value >= 0 && turnIndex.value === turnCount.value - 1)
 const turnsFromHere = computed(() => {
   if (turnIndex.value < 0) return 0
-  return turnIds.value.length - turnIndex.value
+  return turnCount.value - turnIndex.value
 })
 const isFailed = computed(() => props.items.some((item) => item.failed))
 const agentPlainText = computed(() =>
@@ -387,7 +378,17 @@ const resolvedFileChanges = computed<DisplayFileChange[]>(() => {
 
   const turnDiff = props.turnDiff?.trim() ?? ''
   if (turnDiff) {
-    for (const file of parseUnifiedDiff(turnDiff)) {
+    const cacheKey = `${turnDiff.length}:${turnDiff.slice(0, 64)}:${turnDiff.slice(-64)}`
+    let parsed = parsedTurnDiffCache.get(cacheKey)
+    if (!parsed) {
+      parsed = parseUnifiedDiff(turnDiff)
+      parsedTurnDiffCache.set(cacheKey, parsed)
+      if (parsedTurnDiffCache.size > 24) {
+        const oldest = parsedTurnDiffCache.keys().next().value
+        if (oldest) parsedTurnDiffCache.delete(oldest)
+      }
+    }
+    for (const file of parsed) {
       const path = file.displayPath.trim()
       if (!path) continue
       const kind = file.newPath === '/dev/null'
@@ -429,14 +430,16 @@ const liveTextId = computed(() => {
     if (isRunning(block.item.status)) return block.item.id
     break
   }
-  const last = stream.value.at(-1)
-  return last?.kind === 'text' ? last.item.id : ''
+  return ''
 })
 
 const liveReasoningId = computed(() => {
   if (!props.streaming) return ''
   const last = stream.value.at(-1)
-  return last?.kind === 'reasoning' ? last.item.id : ''
+  if (last?.kind !== 'reasoning') return ''
+  // Completed reasoning from an earlier turn must never look "live".
+  if (last.item.status && !isRunning(last.item.status)) return ''
+  return last.item.id
 })
 
 watch(
@@ -468,8 +471,19 @@ function stripReasoningMarkdown(text: string): string {
     .trim()
 }
 
+/** Meaningful reasoning body — ignore whitespace-only / separator-only payloads. */
+function reasoningBodyText(item: TimelineItem): string {
+  const summary = (item.reasoningSummary || '').trim()
+  const content = (item.reasoningContent || '').trim()
+  const text = (item.text || '').trim()
+  if (summary && content && summary !== content && !summary.includes(content) && !content.includes(summary)) {
+    return `${summary}\n\n${content}`
+  }
+  return summary || content || text
+}
+
 function reasoningTitle(item: TimelineItem): string {
-  const raw = (item.reasoningSummary || item.reasoningContent || item.text || '').trim()
+  const raw = reasoningBodyText(item)
   if (!raw) return t('timeline.reasoningLive')
   const firstLine = raw.split(/\n+/).map((line) => line.trim()).find(Boolean) || raw
   const cleaned = stripReasoningMarkdown(firstLine)
@@ -479,7 +493,7 @@ function reasoningTitle(item: TimelineItem): string {
 
 function plainStreamText(item: TimelineItem): string {
   if (item.type === 'reasoning') {
-    return item.reasoningSummary || item.reasoningContent || item.text || ''
+    return reasoningBodyText(item)
   }
   return stripProposedPlanTags(item.text || '')
 }
@@ -805,7 +819,11 @@ function diffStats(diff: string): { add: number; del: number } {
     :animate="{ opacity: 1, y: 0 }"
     :transition="{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }"
     class="group w-full"
-    :class="streaming ? '' : '[content-visibility:auto] [contain-intrinsic-size:72px]'"
+    :class="streaming
+      ? ''
+      : kind === 'user'
+        ? '[content-visibility:auto] [contain-intrinsic-size:88px]'
+        : '[content-visibility:auto] [contain-intrinsic-size:200px]'"
   >
     <!-- User prompt — Claude-style soft bubble, right aligned -->
     <div v-if="kind === 'user'" class="flex flex-col items-end gap-1">
@@ -930,7 +948,7 @@ function diffStats(diff: string): { add: number; del: number } {
                 {{ reasoningTitle(block.item) }}
               </span>
               <span
-                v-else-if="liveReasoningId === block.item.id && !plainStreamText(block.item)"
+                v-else-if="liveReasoningId === block.item.id && !reasoningBodyText(block.item)"
                 class="text-[12px] text-foreground/55"
               >
                 {{ t('timeline.reasoningLive') }}
@@ -940,11 +958,11 @@ function diffStats(diff: string): { add: number; del: number } {
               v-if="reasoningOpen(block.item.id) || liveReasoningId === block.item.id"
               class="reasoning-body mt-1 max-h-56 overflow-y-auto border-l-2 border-border/40 pl-3 text-[13px] leading-6 text-foreground/80"
             >
-              <template v-if="plainStreamText(block.item)">
+              <template v-if="reasoningBodyText(block.item)">
                 <div
                   class="prose prose-sm max-w-none reasoning-prose prose-headings:mb-1.5 prose-headings:mt-2.5 prose-headings:text-[0.95em] prose-headings:font-semibold prose-p:my-1.5 prose-p:leading-6 prose-li:my-0.5 prose-ul:my-1.5 prose-ol:my-1.5 prose-pre:my-2 prose-pre:rounded-lg prose-code:rounded prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:before:content-none prose-code:after:content-none prose-strong:font-semibold"
                   @click="onMarkdownClick"
-                  v-html="markdownHTML(plainStreamText(block.item))"
+                  v-html="markdownHTML(reasoningBodyText(block.item))"
                 />
                 <span
                   v-if="liveReasoningId === block.item.id"
@@ -953,13 +971,16 @@ function diffStats(diff: string): { add: number; del: number } {
                 />
               </template>
               <div
-                v-else-if="liveReasoningId === block.item.id"
+                v-else
                 class="flex items-center gap-2 text-[12.5px] text-muted-foreground"
               >
-                <span class="thinking-dots thinking-dots-sm" aria-hidden="true">
-                  <span /><span /><span />
-                </span>
-                <span>{{ t('timeline.reasoningLive') }}</span>
+                <template v-if="liveReasoningId === block.item.id">
+                  <span class="thinking-dots thinking-dots-sm" aria-hidden="true">
+                    <span /><span /><span />
+                  </span>
+                  <span>{{ t('timeline.reasoningLive') }}</span>
+                </template>
+                <span v-else>{{ t('timeline.reasoningEmpty') }}</span>
               </div>
             </div>
           </div>

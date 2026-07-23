@@ -101,9 +101,13 @@ const usageLocale = computed(() => (locale.value === 'zh-CN' ? 'zh-CN' : 'en-US'
 watch(usagePopoverOpen, (open) => {
   if (!open || !appStore.account.authenticated) return
   usageLoading.value = true
-  void appStore.refreshAccountData().finally(() => {
-    usageLoading.value = false
-  })
+  // Refresh account first so Codex session is warm, then read usage (may seed from cloud).
+  void appStore.refreshAccountData()
+    .catch(() => undefined)
+    .then(() => appStore.loadLocalUsage())
+    .finally(() => {
+      usageLoading.value = false
+    })
 })
 
 const sidebarMotion = computed(() => {
@@ -305,7 +309,7 @@ function loadMore(group: ThreadGroup): void {
 <template>
   <Motion
     as="aside"
-    class="flex h-full shrink-0 flex-col overflow-hidden bg-transparent max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:bg-sidebar max-md:shadow-xl"
+    class="flex h-full shrink-0 flex-col overflow-hidden bg-transparent max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:bg-sidebar max-md:shadow-xl max-md:backdrop-blur-md"
     :class="collapsed ? 'pointer-events-none' : 'pointer-events-auto'"
     :initial="false"
     :animate="sidebarMotion"
@@ -670,6 +674,22 @@ function loadMore(group: ThreadGroup): void {
             <MessageSquareText :size="16" class="opacity-70" />
           </div>
           <p>{{ search ? t('sidebar.noSearchResults') : t('sidebar.firstTask') }}</p>
+          <p v-if="!search" class="max-w-[200px] text-[10px] leading-4 text-muted-foreground/80">
+            {{
+              appStore.settings.workMode === 'cowork'
+                ? t('sidebar.switchToCodeHint')
+                : t('sidebar.switchToCoworkHint')
+            }}
+          </p>
+          <Button
+            v-if="!search"
+            type="button"
+            variant="outline"
+            class="h-7 rounded-md px-2.5 text-[11px]"
+            @click="void setWorkMode(appStore.settings.workMode === 'cowork' ? 'code' : 'cowork')"
+          >
+            {{ appStore.settings.workMode === 'cowork' ? t('sidebar.code') : t('sidebar.cowork') }}
+          </Button>
         </div>
 
         <Collapsible
@@ -811,7 +831,7 @@ function loadMore(group: ThreadGroup): void {
               <div class="mb-3 rounded-lg border bg-muted/30 px-3 py-2.5">
                 <p class="text-[10px] text-muted-foreground">{{ t('sidebar.usageRangeTotal') }}</p>
                 <p class="mt-0.5 text-lg font-semibold tabular-nums tracking-tight">
-                  {{ formatTokenCount(usageRangeView.totalTokens) }}
+                  {{ usageRangeView.dayCount ? formatTokenCount(usageRangeView.totalTokens) : '—' }}
                   <span class="text-[11px] font-normal text-muted-foreground">tokens</span>
                 </p>
                 <p class="mt-1 text-[10px] text-muted-foreground">

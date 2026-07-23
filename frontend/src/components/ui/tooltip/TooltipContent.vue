@@ -9,13 +9,16 @@ defineOptions({
   inheritAttrs: false,
 })
 
-const props = withDefaults(defineProps<TooltipContentProps & { class?: HTMLAttributes["class"] }>(), {
+const props = withDefaults(defineProps<TooltipContentProps & {
+  class?: HTMLAttributes["class"]
+  arrowClass?: HTMLAttributes["class"]
+}>(), {
   sideOffset: 4,
 })
 
 const emits = defineEmits<TooltipContentEmits>()
 
-const delegatedProps = reactiveOmit(props, "class")
+const delegatedProps = reactiveOmit(props, "class", "arrowClass")
 const forwarded = useForwardPropsEmits(delegatedProps, emits)
 </script>
 
@@ -28,7 +31,10 @@ const forwarded = useForwardPropsEmits(delegatedProps, emits)
     >
       <slot />
 
-      <TooltipArrow class="bg-foreground fill-foreground z-50 size-2.5 translate-y-[calc(-50%_-_2px)] rotate-45 rounded-xs" />
+      <TooltipArrow
+        data-slot="tooltip-arrow"
+        :class="cn('z-50 size-2.5 translate-y-[calc(-50%_-_2px)] rotate-45 rounded-[2px] border-0 bg-foreground fill-foreground shadow-none', props.arrowClass)"
+      />
     </TooltipContent>
   </TooltipPortal>
 </template>

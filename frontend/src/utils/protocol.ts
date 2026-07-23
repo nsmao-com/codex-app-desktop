@@ -52,7 +52,16 @@ export function isInterruptedStatus(status: unknown): boolean {
 }
 
 export function asNumber(value: unknown, fallback = 0): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'bigint') {
+    const asFloat = Number(value)
+    return Number.isFinite(asFloat) ? asFloat : fallback
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : fallback
+  }
+  return fallback
 }
 
 export function normalizeThread(value: unknown): ThreadSummary | null {
@@ -77,6 +86,8 @@ export function normalizeThread(value: unknown): ThreadSummary | null {
     effort: asString(record.effort),
     collaborationMode: asString(record.collaborationMode, 'default') || 'default',
     workMode: asString(record.workMode, 'code') || 'code',
+    useMemories: typeof record.useMemories === 'boolean' ? record.useMemories : undefined,
+    generateMemories: typeof record.generateMemories === 'boolean' ? record.generateMemories : undefined,
     turns: asArray(record.turns),
   }
 }
@@ -217,15 +228,24 @@ export function normalizeAccountUsage(value: unknown): AccountUsageSummary | nul
       startDate: asString(record.startDate, asString(record.start_date)),
       tokens: asNumber(record.tokens),
     }
-  }).filter((item) => item.startDate)
+  }).filter((item) => item.startDate && item.tokens > 0)
 
-  if (!Object.keys(summary).length && !dailyBuckets.length) return null
+  const lifetimeTokens = nullableNumber(summary.lifetimeTokens ?? summary.lifetime_tokens)
+  const peakDailyTokens = nullableNumber(summary.peakDailyTokens ?? summary.peak_daily_tokens)
+  const currentStreakDays = nullableNumber(summary.currentStreakDays ?? summary.current_streak_days)
+  const longestStreakDays = nullableNumber(summary.longestStreakDays ?? summary.longest_streak_days)
+  const longestRunningTurnSec = nullableNumber(summary.longestRunningTurnSec ?? summary.longest_running_turn_sec)
+
+  const hasSummary = [lifetimeTokens, peakDailyTokens, currentStreakDays, longestStreakDays, longestRunningTurnSec]
+    .some((item) => item != null && item > 0)
+  if (!hasSummary && !dailyBuckets.length) return null
+
   return {
-    lifetimeTokens: nullableNumber(summary.lifetimeTokens ?? summary.lifetime_tokens),
-    peakDailyTokens: nullableNumber(summary.peakDailyTokens ?? summary.peak_daily_tokens),
-    currentStreakDays: nullableNumber(summary.currentStreakDays ?? summary.current_streak_days),
-    longestStreakDays: nullableNumber(summary.longestStreakDays ?? summary.longest_streak_days),
-    longestRunningTurnSec: nullableNumber(summary.longestRunningTurnSec ?? summary.longest_running_turn_sec),
+    lifetimeTokens,
+    peakDailyTokens,
+    currentStreakDays,
+    longestStreakDays,
+    longestRunningTurnSec,
     dailyBuckets,
   }
 }
@@ -263,7 +283,9 @@ function normalizeCredits(
 }
 
 function nullableNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
+  if (value === null || value === undefined || value === '') return null
+  const parsed = asNumber(value, Number.NaN)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 export function normalizeTimelineItem(value: unknown, turnId = ''): TimelineItem | null {
@@ -309,10 +331,8 @@ export function normalizeTimelineItem(value: unknown, turnId = ''): TimelineItem
       base.title = 'Plan'
       break
     case 'reasoning':
-      base.reasoningSummary = normalizeTextParts(record.summary)
-      base.reasoningContent = normalizeTextParts(record.content)
-      base.reasoningSummary = boundedText(base.reasoningSummary, 250_000)
-      base.reasoningContent = boundedText(base.reasoningContent, 250_000)
+      base.reasoningSummary = boundedText(normalizeReasoningParts(record.summary ?? record.summaryText), 250_000)
+      base.reasoningContent = boundedText(normalizeReasoningParts(record.content ?? record.rawContent ?? record.text), 250_000)
       base.text = base.reasoningSummary || base.reasoningContent
       break
     case 'commandExecution':
@@ -419,8 +439,19 @@ function normalizeTextValue(value: unknown): string {
   return ''
 }
 
-function normalizeTextParts(value: unknown): string {
-  return normalizeTextValue(value)
+/** Reasoning summary/content may be string[], plain string, or legacy part objects. */
+function normalizeReasoningParts(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value
+      .map((part) => {
+        if (typeof part === 'string') return part.trim()
+        const record = asRecord(part)
+        return normalizeTextValue(record.text ?? record.content ?? record.summary ?? part).trim()
+      })
+      .filter(Boolean)
+      .join('\n\n')
+  }
+  return normalizeTextValue(value).trim()
 }
 
 function normalizeToolOutput(content: unknown, structuredContent?: unknown): string {

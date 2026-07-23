@@ -7,12 +7,16 @@ import type { Events } from "@wailsio/runtime";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import type * as main$0 from "../../../../../nice_codex_desktop/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import type * as codex$0 from "../../../../../nice_codex_desktop/internal/codex/models.js";
 
 declare module "@wailsio/runtime" {
     namespace Events {
         interface CustomEvents {
             "codex:event": codex$0.Event;
+            "nice:update": main$0.UpdateProgress;
         }
     }
 }

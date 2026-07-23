@@ -27,12 +27,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { easeOutQuick } from '@/lib/motion'
-import { useBrowserStore, useCodexStore, useWorkspaceStore } from '@/stores'
+import { useBrowserStore, useCodexStore, useDialogStore, useWorkspaceStore } from '@/stores'
 import { Motion } from 'motion-v'
 
 const codexStore = useCodexStore()
 const workspaceStore = useWorkspaceStore()
 const browserStore = useBrowserStore()
+const dialogStore = useDialogStore()
 const { t } = useI18n()
 
 const emit = defineEmits<{
@@ -125,6 +126,20 @@ function deleteThread(): void {
 
 function reviewChanges(): void {
   void codexStore.startReview({ targetType: 'uncommittedChanges', delivery: 'inline' })
+}
+
+function commitFromBar(): void {
+  void (async () => {
+    const message = await dialogStore.prompt({
+      title: t('settings.gitCommit'),
+      description: t('settings.gitCommitMessagePlaceholder'),
+      placeholder: t('settings.gitCommitMessagePlaceholder'),
+      confirmLabel: t('settings.gitCommit'),
+      maxlength: 400,
+    })
+    if (!message?.trim()) return
+    await workspaceStore.commitChanges(message.trim())
+  })()
 }
 
 watch(() => codexStore.activeThreadId, () => {
@@ -238,67 +253,78 @@ watch(() => codexStore.activeThreadId, () => {
     </div>
 
     <div
-      v-if="changesCount && codexStore.activeThread"
+      v-if="(changesCount && codexStore.activeThread) || codexStore.planImplementPrompt?.threadId === codexStore.activeThreadId"
       class="border-t border-border/70 px-4 py-1.5"
     >
-      <div class="mx-auto flex max-w-[680px] items-center justify-between gap-3">
-        <div class="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
-          <FileDiff :size="13" class="shrink-0 text-warning" />
-          <span class="truncate">{{ workspaceTag }}</span>
-          <span class="hidden truncate sm:inline">{{ branchLabel }}</span>
-          <Badge variant="secondary" class="h-5 shrink-0 rounded-md px-1.5 text-[9px] font-normal">
-            {{ changesCount }}
-          </Badge>
+      <div class="mx-auto flex max-w-[680px] flex-col gap-1.5">
+        <div
+          v-if="changesCount && codexStore.activeThread"
+          class="flex items-center justify-between gap-3"
+        >
+          <div class="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+            <FileDiff :size="13" class="shrink-0 text-warning" />
+            <span class="truncate">{{ workspaceTag }}</span>
+            <span class="hidden truncate sm:inline">{{ branchLabel }}</span>
+            <Badge variant="secondary" class="h-5 shrink-0 rounded-md px-1.5 text-[9px] font-normal">
+              {{ changesCount }}
+            </Badge>
+          </div>
+          <div class="flex shrink-0 items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-7 px-2 text-[11px] text-muted-foreground"
+              :disabled="codexStore.activeThreadBusy"
+              @click="reviewChanges"
+            >
+              {{ t('chat.startReview') }}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-7 px-2 text-[11px] text-muted-foreground"
+              @click="commitFromBar"
+            >
+              {{ t('settings.gitCommit') }}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-7 px-2 text-[11px] text-muted-foreground"
+              @click="openFullDiff"
+            >
+              {{ t('inspector.viewDiff') }}
+            </Button>
+          </div>
         </div>
-        <div class="flex shrink-0 items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-7 px-2 text-[11px] text-muted-foreground"
-            :disabled="codexStore.activeThreadBusy"
-            @click="reviewChanges"
-          >
-            {{ t('chat.startReview') }}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-7 px-2 text-[11px] text-muted-foreground"
-            @click="openFullDiff"
-          >
-            {{ t('inspector.viewDiff') }}
-          </Button>
-        </div>
-      </div>
-    </div>
 
-    <!-- Official Codex: after a plan turn, ask whether to implement -->
-    <div
-      v-if="codexStore.planImplementPrompt?.threadId === codexStore.activeThreadId"
-      class="border-t border-border/70 px-4 py-2.5"
-    >
-      <div class="mx-auto flex max-w-[680px] flex-col gap-2 rounded-xl border border-primary/25 bg-primary/5 px-3.5 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div class="min-w-0">
-          <p class="text-[13px] font-medium text-foreground">{{ t('chat.planImplementTitle') }}</p>
-          <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('chat.planImplementHint') }}</p>
-        </div>
-        <div class="flex shrink-0 items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            class="h-7 px-2.5 text-[11px] text-muted-foreground"
-            @click="codexStore.dismissPlanImplementation()"
-          >
-            {{ t('chat.planImplementNo') }}
-          </Button>
-          <Button
-            size="sm"
-            class="h-7 px-2.5 text-[11px]"
-            :disabled="codexStore.activeThreadBusy"
-            @click="codexStore.acceptPlanImplementation()"
-          >
-            {{ t('chat.planImplementYes') }}
-          </Button>
+        <!-- Official Codex: after a plan turn, ask whether to implement -->
+        <div
+          v-if="codexStore.planImplementPrompt?.threadId === codexStore.activeThreadId"
+          class="flex flex-col gap-1.5 rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div class="min-w-0">
+            <p class="text-[12px] font-medium text-foreground">{{ t('chat.planImplementTitle') }}</p>
+            <p class="text-[10px] text-muted-foreground">{{ t('chat.planImplementHint') }}</p>
+          </div>
+          <div class="flex shrink-0 items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-7 px-2.5 text-[11px] text-muted-foreground"
+              @click="codexStore.dismissPlanImplementation()"
+            >
+              {{ t('chat.planImplementNo') }}
+            </Button>
+            <Button
+              size="sm"
+              class="h-7 px-2.5 text-[11px]"
+              :disabled="codexStore.activeThreadBusy"
+              @click="codexStore.acceptPlanImplementation()"
+            >
+              {{ t('chat.planImplementYes') }}
+            </Button>
+          </div>
         </div>
       </div>
     </div>

@@ -33,6 +33,9 @@ type AppService struct {
 	agentProviders   []AgentProviderRuntime
 	sessions         map[string]*SessionRecord
 	externalRuns     map[string]*externalRun
+	scheduledTasks   *scheduledTaskStore
+	schedulerStop    chan struct{}
+	updateState      updateDownloadState
 }
 
 type BootstrapData struct {
@@ -69,6 +72,27 @@ type UserSettings struct {
 	FollowUpBehavior       string   `json:"followUpBehavior"`
 	NotifyOnTurnComplete   bool     `json:"notifyOnTurnComplete"`
 	CustomInstructions     string   `json:"customInstructions"`
+	TranslucentSidebar     bool     `json:"translucentSidebar"`
+	HighContrast           bool     `json:"highContrast"`
+	PointerCursor          bool     `json:"pointerCursor"`
+	ReduceMotion           bool     `json:"reduceMotion"`
+	UiFontSize             string   `json:"uiFontSize"`
+	CodeFontSize           string   `json:"codeFontSize"`
+	PreventSleepWhileRunning bool   `json:"preventSleepWhileRunning"`
+	AlwaysOnTop            bool     `json:"alwaysOnTop"`
+	GitBranchPrefix        string   `json:"gitBranchPrefix"`
+	GitCommitPrefix        string   `json:"gitCommitPrefix"`
+	GitOpenPRAfterPush     bool     `json:"gitOpenPRAfterPush"`
+	GitPRBodyTemplate      string   `json:"gitPRBodyTemplate"`
+	BrowserAllowedHosts    []string `json:"browserAllowedHosts"`
+	BrowserBlockedHosts    []string `json:"browserBlockedHosts"`
+	BrowserDownloadDir     string   `json:"browserDownloadDir"`
+	BrowserFullCDP         bool     `json:"browserFullCDP"`
+	ShortcutCommandPalette string   `json:"shortcutCommandPalette"`
+	ShortcutNewThread      string   `json:"shortcutNewThread"`
+	ShortcutTerminal       string   `json:"shortcutTerminal"`
+	ShortcutBrowser        string   `json:"shortcutBrowser"`
+	OnboardingCompleted    bool     `json:"onboardingCompleted"`
 }
 
 type WorkspaceInfo struct {
@@ -80,12 +104,26 @@ type WorkspaceInfo struct {
 	GitError string      `json:"gitError,omitempty"`
 }
 
+// GlobalInstructionsInfo is the personal Codex AGENTS.md under CODEX_HOME.
+type GlobalInstructionsInfo struct {
+	Content   string `json:"content"`
+	Path      string `json:"path"`
+	Source    string `json:"source"`
+	Exists    bool   `json:"exists"`
+	EmptyFile bool   `json:"emptyFile"`
+	Available bool   `json:"available"`
+}
+
 // ProjectInstructionsInfo is the workspace-root AGENTS.md (project-scoped Codex guidance).
 type ProjectInstructionsInfo struct {
-	Content   string `json:"content"`
-	Workspace string `json:"workspace"`
-	Path      string `json:"path"`
-	Available bool   `json:"available"`
+	Content       string `json:"content"`
+	Workspace     string `json:"workspace"`
+	WorkspaceName string `json:"workspaceName"`
+	Path          string `json:"path"`
+	Source        string `json:"source"`
+	Exists        bool   `json:"exists"`
+	EmptyFile     bool   `json:"emptyFile"`
+	Available     bool   `json:"available"`
 }
 
 type GitChange struct {
@@ -151,11 +189,16 @@ func NewAppService(app *application.App) *AppService {
 		terminalSessions: make(map[string]*terminalSession),
 		sessions:         loadSessions(settingsPath),
 		externalRuns:     make(map[string]*externalRun),
+		scheduledTasks:   newScheduledTaskStore(settingsPath),
+		schedulerStop:    make(chan struct{}),
 	}
+	_ = service.scheduledTasks.load()
 	service.client = codex.NewClient(func(event codex.Event) {
 		service.remapCodexEvent(&event)
+		service.maybeRecordLocalUsage(event)
 		app.Event.Emit("codex:event", event)
 	})
+	go service.runScheduledTaskLoop()
 	return service
 }
 
@@ -176,6 +219,7 @@ func (s *AppService) Bootstrap() BootstrapData {
 		AppVersion:       AppVersion,
 		UpdateRepo:       GitHubRepo,
 	}
+	s.applyAlwaysOnTop(settings.AlwaysOnTop)
 	if settings.Workspace != "" {
 		workspace := inspectWorkspace(settings.Workspace)
 		data.Workspace = &workspace
@@ -201,7 +245,7 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	if !isAllowed(settings.Theme, "dark", "light", "system") {
 		return UserSettings{}, errors.New("invalid theme")
 	}
-	if !isAllowed(settings.AccentColor, "amber", "gold", "rose", "coral", "emerald", "moss", "ocean", "sky", "slate", "graphite") {
+	if !isAllowed(settings.AccentColor, "codex", "amber", "gold", "rose", "coral", "emerald", "moss", "ocean", "sky", "slate", "graphite") {
 		return UserSettings{}, errors.New("invalid accent color")
 	}
 	if !isValidFontFamily(settings.FontFamily) {
@@ -233,8 +277,22 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 		return UserSettings{}, errors.New("invalid multi-agent mode")
 	}
 	settings.FollowUpBehavior = normalizeFollowUpBehavior(settings.FollowUpBehavior)
-	settings.CustomInstructions = sanitizeCustomInstructions(settings.CustomInstructions)
+	settings.UiFontSize = normalizeUiFontSize(settings.UiFontSize)
+	settings.CodeFontSize = normalizeCodeFontSize(settings.CodeFontSize)
+	settings.GitBranchPrefix = sanitizeShortText(settings.GitBranchPrefix, 64)
+	settings.GitCommitPrefix = sanitizeShortText(settings.GitCommitPrefix, 64)
+	settings.GitPRBodyTemplate = sanitizeCustomInstructions(settings.GitPRBodyTemplate)
+	settings.BrowserDownloadDir = strings.TrimSpace(settings.BrowserDownloadDir)
+	if len(settings.BrowserDownloadDir) > 512 {
+		return UserSettings{}, errors.New("download directory is too long")
+	}
+	settings.BrowserAllowedHosts = sanitizeHostList(settings.BrowserAllowedHosts)
+	settings.BrowserBlockedHosts = sanitizeHostList(settings.BrowserBlockedHosts)
 	settings.WorkMode = normalizeWorkMode(settings.WorkMode)
+	settings.ShortcutCommandPalette = normalizeShortcutBinding(settings.ShortcutCommandPalette, "Ctrl+K")
+	settings.ShortcutNewThread = normalizeShortcutBinding(settings.ShortcutNewThread, "Ctrl+N")
+	settings.ShortcutTerminal = normalizeShortcutBinding(settings.ShortcutTerminal, "Ctrl+`")
+	settings.ShortcutBrowser = normalizeShortcutBinding(settings.ShortcutBrowser, "Ctrl+Shift+B")
 	if settings.Effort == "" {
 		settings.Effort = "high"
 	}
@@ -242,17 +300,28 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	if len(settings.Model) > 160 || len(settings.ModelProvider) > 160 || len(settings.Effort) > 64 || len(settings.ServiceTier) > 64 {
 		return UserSettings{}, errors.New("model preferences are too long")
 	}
+	// Disk AGENTS.md is only mutated by SaveGlobalInstructions — never wipe it from generic preference saves.
+	settings.CustomInstructions = readCodexPersonalInstructions()
+	// Onboarding completion is monotonic — concurrent preference saves must not reopen the wizard.
+	if current.OnboardingCompleted || settings.OnboardingCompleted || strings.TrimSpace(settings.Workspace) != "" {
+		settings.OnboardingCompleted = true
+	}
+	flags := readCodexFeatureFlags()
+	flags.BrowserUseFullCDP = settings.BrowserFullCDP
+	_ = writeCodexFeatureFlags(flags)
 	s.mu.Lock()
-	previousInstructions := s.settings.CustomInstructions
 	err := writeSettings(s.settingsPath, settings)
 	if err == nil {
 		s.settings = cloneSettings(settings)
-		if sanitizeCustomInstructions(settings.CustomInstructions) != sanitizeCustomInstructions(previousInstructions) {
-			_ = writeCodexPersonalInstructions(settings.CustomInstructions)
-		}
 	}
 	result := cloneSettings(settings)
 	s.mu.Unlock()
+	if err == nil {
+		s.applyAlwaysOnTop(result.AlwaysOnTop)
+		if !result.PreventSleepWhileRunning {
+			setSystemSleepPrevention(false)
+		}
+	}
 	return result, err
 }
 
@@ -1049,9 +1118,17 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 	if session != nil {
 		resetNonce = session.CollabResetNonce
 	}
+	developerInstructions := collaborationModeDeveloperInstructions(collaborationMode, resetNonce)
+	if guidance := sessionMemoryGuidance(session); guidance != "" {
+		if text, ok := developerInstructions.(string); ok && strings.TrimSpace(text) != "" {
+			developerInstructions = strings.TrimSpace(text) + "\n\n" + guidance
+		} else {
+			developerInstructions = guidance
+		}
+	}
 	collabSettings := map[string]any{
 		"model":                  model,
-		"developer_instructions": collaborationModeDeveloperInstructions(collaborationMode, resetNonce),
+		"developer_instructions": developerInstructions,
 	}
 	if effort != "" {
 		collabSettings["reasoning_effort"] = effort
@@ -1633,12 +1710,79 @@ func (s *AppService) ReadAccountRateLimits() (map[string]any, error) {
 	return result, err
 }
 
+// ReadAccountUsage prefers local usage.json.
+// When empty, it backfills from ~/.codex session rollouts (true local history),
+// then optionally seeds from ChatGPT account/usage/read as a fallback.
 func (s *AppService) ReadAccountUsage() (map[string]any, error) {
-	result, err := s.call("account/usage/read", nil)
-	if isChatGPTAuthenticationRequired(err) {
-		return map[string]any{}, nil
+	if local := s.localUsageSummary(); !localUsageResponseEmpty(local) {
+		return local, nil
 	}
-	return result, err
+
+	if s.backfillLocalUsageFromRollouts() {
+		if local := s.localUsageSummary(); !localUsageResponseEmpty(local) {
+			return local, nil
+		}
+	}
+
+	cloud, err := s.call("account/usage/read", nil)
+	if err == nil && len(cloud) > 0 {
+		_ = s.seedLocalUsageFromCloud(cloud)
+		if local := s.localUsageSummary(); !localUsageResponseEmpty(local) {
+			return local, nil
+		}
+		return cloud, nil
+	}
+
+	// Empty object => frontend normalizeAccountUsage(null); do not return fake zeros.
+	return map[string]any{}, nil
+}
+
+// RecordLocalTurnUsage lets the frontend persist per-turn totals (belt-and-suspenders with event hook).
+func (s *AppService) RecordLocalTurnUsage(threadID, turnID string, totalTokens float64) error {
+	tokens := int64(totalTokens)
+	if tokens <= 0 {
+		return nil
+	}
+	s.recordLocalTurnUsage(threadID, turnID, tokens, time.Now())
+	return nil
+}
+
+func localUsageResponseEmpty(summary map[string]any) bool {
+	if summary == nil {
+		return true
+	}
+	meta, _ := summary["summary"].(map[string]any)
+	var lifetime int64
+	if meta != nil {
+		lifetime = int64(anyToFloat(meta["lifetimeTokens"]))
+	}
+	if lifetime > 0 {
+		return false
+	}
+	buckets, _ := summary["dailyUsageBuckets"].([]map[string]any)
+	if len(buckets) > 0 {
+		return false
+	}
+	// JSON round-trip shape may be []any
+	if raw, ok := summary["dailyUsageBuckets"].([]any); ok && len(raw) > 0 {
+		return false
+	}
+	return true
+}
+
+func (s *AppService) maybeRecordLocalUsage(event codex.Event) {
+	if event.Type != "notification" || event.Method != "thread/tokenUsage/updated" {
+		return
+	}
+	data, ok := event.Data.(map[string]any)
+	if !ok {
+		return
+	}
+	threadID, turnID, tokens, ok := extractTurnTokens(data)
+	if !ok {
+		return
+	}
+	s.recordLocalTurnUsage(threadID, turnID, tokens, time.Now())
 }
 
 func (s *AppService) StartChatGPTLogin() (map[string]any, error) {
@@ -1669,9 +1813,55 @@ func (s *AppService) OpenExternal(rawURL string) error {
 	return s.app.Browser.OpenURL(parsed.String())
 }
 
+// SetPreventSleepActive keeps the machine awake while a Codex turn is running
+// when the user enabled Prevent sleep while running.
+func (s *AppService) SetPreventSleepActive(active bool) error {
+	if active && !s.Settings().PreventSleepWhileRunning {
+		active = false
+	}
+	setSystemSleepPrevention(active)
+	return nil
+}
+
+func (s *AppService) SetAlwaysOnTop(enabled bool) error {
+	s.applyAlwaysOnTop(enabled)
+	settings := s.Settings()
+	settings.AlwaysOnTop = enabled
+	s.mu.Lock()
+	err := writeSettings(s.settingsPath, settings)
+	if err == nil {
+		s.settings = cloneSettings(settings)
+	}
+	s.mu.Unlock()
+	return err
+}
+
+func (s *AppService) applyAlwaysOnTop(enabled bool) {
+	if s.app == nil {
+		return
+	}
+	if window, exists := s.app.Window.GetByName("main"); exists {
+		window.SetAlwaysOnTop(enabled)
+	}
+}
+
+func normalizeShortcutBinding(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	if len(value) > 48 {
+		return fallback
+	}
+	return value
+}
+
 func (s *AppService) OpenBrowser(rawURL string) (string, error) {
 	browserURL, err := normalizeBrowserURL(rawURL)
 	if err != nil {
+		return "", err
+	}
+	if err := s.assertBrowserHostAllowed(browserURL); err != nil {
 		return "", err
 	}
 	if window, exists := s.app.Window.GetByName("browser"); exists {
@@ -1734,6 +1924,84 @@ func (s *AppService) OpenBrowserDevTools() error {
 	return s.withBrowserWindow(func(window application.Window) { window.OpenDevTools() })
 }
 
+// SelectBrowserDownloadDir opens a folder picker for the preferred download directory.
+func (s *AppService) SelectBrowserDownloadDir() (string, error) {
+	current := strings.TrimSpace(s.Settings().BrowserDownloadDir)
+	path, err := s.app.Dialog.OpenFileWithOptions(&application.OpenFileDialogOptions{
+		Title:                "Choose download folder",
+		Message:              "Select the folder Nice Codex should open for browser downloads.",
+		ButtonText:           "Use this folder",
+		Directory:            current,
+		CanChooseDirectories: true,
+		CanChooseFiles:       false,
+		CanCreateDirectories: true,
+	}).PromptForSingleSelection()
+	if err != nil {
+		if isDialogCancelled(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil || !info.IsDir() {
+		return "", errors.New("download folder must be an existing directory")
+	}
+	return filepath.Clean(path), nil
+}
+
+// OpenBrowserDownloadDir reveals the configured download folder in the OS file manager.
+func (s *AppService) OpenBrowserDownloadDir() error {
+	path := strings.TrimSpace(s.Settings().BrowserDownloadDir)
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return errors.New("download folder is not configured")
+		}
+		path = filepath.Join(home, "Downloads")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return errors.New("download folder does not exist")
+	}
+	return openPathInOS(path)
+}
+
+func (s *AppService) assertBrowserHostAllowed(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Hostname() == "" {
+		return errors.New("enter a valid browser address")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	settings := s.Settings()
+	for _, item := range settings.BrowserBlockedHosts {
+		blocked := strings.ToLower(strings.TrimSpace(item))
+		if blocked == "" {
+			continue
+		}
+		if host == blocked || strings.HasSuffix(host, "."+blocked) {
+			return errors.New("this host is blocked in browser settings")
+		}
+	}
+	allowed := settings.BrowserAllowedHosts
+	if len(allowed) == 0 {
+		return nil
+	}
+	for _, item := range allowed {
+		entry := strings.ToLower(strings.TrimSpace(item))
+		if entry == "" {
+			continue
+		}
+		if host == entry || strings.HasSuffix(host, "."+entry) {
+			return nil
+		}
+	}
+	return errors.New("this host is not in the browser allow list")
+}
+
 func (s *AppService) withBrowserWindow(action func(application.Window)) error {
 	window, exists := s.app.Window.GetByName("browser")
 	if !exists {
@@ -1744,8 +2012,16 @@ func (s *AppService) withBrowserWindow(action func(application.Window)) error {
 }
 
 func (s *AppService) shutdown() {
+	setSystemSleepPrevention(false)
 	s.cancelExternalRuns()
 	s.stopAllTerminalSessions()
+	if s.schedulerStop != nil {
+		select {
+		case <-s.schedulerStop:
+		default:
+			close(s.schedulerStop)
+		}
+	}
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
@@ -1794,9 +2070,9 @@ func defaultSettings() UserSettings {
 		MultiAgentMode:       "explicitRequestOnly",
 		Sandbox:              "workspace-write",
 		ApprovalPolicy:       "on-request",
-		Theme:                "dark",
-		AccentColor:          "amber",
-		FontFamily:           "manrope",
+		Theme:                "light",
+		AccentColor:          "codex",
+		FontFamily:           "system",
 		TerminalProfile:      profile,
 		Language:             "zh-CN",
 		AutoConnect:          true,
@@ -1805,6 +2081,27 @@ func defaultSettings() UserSettings {
 		FollowUpBehavior:     "steer",
 		NotifyOnTurnComplete: true,
 		CustomInstructions:   "",
+		TranslucentSidebar:   true,
+		HighContrast:         false,
+		PointerCursor:        false,
+		ReduceMotion:         false,
+		UiFontSize:           "md",
+		CodeFontSize:         "md",
+		PreventSleepWhileRunning: false,
+		AlwaysOnTop:          false,
+		GitBranchPrefix:      "",
+		GitCommitPrefix:      "",
+		GitOpenPRAfterPush:   false,
+		GitPRBodyTemplate:    "",
+		BrowserAllowedHosts:  []string{},
+		BrowserBlockedHosts:  []string{},
+		BrowserDownloadDir:   "",
+		BrowserFullCDP:       false,
+		ShortcutCommandPalette: "Ctrl+K",
+		ShortcutNewThread:      "Ctrl+N",
+		ShortcutTerminal:       "Ctrl+`",
+		ShortcutBrowser:        "Ctrl+Shift+B",
+		OnboardingCompleted:    false,
 		RecentWorkspaces:     []string{},
 		CustomModels:         []string{},
 	}
@@ -1843,16 +2140,29 @@ func readSettings(path string) (UserSettings, error) {
 		settings.MultiAgentMode = "proactive"
 	}
 	settings.FollowUpBehavior = normalizeFollowUpBehavior(settings.FollowUpBehavior)
-	settings.CustomInstructions = sanitizeCustomInstructions(settings.CustomInstructions)
-	if strings.TrimSpace(settings.CustomInstructions) == "" {
-		if fromCodex := readCodexPersonalInstructions(); fromCodex != "" {
-			settings.CustomInstructions = fromCodex
-		}
-	}
+	// Disk AGENTS.md is the source of truth (matches Codex runtime).
+	settings.CustomInstructions = readCodexPersonalInstructions()
+	settings.UiFontSize = normalizeUiFontSize(settings.UiFontSize)
+	settings.CodeFontSize = normalizeCodeFontSize(settings.CodeFontSize)
 	settings.WorkMode = normalizeWorkMode(settings.WorkMode)
+	settings.ShortcutCommandPalette = normalizeShortcutBinding(settings.ShortcutCommandPalette, "Ctrl+K")
+	settings.ShortcutNewThread = normalizeShortcutBinding(settings.ShortcutNewThread, "Ctrl+N")
+	settings.ShortcutTerminal = normalizeShortcutBinding(settings.ShortcutTerminal, "Ctrl+`")
+	settings.ShortcutBrowser = normalizeShortcutBinding(settings.ShortcutBrowser, "Ctrl+Shift+B")
 	settings.ModelProvider = sanitizeWorkbenchProvider(settings.ModelProvider)
+	workspaceBeforeValidate := strings.TrimSpace(settings.Workspace)
+	// Existing installs already configured a workspace — skip first-run wizard.
+	migratedOnboarding := false
+	if !settings.OnboardingCompleted && workspaceBeforeValidate != "" {
+		settings.OnboardingCompleted = true
+		migratedOnboarding = true
+	}
 	if _, err := validateWorkspace(settings.Workspace); err != nil {
 		settings.Workspace = ""
+	}
+	// Persist the migration so a later empty/invalid workspace can't reopen the wizard.
+	if migratedOnboarding {
+		_ = writeSettings(path, settings)
 	}
 	return settings, nil
 }
@@ -2026,6 +2336,8 @@ func mimeFromImageExt(ext string) string {
 func cloneSettings(settings UserSettings) UserSettings {
 	settings.RecentWorkspaces = append([]string(nil), settings.RecentWorkspaces...)
 	settings.CustomModels = append([]string(nil), settings.CustomModels...)
+	settings.BrowserAllowedHosts = append([]string(nil), settings.BrowserAllowedHosts...)
+	settings.BrowserBlockedHosts = append([]string(nil), settings.BrowserBlockedHosts...)
 	return settings
 }
 
@@ -2035,6 +2347,53 @@ func normalizeFollowUpBehavior(value string) string {
 		return "queue"
 	}
 	return "steer"
+}
+
+func normalizeUiFontSize(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	switch value {
+	case "sm", "lg":
+		return value
+	default:
+		return "md"
+	}
+}
+
+func normalizeCodeFontSize(value string) string {
+	return normalizeUiFontSize(value)
+}
+
+func sanitizeShortText(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if max > 0 && len(value) > max {
+		value = value[:max]
+	}
+	return value
+}
+
+func sanitizeHostList(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		host := strings.ToLower(strings.TrimSpace(value))
+		host = strings.TrimPrefix(host, "https://")
+		host = strings.TrimPrefix(host, "http://")
+		if slash := strings.Index(host, "/"); slash >= 0 {
+			host = host[:slash]
+		}
+		if host == "" || len(host) > 180 {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		out = append(out, host)
+		if len(out) >= 64 {
+			break
+		}
+	}
+	return out
 }
 
 func sanitizeCustomInstructions(value string) string {
@@ -2058,16 +2417,94 @@ func resolveCodexHome() string {
 	return filepath.Join(home, ".codex")
 }
 
-func readCodexPersonalInstructions() string {
+func agentsDocCandidates(dir string) []string {
+	return []string{
+		filepath.Join(dir, "AGENTS.override.md"),
+		filepath.Join(dir, "AGENTS.md"),
+	}
+}
+
+func resolveAgentsDoc(dir string) (path string, source string, content string, exists bool, emptyFile bool) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "", "AGENTS.md", "", false, false
+	}
+	emptyPath := ""
+	emptySource := ""
+	for _, candidate := range agentsDocCandidates(dir) {
+		payload, err := os.ReadFile(candidate)
+		if err != nil {
+			continue
+		}
+		trimmed := sanitizeCustomInstructions(string(payload))
+		if trimmed == "" {
+			// Codex uses the first non-empty file; keep empty candidates for UI state only.
+			if emptyPath == "" {
+				emptyPath = candidate
+				emptySource = filepath.Base(candidate)
+			}
+			continue
+		}
+		return candidate, filepath.Base(candidate), trimmed, true, false
+	}
+	if emptyPath != "" {
+		return emptyPath, emptySource, "", false, true
+	}
+	return filepath.Join(dir, "AGENTS.md"), "AGENTS.md", "", false, false
+}
+
+func writeAgentsDoc(dir string, value string) (string, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "", errors.New("agents directory unavailable")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
 	home := resolveCodexHome()
-	if home == "" {
-		return ""
+	isPersonal := home != "" && filepath.Clean(dir) == filepath.Clean(home)
+	// Prefer updating an existing override; otherwise write AGENTS.md.
+	path := filepath.Join(dir, "AGENTS.md")
+	for _, candidate := range agentsDocCandidates(dir) {
+		if _, err := os.Stat(candidate); err == nil {
+			path = candidate
+			break
+		}
 	}
-	payload, err := os.ReadFile(filepath.Join(home, "AGENTS.md"))
-	if err != nil {
-		return ""
+	trimmed := sanitizeCustomInstructions(value)
+	if trimmed == "" {
+		if filepath.Base(path) == "AGENTS.override.md" {
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return path, err
+			}
+			fallback := filepath.Join(dir, "AGENTS.md")
+			if isPersonal {
+				return fallback, os.WriteFile(fallback, []byte(""), 0o600)
+			}
+			_ = os.Remove(fallback)
+			return fallback, nil
+		}
+		if isPersonal {
+			return path, os.WriteFile(path, []byte(""), 0o600)
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return path, err
+		}
+		return path, nil
 	}
-	return sanitizeCustomInstructions(string(payload))
+	if !strings.HasSuffix(trimmed, "\n") {
+		trimmed += "\n"
+	}
+	mode := os.FileMode(0o644)
+	if isPersonal {
+		mode = 0o600
+	}
+	return path, os.WriteFile(path, []byte(trimmed), mode)
+}
+
+func readCodexPersonalInstructions() string {
+	_, _, content, _, _ := resolveAgentsDoc(resolveCodexHome())
+	return content
 }
 
 func writeCodexPersonalInstructions(value string) error {
@@ -2075,46 +2512,41 @@ func writeCodexPersonalInstructions(value string) error {
 	if home == "" {
 		return errors.New("codex home unavailable")
 	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return err
-	}
-	path := filepath.Join(home, "AGENTS.md")
-	trimmed := sanitizeCustomInstructions(value)
-	if trimmed == "" {
-		// Keep an empty file so Codex still sees personal instructions cleared.
-		return os.WriteFile(path, []byte(""), 0o600)
-	}
-	if !strings.HasSuffix(trimmed, "\n") {
-		trimmed += "\n"
-	}
-	return os.WriteFile(path, []byte(trimmed), 0o600)
+	_, err := writeAgentsDoc(home, value)
+	return err
 }
 
-func projectAgentsPath(workspace string) string {
-	return filepath.Join(workspace, "AGENTS.md")
+// ReadGlobalInstructions returns personal Codex AGENTS.md content from disk.
+func (s *AppService) ReadGlobalInstructions() GlobalInstructionsInfo {
+	home := resolveCodexHome()
+	if home == "" {
+		return GlobalInstructionsInfo{}
+	}
+	path, source, content, exists, emptyFile := resolveAgentsDoc(home)
+	return GlobalInstructionsInfo{
+		Content:   content,
+		Path:      path,
+		Source:    source,
+		Exists:    exists,
+		EmptyFile: emptyFile,
+		Available: true,
+	}
 }
 
-func readProjectAgentsInstructions(workspace string) string {
-	payload, err := os.ReadFile(projectAgentsPath(workspace))
-	if err != nil {
-		return ""
+// SaveGlobalInstructions writes personal Codex AGENTS.md and mirrors settings cache.
+func (s *AppService) SaveGlobalInstructions(content string) (GlobalInstructionsInfo, error) {
+	trimmed := sanitizeCustomInstructions(content)
+	if err := writeCodexPersonalInstructions(trimmed); err != nil {
+		return GlobalInstructionsInfo{}, err
 	}
-	return sanitizeCustomInstructions(string(payload))
-}
-
-func writeProjectAgentsInstructions(workspace string, value string) error {
-	path := projectAgentsPath(workspace)
-	trimmed := sanitizeCustomInstructions(value)
-	if trimmed == "" {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
+	s.mu.Lock()
+	updated := cloneSettings(s.settings)
+	updated.CustomInstructions = readCodexPersonalInstructions()
+	if err := writeSettings(s.settingsPath, updated); err == nil {
+		s.settings = updated
 	}
-	if !strings.HasSuffix(trimmed, "\n") {
-		trimmed += "\n"
-	}
-	return os.WriteFile(path, []byte(trimmed), 0o644)
+	s.mu.Unlock()
+	return s.ReadGlobalInstructions(), nil
 }
 
 // ReadProjectInstructions returns the current workspace AGENTS.md content.
@@ -2127,11 +2559,16 @@ func (s *AppService) ReadProjectInstructions() ProjectInstructionsInfo {
 	if err != nil {
 		return ProjectInstructionsInfo{}
 	}
+	path, source, content, exists, emptyFile := resolveAgentsDoc(clean)
 	return ProjectInstructionsInfo{
-		Content:   readProjectAgentsInstructions(clean),
-		Workspace: clean,
-		Path:      projectAgentsPath(clean),
-		Available: true,
+		Content:       content,
+		Workspace:     clean,
+		WorkspaceName: filepath.Base(clean),
+		Path:          path,
+		Source:        source,
+		Exists:        exists,
+		EmptyFile:     emptyFile,
+		Available:     true,
 	}
 }
 
@@ -2145,15 +2582,10 @@ func (s *AppService) SaveProjectInstructions(content string) (ProjectInstruction
 	if err != nil {
 		return ProjectInstructionsInfo{}, err
 	}
-	if err := writeProjectAgentsInstructions(clean, content); err != nil {
+	if _, err := writeAgentsDoc(clean, content); err != nil {
 		return ProjectInstructionsInfo{}, err
 	}
-	return ProjectInstructionsInfo{
-		Content:   sanitizeCustomInstructions(content),
-		Workspace: clean,
-		Path:      projectAgentsPath(clean),
-		Available: true,
-	}, nil
+	return s.ReadProjectInstructions(), nil
 }
 
 func sanitizeCustomModels(items []string) []string {
@@ -2551,4 +2983,147 @@ func providerDisplayName(name string, entry map[string]any) string {
 		return strings.TrimSpace(display)
 	}
 	return name
+}
+
+func (s *AppService) ReadCodexFeatureFlags() CodexFeatureFlags {
+	return readCodexFeatureFlags()
+}
+
+func (s *AppService) SaveCodexFeatureFlags(flags CodexFeatureFlags) (CodexFeatureFlags, error) {
+	if err := writeCodexFeatureFlags(flags); err != nil {
+		return CodexFeatureFlags{}, err
+	}
+	s.mu.Lock()
+	updated := cloneSettings(s.settings)
+	updated.BrowserFullCDP = flags.BrowserUseFullCDP
+	_ = writeSettings(s.settingsPath, updated)
+	s.settings = updated
+	s.mu.Unlock()
+	return readCodexFeatureFlags(), nil
+}
+
+func (s *AppService) ListScheduledTasks() []ScheduledTask {
+	if s.scheduledTasks == nil {
+		return []ScheduledTask{}
+	}
+	return s.scheduledTasks.list()
+}
+
+func (s *AppService) SaveScheduledTask(task ScheduledTask) (ScheduledTask, error) {
+	if s.scheduledTasks == nil {
+		return ScheduledTask{}, errors.New("scheduler unavailable")
+	}
+	if task.Workspace == "" {
+		task.Workspace = s.Settings().Workspace
+	}
+	if task.Workspace != "" {
+		if clean, err := validateWorkspace(task.Workspace); err == nil {
+			task.Workspace = clean
+		}
+	}
+	return s.scheduledTasks.upsert(task)
+}
+
+func (s *AppService) DeleteScheduledTask(id string) error {
+	if s.scheduledTasks == nil {
+		return errors.New("scheduler unavailable")
+	}
+	return s.scheduledTasks.delete(id)
+}
+
+func (s *AppService) runScheduledTaskLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.schedulerStop:
+			return
+		case <-ticker.C:
+			s.tickScheduledTasks()
+		}
+	}
+}
+
+func (s *AppService) tickScheduledTasks() {
+	if s.scheduledTasks == nil {
+		return
+	}
+	now := time.Now().Unix()
+	for _, task := range s.scheduledTasks.due(now) {
+		err := s.executeScheduledTask(task)
+		s.scheduledTasks.markRan(task.ID, err)
+	}
+}
+
+func (s *AppService) executeScheduledTask(task ScheduledTask) error {
+	workspace := strings.TrimSpace(task.Workspace)
+	if workspace == "" {
+		workspace = s.Settings().Workspace
+	}
+	if workspace == "" {
+		return errors.New("no workspace for scheduled task")
+	}
+	clean, err := validateWorkspace(workspace)
+	if err != nil {
+		return err
+	}
+	runWorkspace := clean
+	if task.UseWorktree {
+		worktreePath, worktreeErr := ensureScheduledWorktree(clean, task.ID)
+		if worktreeErr != nil {
+			return worktreeErr
+		}
+		runWorkspace = worktreePath
+	}
+	settings := s.Settings()
+	collaborationMode := strings.TrimSpace(settings.CollaborationMode)
+	if collaborationMode == "" {
+		collaborationMode = "default"
+	}
+	note := "Scheduled task: " + task.Title
+	if task.UseWorktree && runWorkspace != clean {
+		note += " (git worktree: " + runWorkspace + ")"
+	}
+	prompt := strings.TrimSpace(task.Prompt)
+	if prompt == "" {
+		return errors.New("empty scheduled prompt")
+	}
+	fullPrompt := note + "\n\n" + prompt
+	record := s.createSessionRecord(runWorkspace, "", "", settings.Model, settings.Effort, collaborationMode, normalizeWorkMode(settings.WorkMode))
+	s.mu.Lock()
+	s.upsertSessionLocked(record)
+	s.mu.Unlock()
+	s.rememberThread(record.ID, runWorkspace)
+	_, err = s.SendMessage(SendMessageRequest{
+		ThreadID: record.ID,
+		Text:     fullPrompt,
+	})
+	return err
+}
+
+func ensureScheduledWorktree(workspace, taskID string) (string, error) {
+	if currentGitBranch(workspace) == "" {
+		return "", errors.New("prefer worktree requires a Git repository")
+	}
+	safeID := sanitizeFileToken(taskID)
+	if safeID == "" {
+		safeID = fmt.Sprintf("%d", time.Now().Unix())
+	}
+	if len(safeID) > 24 {
+		safeID = safeID[:24]
+	}
+	root := filepath.Join(workspace, ".nice-codex", "worktrees")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return "", err
+	}
+	target := filepath.Join(root, safeID)
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		return target, nil
+	}
+	branch := "nice-codex/sched-" + safeID
+	output, err := runGit(workspace, 90*time.Second, "worktree", "add", "-B", branch, target)
+	if err != nil {
+		return "", fmt.Errorf("git worktree add failed: %w: %s", err, strings.TrimSpace(output))
+	}
+	return target, nil
 }

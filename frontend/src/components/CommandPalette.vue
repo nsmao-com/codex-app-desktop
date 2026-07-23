@@ -128,6 +128,14 @@ const commands = computed<PaletteCommand[]>(() => [
     run: () => { void codexStore.compactActiveThread() },
   },
   {
+    id: 'memories',
+    label: t('memories.title'),
+    hint: '/memories',
+    icon: Sparkles,
+    keywords: 'memories 记忆',
+    run: () => { window.dispatchEvent(new Event('nice-codex:open-memories')) },
+  },
+  {
     id: 'plan',
     label: t('palette.togglePlan'),
     hint: 'Shift+Tab',

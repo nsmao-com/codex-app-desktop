@@ -2,6 +2,8 @@
 import type { ToasterProps } from "vue-sonner"
 import { CircleCheckIcon, InfoIcon, Loader2Icon, OctagonXIcon, TriangleAlertIcon, XIcon } from "@lucide/vue"
 import { Toaster as Sonner } from "vue-sonner"
+import 'vue-sonner/style.css'
+
 import { cn } from "@/lib/utils"
 
 const props = defineProps<ToasterProps>()
@@ -9,7 +11,7 @@ const props = defineProps<ToasterProps>()
 
 <template>
   <Sonner
-    :class="cn('toaster group', props.class)"
+    :class="cn('toaster group z-[200]', props.class)"
     :style="{
       '--normal-bg': 'var(--popover)',
       '--normal-text': 'var(--popover-foreground)',

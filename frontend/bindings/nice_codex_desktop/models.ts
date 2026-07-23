@@ -45,9 +45,45 @@ export interface BootstrapData {
     "updateRepo": string;
 }
 
+export interface CodexFeatureFlags {
+    "memoriesEnabled": boolean;
+    "memoriesGenerate": boolean;
+    "memoriesUse": boolean;
+    "memoriesDisableExternalContext": boolean;
+    "browserUseFullCDP": boolean;
+    "inAppBrowser": boolean;
+}
+
+export interface GitActionResult {
+    "ok": boolean;
+    "message": string;
+    "branch"?: string;
+    "prUrl"?: string;
+}
+
+export interface GitBranchRequest {
+    "name": string;
+}
+
 export interface GitChange {
     "status": string;
     "path": string;
+}
+
+export interface GitCommitRequest {
+    "message": string;
+}
+
+/**
+ * GlobalInstructionsInfo is the personal Codex AGENTS.md under CODEX_HOME.
+ */
+export interface GlobalInstructionsInfo {
+    "content": string;
+    "path": string;
+    "source": string;
+    "exists": boolean;
+    "emptyFile": boolean;
+    "available": boolean;
 }
 
 export interface MCPServerWriteRequest {
@@ -58,6 +94,22 @@ export interface MCPServerWriteRequest {
     "url": string;
     "transport": string;
     "env": { [_ in string]?: string } | null;
+}
+
+export interface MemoriesOverview {
+    "root": string;
+    "enabled": boolean;
+    "generate": boolean;
+    "use": boolean;
+    "files": MemoryFileInfo[] | null;
+    "summaryPreview": string;
+}
+
+export interface MemoryFileInfo {
+    "name": string;
+    "path": string;
+    "size": number;
+    "preview": string;
 }
 
 export interface PluginInstallRequest {
@@ -72,7 +124,11 @@ export interface PluginInstallRequest {
 export interface ProjectInstructionsInfo {
     "content": string;
     "workspace": string;
+    "workspaceName": string;
     "path": string;
+    "source": string;
+    "exists": boolean;
+    "emptyFile": boolean;
     "available": boolean;
 }
 
@@ -84,6 +140,21 @@ export interface ReviewStartRequest {
     "delivery": string;
 }
 
+export interface ScheduledTask {
+    "id": string;
+    "title": string;
+    "prompt": string;
+    "workspace": string;
+    "enabled": boolean;
+    "intervalMin": number;
+    "useWorktree": boolean;
+    "lastRunAt": number;
+    "nextRunAt": number;
+    "lastError"?: string;
+    "createdAt": number;
+    "updatedAt": number;
+}
+
 export interface SendMessageRequest {
     "threadId": string;
     "text": string;
@@ -93,6 +164,12 @@ export interface SendMessageRequest {
      * Per-turn mode override — mirrors official TUI SubmitUserMessageWithMode.
      */
     "collaborationMode"?: string;
+}
+
+export interface SessionMemoriesRequest {
+    "sessionId": string;
+    "useMemories": boolean | null;
+    "generateMemories": boolean | null;
 }
 
 export interface SessionPreferencesRequest {
@@ -137,6 +214,16 @@ export interface UpdateInfo {
     "publishedAt": string;
 }
 
+export interface UpdateProgress {
+    "phase": string;
+    "percent": number;
+    "bytesReceived": number;
+    "bytesTotal": number;
+    "message": string;
+    "error"?: string;
+    "readyToRestart": boolean;
+}
+
 export interface UserSettings {
     "workspace": string;
     "recentWorkspaces": string[] | null;
@@ -161,6 +248,27 @@ export interface UserSettings {
     "followUpBehavior": string;
     "notifyOnTurnComplete": boolean;
     "customInstructions": string;
+    "translucentSidebar": boolean;
+    "highContrast": boolean;
+    "pointerCursor": boolean;
+    "reduceMotion": boolean;
+    "uiFontSize": string;
+    "codeFontSize": string;
+    "preventSleepWhileRunning": boolean;
+    "alwaysOnTop": boolean;
+    "gitBranchPrefix": string;
+    "gitCommitPrefix": string;
+    "gitOpenPRAfterPush": boolean;
+    "gitPRBodyTemplate": string;
+    "browserAllowedHosts": string[] | null;
+    "browserBlockedHosts": string[] | null;
+    "browserDownloadDir": string;
+    "browserFullCDP": boolean;
+    "shortcutCommandPalette": string;
+    "shortcutNewThread": string;
+    "shortcutTerminal": string;
+    "shortcutBrowser": string;
+    "onboardingCompleted": boolean;
 }
 
 export interface WorkspaceInfo {
