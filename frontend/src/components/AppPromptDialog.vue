@@ -84,7 +84,7 @@ function onKeydown(event: KeyboardEvent): void {
     <DialogContent class="gap-0 overflow-hidden p-0 sm:max-w-md" :show-close-button="false">
       <DialogHeader class="border-b px-4 py-3">
         <DialogTitle class="text-[14px]">{{ title }}</DialogTitle>
-        <DialogDescription v-if="description" class="text-[12px] leading-5">
+        <DialogDescription v-if="description" class="whitespace-pre-line text-[12px] leading-5">
           {{ description }}
         </DialogDescription>
       </DialogHeader>

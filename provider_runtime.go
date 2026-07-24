@@ -32,10 +32,11 @@ type AgentProviderRuntime struct {
 }
 
 type AgentProviderModel struct {
-	Model       string `json:"model"`
-	DisplayName string `json:"displayName"`
-	Description string `json:"description"`
-	IsDefault   bool   `json:"isDefault"`
+	Model         string `json:"model"`
+	DisplayName   string `json:"displayName"`
+	Description   string `json:"description"`
+	IsDefault     bool   `json:"isDefault"`
+	ContextWindow int64  `json:"contextWindow"`
 }
 
 type AgentProviderReasoningEffort struct {
@@ -70,8 +71,8 @@ var tomlModelPattern = regexp.MustCompile(`(?m)^\s*(?:model|default_model)\s*=\s
 var geminiModelPattern = regexp.MustCompile(`gemini-[A-Za-z0-9._-]+`)
 
 func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime {
-	// NiceCodex is Codex-only: a full replacement for Codex Desktop.
-	return []AgentProviderRuntime{{
+	// Product runtimes: Codex workbench + Claude Code + optional Grok Build/API.
+	codexProvider := AgentProviderRuntime{
 		ID:           "codex",
 		Name:         "Codex",
 		Kind:         "codex",
@@ -82,7 +83,66 @@ func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime
 		Executable:   codexDetection.Binary,
 		Status:       providerStatus(codexDetection.Available, codexDetection.Available, true),
 		Capabilities: []string{"app-server", "streaming", "reasoning", "tools", "mcp", "skills", "diff", "resume"},
-	}}
+	}
+	claudeProvider := runProviderProbe(providerProbe{
+		id:           "claude",
+		name:         "Claude Code",
+		commands:     commandCandidates("claude"),
+		capabilities: []string{"cli", "streaming", "tools", "mcp"},
+		healthArgs:   []string{"auth", "status", "--json"},
+	})
+	// Fallback health probe when `auth status --json` is unavailable on older CLIs.
+	if claudeProvider.Installed && claudeProvider.Status == "configuration-error" {
+		if _, err := runProbeCommand(claudeProvider.Executable, []string{"--version"}, 3*time.Second); err == nil {
+			claudeProvider.Healthy = true
+			claudeProvider.RuntimeReady = true
+			claudeProvider.Status = providerStatus(true, true, true)
+			claudeProvider.Message = "Claude Code installed"
+		}
+	}
+	if claudeProvider.Installed && claudeProvider.Message == "" {
+		claudeProvider.Message = "Claude Code CLI"
+	}
+	if !claudeProvider.Installed {
+		claudeProvider.Message = "Install Claude Code CLI (claude) to use this runtime"
+	}
+	grokStatus := detectGrokRuntime()
+	grokModels, grokEfforts := discoverProviderCatalog("grok")
+	grokReady := grokStatus.BuildAvailable || grokStatus.APIConfigured
+	grokProvider := AgentProviderRuntime{
+		ID:               "grok",
+		Name:             "Grok",
+		Kind:             "grok",
+		Installed:        grokStatus.BuildAvailable || grokStatus.APIConfigured,
+		Healthy:          grokReady,
+		RuntimeReady:     grokReady,
+		Version:          grokStatus.BuildVersion,
+		Executable:       grokStatus.BuildExecutable,
+		Status:           providerStatus(grokStatus.BuildAvailable || grokStatus.APIConfigured, grokReady, true),
+		Message:          grokProviderMessage(grokStatus),
+		Capabilities:     []string{"build-cli", "api", "streaming", "reasoning", "tools"},
+		Models:           grokModels,
+		ReasoningEfforts: grokEfforts,
+	}
+	return []AgentProviderRuntime{codexProvider, claudeProvider, grokProvider}
+}
+
+func grokProviderMessage(status GrokRuntimeStatus) string {
+	parts := make([]string, 0, 2)
+	if status.BuildAvailable {
+		if status.BuildAuthenticated {
+			parts = append(parts, "Grok Build ready")
+		} else {
+			parts = append(parts, "Grok Build installed (auth may be required)")
+		}
+	}
+	if status.APIConfigured {
+		parts = append(parts, "Grok API key configured")
+	}
+	if len(parts) == 0 {
+		return "Install Grok Build CLI or configure a Grok API key"
+	}
+	return strings.Join(parts, " · ")
 }
 
 func runProviderProbe(probe providerProbe) AgentProviderRuntime {
@@ -128,13 +188,16 @@ func discoverProviderCatalog(kind string) ([]AgentProviderModel, []AgentProvider
 	}
 	models := make([]AgentProviderModel, 0, 8)
 	seen := make(map[string]int)
-	addModel := func(model, displayName, description string, isDefault bool) {
+	addModel := func(model, displayName, description string, isDefault bool, contextWindow int64) {
 		model = strings.TrimSpace(model)
 		if model == "" {
 			return
 		}
 		key := strings.ToLower(model)
 		if index, ok := seen[key]; ok {
+			if contextWindow > 0 && models[index].ContextWindow <= 0 {
+				models[index].ContextWindow = contextWindow
+			}
 			if isDefault {
 				for i := range models {
 					models[i].IsDefault = false
@@ -154,36 +217,42 @@ func discoverProviderCatalog(kind string) ([]AgentProviderModel, []AgentProvider
 		seen[key] = len(models)
 		models = append(models, AgentProviderModel{
 			Model: model, DisplayName: displayName, Description: description, IsDefault: isDefault,
+			ContextWindow: contextWindow,
 		})
 	}
 
 	switch kind {
 	case "claude":
 		for _, model := range discoverClaudeModels(home) {
-			addModel(model.Model, model.DisplayName, model.Description, model.IsDefault)
+			addModel(model.Model, model.DisplayName, model.Description, model.IsDefault, model.ContextWindow)
 		}
 	case "gemini":
 		if model := readEnvValue(filepath.Join(home, ".gemini", ".env"), "GEMINI_MODEL"); model != "" {
-			addModel(model, model, "Configured by GEMINI_MODEL", true)
+			addModel(model, model, "Configured by GEMINI_MODEL", true, 0)
 		}
 		for _, model := range readJSONModelValues(filepath.Join(home, ".gemini", "settings.json")) {
-			addModel(model, model, "Discovered in Gemini CLI configuration", len(models) == 0)
+			addModel(model, model, "Discovered in Gemini CLI configuration", len(models) == 0, 0)
 		}
 		for _, model := range readModelIDsFromDirectory(filepath.Join(home, ".gemini"), geminiModelPattern) {
-			addModel(model, model, "Discovered in local Gemini CLI data", len(models) == 0)
+			addModel(model, model, "Discovered in local Gemini CLI data", len(models) == 0, 0)
 		}
 	case "grok":
 		configured := readTOMLModel(filepath.Join(home, ".grok", "config.toml"))
 		if configured != "" {
-			addModel(configured, configured, "Configured in Grok Build", true)
+			addModel(configured, configured, "Configured in Grok Build", true, 0)
 		}
 		cacheModels, cacheEfforts := readGrokModelCache(filepath.Join(home, ".grok", "models_cache.json"))
 		for _, model := range cacheModels {
-			addModel(model.Model, model.DisplayName, model.Description, model.IsDefault || len(models) == 0)
+			addModel(model.Model, model.DisplayName, model.Description, model.IsDefault || len(models) == 0, model.ContextWindow)
 		}
 		if len(models) == 0 {
 			for _, model := range fallbackProviderModels(kind) {
-				addModel(model.Model, model.DisplayName, model.Description, model.IsDefault)
+				addModel(model.Model, model.DisplayName, model.Description, model.IsDefault, model.ContextWindow)
+			}
+		}
+		for i := range models {
+			if models[i].ContextWindow <= 0 {
+				models[i].ContextWindow = knownProviderContextWindow("grok", models[i].Model)
 			}
 		}
 		if len(cacheEfforts) > 0 {
@@ -192,7 +261,7 @@ func discoverProviderCatalog(kind string) ([]AgentProviderModel, []AgentProvider
 	}
 	if len(models) == 0 {
 		for _, model := range fallbackProviderModels(kind) {
-			addModel(model.Model, model.DisplayName, model.Description, model.IsDefault)
+			addModel(model.Model, model.DisplayName, model.Description, model.IsDefault, model.ContextWindow)
 		}
 	}
 	return models, fallbackReasoningEfforts(kind)
@@ -201,11 +270,13 @@ func discoverProviderCatalog(kind string) ([]AgentProviderModel, []AgentProvider
 func fallbackProviderModels(kind string) []AgentProviderModel {
 	switch kind {
 	case "claude":
+		// Official Claude Code short aliases (--model sonnet|opus|haiku|fable).
+		// Description always states the typical resolved model id for the workbench UI.
 		return []AgentProviderModel{
-			{Model: "sonnet", DisplayName: "Claude Sonnet", Description: "Latest Sonnet model available to Claude Code", IsDefault: true},
-			{Model: "opus", DisplayName: "Claude Opus", Description: "Latest Opus model available to Claude Code"},
-			{Model: "haiku", DisplayName: "Claude Haiku", Description: "Latest Haiku model available to Claude Code"},
-			{Model: "fable", DisplayName: "Claude Fable", Description: "Latest Fable model available to Claude Code"},
+			{Model: "sonnet", DisplayName: "Claude Sonnet", Description: "alias `sonnet` → latest Sonnet (e.g. claude-sonnet-4-6)", IsDefault: true, ContextWindow: 1_000_000},
+			{Model: "opus", DisplayName: "Claude Opus", Description: "alias `opus` → latest Opus (e.g. claude-opus-4-6 / claude-opus-4-8)", ContextWindow: 1_000_000},
+			{Model: "haiku", DisplayName: "Claude Haiku", Description: "alias `haiku` → latest Haiku (e.g. claude-haiku-4-5)", ContextWindow: 200_000},
+			{Model: "fable", DisplayName: "Claude Fable", Description: "alias `fable` → latest Fable (e.g. claude-fable-5)", ContextWindow: 1_000_000},
 		}
 	case "gemini":
 		return []AgentProviderModel{
@@ -213,10 +284,52 @@ func fallbackProviderModels(kind string) []AgentProviderModel {
 			{Model: "gemini-2.5-flash", DisplayName: "Gemini 2.5 Flash", Description: "Fast Gemini model"},
 		}
 	case "grok":
-		return []AgentProviderModel{{Model: "grok-4.5", DisplayName: "Grok 4.5", Description: "Grok Build frontier model", IsDefault: true}}
+		return []AgentProviderModel{{Model: "grok-4.5", DisplayName: "Grok 4.5", Description: "Grok Build frontier model", IsDefault: true, ContextWindow: 500_000}}
 	default:
 		return nil
 	}
+}
+
+// knownProviderContextWindow is the fallback for catalogs that do not expose
+// context-window metadata. Grok cache metadata still takes priority when present.
+func knownProviderContextWindow(kind, model string) int64 {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if lower == "" {
+		return 0
+	}
+	switch kind {
+	case "grok":
+		if lower == "grok-4.5" {
+			return 500_000
+		}
+	case "claude":
+		switch lower {
+		case "sonnet", "opus", "fable":
+			return 1_000_000
+		case "haiku":
+			return 200_000
+		}
+		if strings.Contains(lower, "haiku") {
+			return 200_000
+		}
+		if strings.Contains(lower, "fable-5") || strings.Contains(lower, "fable.5") {
+			return 1_000_000
+		}
+		if strings.Contains(lower, "sonnet-5") || strings.Contains(lower, "sonnet.5") ||
+			strings.Contains(lower, "sonnet-4-6") || strings.Contains(lower, "sonnet-4.6") {
+			return 1_000_000
+		}
+		if strings.Contains(lower, "opus-5") || strings.Contains(lower, "opus.5") ||
+			strings.Contains(lower, "opus-4-6") || strings.Contains(lower, "opus-4.6") ||
+			strings.Contains(lower, "opus-4-7") || strings.Contains(lower, "opus-4.7") ||
+			strings.Contains(lower, "opus-4-8") || strings.Contains(lower, "opus-4.8") {
+			return 1_000_000
+		}
+		if strings.Contains(lower, "claude") || strings.Contains(lower, "sonnet") || strings.Contains(lower, "opus") {
+			return 200_000
+		}
+	}
+	return 0
 }
 
 func fallbackReasoningEfforts(kind string) []AgentProviderReasoningEffort {
@@ -303,36 +416,33 @@ func discoverClaudeModels(home string) []AgentProviderModel {
 		displayName string
 		description string
 	}
+	// Always seed official short aliases so the composer never shows bare IDs without mapping.
+	// Env / settings.json can override the resolved target model id.
 	aliases := make([]aliasConfig, 0, 4)
 	for _, definition := range []struct {
-		alias  string
-		family string
-		prefix string
+		alias     string
+		family    string
+		prefix    string
+		defaultID string
 	}{
-		{alias: "fable", family: "Fable", prefix: "ANTHROPIC_DEFAULT_FABLE_MODEL"},
-		{alias: "opus", family: "Opus", prefix: "ANTHROPIC_DEFAULT_OPUS_MODEL"},
-		{alias: "sonnet", family: "Sonnet", prefix: "ANTHROPIC_DEFAULT_SONNET_MODEL"},
-		{alias: "haiku", family: "Haiku", prefix: "ANTHROPIC_DEFAULT_HAIKU_MODEL"},
+		{alias: "sonnet", family: "Sonnet", prefix: "ANTHROPIC_DEFAULT_SONNET_MODEL", defaultID: "claude-sonnet-4-6"},
+		{alias: "opus", family: "Opus", prefix: "ANTHROPIC_DEFAULT_OPUS_MODEL", defaultID: "claude-opus-4-6"},
+		{alias: "haiku", family: "Haiku", prefix: "ANTHROPIC_DEFAULT_HAIKU_MODEL", defaultID: "claude-haiku-4-5"},
+		{alias: "fable", family: "Fable", prefix: "ANTHROPIC_DEFAULT_FABLE_MODEL", defaultID: "claude-fable-5"},
 	} {
 		model := configuredEnv(definition.prefix)
 		name := configuredEnv(definition.prefix + "_NAME")
 		description := configuredEnv(definition.prefix + "_DESCRIPTION")
-		if model == "" && name == "" && description == "" {
-			continue
+		if model == "" {
+			model = definition.defaultID
 		}
 		// Keep labels clean for the workbench. Proxy nicknames like "gpt-5.6-sol"
 		// belong in the description, never in the primary model title.
 		displayName := "Claude " + definition.family
 		if description == "" {
-			if model != "" {
-				description = "Claude Code alias `" + definition.alias + "` → " + model
-				if name != "" {
-					description += " (" + name + ")"
-				}
-			} else if name != "" {
-				description = name
-			} else {
-				description = "Configured Claude Code " + definition.family + " alias"
+			description = "alias `" + definition.alias + "` → " + model
+			if name != "" && !strings.EqualFold(name, model) {
+				description += " (" + name + ")"
 			}
 		}
 		aliases = append(aliases, aliasConfig{
@@ -386,6 +496,7 @@ func discoverClaudeModels(home string) []AgentProviderModel {
 		seen[key] = len(models)
 		models = append(models, AgentProviderModel{
 			Model: model, DisplayName: displayName, Description: description, IsDefault: isDefault,
+			ContextWindow: knownProviderContextWindow("claude", model),
 		})
 	}
 	presentation := func(model string) (string, string) {
@@ -438,6 +549,9 @@ func discoverClaudeModels(home string) []AgentProviderModel {
 	// Prefer clean Claude Code aliases first.
 	for _, alias := range aliases {
 		addModel(alias.alias, alias.displayName, alias.description, strings.EqualFold(alias.alias, effectiveModel) || (alias.model != "" && strings.EqualFold(alias.model, effectiveModel)))
+		if index, ok := seen[strings.ToLower(alias.alias)]; ok {
+			models[index].ContextWindow = knownProviderContextWindow("claude", alias.model)
+		}
 	}
 	if effectiveModel != "" && keepClaudeModel(effectiveModel) {
 		if coveredByAlias(effectiveModel) {
@@ -620,6 +734,9 @@ func readGrokModelCache(path string) ([]AgentProviderModel, []AgentProviderReaso
 				Name                    string `json:"name"`
 				Description             string `json:"description"`
 				ReasoningEffort         string `json:"reasoning_effort"`
+				ContextWindow           int64  `json:"context_window"`
+				ContextWindowCamel      int64  `json:"contextWindow"`
+				MaxContextLength        int64  `json:"max_context_length"`
 				SupportsReasoningEffort bool   `json:"supports_reasoning_effort"`
 				ReasoningEfforts        []struct {
 					ID          string `json:"id"`
@@ -656,8 +773,19 @@ func readGrokModelCache(path string) ([]AgentProviderModel, []AgentProviderReaso
 		if name == "" {
 			name = model
 		}
+		contextWindow := info.ContextWindow
+		if contextWindow <= 0 {
+			contextWindow = info.ContextWindowCamel
+		}
+		if contextWindow <= 0 {
+			contextWindow = info.MaxContextLength
+		}
+		if contextWindow <= 0 {
+			contextWindow = knownProviderContextWindow("grok", model)
+		}
 		models = append(models, AgentProviderModel{
 			Model: model, DisplayName: name, Description: info.Description, IsDefault: index == 0,
+			ContextWindow: contextWindow,
 		})
 		if !info.SupportsReasoningEffort {
 			continue
@@ -690,7 +818,68 @@ func commandCandidates(name string) []string {
 	return []string{name}
 }
 
+// knownCLIRoots returns directories that ship CLI binaries but may be missing from a
+// GUI process PATH (Windows Explorer / macOS Finder / Dock launches).
+func knownCLIRoots() []string {
+	roots := make([]string, 0, 24)
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		roots = append(roots,
+			filepath.Join(home, ".grok", "bin"),
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, "go", "bin"),
+			filepath.Join(home, ".cargo", "bin"),
+			filepath.Join(home, ".volta", "bin"),
+			filepath.Join(home, ".yarn", "bin"),
+			filepath.Join(home, ".npm-global", "bin"),
+			filepath.Join(home, ".local", "share", "pnpm"),
+			filepath.Join(home, "Library", "pnpm"), // macOS pnpm
+			filepath.Join(home, ".asdf", "shims"),
+			filepath.Join(home, ".local", "share", "mise", "shims"),
+		)
+		// nvm latest node bin
+		nvmRoot := filepath.Join(home, ".nvm", "versions", "node")
+		if entries, err := os.ReadDir(nvmRoot); err == nil {
+			var best string
+			for _, entry := range entries {
+				if entry.IsDir() && (best == "" || entry.Name() > best) {
+					best = entry.Name()
+				}
+			}
+			if best != "" {
+				roots = append(roots, filepath.Join(nvmRoot, best, "bin"))
+			}
+		}
+	}
+	// Windows user app roots
+	if local := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); local != "" {
+		roots = append(roots,
+			filepath.Join(local, "Programs"),
+			filepath.Join(local, "pnpm"),
+			filepath.Join(local, "Yarn", "bin"),
+		)
+	}
+	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+		roots = append(roots, filepath.Join(appData, "npm"))
+	}
+	// macOS / Linux system package managers
+	roots = append(roots,
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/home/linuxbrew/.linuxbrew/bin",
+		"/snap/bin",
+	)
+	if grokHome := strings.TrimSpace(os.Getenv("GROK_HOME")); grokHome != "" {
+		roots = append(roots, filepath.Join(grokHome, "bin"))
+	}
+	if pnpmHome := strings.TrimSpace(os.Getenv("PNPM_HOME")); pnpmHome != "" {
+		roots = append(roots, pnpmHome)
+	}
+	return roots
+}
+
 func findCommand(candidates []string) string {
+	// Ensure PATH includes platform-specific Node/CLI roots before LookPath.
+	codex.EnrichPathForLookups()
 	for _, candidate := range candidates {
 		path, err := exec.LookPath(candidate)
 		if err == nil {
@@ -699,6 +888,25 @@ func findCommand(candidates []string) string {
 				return absolute
 			}
 			return path
+		}
+	}
+	// GUI apps often miss user PATH entries (Windows npm, macOS Homebrew/nvm, ~/.grok/bin).
+	for _, root := range knownCLIRoots() {
+		for _, candidate := range candidates {
+			full := filepath.Join(root, candidate)
+			info, err := os.Stat(full)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			// Unix: require executable bit when present.
+			if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
+				continue
+			}
+			absolute, absoluteErr := filepath.Abs(full)
+			if absoluteErr == nil {
+				return absolute
+			}
+			return full
 		}
 	}
 	return ""

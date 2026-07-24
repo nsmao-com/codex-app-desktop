@@ -36,8 +36,8 @@ func main() {
 	if !boot.Codex.Available {
 		problems = append(problems, "Codex CLI not available")
 	}
-	if len(boot.AgentProviders) != 1 || boot.AgentProviders[0].Kind != "codex" {
-		problems = append(problems, fmt.Sprintf("Bootstrap agentProviders=%d want Codex-only", len(boot.AgentProviders)))
+	if len(boot.AgentProviders) < 1 || boot.AgentProviders[0].Kind != "codex" {
+		problems = append(problems, fmt.Sprintf("Bootstrap agentProviders=%d want Codex first", len(boot.AgentProviders)))
 	}
 
 	data, _ := providers["data"].([]any)

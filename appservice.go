@@ -23,6 +23,7 @@ import (
 
 type AppService struct {
 	app              *application.App
+	pluginAssets     *pluginAssetServer
 	mu               sync.Mutex
 	client           *codex.Client
 	settings         UserSettings
@@ -33,6 +34,9 @@ type AppService struct {
 	agentProviders   []AgentProviderRuntime
 	sessions         map[string]*SessionRecord
 	externalRuns     map[string]*externalRun
+	grokAPISessions  map[string]*GrokAPISession
+	grokApprovals     map[string]*grokPendingApproval
+	claudeSessions   map[string]*claudeStoredSession
 	scheduledTasks   *scheduledTaskStore
 	schedulerStop    chan struct{}
 	updateState      updateDownloadState
@@ -40,6 +44,7 @@ type AppService struct {
 
 type BootstrapData struct {
 	Codex            codex.Detection        `json:"codex"`
+	Grok             GrokRuntimeStatus      `json:"grok"`
 	AgentProviders   []AgentProviderRuntime `json:"agentProviders"`
 	Settings         UserSettings           `json:"settings"`
 	Workspace        *WorkspaceInfo         `json:"workspace,omitempty"`
@@ -49,8 +54,34 @@ type BootstrapData struct {
 }
 
 type UserSettings struct {
+	ActiveRuntime          string   `json:"activeRuntime"`
 	Workspace              string   `json:"workspace"`
 	RecentWorkspaces       []string `json:"recentWorkspaces"`
+	GrokWorkspace          string   `json:"grokWorkspace"`
+	GrokRecentWorkspaces   []string `json:"grokRecentWorkspaces"`
+	GrokBackend            string   `json:"grokBackend"`
+	GrokBuildModel         string   `json:"grokBuildModel"`
+	GrokAPIModel           string   `json:"grokAPIModel"`
+	GrokEffort             string   `json:"grokEffort"`
+	GrokSandbox            string   `json:"grokSandbox"`
+	GrokApprovalPolicy     string   `json:"grokApprovalPolicy"`
+	GrokWebSearch          bool     `json:"grokWebSearch"`
+	GrokXSearch            bool     `json:"grokXSearch"`
+	// GrokAPIKey / GrokAPIBaseURL configure NiceCodex Grok API mode (OpenAI-compatible).
+	// Empty key falls back to XAI_API_KEY / GROK_API_KEY env; empty base uses https://api.x.ai/v1.
+	GrokAPIKey             string   `json:"grokAPIKey"`
+	GrokAPIBaseURL         string   `json:"grokAPIBaseURL"`
+	// Claude Code independent stack (workspace / model / permissions).
+	ClaudeWorkspace        string   `json:"claudeWorkspace"`
+	ClaudeRecentWorkspaces []string `json:"claudeRecentWorkspaces"`
+	ClaudeModel            string   `json:"claudeModel"`
+	ClaudeEffort           string   `json:"claudeEffort"`
+	ClaudeSandbox          string   `json:"claudeSandbox"`
+	ClaudeApprovalPolicy   string   `json:"claudeApprovalPolicy"`
+	// ClaudePermissionMode is the official Claude Code --permission-mode value when set:
+	// acceptEdits | auto | bypassPermissions | manual | dontAsk | plan.
+	// Empty falls back to ClaudeSandbox + ClaudeApprovalPolicy mapping.
+	ClaudePermissionMode string `json:"claudePermissionMode"`
 	Model                  string   `json:"model"`
 	ModelProvider          string   `json:"modelProvider"`
 	CustomModels           []string `json:"customModels"`
@@ -92,6 +123,11 @@ type UserSettings struct {
 	ShortcutNewThread      string   `json:"shortcutNewThread"`
 	ShortcutTerminal       string   `json:"shortcutTerminal"`
 	ShortcutBrowser        string   `json:"shortcutBrowser"`
+	// CodexClient* is the app-server initialize clientInfo sent upstream as User-Agent.
+	// Empty values fall back to official Codex Desktop defaults (or NICE_CODEX_CLIENT_* env).
+	CodexClientName        string   `json:"codexClientName"`
+	CodexClientTitle       string   `json:"codexClientTitle"`
+	CodexClientVersion     string   `json:"codexClientVersion"`
 	OnboardingCompleted    bool     `json:"onboardingCompleted"`
 }
 
@@ -173,7 +209,7 @@ type SkillConfigRequest struct {
 	Enabled bool   `json:"enabled"`
 }
 
-func NewAppService(app *application.App) *AppService {
+func NewAppService(app *application.App, pluginAssets *pluginAssetServer) *AppService {
 	settingsPath := resolveSettingsPath()
 	settings := defaultSettings()
 	if loaded, err := readSettings(settingsPath); err == nil {
@@ -182,6 +218,7 @@ func NewAppService(app *application.App) *AppService {
 
 	service := &AppService{
 		app:              app,
+		pluginAssets:     pluginAssets,
 		settings:         settings,
 		settingsPath:     settingsPath,
 		allowedThreads:   make(map[string]string),
@@ -189,6 +226,9 @@ func NewAppService(app *application.App) *AppService {
 		terminalSessions: make(map[string]*terminalSession),
 		sessions:         loadSessions(settingsPath),
 		externalRuns:     make(map[string]*externalRun),
+		grokAPISessions:  loadGrokAPISessions(settingsPath),
+		grokApprovals:     make(map[string]*grokPendingApproval),
+		claudeSessions:   loadClaudeSessions(settingsPath),
 		scheduledTasks:   newScheduledTaskStore(settingsPath),
 		schedulerStop:    make(chan struct{}),
 	}
@@ -213,6 +253,7 @@ func (s *AppService) Bootstrap() BootstrapData {
 	s.mu.Unlock()
 	data := BootstrapData{
 		Codex:            codexDetection,
+		Grok:             s.RefreshGrokRuntime(),
 		AgentProviders:   agentProviders,
 		Settings:         settings,
 		TerminalProfiles: listTerminalProfiles(),
@@ -220,8 +261,20 @@ func (s *AppService) Bootstrap() BootstrapData {
 		UpdateRepo:       GitHubRepo,
 	}
 	s.applyAlwaysOnTop(settings.AlwaysOnTop)
-	if settings.Workspace != "" {
-		workspace := inspectWorkspace(settings.Workspace)
+	// Surface the workspace for the currently active product runtime.
+	activePath := strings.TrimSpace(settings.Workspace)
+	switch normalizeRuntime(settings.ActiveRuntime) {
+	case "grok":
+		if gw := strings.TrimSpace(settings.GrokWorkspace); gw != "" {
+			activePath = gw
+		}
+	case "claude":
+		if cw := strings.TrimSpace(settings.ClaudeWorkspace); cw != "" {
+			activePath = cw
+		}
+	}
+	if activePath != "" {
+		workspace := inspectWorkspace(activePath)
 		data.Workspace = &workspace
 	}
 	return data
@@ -237,11 +290,37 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	current := s.Settings()
 	settings.Workspace = current.Workspace
 	settings.RecentWorkspaces = current.RecentWorkspaces
+	settings.GrokWorkspace = current.GrokWorkspace
+	settings.GrokRecentWorkspaces = current.GrokRecentWorkspaces
+	settings.ClaudeWorkspace = current.ClaudeWorkspace
+	settings.ClaudeRecentWorkspaces = current.ClaudeRecentWorkspaces
 	settings.Workspace = strings.TrimSpace(settings.Workspace)
 	settings.Model = strings.TrimSpace(settings.Model)
 	settings.ModelProvider = "" // Codex-only: never persist Claude/Gemini/Grok workbench providers
 	settings.CustomModels = sanitizeCustomModels(settings.CustomModels)
 	settings.Effort = strings.TrimSpace(settings.Effort)
+	settings.ActiveRuntime = normalizeRuntime(settings.ActiveRuntime)
+	settings.GrokBackend = normalizeGrokBackend(settings.GrokBackend)
+	settings.GrokBuildModel = sanitizeShortText(settings.GrokBuildModel, 160)
+	settings.GrokAPIModel = sanitizeShortText(settings.GrokAPIModel, 160)
+	settings.GrokAPIKey = sanitizeShortText(settings.GrokAPIKey, 512)
+	settings.GrokAPIBaseURL = sanitizeShortText(settings.GrokAPIBaseURL, 512)
+	settings.GrokEffort = normalizeGrokEffort(settings.GrokEffort)
+	settings.ClaudeModel = sanitizeShortText(settings.ClaudeModel, 160)
+	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
+	if !isAllowed(settings.GrokSandbox, "read-only", "workspace-write", "danger-full-access") {
+		return UserSettings{}, errors.New("invalid Grok sandbox mode")
+	}
+	if !isAllowed(settings.GrokApprovalPolicy, "on-request", "never") {
+		return UserSettings{}, errors.New("invalid Grok approval policy")
+	}
+	if !isAllowed(settings.ClaudeSandbox, "read-only", "workspace-write", "danger-full-access") {
+		return UserSettings{}, errors.New("invalid Claude sandbox mode")
+	}
+	if !isAllowed(settings.ClaudeApprovalPolicy, "on-request", "never") {
+		return UserSettings{}, errors.New("invalid Claude approval policy")
+	}
+	settings.ClaudePermissionMode = normalizeClaudePermissionMode(settings.ClaudePermissionMode)
 	if !isAllowed(settings.Theme, "dark", "light", "system") {
 		return UserSettings{}, errors.New("invalid theme")
 	}
@@ -293,6 +372,9 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	settings.ShortcutNewThread = normalizeShortcutBinding(settings.ShortcutNewThread, "Ctrl+N")
 	settings.ShortcutTerminal = normalizeShortcutBinding(settings.ShortcutTerminal, "Ctrl+`")
 	settings.ShortcutBrowser = normalizeShortcutBinding(settings.ShortcutBrowser, "Ctrl+Shift+B")
+	settings.CodexClientName = sanitizeCodexClientField(settings.CodexClientName, 64)
+	settings.CodexClientTitle = sanitizeCodexClientField(settings.CodexClientTitle, 80)
+	settings.CodexClientVersion = sanitizeCodexClientField(settings.CodexClientVersion, 32)
 	if settings.Effort == "" {
 		settings.Effort = "high"
 	}
@@ -455,7 +537,8 @@ func (s *AppService) UseWorkspace(path string) (WorkspaceInfo, error) {
 }
 
 func (s *AppService) RefreshWorkspace() (WorkspaceInfo, error) {
-	workspace := s.Settings().Workspace
+	// Respect the active product runtime so Grok mode doesn't refresh Codex cwd.
+	workspace := strings.TrimSpace(s.activeWorkspacePath())
 	if workspace == "" {
 		return WorkspaceInfo{}, errors.New("no workspace is selected")
 	}
@@ -474,13 +557,31 @@ func (s *AppService) StartCodex(workspace string) error {
 	if client == nil {
 		return errors.New("Codex client is not initialized")
 	}
-	status := client.Status()
-	if status.Running && filepath.Clean(status.Workspace) != cleanPath {
+	// Restart when already running so reconnect (and updated clientInfo) take effect.
+	if client.Status().Running {
 		if err := client.Stop(); err != nil {
 			return err
 		}
 	}
-	return client.Start(s.app.Context(), cleanPath)
+	settings := s.Settings()
+	name := strings.TrimSpace(settings.CodexClientName)
+	title := strings.TrimSpace(settings.CodexClientTitle)
+	version := strings.TrimSpace(settings.CodexClientVersion)
+	// Best-effort: stamp provider http_headers.User-Agent so custom base_url
+	// reverse proxies see an official Codex Desktop identity.
+	cliVersion := ""
+	if detection := codex.Detect(); detection.Available {
+		cliVersion = detection.Version
+	}
+	if err := ensureCodexProviderUserAgent(name, title, version, cliVersion); err != nil {
+		// Non-fatal: app-server clientInfo + originator env still apply.
+		_ = err
+	}
+	return client.Start(s.app.Context(), cleanPath, codex.ClientInfo{
+		Name:    name,
+		Title:   title,
+		Version: version,
+	})
 }
 
 func (s *AppService) StopCodex() error {
@@ -642,7 +743,8 @@ func (s *AppService) ResumeThread(threadID string) (map[string]any, error) {
 		return s.sessionResponse(session), nil
 	}
 	backendID := s.codexBackendID(threadID, workspace)
-	if err := s.ensureThreadInWorkspace(backendID, workspace); err != nil {
+	result, err := s.loadBackendThread(backendID, workspace, settings, session)
+	if err != nil {
 		// Fall back to local index if the backend thread is gone.
 		if session != nil {
 			s.rememberThread(threadID, workspace)
@@ -650,32 +752,9 @@ func (s *AppService) ResumeThread(threadID string) (map[string]any, error) {
 		}
 		return nil, err
 	}
-	params := map[string]any{
-		"threadId":       backendID,
-		"cwd":            workspace,
-		"sandbox":        normalizeSandbox(settings.Sandbox),
-		"approvalPolicy": normalizeApproval(settings.ApprovalPolicy),
-	}
-	model := settings.Model
-	providerID := settings.ModelProvider
-	if session != nil {
-		if session.Model != "" {
-			model = session.Model
-		}
-		providerID = session.ProviderID
-	}
-	if externalProviderKind(providerID) == "" && model != "" {
-		params["model"] = model
-	}
-	if externalProviderKind(providerID) == "" && providerID != "" {
-		params["modelProvider"] = providerID
-	}
-	result, err := s.call("thread/resume", params)
-	if err == nil {
-		s.rememberThread(threadID, workspace)
-		s.attachSessionIdentity(result, session, threadID)
-	}
-	return result, err
+	s.rememberThread(threadID, workspace)
+	s.attachSessionIdentity(result, session, threadID)
+	return result, nil
 }
 
 func (s *AppService) ForkThread(threadID string) (map[string]any, error) {
@@ -973,7 +1052,8 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 	if strings.TrimSpace(threadID) == "" {
 		return nil, errors.New("thread id is required")
 	}
-	workspace := s.Settings().Workspace
+	settings := s.Settings()
+	workspace := settings.Workspace
 	session := s.sessionFor(threadID, workspace)
 	if session != nil && isExternalSession(session) {
 		s.rememberThread(threadID, workspace)
@@ -984,15 +1064,13 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 		return s.sessionResponse(session), nil
 	}
 	backendID := s.codexBackendID(threadID, workspace)
-	if err := s.ensureThreadInWorkspace(backendID, workspace); err != nil {
+	// After app-server restart, thread/read fails until thread/resume reloads history.
+	result, err := s.loadBackendThread(backendID, workspace, settings, session)
+	if err != nil {
 		if session != nil {
 			s.rememberThread(threadID, workspace)
 			return s.sessionResponse(session), nil
 		}
-		return nil, err
-	}
-	result, err := s.call("thread/read", map[string]any{"threadId": backendID, "includeTurns": true})
-	if err != nil {
 		return nil, err
 	}
 	s.attachSessionIdentity(result, session, threadID)
@@ -1033,6 +1111,14 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 		backendID = ensured
 	} else if ref := s.codexBackendID(request.ThreadID, workspace); ref != "" {
 		backendID = ref
+	}
+
+	// App-server process restarts drop in-memory threads; turn/start then 422s
+	// "thread not found". Always re-bind before starting a turn.
+	if session == nil || session.BackendRef != "" {
+		if _, err := s.loadBackendThread(backendID, workspace, settings, session); err != nil {
+			return nil, fmt.Errorf("load thread for send: %w", err)
+		}
 	}
 
 	input, err := s.buildUserInput(request.Text, request.Images)
@@ -1138,6 +1224,12 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 		"settings": collabSettings,
 	}
 	result, err := s.call("turn/start", params)
+	if err != nil && isThreadNotFoundError(err) {
+		// Race: process restarted between load and turn/start — resume once more.
+		if _, loadErr := s.loadBackendThread(backendID, workspace, settings, session); loadErr == nil {
+			result, err = s.call("turn/start", params)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1378,7 +1470,14 @@ func (s *AppService) ListPlugins() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.call("plugin/list", map[string]any{"cwds": []string{workspace}})
+	result, err := s.call("plugin/list", map[string]any{"cwds": []string{workspace}})
+	if err != nil {
+		return nil, err
+	}
+	if s.pluginAssets != nil {
+		s.pluginAssets.updatePluginIconURLs(result)
+	}
+	return result, nil
 }
 
 func (s *AppService) InstallPlugin(request PluginInstallRequest) (map[string]any, error) {
@@ -1710,40 +1809,74 @@ func (s *AppService) ReadAccountRateLimits() (map[string]any, error) {
 	return result, err
 }
 
-// ReadAccountUsage prefers local usage.json.
-// When empty, it backfills from ~/.codex session rollouts (true local history),
-// then optionally seeds from ChatGPT account/usage/read as a fallback.
+// ReadAccountUsage returns spend for the *active* runtime only (codex | grok | claude).
+// Codex may backfill from ~/.codex rollouts / ChatGPT cloud when its local bucket is empty.
+// Grok backfills input/output/cache/reasoning from ~/.grok session updates.jsonl when missing.
+// Claude backfills from ~/.claude/projects/**/*.jsonl assistant message.usage when missing.
 func (s *AppService) ReadAccountUsage() (map[string]any, error) {
-	if local := s.localUsageSummary(); !localUsageResponseEmpty(local) {
+	runtime := normalizeUsageRuntime(s.Settings().ActiveRuntime)
+
+	// Grok: rebuild breakdown from local sessions when the bucket is empty or total-only.
+	if runtime == "grok" {
+		_ = s.backfillGrokUsageFromSessions()
+	}
+	// Claude: rebuild from official Claude Code project transcripts.
+	if runtime == "claude" {
+		_ = s.backfillClaudeUsageFromProjects()
+	}
+	// Codex: rebuild input/output/cache from ~/.codex rollouts when missing detail.
+	if runtime == "codex" {
+		_ = s.backfillLocalUsageFromRollouts()
+	}
+
+	if local := s.localUsageSummaryFor(runtime); !localUsageResponseEmpty(local) {
 		return local, nil
 	}
 
-	if s.backfillLocalUsageFromRollouts() {
-		if local := s.localUsageSummary(); !localUsageResponseEmpty(local) {
-			return local, nil
+	// Cloud seed is Codex-only (ChatGPT account usage).
+	if runtime == "codex" {
+		cloud, err := s.call("account/usage/read", nil)
+		if err == nil && len(cloud) > 0 {
+			_ = s.seedLocalUsageFromCloud(cloud)
+			if local := s.localUsageSummaryFor("codex"); !localUsageResponseEmpty(local) {
+				return local, nil
+			}
+			return cloud, nil
 		}
-	}
-
-	cloud, err := s.call("account/usage/read", nil)
-	if err == nil && len(cloud) > 0 {
-		_ = s.seedLocalUsageFromCloud(cloud)
-		if local := s.localUsageSummary(); !localUsageResponseEmpty(local) {
-			return local, nil
-		}
-		return cloud, nil
 	}
 
 	// Empty object => frontend normalizeAccountUsage(null); do not return fake zeros.
-	return map[string]any{}, nil
+	return map[string]any{"runtime": runtime, "source": "local"}, nil
 }
 
 // RecordLocalTurnUsage lets the frontend persist per-turn totals (belt-and-suspenders with event hook).
+// Always attributes to the Codex runtime (frontend Codex store only calls this).
 func (s *AppService) RecordLocalTurnUsage(threadID, turnID string, totalTokens float64) error {
 	tokens := int64(totalTokens)
 	if tokens <= 0 {
 		return nil
 	}
-	s.recordLocalTurnUsage(threadID, turnID, tokens, time.Now())
+	s.persistTurnUsage("codex", threadID, turnID, tokenBreakdown{Total: tokens}, time.Now())
+	return nil
+}
+
+// RecordLocalTurnUsageDetailed persists a full input/output/cache/reasoning breakdown for a runtime.
+func (s *AppService) RecordLocalTurnUsageDetailed(
+	runtime, threadID, turnID string,
+	inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens, totalTokens float64,
+) error {
+	b := tokenBreakdown{
+		Input:     int64(inputTokens),
+		Cached:    int64(cachedInputTokens),
+		Output:    int64(outputTokens),
+		Reasoning: int64(reasoningOutputTokens),
+		Total:     int64(totalTokens),
+	}
+	b.normalize()
+	if !b.valid() {
+		return nil
+	}
+	s.persistTurnUsage(runtime, threadID, turnID, b, time.Now())
 	return nil
 }
 
@@ -1778,11 +1911,12 @@ func (s *AppService) maybeRecordLocalUsage(event codex.Event) {
 	if !ok {
 		return
 	}
-	threadID, turnID, tokens, ok := extractTurnTokens(data)
+	threadID, turnID, b, ok := extractTurnTokenBreakdown(data)
 	if !ok {
 		return
 	}
-	s.recordLocalTurnUsage(threadID, turnID, tokens, time.Now())
+	// Official Codex app-server events always belong to the codex runtime.
+	s.persistTurnUsage("codex", threadID, turnID, b, time.Now())
 }
 
 func (s *AppService) StartChatGPTLogin() (map[string]any, error) {
@@ -2063,7 +2197,25 @@ func defaultSettings() UserSettings {
 			profile = "bash"
 		}
 	}
-	return UserSettings{
+		return UserSettings{
+			ActiveRuntime:          "codex",
+			GrokBackend:            "build",
+			GrokBuildModel:         "",
+			GrokAPIModel:           "grok-4.5",
+			GrokAPIKey:             "",
+			GrokAPIBaseURL:         "",
+			GrokEffort:             "high",
+			GrokSandbox:            "workspace-write",
+			GrokApprovalPolicy:     "on-request",
+			GrokWebSearch:          false,
+			GrokXSearch:            false,
+			ClaudeWorkspace:        "",
+			ClaudeRecentWorkspaces: []string{},
+			ClaudeModel:            "sonnet",
+			ClaudeEffort:           "high",
+			ClaudeSandbox:          "workspace-write",
+			ClaudeApprovalPolicy:   "on-request",
+			ClaudePermissionMode:   "acceptEdits",
 		Effort:               "high",
 		CollaborationMode:    "default",
 		Personality:          "pragmatic",
@@ -2078,7 +2230,7 @@ func defaultSettings() UserSettings {
 		AutoConnect:          true,
 		WorkMode:             "code",
 		SendWithModifier:      false,
-		FollowUpBehavior:     "steer",
+		FollowUpBehavior:     "queue",
 		NotifyOnTurnComplete: true,
 		CustomInstructions:   "",
 		TranslucentSidebar:   true,
@@ -2101,8 +2253,13 @@ func defaultSettings() UserSettings {
 		ShortcutNewThread:      "Ctrl+N",
 		ShortcutTerminal:       "Ctrl+`",
 		ShortcutBrowser:        "Ctrl+Shift+B",
+		// Empty = use official Codex Desktop defaults at handshake time.
+		CodexClientName:        "",
+		CodexClientTitle:       "",
+		CodexClientVersion:     "",
 		OnboardingCompleted:    false,
-		RecentWorkspaces:     []string{},
+			RecentWorkspaces:     []string{},
+			GrokRecentWorkspaces: []string{},
 		CustomModels:         []string{},
 	}
 }
@@ -2135,6 +2292,7 @@ func readSettings(path string) (UserSettings, error) {
 		return UserSettings{}, err
 	}
 	settings.RecentWorkspaces = sanitizeRecentWorkspaces(settings.RecentWorkspaces)
+	settings.GrokRecentWorkspaces = sanitizeRecentWorkspaces(settings.GrokRecentWorkspaces)
 	settings.CustomModels = sanitizeCustomModels(settings.CustomModels)
 	if settings.MultiAgentMode == "proactiveAgents" {
 		settings.MultiAgentMode = "proactive"
@@ -2150,6 +2308,32 @@ func readSettings(path string) (UserSettings, error) {
 	settings.ShortcutTerminal = normalizeShortcutBinding(settings.ShortcutTerminal, "Ctrl+`")
 	settings.ShortcutBrowser = normalizeShortcutBinding(settings.ShortcutBrowser, "Ctrl+Shift+B")
 	settings.ModelProvider = sanitizeWorkbenchProvider(settings.ModelProvider)
+	settings.ActiveRuntime = normalizeRuntime(settings.ActiveRuntime)
+	settings.GrokBackend = normalizeGrokBackend(settings.GrokBackend)
+	settings.GrokEffort = normalizeGrokEffort(settings.GrokEffort)
+	if !isAllowed(settings.GrokSandbox, "read-only", "workspace-write", "danger-full-access") {
+		settings.GrokSandbox = "workspace-write"
+	}
+	if !isAllowed(settings.GrokApprovalPolicy, "on-request", "never") {
+		settings.GrokApprovalPolicy = "on-request"
+	}
+	settings.ClaudeRecentWorkspaces = sanitizeRecentWorkspaces(settings.ClaudeRecentWorkspaces)
+	settings.ClaudeModel = sanitizeShortText(settings.ClaudeModel, 160)
+	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
+	if !isAllowed(settings.ClaudeSandbox, "read-only", "workspace-write", "danger-full-access") {
+		settings.ClaudeSandbox = "workspace-write"
+	}
+	if !isAllowed(settings.ClaudeApprovalPolicy, "on-request", "never") {
+		settings.ClaudeApprovalPolicy = "on-request"
+	}
+	settings.ClaudePermissionMode = normalizeClaudePermissionMode(settings.ClaudePermissionMode)
+	if settings.ClaudePermissionMode == "" {
+		// Sensible default aligned with official Claude Code headless usage.
+		settings.ClaudePermissionMode = "acceptEdits"
+	}
+	if _, err := validateWorkspace(settings.ClaudeWorkspace); err != nil {
+		settings.ClaudeWorkspace = ""
+	}
 	workspaceBeforeValidate := strings.TrimSpace(settings.Workspace)
 	// Existing installs already configured a workspace — skip first-run wizard.
 	migratedOnboarding := false
@@ -2159,6 +2343,9 @@ func readSettings(path string) (UserSettings, error) {
 	}
 	if _, err := validateWorkspace(settings.Workspace); err != nil {
 		settings.Workspace = ""
+	}
+	if _, err := validateWorkspace(settings.GrokWorkspace); err != nil {
+		settings.GrokWorkspace = ""
 	}
 	// Persist the migration so a later empty/invalid workspace can't reopen the wizard.
 	if migratedOnboarding {
@@ -2335,6 +2522,8 @@ func mimeFromImageExt(ext string) string {
 
 func cloneSettings(settings UserSettings) UserSettings {
 	settings.RecentWorkspaces = append([]string(nil), settings.RecentWorkspaces...)
+	settings.GrokRecentWorkspaces = append([]string(nil), settings.GrokRecentWorkspaces...)
+	settings.ClaudeRecentWorkspaces = append([]string(nil), settings.ClaudeRecentWorkspaces...)
 	settings.CustomModels = append([]string(nil), settings.CustomModels...)
 	settings.BrowserAllowedHosts = append([]string(nil), settings.BrowserAllowedHosts...)
 	settings.BrowserBlockedHosts = append([]string(nil), settings.BrowserBlockedHosts...)
@@ -2343,10 +2532,10 @@ func cloneSettings(settings UserSettings) UserSettings {
 
 func normalizeFollowUpBehavior(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
-	if value == "queue" {
-		return "queue"
+	if value == "steer" {
+		return "steer"
 	}
-	return "steer"
+	return "queue"
 }
 
 func normalizeUiFontSize(value string) string {
@@ -2365,6 +2554,21 @@ func normalizeCodeFontSize(value string) string {
 
 func sanitizeShortText(value string, max int) string {
 	value = strings.TrimSpace(value)
+	if max > 0 && len(value) > max {
+		value = value[:max]
+	}
+	return value
+}
+
+// sanitizeCodexClientField keeps free-form clientInfo fields safe for UA / settings storage.
+func sanitizeCodexClientField(value string, max int) string {
+	value = strings.TrimSpace(value)
+	value = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, value)
 	if max > 0 && len(value) > max {
 		value = value[:max]
 	}
@@ -2408,12 +2612,13 @@ func sanitizeCustomInstructions(value string) string {
 func resolveCodexHome() string {
 	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
 	if codexHome != "" {
-		return codexHome
+		return filepath.Clean(codexHome)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
 		return ""
 	}
+	// Official Codex uses ~/.codex on Windows, macOS, and Linux.
 	return filepath.Join(home, ".codex")
 }
 
@@ -2462,7 +2667,7 @@ func writeAgentsDoc(dir string, value string) (string, error) {
 		return "", err
 	}
 	home := resolveCodexHome()
-	isPersonal := home != "" && filepath.Clean(dir) == filepath.Clean(home)
+	isPersonal := home != "" && samePath(dir, home)
 	// Prefer updating an existing override; otherwise write AGENTS.md.
 	path := filepath.Join(dir, "AGENTS.md")
 	for _, candidate := range agentsDocCandidates(dir) {
@@ -2761,11 +2966,73 @@ func (s *AppService) threadAllowed(threadID string, workspace string) bool {
 	return session != nil && !session.Archived && samePath(session.Workspace, workspace)
 }
 
+func isThreadNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "thread not found") ||
+		(strings.Contains(msg, "not found") && strings.Contains(msg, "thread"))
+}
+
+// loadBackendThread ensures the Codex app-server has the thread in memory.
+// After reconnect, history lives on disk but turn/start fails until thread/resume.
+func (s *AppService) loadBackendThread(backendID, workspace string, settings UserSettings, session *SessionRecord) (map[string]any, error) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return nil, errors.New("thread id is required")
+	}
+	cleanWorkspace, err := validateWorkspace(workspace)
+	if err != nil {
+		return nil, err
+	}
+	// Fast path: already loaded in this app-server process.
+	if result, err := s.call("thread/read", map[string]any{
+		"threadId":      backendID,
+		"includeTurns":  true,
+	}); err == nil {
+		s.rememberThread(backendID, cleanWorkspace)
+		return result, nil
+	}
+	params := map[string]any{
+		"threadId":       backendID,
+		"cwd":            cleanWorkspace,
+		"sandbox":        normalizeSandbox(settings.Sandbox),
+		"approvalPolicy": normalizeApproval(settings.ApprovalPolicy),
+	}
+	model := strings.TrimSpace(settings.Model)
+	providerID := strings.TrimSpace(settings.ModelProvider)
+	if session != nil {
+		if session.Model != "" {
+			model = session.Model
+		}
+		if session.ProviderID != "" {
+			providerID = session.ProviderID
+		}
+	}
+	if externalProviderKind(providerID) == "" && model != "" {
+		params["model"] = model
+	}
+	if externalProviderKind(providerID) == "" && providerID != "" {
+		params["modelProvider"] = providerID
+	}
+	result, err := s.call("thread/resume", params)
+	if err != nil {
+		return nil, err
+	}
+	s.rememberThread(backendID, cleanWorkspace)
+	return result, nil
+}
+
 func (s *AppService) ensureCodexBackendThread(session *SessionRecord, settings UserSettings, workspace string) (string, error) {
 	if session == nil {
 		return "", errors.New("session not found")
 	}
 	if session.BackendRef != "" {
+		// Existing Codex thread — must be resumed after app-server restart.
+		if _, err := s.loadBackendThread(session.BackendRef, workspace, settings, session); err != nil {
+			return "", fmt.Errorf("resume codex thread: %w", err)
+		}
 		return session.BackendRef, nil
 	}
 	params := map[string]any{

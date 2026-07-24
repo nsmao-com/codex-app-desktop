@@ -4,7 +4,7 @@
 
 **Nice Codex** is an unofficial, lightweight desktop client for the official OpenAI Codex runtime. It ships as a native Windows / macOS app (Wails v3 + Vue 3) and talks to the local `codex app-server` for auth, threads, turns, approvals, tools, and streamed agent events.
 
-> Current version: **v1.0.2**  
+> Current version: **v1.0.3**
 > Releases: [github.com/nsmao-com/codex-app-desktop/releases](https://github.com/nsmao-com/codex-app-desktop/releases)
 
 ## Highlights

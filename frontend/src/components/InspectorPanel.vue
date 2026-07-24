@@ -11,10 +11,13 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { panelFromRight } from '@/lib/motion'
-import { useAppStore, useCodexStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import { buildContextUsageView, CODEX_CONTEXT_BASELINE_TOKENS } from '@/utils/accountUsage'
 
 const appStore = useAppStore()
 const codexStore = useCodexStore()
+const grokStore = useGrokStore()
+const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const { locale, t } = useI18n()
 
@@ -25,11 +28,16 @@ const emit = defineEmits<{
 const activeTab = shallowRef<'changes' | 'runtime'>('changes')
 
 const changes = computed(() => workspaceStore.changes)
-const contextUsedPercent = computed(() => {
-  const usage = codexStore.activeTokenUsage
-  if (!usage?.modelContextWindow) return 0
-  return Math.min(100, Math.max(0, (usage.total.totalTokens / usage.modelContextWindow) * 100))
+const activeTokenUsage = computed(() => {
+  if (appStore.isGrokMode) return grokStore.activeTokenUsage
+  if (appStore.isClaudeMode) return claudeStore.activeTokenUsage
+  return codexStore.activeTokenUsage
 })
+const contextUsage = computed(() => buildContextUsageView(
+  activeTokenUsage.value,
+  appStore.isCodexMode ? CODEX_CONTEXT_BASELINE_TOKENS : 0,
+))
+const contextUsedPercent = computed(() => contextUsage.value.usedPercent)
 
 function formatTokens(value: number | null | undefined): string {
   if (value === null || value === undefined) return '—'
@@ -157,7 +165,7 @@ function statusClass(status: string): string {
             </CardContent>
           </Card>
 
-          <Card v-if="codexStore.activeTokenUsage" class="mb-3 rounded-md shadow-none">
+          <Card v-if="activeTokenUsage" class="mb-3 rounded-md shadow-none">
             <CardHeader class="pb-2">
               <CardTitle class="flex items-center gap-2 text-xs">
                 <Gauge :size="14" />
@@ -173,15 +181,15 @@ function statusClass(status: string): string {
               <div class="mt-3 grid grid-cols-3 gap-2 text-center text-[10px]">
                 <div class="rounded-md bg-muted p-2">
                   <p class="text-muted-foreground">{{ t('inspector.inputTokens') }}</p>
-                  <p class="font-medium tabular-nums">{{ formatTokens(codexStore.activeTokenUsage.total.inputTokens) }}</p>
+                  <p class="font-medium tabular-nums">{{ formatTokens(activeTokenUsage.total.inputTokens) }}</p>
                 </div>
                 <div class="rounded-md bg-muted p-2">
                   <p class="text-muted-foreground">{{ t('inspector.outputTokens') }}</p>
-                  <p class="font-medium tabular-nums">{{ formatTokens(codexStore.activeTokenUsage.total.outputTokens) }}</p>
+                  <p class="font-medium tabular-nums">{{ formatTokens(activeTokenUsage.total.outputTokens) }}</p>
                 </div>
                 <div class="rounded-md bg-muted p-2">
                   <p class="text-muted-foreground">{{ t('inspector.contextWindow') }}</p>
-                  <p class="font-medium tabular-nums">{{ formatTokens(codexStore.activeTokenUsage.modelContextWindow) }}</p>
+                  <p class="font-medium tabular-nums">{{ formatTokens(activeTokenUsage.modelContextWindow) }}</p>
                 </div>
               </div>
             </CardContent>

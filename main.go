@@ -20,6 +20,7 @@ func init() {
 }
 
 func main() {
+	pluginAssets := newPluginAssetServer()
 	windowsOpts := application.WindowsOptions{}
 	if port := strings.TrimSpace(os.Getenv("NICE_CODEX_CDP_PORT")); port != "" {
 		windowsOpts.AdditionalBrowserArgs = []string{
@@ -32,7 +33,8 @@ func main() {
 		Name:        "Nice Codex",
 		Description: "A lightweight Codex-compatible desktop client.",
 		Assets: application.AssetOptions{
-			Handler: application.AssetFileServerFS(assets),
+			Handler:    application.AssetFileServerFS(assets),
+			Middleware: pluginAssets.middleware,
 		},
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
@@ -40,7 +42,7 @@ func main() {
 		Windows: windowsOpts,
 	})
 
-	service := NewAppService(app)
+	service := NewAppService(app, pluginAssets)
 	app.RegisterService(application.NewService(service))
 	app.OnShutdown(service.shutdown)
 

@@ -27,10 +27,13 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { easeOutQuick } from '@/lib/motion'
-import { useBrowserStore, useCodexStore, useDialogStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useBrowserStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import { Motion } from 'motion-v'
 
+const appStore = useAppStore()
 const codexStore = useCodexStore()
+const grokStore = useGrokStore()
+const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const browserStore = useBrowserStore()
 const dialogStore = useDialogStore()
@@ -42,10 +45,18 @@ const emit = defineEmits<{
 
 const draft = shallowRef('')
 const welcomeEpoch = shallowRef(0)
-const hasConversation = computed(() => codexStore.activeItems.length > 0)
+const hasConversation = computed(() => {
+  if (appStore.isClaudeMode) return claudeStore.activeItems.length > 0 || Boolean(claudeStore.activeSessionId)
+  if (appStore.isGrokMode) return grokStore.activeItems.length > 0 || Boolean(grokStore.activeSessionId)
+  return codexStore.activeItems.length > 0
+})
 
 watch(
-  [hasConversation, () => codexStore.activeThreadId],
+  [hasConversation, () => (appStore.isGrokMode
+    ? grokStore.activeSessionId
+    : appStore.isClaudeMode
+      ? claudeStore.activeSessionId
+      : codexStore.activeThreadId)],
   ([hasItems, threadId]) => {
     if (!hasItems && !threadId) welcomeEpoch.value += 1
   },
@@ -60,12 +71,14 @@ function useSuggestion(prompt: string): void {
 }
 
 function onRetry(itemID: string): void {
+  if (!appStore.isCodexMode) return
   const item = codexStore.activeItems.find((candidate) => candidate.id === itemID)
   if (!item?.text) return
   void codexStore.retryMessage(itemID, item.text)
 }
 
 function onRollback(payload: { turnId: string; mode: 'single' | 'fromHere' }): void {
+  if (!appStore.isCodexMode) return
   void codexStore.rollbackToTurn(payload.turnId, payload.mode)
 }
 
@@ -105,6 +118,14 @@ function onOpenUrl(url: string): void {
 }
 
 function archiveThread(): void {
+  if (appStore.isGrokMode) {
+    void grokStore.archiveActiveSession()
+    return
+  }
+  if (appStore.isClaudeMode) {
+    void claudeStore.archiveActiveSession()
+    return
+  }
   void codexStore.archiveActiveThread()
 }
 
@@ -117,12 +138,42 @@ function forkThread(): void {
 }
 
 function renameThread(): void {
+  if (appStore.isGrokMode) {
+    void grokStore.renameActiveSession()
+    return
+  }
+  if (appStore.isClaudeMode) {
+    void claudeStore.renameActiveSession()
+    return
+  }
   void codexStore.renameActiveThread()
 }
 
 function deleteThread(): void {
+  if (appStore.isGrokMode) {
+    void grokStore.deleteActiveSession()
+    return
+  }
+  if (appStore.isClaudeMode) {
+    void claudeStore.deleteActiveSession()
+    return
+  }
   void codexStore.deleteActiveThread()
 }
+
+const activeSessionTitle = computed(() => {
+  if (appStore.isGrokMode) {
+    const id = grokStore.activeSessionId
+    const session = grokStore.sessions.find((item) => item.id === id)
+    return session?.name || id || ''
+  }
+  if (appStore.isClaudeMode) {
+    const id = claudeStore.activeSessionId
+    const session = claudeStore.sessions.find((item) => item.id === id)
+    return session?.name || id || ''
+  }
+  return codexStore.activeThread?.name || ''
+})
 
 function reviewChanges(): void {
   void codexStore.startReview({ targetType: 'uncommittedChanges', delivery: 'inline' })
@@ -150,7 +201,7 @@ watch(() => codexStore.activeThreadId, () => {
 <template>
   <div class="relative flex h-full flex-col">
     <div
-      v-if="codexStore.creatingThread"
+      v-if="appStore.isCodexMode && codexStore.creatingThread"
       class="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center"
     >
       <div class="flex items-center gap-2 rounded-full border bg-card/95 px-3 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
@@ -160,7 +211,11 @@ watch(() => codexStore.activeThreadId, () => {
     </div>
 
     <div
-      v-if="codexStore.activeThread || workspaceStore.switchingWorkspace"
+      v-if="(appStore.isGrokMode
+        ? grokStore.activeSessionId
+        : appStore.isClaudeMode
+          ? claudeStore.activeSessionId
+          : codexStore.activeThread) || workspaceStore.switchingWorkspace"
       class="flex h-9 shrink-0 items-center justify-between border-b border-border/70 px-4"
     >
       <div class="flex min-w-0 items-center gap-2">
@@ -172,9 +227,30 @@ watch(() => codexStore.activeThreadId, () => {
           {{ t('chat.switchingProject') }}
         </div>
         <template v-else>
-          <span v-if="workspaceTag" class="truncate text-[12px] font-medium text-foreground/90">
+          <span
+            v-if="(appStore.isGrokMode || appStore.isClaudeMode) && activeSessionTitle"
+            class="truncate text-[12px] font-medium text-foreground/90"
+            :title="activeSessionTitle"
+          >
+            {{ activeSessionTitle }}
+          </span>
+          <span v-else-if="workspaceTag" class="truncate text-[12px] font-medium text-foreground/90">
             {{ workspaceTag }}
           </span>
+          <Badge
+            v-if="appStore.isGrokMode"
+            variant="secondary"
+            class="h-5 shrink-0 rounded-md px-1.5 text-[9px] font-normal"
+          >
+            Grok
+          </Badge>
+          <Badge
+            v-else-if="appStore.isClaudeMode"
+            variant="secondary"
+            class="h-5 shrink-0 rounded-md px-1.5 text-[9px] font-normal"
+          >
+            Claude
+          </Badge>
           <div
             v-if="workspaceStore.workspace"
             class="hidden items-center gap-1.5 text-[11px] text-muted-foreground sm:flex"
@@ -188,37 +264,51 @@ watch(() => codexStore.activeThreadId, () => {
         </template>
       </div>
 
-      <DropdownMenu v-if="codexStore.activeThread">
+      <DropdownMenu
+        v-if="(appStore.isCodexMode && codexStore.activeThread)
+          || (appStore.isGrokMode && grokStore.activeSessionId)
+          || (appStore.isClaudeMode && claudeStore.activeSessionId)"
+      >
         <DropdownMenuTrigger as-child>
           <Button
             variant="ghost"
             size="icon-sm"
             class="size-7 text-muted-foreground"
             :aria-label="t('threadActions.title')"
-            :disabled="codexStore.activeThreadBusy"
+            :disabled="appStore.isGrokMode
+              ? Boolean(grokStore.sessionMutation) || grokStore.isTurnRunning
+              : appStore.isClaudeMode
+                ? claudeStore.isTurnRunning
+                : codexStore.activeThreadBusy"
           >
             <MoreHorizontal :size="15" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem @click="reviewChanges">
-            <ScanSearch :size="14" class="mr-2" />
-            {{ t('threadActions.review') }}
-          </DropdownMenuItem>
-          <DropdownMenuItem @click="forkThread">
-            <Copy :size="14" class="mr-2" />
-            {{ t('threadActions.fork') }}
-          </DropdownMenuItem>
+          <template v-if="appStore.isCodexMode">
+            <DropdownMenuItem @click="reviewChanges">
+              <ScanSearch :size="14" class="mr-2" />
+              {{ t('threadActions.review') }}
+            </DropdownMenuItem>
+            <DropdownMenuItem @click="forkThread">
+              <Copy :size="14" class="mr-2" />
+              {{ t('threadActions.fork') }}
+            </DropdownMenuItem>
+          </template>
           <DropdownMenuItem @click="renameThread">
             <Pencil :size="14" class="mr-2" />
             {{ t('threadActions.rename') }}
           </DropdownMenuItem>
-          <DropdownMenuItem @click="compactThread">
+          <DropdownMenuItem v-if="appStore.isCodexMode" @click="compactThread">
             <Archive :size="14" class="mr-2" />
             {{ t('threadActions.compact') }}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
-          <DropdownMenuItem @click="archiveThread">
+          <DropdownMenuItem
+            :disabled="(appStore.isGrokMode && grokStore.activeSessionId.startsWith('pending-grok-'))
+              || (appStore.isClaudeMode && claudeStore.activeSessionId.startsWith('pending-claude-'))"
+            @click="archiveThread"
+          >
             <Archive :size="14" class="mr-2" />
             {{ t('threadActions.archive') }}
           </DropdownMenuItem>
@@ -232,14 +322,22 @@ watch(() => codexStore.activeThreadId, () => {
 
     <div class="min-h-0 flex-1 overflow-hidden">
       <Motion
-        :key="codexStore.activeThreadId || (hasConversation ? 'conversation' : 'welcome')"
+        :key="(appStore.isGrokMode
+          ? grokStore.activeSessionId
+          : appStore.isClaudeMode
+            ? claudeStore.activeSessionId
+            : codexStore.activeThreadId) || (hasConversation ? 'conversation' : 'welcome')"
         class="h-full"
         :initial="{ opacity: 0, y: 8 }"
         :animate="{ opacity: 1, y: 0 }"
         :transition="easeOutQuick"
       >
         <WorkspaceWelcome
-          v-if="!hasConversation && !codexStore.activeThread"
+          v-if="!hasConversation && !(appStore.isGrokMode
+            ? grokStore.activeSessionId
+            : appStore.isClaudeMode
+              ? claudeStore.activeSessionId
+              : codexStore.activeThread)"
           :key="`welcome-${welcomeEpoch}`"
           @suggestion="useSuggestion"
         />
@@ -253,7 +351,7 @@ watch(() => codexStore.activeThreadId, () => {
     </div>
 
     <div
-      v-if="(changesCount && codexStore.activeThread) || codexStore.planImplementPrompt?.threadId === codexStore.activeThreadId"
+      v-if="appStore.isCodexMode && ((changesCount && codexStore.activeThread) || codexStore.planImplementPrompt?.threadId === codexStore.activeThreadId)"
       class="border-t border-border/70 px-4 py-1.5"
     >
       <div class="mx-auto flex max-w-[680px] flex-col gap-1.5">

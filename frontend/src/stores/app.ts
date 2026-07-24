@@ -26,8 +26,28 @@ import { translate } from '../i18n'
 const AppVersionFallback = '1.0.1'
 
 const defaultSettings: UserSettings = {
+  activeRuntime: 'codex',
   workspace: '',
   recentWorkspaces: [],
+  grokWorkspace: '',
+  grokRecentWorkspaces: [],
+  grokBackend: 'build',
+  grokBuildModel: '',
+  grokAPIModel: '',
+  grokEffort: 'high',
+  grokSandbox: 'workspace-write',
+  grokApprovalPolicy: 'on-request',
+  grokWebSearch: true,
+  grokXSearch: false,
+  grokAPIKey: '',
+  grokAPIBaseURL: '',
+  claudeWorkspace: '',
+  claudeRecentWorkspaces: [],
+  claudeModel: 'sonnet',
+  claudeEffort: 'high',
+  claudeSandbox: 'workspace-write',
+  claudeApprovalPolicy: 'on-request',
+  claudePermissionMode: 'acceptEdits',
   model: '',
   modelProvider: '',
   customModels: [],
@@ -46,7 +66,7 @@ const defaultSettings: UserSettings = {
   autoConnect: true,
   workMode: 'code',
   sendWithModifier: false,
-  followUpBehavior: 'steer',
+  followUpBehavior: 'queue',
   notifyOnTurnComplete: true,
   customInstructions: '',
   translucentSidebar: true,
@@ -69,6 +89,9 @@ const defaultSettings: UserSettings = {
   shortcutNewThread: 'Ctrl+N',
   shortcutTerminal: 'Ctrl+`',
   shortcutBrowser: 'Ctrl+Shift+B',
+  codexClientName: '',
+  codexClientTitle: '',
+  codexClientVersion: '',
   onboardingCompleted: false,
 }
 
@@ -89,7 +112,7 @@ const emptyAccount: AccountInfo = {
 }
 
 export const useAppStore = defineStore('app', () => {
-  const { initAppearance, setTheme, setAccent, setFont, setUiPrefs } = useAppearance()
+  const { initAppearance, setTheme, setAccent, setFont, setUiPrefs, setRuntime } = useAppearance()
 
   const bootstrapping = shallowRef(true)
   const settings = shallowRef<UserSettings>({ ...defaultSettings })
@@ -129,8 +152,16 @@ export const useAppStore = defineStore('app', () => {
   const modelProviders = shallowRef<import('../types/codex').ModelProviderOption[]>([])
   const agentProviders = shallowRef<AgentProviderRuntime[]>([])
 
-  const currentWorkspacePath = computed(() => settings.value.workspace)
+  const currentWorkspacePath = computed(() => {
+    if (isGrokMode.value) return settings.value.grokWorkspace || settings.value.workspace
+    if (isClaudeMode.value) return settings.value.claudeWorkspace || settings.value.workspace
+    return settings.value.workspace
+  })
   const currentTheme = computed(() => settings.value.theme)
+  const activeRuntime = computed(() => normalizeRuntimeID(settings.value.activeRuntime))
+  const isGrokMode = computed(() => activeRuntime.value === 'grok')
+  const isClaudeMode = computed(() => activeRuntime.value === 'claude')
+  const isCodexMode = computed(() => activeRuntime.value === 'codex')
 
   let preferenceTimer = 0
   let preferenceVersion = 0
@@ -147,6 +178,18 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
+  /** Soft re-detect CLIs / providers without full-screen bootstrap spinner. */
+  async function refreshRuntimes(): Promise<void> {
+    try {
+      const data = await backend.Bootstrap()
+      codexAvailable.value = data.codex.available
+      codexVersion.value = data.codex.version
+      agentProviders.value = data.agentProviders ?? []
+    } catch {
+      // best-effort
+    }
+  }
+
   function applyBootstrap(data: BootstrapData): void {
     codexAvailable.value = data.codex.available
     codexVersion.value = data.codex.version
@@ -156,10 +199,30 @@ export const useAppStore = defineStore('app', () => {
     settings.value = {
       ...defaultSettings,
       ...data.settings,
+      activeRuntime: normalizeRuntimeID(data.settings.activeRuntime),
       modelProvider: '',
       recentWorkspaces: data.settings.recentWorkspaces ?? [],
+      grokWorkspace: data.settings.grokWorkspace ?? '',
+      grokRecentWorkspaces: data.settings.grokRecentWorkspaces ?? [],
+      grokBackend: data.settings.grokBackend === 'api' ? 'api' : 'build',
+      grokBuildModel: data.settings.grokBuildModel ?? '',
+      grokAPIModel: data.settings.grokAPIModel ?? '',
+      grokEffort: data.settings.grokEffort || 'high',
+      grokSandbox: data.settings.grokSandbox || 'workspace-write',
+      grokApprovalPolicy: data.settings.grokApprovalPolicy || 'on-request',
+      grokWebSearch: data.settings.grokWebSearch !== false,
+      grokXSearch: Boolean(data.settings.grokXSearch),
+      grokAPIKey: data.settings.grokAPIKey ?? '',
+      grokAPIBaseURL: data.settings.grokAPIBaseURL ?? '',
+      claudeWorkspace: data.settings.claudeWorkspace ?? '',
+      claudeRecentWorkspaces: data.settings.claudeRecentWorkspaces ?? [],
+      claudeModel: data.settings.claudeModel || 'sonnet',
+      claudeEffort: data.settings.claudeEffort || 'high',
+      claudeSandbox: data.settings.claudeSandbox || 'workspace-write',
+      claudeApprovalPolicy: data.settings.claudeApprovalPolicy || 'on-request',
+      claudePermissionMode: data.settings.claudePermissionMode || 'acceptEdits',
       customModels: data.settings.customModels ?? [],
-      followUpBehavior: data.settings.followUpBehavior === 'queue' ? 'queue' : 'steer',
+      followUpBehavior: data.settings.followUpBehavior === 'steer' ? 'steer' : 'queue',
       notifyOnTurnComplete: data.settings.notifyOnTurnComplete !== false,
       customInstructions: data.settings.customInstructions ?? '',
       sendWithModifier: Boolean(data.settings.sendWithModifier),
@@ -201,10 +264,57 @@ export const useAppStore = defineStore('app', () => {
       highContrast: settings.value.highContrast,
       pointerCursor: settings.value.pointerCursor,
       reduceMotion: settings.value.reduceMotion,
+      runtime: normalizeRuntimeID(settings.value.activeRuntime),
     })
     applyLocale(settings.value.language)
     void loadSystemFonts()
     void checkForUpdates(true)
+  }
+
+  async function setActiveRuntime(runtimeID: 'codex' | 'claude' | 'grok'): Promise<boolean> {
+    if (activeRuntime.value === runtimeID) return true
+    const nextRuntime = normalizeRuntimeID(runtimeID)
+    // Instant UI switch — never await backend on the click path (that freezes the tab).
+    settings.value = { ...settings.value, activeRuntime: nextRuntime }
+    setRuntime(nextRuntime)
+    patchSettings({ activeRuntime: nextRuntime })
+    // Background persist; patchSettings already writes ActiveRuntime shortly after.
+    void backend.SetActiveRuntime(nextRuntime).catch(() => undefined)
+    return true
+  }
+
+  /** Merge saved prefs without dropping Grok-specific fields or activeRuntime. */
+  function mergeSavedSettings(saved: UserSettings, next: UserSettings): UserSettings {
+    const runtime = normalizeRuntimeID(saved.activeRuntime || next.activeRuntime)
+    return {
+      ...defaultSettings,
+      ...saved,
+      activeRuntime: runtime,
+      recentWorkspaces: saved.recentWorkspaces ?? next.recentWorkspaces ?? [],
+      grokWorkspace: saved.grokWorkspace ?? next.grokWorkspace ?? '',
+      grokRecentWorkspaces: saved.grokRecentWorkspaces ?? next.grokRecentWorkspaces ?? [],
+      grokBackend: saved.grokBackend === 'api' || next.grokBackend === 'api' ? 'api' : 'build',
+      grokBuildModel: saved.grokBuildModel ?? next.grokBuildModel ?? '',
+      grokAPIModel: saved.grokAPIModel ?? next.grokAPIModel ?? '',
+      grokEffort: saved.grokEffort || next.grokEffort || 'high',
+      grokSandbox: saved.grokSandbox || next.grokSandbox || 'workspace-write',
+      grokApprovalPolicy: saved.grokApprovalPolicy || next.grokApprovalPolicy || 'on-request',
+      grokWebSearch: saved.grokWebSearch !== undefined ? saved.grokWebSearch : next.grokWebSearch !== false,
+      grokXSearch: saved.grokXSearch !== undefined ? Boolean(saved.grokXSearch) : Boolean(next.grokXSearch),
+      grokAPIKey: saved.grokAPIKey ?? next.grokAPIKey ?? '',
+      grokAPIBaseURL: saved.grokAPIBaseURL ?? next.grokAPIBaseURL ?? '',
+      claudeWorkspace: saved.claudeWorkspace ?? next.claudeWorkspace ?? '',
+      claudeRecentWorkspaces: saved.claudeRecentWorkspaces ?? next.claudeRecentWorkspaces ?? [],
+      claudeModel: saved.claudeModel || next.claudeModel || 'sonnet',
+      claudeEffort: saved.claudeEffort || next.claudeEffort || 'high',
+      claudeSandbox: saved.claudeSandbox || next.claudeSandbox || 'workspace-write',
+      claudeApprovalPolicy: saved.claudeApprovalPolicy || next.claudeApprovalPolicy || 'on-request',
+      claudePermissionMode: saved.claudePermissionMode || next.claudePermissionMode || 'acceptEdits',
+      customModels: saved.customModels ?? next.customModels ?? [],
+      onboardingCompleted: Boolean(saved.onboardingCompleted)
+        || Boolean(next.onboardingCompleted)
+        || Boolean(saved.workspace || next.workspace),
+    }
   }
 
   async function loadSystemFonts(): Promise<void> {
@@ -390,20 +500,13 @@ export const useAppStore = defineStore('app', () => {
       const saved = await backend.SavePreferences({
         ...next,
         recentWorkspaces: next.recentWorkspaces ?? [],
+        activeRuntime: normalizeRuntimeID(next.activeRuntime),
       })
-      // Older backends may omit newer bools; never let a round-trip clear onboarding.
-      const onboardingCompleted = Boolean(saved.onboardingCompleted)
-        || Boolean(next.onboardingCompleted)
-        || Boolean(saved.workspace || next.workspace)
-      settings.value = {
-        ...saved,
-        recentWorkspaces: saved.recentWorkspaces ?? [],
-        customModels: saved.customModels ?? [],
-        onboardingCompleted,
-      }
+      settings.value = mergeSavedSettings(saved, next)
       applyAppearance(settings.value)
-      supportedLocales.find((item) => item.value === saved.language)
-        ? setLocale(saved.language)
+      setRuntime(normalizeRuntimeID(settings.value.activeRuntime))
+      supportedLocales.find((item) => item.value === settings.value.language)
+        ? setLocale(settings.value.language)
         : setLocale('zh-CN')
       if (!options.silent) {
         notify('success', translate('notifications.preferencesSaved'), translate('notifications.preferencesSavedHint'))
@@ -549,13 +652,20 @@ export const useAppStore = defineStore('app', () => {
     try {
       const saved = await backend.SavePreferences(next)
       if (version === preferenceVersion) {
-        settings.value = { ...saved, recentWorkspaces: saved.recentWorkspaces ?? [], customModels: saved.customModels ?? [] }
+        settings.value = mergeSavedSettings(saved, next)
+        setRuntime(normalizeRuntimeID(settings.value.activeRuntime))
       }
     } catch (error) {
       if (version === preferenceVersion) {
         notify('error', translate('notifications.agentPreferencesFailed'), errorMessage(error))
       }
     }
+  }
+
+  function updateGrokPreferences(partial: Partial<Pick<UserSettings,
+    'grokBackend' | 'grokBuildModel' | 'grokAPIModel' | 'grokEffort' | 'grokSandbox' | 'grokApprovalPolicy' | 'grokWebSearch' | 'grokXSearch'
+  >>): void {
+    patchSettings(partial)
   }
 
   function applyLocale(value: string): void {
@@ -587,7 +697,13 @@ export const useAppStore = defineStore('app', () => {
     agentProviders,
     currentWorkspacePath,
     currentTheme,
+    activeRuntime,
+    isGrokMode,
+    isClaudeMode,
+    isCodexMode,
     bootstrap,
+    refreshRuntimes,
+    setActiveRuntime,
     savePreferences,
     toggleTheme,
     previewAppearance,
@@ -608,9 +724,17 @@ export const useAppStore = defineStore('app', () => {
     startLogin,
     logout,
     updateAgentPreferences,
+    updateGrokPreferences,
     patchSettings,
   }
 })
+
+function normalizeRuntimeID(value: string | undefined | null): 'codex' | 'claude' | 'grok' {
+  const id = String(value || '').trim().toLowerCase()
+  if (id === 'grok') return 'grok'
+  if (id === 'claude') return 'claude'
+  return 'codex'
+}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message

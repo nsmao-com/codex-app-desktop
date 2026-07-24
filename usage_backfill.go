@@ -14,18 +14,22 @@ import (
 type rolloutTokenHit struct {
 	SessionID string
 	TurnID    string
-	Tokens    int64
+	Breakdown tokenBreakdown
 	At        time.Time
 }
 
-// backfillLocalUsageFromRollouts rebuilds usage.json from ~/.codex session rollouts.
-// This is true local usage and does not depend on ChatGPT account/usage/read.
+// backfillLocalUsageFromRollouts rebuilds the *codex* runtime bucket from ~/.codex
+// session rollouts (token_count.last_token_usage). Runs when the codex bucket is
+// empty OR has totals but no input/output/cache breakdown (legacy total-only rows).
 func (s *AppService) backfillLocalUsageFromRollouts() bool {
 	s.mu.Lock()
 	usage := loadLocalUsage(s.settingsPath)
-	empty := localUsageIsEmpty(usage)
+	bucket := usage.ensureRuntime("codex")
+	needsDetail := bucket.LifetimeInput <= 0 && bucket.LifetimeCached <= 0 &&
+		bucket.LifetimeOutput <= 0 && bucket.LifetimeReasoning <= 0
+	emptyCodex := bucket.LifetimeTokens <= 0 && len(bucket.Days) == 0
 	s.mu.Unlock()
-	if !empty {
+	if !emptyCodex && !needsDetail {
 		return false
 	}
 
@@ -41,14 +45,27 @@ func (s *AppService) backfillLocalUsageFromRollouts() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	usage = loadLocalUsage(s.settingsPath)
-	if !localUsageIsEmpty(usage) {
+	bucket = usage.ensureRuntime("codex")
+	needsDetail = bucket.LifetimeInput <= 0 && bucket.LifetimeCached <= 0 &&
+		bucket.LifetimeOutput <= 0 && bucket.LifetimeReasoning <= 0
+	emptyCodex = bucket.LifetimeTokens <= 0 && len(bucket.Days) == 0
+	if !emptyCodex && !needsDetail {
 		return false
+	}
+
+	// Drop legacy total-only codex rows so we do not double-count when re-importing.
+	if needsDetail && !emptyCodex {
+		clearRuntimeUsage(usage, "codex")
 	}
 
 	changed := false
 	now := time.Now()
 	for _, hit := range hits {
-		if applyTurnToUsage(usage, hit.SessionID, hit.TurnID, hit.Tokens, hit.At) {
+		b := hit.Breakdown
+		if !b.valid() {
+			continue
+		}
+		if applyTurnToUsageDetailed(usage, "codex", hit.SessionID, hit.TurnID, b, hit.At) {
 			changed = true
 		}
 	}
@@ -58,6 +75,22 @@ func (s *AppService) backfillLocalUsageFromRollouts() bool {
 	pruneLocalUsageTurns(usage, now)
 	persistLocalUsage(s.settingsPath, usage)
 	return true
+}
+
+// clearRuntimeUsage removes one runtime's bucket + turns (used before detailed re-import).
+func clearRuntimeUsage(usage *localUsageFile, runtime string) {
+	if usage == nil {
+		return
+	}
+	runtime = normalizeUsageRuntime(runtime)
+	if usage.ByRuntime != nil {
+		usage.ByRuntime[runtime] = emptyRuntimeBucket()
+	}
+	for key, turn := range usage.Turns {
+		if normalizeUsageRuntime(turn.Runtime) == runtime || (turn.Runtime == "" && runtime == "codex") {
+			delete(usage.Turns, key)
+		}
+	}
 }
 
 func scanCodexRolloutTokenUsage(codexHome string) []rolloutTokenHit {
@@ -113,11 +146,11 @@ func parseRolloutTokenHits(path string) []rolloutTokenHit {
 
 	sessionID := sessionIDFromRolloutPath(path)
 	var (
-		pendingTokens int64
-		pendingAt     time.Time
-		hasPending    bool
-		hits          []rolloutTokenHit
-		lineNo        int
+		pending   tokenBreakdown
+		pendingAt time.Time
+		hasPending bool
+		hits      []rolloutTokenHit
+		lineNo    int
 	)
 
 	scanner := bufio.NewScanner(file)
@@ -147,19 +180,37 @@ func parseRolloutTokenHits(path string) []rolloutTokenHit {
 			eventType, _ := payload["type"].(string)
 			switch eventType {
 			case "token_count":
+				// Official Codex rollout:
+				// info.last_token_usage: {input_tokens, cached_input_tokens, output_tokens,
+				//   reasoning_output_tokens, total_tokens}
 				info := asStringKeyMap(payload["info"])
 				last := asStringKeyMap(info["last_token_usage"])
-				tokens := int64(anyToFloat(last["total_tokens"]))
-				if tokens <= 0 {
-					tokens = int64(anyToFloat(last["totalTokens"]))
+				if len(last) == 0 {
+					last = asStringKeyMap(info["lastTokenUsage"])
 				}
-				if tokens > 0 {
-					pendingTokens = tokens
+				// Fall back to cumulative total_token_usage only if last is missing.
+				if len(last) == 0 {
+					last = asStringKeyMap(info["total_token_usage"])
+				}
+				b := breakdownFromUsageMap(last)
+				if !b.valid() {
+					// Direct snake_case parse for older shapes.
+					b = tokenBreakdown{
+						Input:     int64(anyToFloat(last["input_tokens"])),
+						Cached:    int64(anyToFloat(last["cached_input_tokens"])),
+						Output:    int64(anyToFloat(last["output_tokens"])),
+						Reasoning: int64(anyToFloat(last["reasoning_output_tokens"])),
+						Total:     int64(anyToFloat(last["total_tokens"])),
+					}
+					b.normalize()
+				}
+				if b.valid() {
+					pending = b
 					pendingAt = ts
 					hasPending = true
 				}
 			case "task_complete":
-				if !hasPending || pendingTokens <= 0 {
+				if !hasPending || !pending.valid() {
 					continue
 				}
 				turnID := strings.TrimSpace(stringFromAny(payload["turn_id"]))
@@ -179,24 +230,24 @@ func parseRolloutTokenHits(path string) []rolloutTokenHit {
 				hits = append(hits, rolloutTokenHit{
 					SessionID: sessionID,
 					TurnID:    turnID,
-					Tokens:    pendingTokens,
+					Breakdown: pending,
 					At:        at,
 				})
 				hasPending = false
-				pendingTokens = 0
+				pending = tokenBreakdown{}
 			}
 		}
 	}
 
 	// Flush trailing token_count without task_complete.
-	if hasPending && pendingTokens > 0 {
+	if hasPending && pending.valid() {
 		if strings.TrimSpace(sessionID) == "" {
 			sessionID = sessionIDFromRolloutPath(path)
 		}
 		hits = append(hits, rolloutTokenHit{
 			SessionID: sessionID,
 			TurnID:    "flush-" + strconv.Itoa(lineNo),
-			Tokens:    pendingTokens,
+			Breakdown: pending,
 			At:        pendingAt,
 		})
 	}

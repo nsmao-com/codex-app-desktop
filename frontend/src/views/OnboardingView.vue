@@ -1,11 +1,31 @@
 <script setup lang="ts">
-import { FolderOpen, Moon, Sparkles, Sun, Monitor } from '@lucide/vue'
-import { computed, shallowRef } from 'vue'
+import {
+  CheckCircle2,
+  Download,
+  FolderOpen,
+  LoaderCircle,
+  Monitor,
+  Moon,
+  RefreshCw,
+  Sparkles,
+  Sun,
+  Terminal,
+  AlertCircle,
+} from '@lucide/vue'
+import { computed, onMounted, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useAppStore, useCodexStore, useWorkspaceStore } from '@/stores'
 import type { AppTheme } from '@/composables/useAppearance'
+import { notify } from '@/utils/notify'
+import {
+  checkCLITools,
+  installCLITool,
+  type CLIToolStatus,
+  type CLIToolsReport,
+} from '@/utils/cliTools'
 
 const { t, locale } = useI18n()
 const appStore = useAppStore()
@@ -19,12 +39,21 @@ const finishing = shallowRef(false)
 const theme = shallowRef<AppTheme>((appStore.settings.theme as AppTheme) || 'system')
 const language = shallowRef(appStore.settings.language === 'en-US' ? 'en-US' : 'zh-CN')
 
+const cliReport = shallowRef<CLIToolsReport | null>(null)
+const cliLoading = shallowRef(false)
+const cliInstalling = shallowRef<Record<string, boolean>>({})
+const cliError = shallowRef('')
+
 const steps = computed(() => [
   t('onboarding.stepWelcome'),
   t('onboarding.stepTheme'),
   t('onboarding.stepLanguage'),
+  t('onboarding.stepRuntime'),
   t('onboarding.stepWorkspace'),
 ])
+
+const STEP_RUNTIME = 3
+const STEP_WORKSPACE = 4
 
 const transitionName = computed(() => (stepDirection.value >= 0 ? 'onboard-forward' : 'onboard-back'))
 
@@ -33,6 +62,8 @@ const themeOptions = computed(() => ([
   { id: 'dark' as const, icon: Moon, label: t('settings.dark') },
   { id: 'system' as const, icon: Monitor, label: t('settings.system') },
 ]))
+
+const cliTools = computed(() => cliReport.value?.tools ?? [])
 
 function selectTheme(next: AppTheme): void {
   theme.value = next
@@ -58,10 +89,69 @@ async function chooseWorkspace(): Promise<void> {
   await workspaceStore.selectWorkspace()
 }
 
+async function refreshCLITools(): Promise<void> {
+  cliLoading.value = true
+  cliError.value = ''
+  try {
+    cliReport.value = await checkCLITools()
+  } catch (error) {
+    cliError.value = error instanceof Error ? error.message : String(error || 'check failed')
+  } finally {
+    cliLoading.value = false
+  }
+}
+
+async function installTool(tool: CLIToolStatus): Promise<void> {
+  if (!tool?.id || cliInstalling.value[tool.id]) return
+  cliInstalling.value = { ...cliInstalling.value, [tool.id]: true }
+  cliError.value = ''
+  try {
+    const result = await installCLITool(tool.id)
+    if (result.tool) {
+      const list = [...(cliReport.value?.tools ?? [])]
+      const idx = list.findIndex((item) => item.id === tool.id)
+      if (idx >= 0) list[idx] = result.tool
+      else list.push(result.tool)
+      cliReport.value = {
+        ...(cliReport.value || {
+          packageManager: result.tool.packageManager,
+          nodeAvailable: result.tool.nodeAvailable,
+          nodeVersion: '',
+          checkedAt: Date.now() / 1000,
+        }),
+        tools: list,
+      }
+    }
+    if (result.ok) {
+      notify('success', tool.name, result.message || t('onboarding.cliInstallOk'))
+      // Soft re-check so version / badges refresh without full app bootstrap.
+      void refreshCLITools()
+    } else {
+      notify('error', tool.name, result.message || t('onboarding.cliInstallFailed'))
+      cliError.value = result.message || result.output || ''
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || 'install failed')
+    cliError.value = message
+    notify('error', tool.name, message)
+  } finally {
+    cliInstalling.value = { ...cliInstalling.value, [tool.id]: false }
+  }
+}
+
+function toolStatusLabel(tool: CLIToolStatus): string {
+  if (!tool.installed) return t('onboarding.cliMissing')
+  if (tool.updateAvailable) return t('onboarding.cliUpdateAvailable')
+  return t('onboarding.cliReady')
+}
+
 function next(): void {
   if (step.value < steps.value.length - 1) {
     stepDirection.value = 1
     step.value += 1
+    if (step.value === STEP_RUNTIME) {
+      void refreshCLITools()
+    }
     return
   }
   void finish()
@@ -93,6 +183,11 @@ async function finish(): Promise<void> {
 async function skipWorkspace(): Promise<void> {
   await finish()
 }
+
+onMounted(() => {
+  // Warm detection early so the runtime step feels instant.
+  void refreshCLITools()
+})
 </script>
 
 <template>
@@ -183,6 +278,126 @@ async function skipWorkspace(): Promise<void> {
             </div>
           </div>
 
+          <!-- Runtime / CLI tools -->
+          <div v-else-if="step === STEP_RUNTIME" key="runtime" class="onboarding-panel space-y-5">
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">{{ t('onboarding.runtimeTitle') }}</h1>
+                <p class="mt-2 text-[14px] text-muted-foreground">{{ t('onboarding.runtimeBody') }}</p>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                class="h-8 shrink-0 px-2 text-xs"
+                :disabled="cliLoading"
+                @click="refreshCLITools"
+              >
+                <RefreshCw :size="13" class="mr-1" :class="cliLoading ? 'animate-spin' : ''" />
+                {{ t('onboarding.cliRecheck') }}
+              </Button>
+            </div>
+
+            <div
+              v-if="cliReport && !cliReport.nodeAvailable"
+              class="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[12px] text-amber-900 dark:text-amber-100"
+            >
+              <AlertCircle :size="15" class="mt-0.5 shrink-0" />
+              <div>
+                <p class="font-medium">{{ t('onboarding.nodeMissingTitle') }}</p>
+                <p class="mt-0.5 text-[11px] opacity-90">{{ t('onboarding.nodeMissingBody') }}</p>
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              <div
+                v-for="tool in cliTools"
+                :key="tool.id"
+                class="onboarding-card rounded-2xl border bg-card/90 px-4 py-3.5 backdrop-blur-sm"
+              >
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <Terminal :size="14" class="shrink-0 text-muted-foreground" />
+                      <p class="text-[13px] font-medium">{{ tool.name }}</p>
+                      <Badge
+                        :variant="tool.installed && !tool.updateAvailable ? 'default' : 'outline'"
+                        class="text-[9px]"
+                      >
+                        {{ toolStatusLabel(tool) }}
+                      </Badge>
+                    </div>
+                    <p class="mt-1.5 font-mono text-[11px] text-muted-foreground">
+                      {{ tool.package }}
+                    </p>
+                    <p class="mt-1 text-[11px] text-muted-foreground">
+                      <template v-if="tool.installed">
+                        {{ t('onboarding.cliVersion', { version: tool.version || '—' }) }}
+                        <span v-if="tool.latestVersion">
+                          · {{ t('onboarding.cliLatest', { version: tool.latestVersion }) }}
+                        </span>
+                      </template>
+                      <template v-else>
+                        {{ t('onboarding.cliInstallHint', { command: tool.installCommand }) }}
+                      </template>
+                    </p>
+                  </div>
+                  <div class="flex shrink-0 flex-col items-end gap-1.5">
+                    <CheckCircle2
+                      v-if="tool.installed && !tool.updateAvailable"
+                      :size="18"
+                      class="text-emerald-500"
+                    />
+                    <Button
+                      v-else
+                      type="button"
+                      size="sm"
+                      class="h-8 text-xs"
+                      :disabled="!tool.canInstall || Boolean(cliInstalling[tool.id])"
+                      @click="installTool(tool)"
+                    >
+                      <LoaderCircle
+                        v-if="cliInstalling[tool.id]"
+                        :size="13"
+                        class="mr-1.5 animate-spin"
+                      />
+                      <Download v-else :size="13" class="mr-1.5" />
+                      {{
+                        cliInstalling[tool.id]
+                          ? t('onboarding.cliInstalling')
+                          : tool.installed
+                            ? t('onboarding.cliUpdate')
+                            : t('onboarding.cliInstall')
+                      }}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <p v-if="cliLoading && !cliTools.length" class="text-center text-[12px] text-muted-foreground">
+                {{ t('onboarding.cliChecking') }}
+              </p>
+              <p v-if="cliError" class="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
+                {{ cliError }}
+              </p>
+            </div>
+
+            <p
+              v-if="cliReport?.codexHome || cliReport?.grokHome"
+              class="text-[11px] leading-5 text-muted-foreground"
+            >
+              {{
+                t('onboarding.cliHomesHint', {
+                  codexHome: cliReport?.codexHome || '~/.codex',
+                  grokHome: cliReport?.grokHome || '~/.grok',
+                })
+              }}
+            </p>
+            <p class="text-[12px] text-muted-foreground">
+              {{ t('onboarding.runtimeSkipHint') }}
+            </p>
+          </div>
+
           <!-- Workspace -->
           <div v-else key="workspace" class="onboarding-panel space-y-5">
             <div>
@@ -210,7 +425,7 @@ async function skipWorkspace(): Promise<void> {
           type="button"
           variant="ghost"
           class="h-9"
-          :disabled="finishing"
+          :disabled="finishing || Object.values(cliInstalling).some(Boolean)"
           @click="back"
         >
           {{ t('onboarding.back') }}
@@ -218,7 +433,7 @@ async function skipWorkspace(): Promise<void> {
         <div v-else />
         <div class="flex items-center gap-2">
           <Button
-            v-if="step === 3"
+            v-if="step === STEP_WORKSPACE"
             type="button"
             variant="ghost"
             class="h-9"
@@ -230,7 +445,7 @@ async function skipWorkspace(): Promise<void> {
           <Button
             type="button"
             class="h-9 min-w-[112px]"
-            :disabled="finishing"
+            :disabled="finishing || Object.values(cliInstalling).some(Boolean)"
             @click="next"
           >
             {{ finishing ? t('common.saving') : (step === steps.length - 1 ? t('onboarding.finish') : t('onboarding.continue')) }}

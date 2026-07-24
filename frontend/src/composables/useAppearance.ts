@@ -18,6 +18,9 @@ const TRANSLUCENT_ATTR = 'data-translucent-sidebar'
 const CONTRAST_ATTR = 'data-high-contrast'
 const POINTER_ATTR = 'data-pointer-cursor'
 const MOTION_ATTR = 'data-reduce-motion'
+const RUNTIME_ATTR = 'data-runtime'
+
+export type AppRuntime = 'codex' | 'claude' | 'grok'
 
 const theme = ref<AppTheme>('light')
 const accent = ref<AppAccent>('codex')
@@ -28,6 +31,7 @@ const translucentSidebar = ref(true)
 const highContrast = ref(false)
 const pointerCursor = ref(false)
 const reduceMotion = ref(false)
+const runtime = ref<AppRuntime>('codex')
 const initialized = ref(false)
 
 function readSystemTheme(): 'light' | 'dark' {
@@ -45,8 +49,10 @@ function normalizeScale(value?: string): FontScale {
 
 function applyAttributes(): void {
   const root = document.documentElement
+  // Theme / accent always follow global prefs (including Grok mode).
   root.setAttribute(THEME_ATTR, theme.value)
   root.setAttribute(ACCENT_ATTR, accent.value)
+  root.setAttribute(RUNTIME_ATTR, runtime.value)
   root.setAttribute(UI_SIZE_ATTR, uiFontSize.value)
   root.setAttribute(CODE_SIZE_ATTR, codeFontSize.value)
   root.setAttribute(TRANSLUCENT_ATTR, translucentSidebar.value ? 'true' : 'false')
@@ -80,10 +86,14 @@ export type AppearanceState = {
   highContrast?: boolean
   pointerCursor?: boolean
   reduceMotion?: boolean
+  runtime?: AppRuntime
 }
 
 function initAppearance(initial: AppearanceState = {}): void {
-  if (initialized.value) return
+  if (initialized.value) {
+    if (initial.runtime) setRuntime(initial.runtime)
+    return
+  }
   theme.value = initial.theme ?? 'light'
   accent.value = initial.accent && isAppAccent(initial.accent) ? initial.accent : 'codex'
   font.value = initial.font ?? 'system'
@@ -93,6 +103,7 @@ function initAppearance(initial: AppearanceState = {}): void {
   highContrast.value = Boolean(initial.highContrast)
   pointerCursor.value = Boolean(initial.pointerCursor)
   reduceMotion.value = Boolean(initial.reduceMotion)
+  runtime.value = normalizeRuntime(initial.runtime)
 
   applyAttributes()
   initialized.value = true
@@ -101,6 +112,11 @@ function initAppearance(initial: AppearanceState = {}): void {
   media.addEventListener('change', () => {
     if (theme.value === 'system') applyAttributes()
   })
+}
+
+function normalizeRuntime(value: string | undefined | null): AppRuntime {
+  if (value === 'grok' || value === 'claude') return value
+  return 'codex'
 }
 
 function setTheme(value: AppTheme): void {
@@ -128,6 +144,11 @@ function setUiPrefs(prefs: AppearanceState): void {
   applyAttributes()
 }
 
+function setRuntime(value: AppRuntime): void {
+  runtime.value = normalizeRuntime(value)
+  applyAttributes()
+}
+
 export function useAppearance() {
   return {
     theme,
@@ -139,6 +160,7 @@ export function useAppearance() {
     highContrast,
     pointerCursor,
     reduceMotion,
+    runtime,
     resolvedTheme,
     isDark,
     initialized,
@@ -147,5 +169,6 @@ export function useAppearance() {
     setAccent,
     setFont,
     setUiPrefs,
+    setRuntime,
   }
 }

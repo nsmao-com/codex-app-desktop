@@ -25,13 +25,21 @@ Write-Output ('stopped: ' + ($(if ($stopped.Count) { $stopped -join ', ' } else 
 
 # Free wails3 control port if a stale process still holds it.
 $port = 9245
-Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
-  Where-Object { $_.OwningProcess -gt 0 } |
-  Select-Object -ExpandProperty OwningProcess -Unique |
-  ForEach-Object {
-    Write-Output ("freeing port {0} pid={1}" -f $port, $_)
-    Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+try {
+  $listenPids = @()
+  foreach ($line in (netstat -ano | Select-String "LISTENING" | Select-String ":$port\s")) {
+    if ($line.Line -match '\s+(\d+)\s*$') {
+      $listenPids += [int]$Matches[1]
+    }
   }
+  foreach ($procId in ($listenPids | Select-Object -Unique)) {
+    if ($procId -le 0) { continue }
+    Write-Output ("freeing port {0} pid={1}" -f $port, $procId)
+    Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+  }
+} catch {
+  Write-Output ("skip port free for {0}: {1}" -f $port, $_.Exception.Message)
+}
 Start-Sleep -Seconds 1
 
 $root = Split-Path -Parent $PSScriptRoot

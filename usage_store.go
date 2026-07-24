@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,20 +12,55 @@ import (
 
 const localUsageTurnRetentionDays = 60
 
+// localDayStats is one calendar day's aggregated spend for a single runtime.
+type localDayStats struct {
+	Tokens    int64 `json:"tokens"`
+	Input     int64 `json:"inputTokens,omitempty"`
+	Cached    int64 `json:"cachedInputTokens,omitempty"`
+	Output    int64 `json:"outputTokens,omitempty"`
+	Reasoning int64 `json:"reasoningOutputTokens,omitempty"`
+}
+
+// localRuntimeBucket holds lifetime + daily totals for codex | grok | claude.
+type localRuntimeBucket struct {
+	LifetimeTokens    int64                    `json:"lifetimeTokens"`
+	LifetimeInput      int64                    `json:"lifetimeInputTokens"`
+	LifetimeCached     int64                    `json:"lifetimeCachedInputTokens"`
+	LifetimeOutput     int64                    `json:"lifetimeOutputTokens"`
+	LifetimeReasoning  int64                    `json:"lifetimeReasoningTokens"`
+	Days              map[string]localDayStats `json:"days"`
+}
+
 type localTurnUsage struct {
+	Runtime   string `json:"runtime"`
 	ThreadID  string `json:"threadId"`
 	TurnID    string `json:"turnId"`
 	Tokens    int64  `json:"tokens"`
+	Input     int64  `json:"inputTokens,omitempty"`
+	Cached    int64  `json:"cachedInputTokens,omitempty"`
+	Output    int64  `json:"outputTokens,omitempty"`
+	Reasoning int64  `json:"reasoningOutputTokens,omitempty"`
 	Day       string `json:"day"`
 	UpdatedAt int64  `json:"updatedAt"`
 }
 
+// localUsageFile version 2 stores spend per runtime so Grok and Codex never share totals.
+// Legacy v1 fields (top-level lifetimeTokens/days) are migrated into byRuntime.codex on load.
 type localUsageFile struct {
-	Version         int                       `json:"version"`
-	LifetimeTokens   int64                     `json:"lifetimeTokens"`
-	Days            map[string]int64          `json:"days"`
-	Turns           map[string]localTurnUsage `json:"turns"`
-	SeededFromCloud bool                      `json:"seededFromCloud,omitempty"`
+	Version         int                            `json:"version"`
+	LifetimeTokens   int64                          `json:"lifetimeTokens,omitempty"` // legacy v1
+	Days            map[string]int64               `json:"days,omitempty"`          // legacy v1
+	Turns           map[string]localTurnUsage      `json:"turns"`
+	ByRuntime       map[string]*localRuntimeBucket `json:"byRuntime"`
+	SeededFromCloud bool                           `json:"seededFromCloud,omitempty"`
+}
+
+type tokenBreakdown struct {
+	Input     int64
+	Cached    int64
+	Output    int64
+	Reasoning int64
+	Total     int64
 }
 
 func usagePath(settingsPath string) string {
@@ -35,10 +69,14 @@ func usagePath(settingsPath string) string {
 
 func emptyLocalUsage() *localUsageFile {
 	return &localUsageFile{
-		Version: 1,
-		Days:    make(map[string]int64),
-		Turns:   make(map[string]localTurnUsage),
+		Version:   2,
+		Turns:     make(map[string]localTurnUsage),
+		ByRuntime: make(map[string]*localRuntimeBucket),
 	}
+}
+
+func emptyRuntimeBucket() *localRuntimeBucket {
+	return &localRuntimeBucket{Days: make(map[string]localDayStats)}
 }
 
 func loadLocalUsage(settingsPath string) *localUsageFile {
@@ -50,22 +88,99 @@ func loadLocalUsage(settingsPath string) *localUsageFile {
 	if err := json.Unmarshal(payload, result); err != nil {
 		return emptyLocalUsage()
 	}
-	if result.Days == nil {
-		result.Days = make(map[string]int64)
-	}
 	if result.Turns == nil {
 		result.Turns = make(map[string]localTurnUsage)
 	}
-	if result.Version <= 0 {
-		result.Version = 1
+	if result.ByRuntime == nil {
+		result.ByRuntime = make(map[string]*localRuntimeBucket)
 	}
+	migrateLocalUsage(result)
 	return result
+}
+
+func migrateLocalUsage(usage *localUsageFile) {
+	if usage == nil {
+		return
+	}
+	// Promote legacy v1 top-level days/lifetime into the codex bucket once.
+	if usage.Version < 2 || (len(usage.ByRuntime) == 0 && (usage.LifetimeTokens > 0 || len(usage.Days) > 0)) {
+		bucket := usage.ensureRuntime("codex")
+		if bucket.LifetimeTokens == 0 && usage.LifetimeTokens > 0 {
+			bucket.LifetimeTokens = usage.LifetimeTokens
+		}
+		if len(usage.Days) > 0 {
+			for day, tokens := range usage.Days {
+				if tokens <= 0 || strings.TrimSpace(day) == "" {
+					continue
+				}
+				prev := bucket.Days[day]
+				if prev.Tokens == 0 {
+					bucket.Days[day] = localDayStats{Tokens: tokens}
+				}
+			}
+		}
+		// Clear legacy fields after migration so they are not double-counted on next write.
+		usage.LifetimeTokens = 0
+		usage.Days = nil
+		usage.Version = 2
+	}
+	if usage.Version < 2 {
+		usage.Version = 2
+	}
+	// Normalize turn runtimes and re-aggregate buckets from turns when possible.
+	for key, turn := range usage.Turns {
+		runtime := normalizeUsageRuntime(turn.Runtime)
+		if turn.Runtime == "" {
+			turn.Runtime = runtime
+			usage.Turns[key] = turn
+		}
+		if turn.Tokens <= 0 {
+			turn.Tokens = turn.Input + turn.Cached + turn.Output + turn.Reasoning
+			usage.Turns[key] = turn
+		}
+	}
+	for _, bucket := range usage.ByRuntime {
+		if bucket == nil {
+			continue
+		}
+		if bucket.Days == nil {
+			bucket.Days = make(map[string]localDayStats)
+		}
+	}
+}
+
+func (u *localUsageFile) ensureRuntime(runtime string) *localRuntimeBucket {
+	runtime = normalizeUsageRuntime(runtime)
+	if u.ByRuntime == nil {
+		u.ByRuntime = make(map[string]*localRuntimeBucket)
+	}
+	bucket := u.ByRuntime[runtime]
+	if bucket == nil {
+		bucket = emptyRuntimeBucket()
+		u.ByRuntime[runtime] = bucket
+	}
+	if bucket.Days == nil {
+		bucket.Days = make(map[string]localDayStats)
+	}
+	return bucket
+}
+
+func normalizeUsageRuntime(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "grok":
+		return "grok"
+	case "claude":
+		return "claude"
+	default:
+		return "codex"
+	}
 }
 
 func persistLocalUsage(settingsPath string, usage *localUsageFile) {
 	if usage == nil {
 		return
 	}
+	usage.Version = 2
 	payload, err := json.MarshalIndent(usage, "", "  ")
 	if err != nil {
 		return
@@ -81,15 +196,32 @@ func localDayKey(at time.Time) string {
 	return at.In(time.Local).Format("2006-01-02")
 }
 
-func turnUsageKey(threadID, turnID string) string {
-	return strings.TrimSpace(threadID) + ":" + strings.TrimSpace(turnID)
+func turnUsageKey(runtime, threadID, turnID string) string {
+	return normalizeUsageRuntime(runtime) + ":" + strings.TrimSpace(threadID) + ":" + strings.TrimSpace(turnID)
 }
 
 func localUsageIsEmpty(usage *localUsageFile) bool {
 	if usage == nil {
 		return true
 	}
-	if usage.LifetimeTokens > 0 || len(usage.Turns) > 0 {
+	if len(usage.Turns) > 0 {
+		return false
+	}
+	for _, bucket := range usage.ByRuntime {
+		if bucket == nil {
+			continue
+		}
+		if bucket.LifetimeTokens > 0 {
+			return false
+		}
+		for _, day := range bucket.Days {
+			if day.Tokens > 0 {
+				return false
+			}
+		}
+	}
+	// Legacy v1 residual
+	if usage.LifetimeTokens > 0 {
 		return false
 	}
 	for _, tokens := range usage.Days {
@@ -100,10 +232,50 @@ func localUsageIsEmpty(usage *localUsageFile) bool {
 	return true
 }
 
+func breakdownFromUsageMap(usage map[string]any) tokenBreakdown {
+	if usage == nil {
+		return tokenBreakdown{}
+	}
+	// Prefer already-normalized maps; also accept snake_case.
+	normalized := normalizeTokenUsageMap(usage)
+	if normalized == nil {
+		return tokenBreakdown{}
+	}
+	b := tokenBreakdown{
+		Input:     int64(anyToFloat(normalized["inputTokens"])),
+		Cached:    int64(anyToFloat(normalized["cachedInputTokens"])),
+		Output:    int64(anyToFloat(normalized["outputTokens"])),
+		Reasoning: int64(anyToFloat(normalized["reasoningOutputTokens"])),
+		Total:     int64(anyToFloat(normalized["totalTokens"])),
+	}
+	if b.Total <= 0 {
+		b.Total = b.Input + b.Cached + b.Output + b.Reasoning
+	}
+	return b
+}
+
+func (b tokenBreakdown) valid() bool {
+	return b.Total > 0 || b.Input > 0 || b.Cached > 0 || b.Output > 0 || b.Reasoning > 0
+}
+
+func (b *tokenBreakdown) normalize() {
+	if b.Total <= 0 {
+		b.Total = b.Input + b.Cached + b.Output + b.Reasoning
+	}
+}
+
+// recordLocalTurnUsage is the legacy total-only entrypoint (Codex cloud events).
 func (s *AppService) recordLocalTurnUsage(threadID, turnID string, tokens int64, at time.Time) {
+	s.persistTurnUsage("codex", threadID, turnID, tokenBreakdown{Total: tokens}, at)
+}
+
+// persistTurnUsage writes one turn's spend into the runtime-scoped local usage store.
+func (s *AppService) persistTurnUsage(runtime, threadID, turnID string, b tokenBreakdown, at time.Time) {
+	runtime = normalizeUsageRuntime(runtime)
 	threadID = strings.TrimSpace(threadID)
 	turnID = strings.TrimSpace(turnID)
-	if threadID == "" || turnID == "" || tokens <= 0 {
+	b.normalize()
+	if threadID == "" || turnID == "" || !b.valid() {
 		return
 	}
 	if at.IsZero() {
@@ -114,17 +286,23 @@ func (s *AppService) recordLocalTurnUsage(threadID, turnID string, tokens int64,
 	defer s.mu.Unlock()
 
 	usage := loadLocalUsage(s.settingsPath)
-	if !applyTurnToUsage(usage, threadID, turnID, tokens, at) {
+	if !applyTurnToUsageDetailed(usage, runtime, threadID, turnID, b, at) {
 		return
 	}
 	pruneLocalUsageTurns(usage, at)
 	persistLocalUsage(s.settingsPath, usage)
 }
 
-func applyTurnToUsage(usage *localUsageFile, threadID, turnID string, tokens int64, at time.Time) bool {
-	if usage == nil || tokens <= 0 {
+func applyTurnToUsageDetailed(
+	usage *localUsageFile,
+	runtime, threadID, turnID string,
+	b tokenBreakdown,
+	at time.Time,
+) bool {
+	if usage == nil || !b.valid() {
 		return false
 	}
+	runtime = normalizeUsageRuntime(runtime)
 	threadID = strings.TrimSpace(threadID)
 	turnID = strings.TrimSpace(turnID)
 	if threadID == "" || turnID == "" {
@@ -133,41 +311,116 @@ func applyTurnToUsage(usage *localUsageFile, threadID, turnID string, tokens int
 	if at.IsZero() {
 		at = time.Now()
 	}
+	b.normalize()
 	day := localDayKey(at)
-	key := turnUsageKey(threadID, turnID)
+	key := turnUsageKey(runtime, threadID, turnID)
+	bucket := usage.ensureRuntime(runtime)
 
 	prev, hadPrev := usage.Turns[key]
-	prevTokens := int64(0)
-	prevDay := ""
-	if hadPrev {
-		prevTokens = prev.Tokens
-		prevDay = prev.Day
-	}
-	if hadPrev && prevTokens == tokens && prevDay == day {
+	if hadPrev &&
+		prev.Tokens == b.Total &&
+		prev.Input == b.Input &&
+		prev.Cached == b.Cached &&
+		prev.Output == b.Output &&
+		prev.Reasoning == b.Reasoning &&
+		prev.Day == day &&
+		normalizeUsageRuntime(prev.Runtime) == runtime {
 		return false
 	}
 
-	if hadPrev && prevDay != "" {
-		usage.Days[prevDay] = usage.Days[prevDay] - prevTokens
-		if usage.Days[prevDay] <= 0 {
-			delete(usage.Days, prevDay)
+	// Undo previous contribution for this turn key.
+	if hadPrev {
+		prevRuntime := normalizeUsageRuntime(prev.Runtime)
+		prevBucket := usage.ensureRuntime(prevRuntime)
+		if prev.Day != "" {
+			prevDay := prevBucket.Days[prev.Day]
+			prevDay.Tokens -= prev.Tokens
+			prevDay.Input -= prev.Input
+			prevDay.Cached -= prev.Cached
+			prevDay.Output -= prev.Output
+			prevDay.Reasoning -= prev.Reasoning
+			if prevDay.Tokens <= 0 && prevDay.Input <= 0 && prevDay.Cached <= 0 && prevDay.Output <= 0 && prevDay.Reasoning <= 0 {
+				delete(prevBucket.Days, prev.Day)
+			} else {
+				prevBucket.Days[prev.Day] = clampDayStats(prevDay)
+			}
 		}
-		usage.LifetimeTokens -= prevTokens
+		prevBucket.LifetimeTokens -= prev.Tokens
+		prevBucket.LifetimeInput -= prev.Input
+		prevBucket.LifetimeCached -= prev.Cached
+		prevBucket.LifetimeOutput -= prev.Output
+		prevBucket.LifetimeReasoning -= prev.Reasoning
+		clampRuntimeBucket(prevBucket)
 	}
 
-	usage.Days[day] = usage.Days[day] + tokens
-	usage.LifetimeTokens += tokens
-	if usage.LifetimeTokens < 0 {
-		usage.LifetimeTokens = 0
-	}
+	dayStats := bucket.Days[day]
+	dayStats.Tokens += b.Total
+	dayStats.Input += b.Input
+	dayStats.Cached += b.Cached
+	dayStats.Output += b.Output
+	dayStats.Reasoning += b.Reasoning
+	bucket.Days[day] = dayStats
+
+	bucket.LifetimeTokens += b.Total
+	bucket.LifetimeInput += b.Input
+	bucket.LifetimeCached += b.Cached
+	bucket.LifetimeOutput += b.Output
+	bucket.LifetimeReasoning += b.Reasoning
+	clampRuntimeBucket(bucket)
+
 	usage.Turns[key] = localTurnUsage{
+		Runtime:   runtime,
 		ThreadID:  threadID,
 		TurnID:    turnID,
-		Tokens:    tokens,
+		Tokens:    b.Total,
+		Input:     b.Input,
+		Cached:    b.Cached,
+		Output:    b.Output,
+		Reasoning: b.Reasoning,
 		Day:       day,
 		UpdatedAt: at.Unix(),
 	}
 	return true
+}
+
+func clampDayStats(day localDayStats) localDayStats {
+	if day.Tokens < 0 {
+		day.Tokens = 0
+	}
+	if day.Input < 0 {
+		day.Input = 0
+	}
+	if day.Cached < 0 {
+		day.Cached = 0
+	}
+	if day.Output < 0 {
+		day.Output = 0
+	}
+	if day.Reasoning < 0 {
+		day.Reasoning = 0
+	}
+	return day
+}
+
+func clampRuntimeBucket(bucket *localRuntimeBucket) {
+	if bucket == nil {
+		return
+	}
+	if bucket.LifetimeTokens < 0 {
+		bucket.LifetimeTokens = 0
+	}
+	if bucket.LifetimeInput < 0 {
+		bucket.LifetimeInput = 0
+	}
+	if bucket.LifetimeCached < 0 {
+		bucket.LifetimeCached = 0
+	}
+	if bucket.LifetimeOutput < 0 {
+		bucket.LifetimeOutput = 0
+	}
+	if bucket.LifetimeReasoning < 0 {
+		bucket.LifetimeReasoning = 0
+	}
 }
 
 func pruneLocalUsageTurns(usage *localUsageFile, now time.Time) {
@@ -183,10 +436,15 @@ func pruneLocalUsageTurns(usage *localUsageFile, now time.Time) {
 }
 
 func (s *AppService) localUsageSummary() map[string]any {
+	return s.localUsageSummaryFor(normalizeUsageRuntime(s.Settings().ActiveRuntime))
+}
+
+func (s *AppService) localUsageSummaryFor(runtime string) map[string]any {
+	runtime = normalizeUsageRuntime(runtime)
 	s.mu.Lock()
 	usage := loadLocalUsage(s.settingsPath)
 	s.mu.Unlock()
-	return buildLocalUsageResponse(usage)
+	return buildLocalUsageResponse(usage, runtime)
 }
 
 func (s *AppService) seedLocalUsageFromCloud(cloud map[string]any) bool {
@@ -206,8 +464,16 @@ func (s *AppService) seedLocalUsageFromCloud(cloud map[string]any) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	usage := loadLocalUsage(s.settingsPath)
-	if !localUsageIsEmpty(usage) {
+	// Only seed into the empty codex bucket — never overwrite Grok/Claude.
+	codexBucket := usage.ensureRuntime("codex")
+	if codexBucket.LifetimeTokens > 0 || len(codexBucket.Days) > 0 {
 		return false
+	}
+	// Also refuse if any codex turns already exist.
+	for _, turn := range usage.Turns {
+		if normalizeUsageRuntime(turn.Runtime) == "codex" {
+			return false
+		}
 	}
 
 	changed := false
@@ -228,18 +494,18 @@ func (s *AppService) seedLocalUsageFromCloud(cloud map[string]any) bool {
 		if day == "" || tokens <= 0 {
 			continue
 		}
-		usage.Days[day] = tokens
+		codexBucket.Days[day] = localDayStats{Tokens: tokens}
 		changed = true
 	}
 	if lifetime > 0 {
-		usage.LifetimeTokens = lifetime
+		codexBucket.LifetimeTokens = lifetime
 		changed = true
-	} else if len(usage.Days) > 0 {
+	} else if len(codexBucket.Days) > 0 {
 		var sum int64
-		for _, tokens := range usage.Days {
-			sum += tokens
+		for _, day := range codexBucket.Days {
+			sum += day.Tokens
 		}
-		usage.LifetimeTokens = sum
+		codexBucket.LifetimeTokens = sum
 		changed = sum > 0
 	}
 	if !changed {
@@ -257,7 +523,6 @@ func asStringKeyMap(value any) map[string]any {
 	if typed, ok := value.(map[string]any); ok {
 		return typed
 	}
-	// Some RPC decoders yield map[string]interface{} aliases already covered above.
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return map[string]any{}
@@ -294,54 +559,82 @@ func asAnySlice(value any) []any {
 	}
 }
 
-
-func buildLocalUsageResponse(usage *localUsageFile) map[string]any {
+func buildLocalUsageResponse(usage *localUsageFile, runtime string) map[string]any {
 	if usage == nil {
 		usage = emptyLocalUsage()
 	}
+	runtime = normalizeUsageRuntime(runtime)
+	bucket := usage.ByRuntime[runtime]
+	if bucket == nil {
+		bucket = emptyRuntimeBucket()
+	}
 
 	type dayBucket struct {
-		day    string
-		tokens int64
+		day   string
+		stats localDayStats
 	}
-	buckets := make([]dayBucket, 0, len(usage.Days))
+	items := make([]dayBucket, 0, len(bucket.Days))
 	var peak int64
-	for day, tokens := range usage.Days {
-		if tokens <= 0 || strings.TrimSpace(day) == "" {
+	for day, stats := range bucket.Days {
+		if stats.Tokens <= 0 || strings.TrimSpace(day) == "" {
 			continue
 		}
-		buckets = append(buckets, dayBucket{day: day, tokens: tokens})
-		if tokens > peak {
-			peak = tokens
+		items = append(items, dayBucket{day: day, stats: stats})
+		if stats.Tokens > peak {
+			peak = stats.Tokens
 		}
 	}
-	sort.Slice(buckets, func(i, j int) bool { return buckets[i].day > buckets[j].day })
+	sort.Slice(items, func(i, j int) bool { return items[i].day > items[j].day })
 
-	daily := make([]map[string]any, 0, len(buckets))
-	for _, item := range buckets {
+	// Build day map for streak helper (token totals only).
+	dayTotals := make(map[string]int64, len(bucket.Days))
+	for day, stats := range bucket.Days {
+		if stats.Tokens > 0 {
+			dayTotals[day] = stats.Tokens
+		}
+	}
+	currentStreak, longestStreak := computeUsageStreaks(dayTotals, time.Now())
+
+	daily := make([]map[string]any, 0, len(items))
+	for _, item := range items {
 		daily = append(daily, map[string]any{
-			"startDate": item.day,
-			"tokens":    item.tokens,
+			"startDate":             item.day,
+			"tokens":                item.stats.Tokens,
+			"inputTokens":           item.stats.Input,
+			"cachedInputTokens":     item.stats.Cached,
+			"outputTokens":          item.stats.Output,
+			"reasoningOutputTokens": item.stats.Reasoning,
 		})
 	}
 
-	currentStreak, longestStreak := computeUsageStreaks(usage.Days, time.Now())
-	lifetime := usage.LifetimeTokens
+	lifetime := bucket.LifetimeTokens
 	if lifetime < 0 {
 		lifetime = 0
 	}
 
 	return map[string]any{
 		"summary": map[string]any{
-			"lifetimeTokens":       lifetime,
-			"peakDailyTokens":      peak,
-			"currentStreakDays":    currentStreak,
-			"longestStreakDays":    longestStreak,
-			"longestRunningTurnSec": nil,
+			"lifetimeTokens":            lifetime,
+			"lifetimeInputTokens":       maxInt64(0, bucket.LifetimeInput),
+			"lifetimeCachedInputTokens": maxInt64(0, bucket.LifetimeCached),
+			"lifetimeOutputTokens":      maxInt64(0, bucket.LifetimeOutput),
+			"lifetimeReasoningTokens":   maxInt64(0, bucket.LifetimeReasoning),
+			"peakDailyTokens":           peak,
+			"currentStreakDays":         currentStreak,
+			"longestStreakDays":         longestStreak,
+			"longestRunningTurnSec":     nil,
 		},
 		"dailyUsageBuckets": daily,
+		"runtime":           runtime,
 		"source":            "local",
 	}
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func computeUsageStreaks(days map[string]int64, now time.Time) (current, longest int) {
@@ -358,22 +651,22 @@ func computeUsageStreaks(days map[string]int64, now time.Time) (current, longest
 		return 0, 0
 	}
 
-	sorted := make([]string, 0, len(active))
+	// Longest streak over all active days.
+	keys := make([]string, 0, len(active))
 	for day := range active {
-		sorted = append(sorted, day)
+		keys = append(keys, day)
 	}
-	sort.Strings(sorted)
-
+	sort.Strings(keys)
 	run := 1
 	longest = 1
-	for i := 1; i < len(sorted); i++ {
-		prev, errPrev := time.ParseInLocation("2006-01-02", sorted[i-1], time.Local)
-		cur, errCur := time.ParseInLocation("2006-01-02", sorted[i], time.Local)
+	for i := 1; i < len(keys); i++ {
+		prev, errPrev := time.ParseInLocation("2006-01-02", keys[i-1], time.Local)
+		cur, errCur := time.ParseInLocation("2006-01-02", keys[i], time.Local)
 		if errPrev != nil || errCur != nil {
 			run = 1
 			continue
 		}
-		if int(math.Round(cur.Sub(prev).Hours()/24)) == 1 {
+		if cur.Sub(prev) == 24*time.Hour {
 			run++
 			if run > longest {
 				longest = run
@@ -383,20 +676,14 @@ func computeUsageStreaks(days map[string]int64, now time.Time) (current, longest
 		}
 	}
 
-	today := localDayKey(now)
-	yesterday := localDayKey(now.AddDate(0, 0, -1))
-	start := ""
-	if _, ok := active[today]; ok {
-		start = today
-	} else if _, ok := active[yesterday]; ok {
-		start = yesterday
-	}
-	if start == "" {
-		return 0, longest
-	}
-	cursor, err := time.ParseInLocation("2006-01-02", start, time.Local)
-	if err != nil {
-		return 0, longest
+	// Current streak ending today or yesterday.
+	cursor := now.In(time.Local)
+	todayKey := localDayKey(cursor)
+	if _, ok := active[todayKey]; !ok {
+		cursor = cursor.AddDate(0, 0, -1)
+		if _, ok := active[localDayKey(cursor)]; !ok {
+			return 0, longest
+		}
 	}
 	for {
 		key := localDayKey(cursor)
@@ -413,18 +700,23 @@ func computeUsageStreaks(days map[string]int64, now time.Time) (current, longest
 }
 
 func extractTurnTokens(data map[string]any) (threadID, turnID string, tokens int64, ok bool) {
+	threadID, turnID, b, ok := extractTurnTokenBreakdown(data)
+	return threadID, turnID, b.Total, ok
+}
+
+func extractTurnTokenBreakdown(data map[string]any) (threadID, turnID string, b tokenBreakdown, ok bool) {
 	if data == nil {
-		return "", "", 0, false
+		return "", "", tokenBreakdown{}, false
 	}
 	threadID, _ = data["threadId"].(string)
 	if threadID == "" {
-		if thread, ok := data["thread"].(map[string]any); ok {
+		if thread, okMap := data["thread"].(map[string]any); okMap {
 			threadID, _ = thread["id"].(string)
 		}
 	}
 	turnID, _ = data["turnId"].(string)
 	if turnID == "" {
-		if turn, ok := data["turn"].(map[string]any); ok {
+		if turn, okMap := data["turn"].(map[string]any); okMap {
 			turnID, _ = turn["id"].(string)
 		}
 	}
@@ -433,36 +725,22 @@ func extractTurnTokens(data map[string]any) (threadID, turnID string, tokens int
 		tokenUsage, _ = data["token_usage"].(map[string]any)
 	}
 	if tokenUsage == nil {
-		return threadID, turnID, 0, false
+		return threadID, turnID, tokenBreakdown{}, false
 	}
 	// Prefer per-turn "last" so session cumulative "total" never double-counts.
 	last, _ := tokenUsage["last"].(map[string]any)
 	if last == nil {
 		last = tokenUsage
 	}
-	tokens = int64(anyToFloat(last["totalTokens"]))
-	if tokens <= 0 {
-		tokens = int64(anyToFloat(last["total_tokens"]))
+	b = breakdownFromUsageMap(last)
+	// Older extract path missed cache; include it in total.
+	if b.Total <= 0 {
+		b.Total = b.Input + b.Cached + b.Output + b.Reasoning
 	}
-	if tokens <= 0 {
-		input := int64(anyToFloat(last["inputTokens"]))
-		if input <= 0 {
-			input = int64(anyToFloat(last["input_tokens"]))
-		}
-		output := int64(anyToFloat(last["outputTokens"]))
-		if output <= 0 {
-			output = int64(anyToFloat(last["output_tokens"]))
-		}
-		reasoning := int64(anyToFloat(last["reasoningOutputTokens"]))
-		if reasoning <= 0 {
-			reasoning = int64(anyToFloat(last["reasoning_output_tokens"]))
-		}
-		tokens = input + output + reasoning
+	if strings.TrimSpace(threadID) == "" || strings.TrimSpace(turnID) == "" || !b.valid() {
+		return threadID, turnID, b, false
 	}
-	if strings.TrimSpace(threadID) == "" || strings.TrimSpace(turnID) == "" || tokens <= 0 {
-		return threadID, turnID, tokens, false
-	}
-	return threadID, turnID, tokens, true
+	return threadID, turnID, b, true
 }
 
 func anyToFloat(value any) float64 {
@@ -488,16 +766,16 @@ func anyToFloat(value any) float64 {
 		}
 		return parsed
 	case string:
-		trimmed := strings.TrimSpace(typed)
-		if trimmed == "" {
+		parsed, err := strconvParseFloat(typed)
+		if err != nil {
 			return 0
 		}
-		trimmed = strings.TrimSuffix(trimmed, "n")
-		if parsed, err := strconv.ParseFloat(trimmed, 64); err == nil {
-			return parsed
-		}
-		return 0
+		return parsed
 	default:
 		return 0
 	}
+}
+
+func strconvParseFloat(value string) (float64, error) {
+	return strconv.ParseFloat(strings.TrimSpace(value), 64)
 }

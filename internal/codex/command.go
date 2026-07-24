@@ -16,6 +16,12 @@ type commandSpec struct {
 	prefixArgs []string
 }
 
+// EnrichPathForLookups merges common Node/pnpm/npm bin dirs into PATH so GUI
+// apps can resolve globally installed CLIs (codex, grok, node, pnpm, …).
+func EnrichPathForLookups() {
+	enrichProcessPath()
+}
+
 func Detect() Detection {
 	enrichProcessPath()
 
@@ -71,10 +77,18 @@ func resolveCommand() (commandSpec, error) {
 	}
 
 	path, err := execLookPath("codex")
-	if err != nil {
-		return commandSpec{}, errors.New("Codex CLI was not found; install it with pnpm add -g @openai/codex, then restart Nice Codex (GUI apps need Node/pnpm on the User PATH)")
+	if err == nil {
+		return commandSpec{path: path}, nil
 	}
-	return commandSpec{path: path}, nil
+
+	// macOS/Linux GUI apps often miss Homebrew/nvm PATH — scan known install roots.
+	if runtime.GOOS != "windows" {
+		if spec, ok := resolveUnixExtraCommands(); ok {
+			return spec, nil
+		}
+	}
+
+	return commandSpec{}, errors.New("Codex CLI was not found; install it with pnpm add -g @openai/codex, then restart Nice Codex (GUI apps need Node/pnpm on PATH — macOS: Homebrew/nvm/fnm bins)")
 }
 
 func resolveWindowsNPMCommand() (commandSpec, bool) {

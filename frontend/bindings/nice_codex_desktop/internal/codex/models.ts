@@ -22,4 +22,10 @@ export interface Status {
     "binary": string;
     "version": string;
     "workspace": string;
+
+    /**
+     * UserAgent is the effective app-server originator UA after initialize
+     * (e.g. "codex_desktop/0.144.6 (Windows …) … (codex_desktop; 0.1.0)").
+     */
+    "userAgent"?: string;
 }

@@ -4,10 +4,12 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { Button } from '@/components/ui/button'
-import { useAppStore, useCodexStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
 
 const appStore = useAppStore()
 const codexStore = useCodexStore()
+const grokStore = useGrokStore()
+const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const { t } = useI18n()
 
@@ -15,8 +17,14 @@ const emit = defineEmits<{
   suggestion: [prompt: string]
 }>()
 
-const isCowork = computed(() => appStore.settings.workMode === 'cowork')
-const titleText = computed(() => (isCowork.value ? t('chat.coworkTitle') : t('chat.title')))
+const isGrok = computed(() => appStore.isGrokMode)
+const isClaude = computed(() => appStore.isClaudeMode)
+const isCowork = computed(() => !isGrok.value && !isClaude.value && appStore.settings.workMode === 'cowork')
+const titleText = computed(() => {
+  if (isGrok.value) return t('chat.grokTitle')
+  if (isClaude.value) return t('chat.claudeTitle')
+  return isCowork.value ? t('chat.coworkTitle') : t('chat.title')
+})
 const titleChars = computed(() => [...titleText.value])
 const suggestions = computed(() => [
   { icon: FileSearch, title: t('chat.traceBug'), prompt: t('chat.traceBugPrompt') },
@@ -24,9 +32,39 @@ const suggestions = computed(() => [
   { icon: GitPullRequestArrow, title: t('chat.reviewChanges'), prompt: t('chat.reviewChangesPrompt') },
 ])
 const runtimeWarning = computed(() => {
+  if (isGrok.value) {
+    if (grokStore.isReady) return ''
+    return t('sidebar.grokRuntimeMissing')
+  }
+  if (isClaude.value) {
+    if (claudeStore.isReady) return ''
+    return claudeStore.runtime.message || t('sidebar.claudeRuntimeMissing')
+  }
   if (appStore.codexAvailable) return ''
   return appStore.codexVersion || t('welcome.cliRequired')
 })
+const needsWorkspace = computed(() => !workspaceStore.workspace)
+const kickerText = computed(() => {
+  if (isGrok.value) return t('chat.grokReadyHere')
+  if (isClaude.value) return t('chat.claudeReadyHere')
+  return t('chat.readyHere')
+})
+const descriptionText = computed(() => {
+  if (isGrok.value) return t('chat.grokDescription')
+  if (isClaude.value) return t('chat.claudeDescription')
+  return isCowork.value ? t('chat.coworkDescription') : t('chat.description')
+})
+
+function chooseWorkspace(): void {
+  if (isGrok.value || isClaude.value) {
+    void workspaceStore.selectWorkspace().then(() => {
+      if (isGrok.value) void grokStore.loadSessions()
+      else void claudeStore.loadSessions()
+    })
+    return
+  }
+  void codexStore.selectProject()
+}
 </script>
 
 <template>
@@ -38,7 +76,7 @@ const runtimeWarning = computed(() => {
 
     <div class="welcome-enter relative z-[1] flex flex-col items-center">
       <p class="welcome-kicker mb-3 text-[10px] font-medium tracking-[0.2em] text-muted-foreground uppercase">
-        {{ t('chat.readyHere') }}
+        {{ kickerText }}
       </p>
 
       <h2 class="welcome-headline text-xl font-semibold tracking-tight text-foreground sm:text-3xl">
@@ -52,7 +90,7 @@ const runtimeWarning = computed(() => {
       <div class="welcome-underline mt-3 h-[2px] w-24 rounded-full" aria-hidden="true" />
 
       <p class="welcome-desc mt-4 max-w-md text-[13px] leading-6 text-muted-foreground">
-        {{ isCowork ? t('chat.coworkDescription') : t('chat.description') }}
+        {{ descriptionText }}
       </p>
     </div>
 
@@ -79,14 +117,14 @@ const runtimeWarning = computed(() => {
     </div>
 
     <div
-      v-else-if="appStore.codexAvailable && !workspaceStore.workspace"
+      v-else-if="needsWorkspace"
       class="welcome-note relative z-[1] mt-6 max-w-md rounded-md border border-border/70 bg-muted/30 px-3 py-2.5 text-[12px] leading-5 text-muted-foreground"
     >
       {{ t('app.needWorkspaceHintReady') }}
     </div>
 
-    <div v-if="!workspaceStore.workspace" class="welcome-note relative z-[1] mt-5">
-      <Button variant="secondary" size="sm" class="h-8 text-[12px]" @click="codexStore.selectProject">
+    <div v-if="needsWorkspace" class="welcome-note relative z-[1] mt-5">
+      <Button variant="secondary" size="sm" class="h-8 text-[12px]" @click="chooseWorkspace">
         {{ t('welcome.chooseWorkspace') }}
       </Button>
     </div>

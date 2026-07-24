@@ -49,6 +49,64 @@ type externalRun struct {
 	cancel context.CancelFunc
 }
 
+const (
+	externalStreamFlushInterval = 32 * time.Millisecond
+	externalStreamFlushBytes    = 512
+)
+
+// externalStreamCoalescer preserves CLI stdout order while reducing the number
+// of fine-grained events crossing the Wails bridge.
+type externalStreamCoalescer struct {
+	onStream  func(kind, chunk string)
+	kind      string
+	buffer    strings.Builder
+	lastFlush time.Time
+}
+
+func newExternalStreamCoalescer(onStream func(kind, chunk string)) *externalStreamCoalescer {
+	return &externalStreamCoalescer{onStream: onStream}
+}
+
+func (c *externalStreamCoalescer) Push(kind, chunk string) {
+	if c == nil || c.onStream == nil || chunk == "" {
+		return
+	}
+	if kind == "replace" {
+		if c.kind != "" && c.kind != kind {
+			c.Flush()
+		}
+		c.kind = kind
+		c.buffer.Reset()
+		c.buffer.WriteString(chunk)
+		if time.Since(c.lastFlush) >= externalStreamFlushInterval {
+			c.Flush()
+		}
+		return
+	}
+	if c.kind != "" && c.kind != kind {
+		c.Flush()
+	}
+	c.kind = kind
+	c.buffer.WriteString(chunk)
+	if c.buffer.Len() >= externalStreamFlushBytes || strings.Contains(chunk, "\n") || time.Since(c.lastFlush) >= externalStreamFlushInterval {
+		c.Flush()
+	}
+}
+
+func (c *externalStreamCoalescer) Flush() {
+	if c == nil || c.buffer.Len() == 0 {
+		return
+	}
+	kind := c.kind
+	chunk := c.buffer.String()
+	c.buffer.Reset()
+	c.kind = ""
+	c.lastFlush = time.Now()
+	if c.onStream != nil {
+		c.onStream(kind, chunk)
+	}
+}
+
 func externalProviderKind(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "__claude__", "claude-cli":
@@ -432,7 +490,10 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		"item": map[string]any{"id": itemID, "type": "agentMessage", "status": "inProgress", "text": ""},
 	})
 
-	output, sessionID, runErr := s.executeExternalTurn(ctx, provider, record.BackendRef, workspace, turnSettings, text, images, func(delta string) {
+	output, sessionID, usage, runErr := s.executeExternalTurn(ctx, provider, record.BackendRef, workspace, turnSettings, text, images, func(kind, delta string) {
+		if kind != "" && kind != "text" {
+			return
+		}
 		s.emitExternalNotification("item/agentMessage/delta", map[string]any{
 			"threadId": threadID, "turnId": turnID, "itemId": itemID, "delta": delta,
 		})
@@ -451,6 +512,26 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		errorText = runErr.Error()
 	}
 	completed := time.Now()
+	if b := breakdownFromUsageMap(usage); b.valid() {
+		// External agents launched from the Codex workbench still attribute to codex
+		// unless the provider itself is grok/claude dual-runtime.
+		runtime := "codex"
+		switch strings.ToLower(strings.TrimSpace(provider)) {
+		case "grok":
+			runtime = "grok"
+		case "claude":
+			runtime = "claude"
+		}
+		s.persistTurnUsage(runtime, threadID, turnID, b, completed)
+		s.emitExternalNotification("thread/tokenUsage/updated", map[string]any{
+			"threadId": threadID,
+			"turnId":   turnID,
+			"tokenUsage": map[string]any{
+				"last":  usage,
+				"total": usage,
+			},
+		})
+	}
 	turn := externalTurn{
 		ID: turnID, UserText: strings.TrimSpace(text), Images: append([]string(nil), images...),
 		AgentText: output, Status: status, Error: errorText,
@@ -499,30 +580,35 @@ func (s *AppService) executeExternalTurn(
 	settings UserSettings,
 	text string,
 	images []string,
-	onDelta func(string),
-) (string, string, error) {
+	onStream func(kind, chunk string),
+) (string, string, map[string]any, error) {
 	executable := s.externalExecutable(provider)
 	if executable == "" {
-		return "", sessionID, fmt.Errorf("%s CLI executable was not found", provider)
+		return "", sessionID, nil, fmt.Errorf("%s CLI executable was not found", provider)
 	}
 	prompt := externalPrompt(text, images)
 	args, generatedSessionID := externalCommandArgs(provider, sessionID, workspace, settings, prompt)
 	if sessionID == "" {
 		sessionID = generatedSessionID
 	}
+	if onStream != nil && sessionID != "" {
+		// Expose the concrete native session before the process starts so runtimes can
+		// observe provider-owned tool history without mixing it into the text stream.
+		onStream("session", sessionID)
+	}
 	commandPath, commandArgs := providerCommand(executable, args)
 	command := exec.CommandContext(ctx, commandPath, commandArgs...)
 	command.Dir = workspace
 	stdout, err := command.StdoutPipe()
 	if err != nil {
-		return "", sessionID, err
+		return "", sessionID, nil, err
 	}
 	stderr, err := command.StderrPipe()
 	if err != nil {
-		return "", sessionID, err
+		return "", sessionID, nil, err
 	}
 	if err := command.Start(); err != nil {
-		return "", sessionID, err
+		return "", sessionID, nil, err
 	}
 	stderrResult := make(chan []byte, 1)
 	go func() {
@@ -531,45 +617,118 @@ func (s *AppService) executeExternalTurn(
 	}()
 
 	var output strings.Builder
+	var usage map[string]any
+	var streamErr string
 	emitted := false
+	stream := newExternalStreamCoalescer(onStream)
+	// Claude stream-json has two live channels:
+	//  1) stream_event content_block_delta (true increments) → append
+	//  2) type=assistant partial messages (--include-partial-messages) → full snapshots
+	// The first text channel seen owns the turn. Mixing snapshots and increments
+	// produces duplicated or reordered output on proxy-backed Claude runtimes.
+	claudeSnapshotFallback := ""
+	claudeTextSource := ""
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
-		chunk, nextSessionID, final := parseExternalEvent(provider, scanner.Bytes())
+		line := scanner.Bytes()
+		chunk, nextSessionID, final, kind := parseExternalEvent(provider, line)
 		if nextSessionID != "" {
 			sessionID = nextSessionID
+		}
+		// Always try to capture spend fields — Grok end events often have empty text
+		// so kind/final alone is not enough; also catch mid-stream usage if present.
+		if next := extractExternalUsage(line); next != nil {
+			usage = next
+		}
+		if kind == "error" {
+			if chunk != "" {
+				streamErr = chunk
+			} else if streamErr == "" {
+				streamErr = "provider stream error"
+			}
+			continue
+		}
+		if kind == "thought" {
+			stream.Push("thought", chunk)
+			continue
 		}
 		if chunk == "" {
 			continue
 		}
+		if provider == "claude" && final {
+			claudeSnapshotFallback = mergeExternalSnapshot(claudeSnapshotFallback, chunk)
+			if claudeTextSource == "" {
+				claudeTextSource = "snapshot"
+			}
+			if claudeTextSource != "snapshot" {
+				continue
+			}
+			output.Reset()
+			output.WriteString(claudeSnapshotFallback)
+			emitted = true
+			stream.Push("replace", output.String())
+			continue
+		}
 		if final && emitted {
-			// Final stream-json payload can supersede truncated delta fragments.
+			// Non-Claude final payloads may supersede truncated delta fragments.
 			if len(chunk) > output.Len() {
 				output.Reset()
 				output.WriteString(chunk)
 			}
 			continue
 		}
+		// Incremental text only (Claude stream_event deltas, Grok text, …).
+		if provider == "claude" {
+			if claudeTextSource == "" {
+				claudeTextSource = "delta"
+			}
+			if claudeTextSource != "delta" {
+				continue
+			}
+		}
 		output.WriteString(chunk)
 		emitted = true
-		onDelta(chunk)
+		stream.Push("text", chunk)
+	}
+	stream.Flush()
+	// No live content at all — fall back to last full assistant/result snapshot.
+	if provider == "claude" && !emitted && claudeSnapshotFallback != "" {
+		output.Reset()
+		output.WriteString(claudeSnapshotFallback)
 	}
 	scanErr := scanner.Err()
 	waitErr := command.Wait()
 	stderrText := strings.TrimSpace(string(<-stderrResult))
 	if ctx.Err() != nil {
-		return output.String(), sessionID, context.Canceled
+		return output.String(), sessionID, usage, context.Canceled
+	}
+	if streamErr != "" {
+		return output.String(), sessionID, usage, errors.New(truncateRunes(streamErr, 1000))
 	}
 	if scanErr != nil {
-		return output.String(), sessionID, scanErr
+		return output.String(), sessionID, usage, scanErr
 	}
 	if waitErr != nil {
 		if stderrText != "" {
-			return output.String(), sessionID, errors.New(truncateRunes(stderrText, 1000))
+			return output.String(), sessionID, usage, errors.New(truncateRunes(stderrText, 1000))
 		}
-		return output.String(), sessionID, waitErr
+		return output.String(), sessionID, usage, waitErr
 	}
-	return output.String(), sessionID, nil
+	return output.String(), sessionID, usage, nil
+}
+
+func mergeExternalSnapshot(current, next string) string {
+	if current == "" {
+		return next
+	}
+	if next == "" || strings.Contains(current, next) {
+		return current
+	}
+	if strings.HasPrefix(next, current) || strings.Contains(next, current) {
+		return next
+	}
+	return current + "\n\n" + next
 }
 
 func (s *AppService) externalExecutable(provider string) string {
@@ -646,14 +805,39 @@ func isExternalEffort(value string, options ...string) bool {
 	return false
 }
 
+// claudePermissionArgs maps NiceCodex permission controls to official Claude Code flags.
+// Official --permission-mode choices (CLI 2.x):
+//
+//	acceptEdits | auto | bypassPermissions | manual | dontAsk | plan
+//
+// Headless -p sessions cannot answer interactive prompts, so we avoid plain "manual"
+// for the default "ask" profile and use acceptEdits (auto-approve file edits).
 func claudePermissionArgs(settings UserSettings) []string {
+	// Explicit mode wins when set (Claude-native setting).
+	if mode := normalizeClaudePermissionMode(settings.ClaudePermissionMode); mode != "" {
+		if mode == "bypassPermissions" {
+			return []string{"--dangerously-skip-permissions"}
+		}
+		return []string{"--permission-mode", mode}
+	}
+	// Legacy sandbox + approval mapping (composer ask / auto / strict).
 	if settings.Sandbox == "danger-full-access" && settings.ApprovalPolicy == "never" {
 		return []string{"--dangerously-skip-permissions"}
 	}
 	if settings.Sandbox == "read-only" {
 		return []string{"--permission-mode", "plan"}
 	}
-	return []string{"--permission-mode", "manual"}
+	// workspace-write + on-request → acceptEdits (workable in print/stream-json)
+	return []string{"--permission-mode", "acceptEdits"}
+}
+
+func normalizeClaudePermissionMode(value string) string {
+	switch strings.TrimSpace(value) {
+	case "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan":
+		return strings.TrimSpace(value)
+	default:
+		return ""
+	}
 }
 
 func geminiPermissionArgs(settings UserSettings) []string {
@@ -667,13 +851,16 @@ func geminiPermissionArgs(settings UserSettings) []string {
 }
 
 func grokPermissionArgs(settings UserSettings) []string {
-	mode := "default"
-	if settings.Sandbox == "danger-full-access" && settings.ApprovalPolicy == "never" {
-		mode = "bypassPermissions"
-	} else if settings.Sandbox == "read-only" {
-		mode = "plan"
+	// Headless `-p` cannot answer interactive prompts — a tool that would ask is
+	// cancelled and often ends the agentic loop early (looks like a mid-turn disconnect).
+	// Only `bypassPermissions` / `--yolo` actually enable always-approve via CLI flags;
+	// `acceptEdits`/`plan` on --permission-mode are accepted but do not enable those policies.
+	// See ~/.grok/docs/user-guide/14-headless-mode.md and 22-permissions-and-safety.md.
+	if settings.Sandbox == "read-only" {
+		return []string{"--permission-mode", "default"}
 	}
-	return []string{"--permission-mode", mode}
+	// Desktop workbench already scoped the workspace — auto-approve tools unattended.
+	return []string{"--yolo"}
 }
 
 func externalPrompt(text string, images []string) string {
@@ -692,47 +879,413 @@ func externalPrompt(text string, images []string) string {
 	return builder.String()
 }
 
-func parseExternalEvent(provider string, line []byte) (string, string, bool) {
+// extractExternalUsage normalizes spend fields into a stable Codex-like shape:
+//
+//	inputTokens          = uncached prompt tokens
+//	cachedInputTokens    = cache hits
+//	outputTokens         = completion tokens
+//	reasoningOutputTokens= thinking tokens
+//	totalTokens          = billed total when provided
+//
+// Sources (verified against live CLI + ~/.grok sessions):
+//   - headless streaming-json end:
+//     {"type":"end","usage":{"input_tokens","cache_read_input_tokens","output_tokens","reasoning_tokens","total_tokens"}}
+//   - session updates.jsonl turn_completed:
+//     usage: {inputTokens, cachedReadTokens, outputTokens, reasoningTokens, totalTokens}
+//     (ACP inputTokens is FULL prompt incl. cache; headless input_tokens is uncached-only)
+func extractExternalUsage(line []byte) map[string]any {
+	var event map[string]any
+	if err := json.Unmarshal(line, &event); err != nil || event == nil {
+		return nil
+	}
+	raw := event["usage"]
+	// Claude Code stream-json / transcripts: usage often lives on message.usage
+	// for type=assistant, or top-level usage on type=result.
+	if raw == nil {
+		if msg, ok := event["message"].(map[string]any); ok {
+			raw = msg["usage"]
+		}
+	}
+	if raw == nil {
+		if nested, ok := event["result"].(map[string]any); ok {
+			raw = nested["usage"]
+		}
+	}
+	if raw == nil {
+		if nested, ok := event["data"].(map[string]any); ok {
+			raw = nested["usage"]
+		}
+	}
+	// Nested session/update envelopes (updates.jsonl).
+	if raw == nil {
+		if params, ok := event["params"].(map[string]any); ok {
+			if update, ok := params["update"].(map[string]any); ok {
+				raw = update["usage"]
+			}
+			if raw == nil {
+				raw = params["usage"]
+			}
+		}
+	}
+	if raw == nil {
+		if update, ok := event["update"].(map[string]any); ok {
+			raw = update["usage"]
+		}
+	}
+	// OpenAI-compatible stream final chunk often has usage at the root.
+	if raw == nil {
+		if _, hasPrompt := event["prompt_tokens"]; hasPrompt {
+			raw = event
+		} else if _, hasPrompt := event["promptTokens"]; hasPrompt {
+			raw = event
+		} else if _, hasInput := event["input_tokens"]; hasInput {
+			raw = event
+		} else if _, hasInput := event["inputTokens"]; hasInput {
+			raw = event
+		}
+	}
+	return normalizeTokenUsageMap(raw)
+}
+
+func normalizeTokenUsageMap(value any) map[string]any {
+	raw, ok := value.(map[string]any)
+	if !ok || raw == nil {
+		return nil
+	}
+
+	// Detect source shape before normalizing.
+	// Headless uses snake_case input_tokens (uncached) + cache_read_input_tokens.
+	// ACP / session updates use inputTokens (often FULL) + cachedReadTokens.
+	_, hasSnakeInput := raw["input_tokens"]
+	_, hasSnakeCache := raw["cache_read_input_tokens"]
+	_, hasCachedRead := raw["cachedReadTokens"]
+	_, hasCamelInput := raw["inputTokens"]
+
+	inputRaw := anyToFloat(raw["input_tokens"])
+	if inputRaw <= 0 {
+		inputRaw = anyToFloat(raw["inputTokens"])
+	}
+	if inputRaw <= 0 {
+		inputRaw = anyToFloat(raw["prompt_tokens"])
+	}
+	if inputRaw <= 0 {
+		inputRaw = anyToFloat(raw["promptTokens"])
+	}
+
+	// Cache field names across Grok headless / Grok session / Codex rollout:
+	// cache_read_input_tokens | cachedReadTokens | cached_input_tokens | cachedInputTokens
+	cached := anyToFloat(raw["cache_read_input_tokens"])
+	if cached <= 0 {
+		cached = anyToFloat(raw["cached_input_tokens"]) // Codex token_count
+	}
+	if cached <= 0 {
+		cached = anyToFloat(raw["cachedReadTokens"]) // Grok updates.jsonl
+	}
+	if cached <= 0 {
+		cached = anyToFloat(raw["cacheReadInputTokens"])
+	}
+	if cached <= 0 {
+		cached = anyToFloat(raw["cachedInputTokens"])
+	}
+	if cached <= 0 {
+		cached = anyToFloat(raw["cached_tokens"])
+	}
+	// Claude prompt caching reports newly-written prompt tokens separately from
+	// cache reads. Both occupy the active request context.
+	cacheCreation := anyToFloat(raw["cache_creation_input_tokens"])
+	if cacheCreation <= 0 {
+		cacheCreation = anyToFloat(raw["cacheCreationInputTokens"])
+	}
+	cached += cacheCreation
+
+	output := anyToFloat(raw["output_tokens"])
+	if output <= 0 {
+		output = anyToFloat(raw["outputTokens"])
+	}
+	if output <= 0 {
+		output = anyToFloat(raw["completion_tokens"])
+	}
+	if output <= 0 {
+		output = anyToFloat(raw["completionTokens"])
+	}
+
+	reasoning := anyToFloat(raw["reasoning_tokens"])
+	if reasoning <= 0 {
+		reasoning = anyToFloat(raw["reasoningTokens"])
+	}
+	if reasoning <= 0 {
+		reasoning = anyToFloat(raw["reasoningOutputTokens"])
+	}
+	if reasoning <= 0 {
+		reasoning = anyToFloat(raw["reasoning_output_tokens"])
+	}
+
+	total := anyToFloat(raw["total_tokens"])
+	if total <= 0 {
+		total = anyToFloat(raw["totalTokens"])
+	}
+
+	// Normalize input to *uncached* tokens for a consistent UI.
+	// - Grok headless: input_tokens is uncached; total = uncached + cache + output.
+	// - Codex token_count / Grok ACP: input*_tokens is FULL prompt; total ≈ fullInput + output.
+	input := inputRaw
+	inputIsFull := false
+	if cached > 0 && inputRaw >= cached && total > 0 {
+		if almostEqualFloat(total, inputRaw+output, 2) {
+			// full input + output == total  → input includes cache (Codex + Grok ACP)
+			inputIsFull = true
+		} else if hasCachedRead && hasCamelInput && !hasSnakeInput {
+			inputIsFull = true
+		}
+	}
+	// Headless check: if total ≈ uncached + cache + output, keep input as uncached.
+	if inputIsFull && hasSnakeInput && hasSnakeCache && almostEqualFloat(total, inputRaw+cached+output, 2) {
+		// Ambiguous; prefer headless uncached semantics when both formulas match poorly.
+		// Only keep full when the uncached formula does NOT fit.
+		if almostEqualFloat(total, inputRaw+cached+output, 2) && !almostEqualFloat(total, inputRaw+output, 2) {
+			inputIsFull = false
+		}
+	}
+	if inputIsFull {
+		input = inputRaw - cached
+		if input < 0 {
+			input = 0
+		}
+	}
+
+	// Prefer reported total; otherwise compose.
+	if total <= 0 {
+		if inputIsFull {
+			total = inputRaw + output
+		} else {
+			total = input + cached + output
+		}
+	}
+	if total <= 0 && (input > 0 || cached > 0 || output > 0 || reasoning > 0) {
+		total = input + cached + output
+	}
+	if total <= 0 && input <= 0 && output <= 0 && cached <= 0 && reasoning <= 0 {
+		return nil
+	}
+	return map[string]any{
+		"inputTokens":           int64(input),
+		"cachedInputTokens":     int64(cached),
+		"outputTokens":          int64(output),
+		"reasoningOutputTokens": int64(reasoning),
+		"totalTokens":           int64(total),
+	}
+}
+
+func almostEqualFloat(a, b, tol float64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d <= tol
+}
+
+func tokenTotalFromUsage(usage map[string]any) int64 {
+	if usage == nil {
+		return 0
+	}
+	total := int64(anyToFloat(usage["totalTokens"]))
+	if total > 0 {
+		return total
+	}
+	return int64(anyToFloat(usage["inputTokens"])) +
+		int64(anyToFloat(usage["cachedInputTokens"])) +
+		int64(anyToFloat(usage["outputTokens"])) +
+		int64(anyToFloat(usage["reasoningOutputTokens"]))
+}
+
+// parseExternalEvent returns (chunk, sessionID, final, kind).
+// kind is "text" | "thought" | "".
+func parseExternalEvent(provider string, line []byte) (string, string, bool, string) {
 	var event map[string]any
 	if err := json.Unmarshal(line, &event); err != nil {
-		return "", "", false
+		return "", "", false, ""
 	}
 	sessionID := firstMapString(event, "session_id", "sessionId")
 	eventType := strings.ToLower(firstMapString(event, "type", "event"))
 	if provider == "claude" {
+		// Claude Code stream-json — Anthropic-native AND proxy backends (GPT / GLM / etc.):
+		//   {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"…"}}}
+		//   {"type":"assistant","message":{"content":[…]}}           // partial/full snapshots
+		//   {"type":"result","result":"…"}
+		//   OpenAI-style: {"choices":[{"delta":{"content":"…"}}]} / {"choices":[{"message":{"content":"…"}}]}
+		//   Generic: {"type":"text","text"|"data":"…"} / {"type":"content","content":"…"}
+		//   {"type":"message","role":"assistant","content":"…" | […]}
+		if text, ok := claudeOpenAIStyleDelta(event); ok {
+			return text, sessionID, false, "text"
+		}
 		if eventType == "stream_event" {
 			streamEvent, _ := event["event"].(map[string]any)
-			delta, _ := streamEvent["delta"].(map[string]any)
-			return firstMapString(delta, "text"), sessionID, false
+			if streamEvent == nil {
+				return "", sessionID, false, ""
+			}
+			innerType := strings.ToLower(firstMapString(streamEvent, "type"))
+			// content_block_delta is the normal Anthropic path; some proxies omit inner type
+			// and put text directly on event/delta.
+			if innerType == "content_block_delta" || innerType == "" {
+				if delta, _ := streamEvent["delta"].(map[string]any); delta != nil {
+					deltaType := strings.ToLower(firstMapString(delta, "type"))
+					switch {
+					case deltaType == "input_json_delta":
+						return "", sessionID, false, ""
+					case strings.Contains(deltaType, "thinking") || strings.Contains(deltaType, "reasoning"):
+						return firstMapString(delta, "thinking", "text", "reasoning", "content"), sessionID, false, "thought"
+					case deltaType == "text_delta" || strings.Contains(deltaType, "text") || deltaType == "" || deltaType == "input_text":
+						if t := firstMapString(delta, "text", "content"); t != "" {
+							return t, sessionID, false, "text"
+						}
+					}
+				}
+				// Proxy may put text on the stream event itself.
+				if t := firstMapString(streamEvent, "text", "content", "data"); t != "" {
+					return t, sessionID, false, "text"
+				}
+			}
+			return "", sessionID, false, ""
 		}
-		if eventType == "assistant" {
+		if eventType == "assistant" || (eventType == "message" && strings.EqualFold(firstMapString(event, "role"), "assistant")) {
 			message, _ := event["message"].(map[string]any)
-			return textFromExternalValue(message["content"]), sessionID, true
+			var text string
+			if message != nil {
+				text = textFromExternalValue(message["content"])
+				if text == "" {
+					text = textFromClaudeContentBlocks(message["content"], false)
+				}
+			}
+			if text == "" {
+				text = textFromExternalValue(event["content"])
+			}
+			if text == "" {
+				text = firstMapString(event, "text", "data", "result")
+			}
+			// final=true → snapshot / replace path (not live-appended).
+			return text, sessionID, true, "text"
 		}
-		if eventType == "result" {
-			return firstMapString(event, "result"), sessionID, true
+		if eventType == "result" || eventType == "final" || eventType == "completed" {
+			text := firstMapString(event, "result", "text", "content", "data")
+			if text == "" {
+				text = textFromExternalValue(event["result"])
+			}
+			if text == "" {
+				text = textFromExternalValue(event["content"])
+			}
+			return text, sessionID, true, "text"
 		}
-		return "", sessionID, false
+		// Top-level content_block_delta (some wrappers flatten stream_event).
+		if inner := strings.ToLower(eventType); inner == "content_block_delta" || strings.HasSuffix(inner, "content_block_delta") {
+			delta, _ := event["delta"].(map[string]any)
+			deltaType := strings.ToLower(firstMapString(delta, "type"))
+			if strings.Contains(deltaType, "thinking") {
+				return firstMapString(delta, "thinking", "text"), sessionID, false, "thought"
+			}
+			if deltaType == "text_delta" || strings.Contains(deltaType, "text") || deltaType == "" {
+				return firstMapString(delta, "text", "content"), sessionID, false, "text"
+			}
+			return "", sessionID, false, ""
+		}
+		// Generic incremental types used by proxies / GLM-style gateways.
+		switch eventType {
+		case "text", "content", "delta", "response.delta", "response_delta", "output_text.delta", "output_text_delta":
+			text := firstMapString(event, "text", "content", "data", "delta", "output")
+			if text == "" {
+				text = textFromExternalValue(event["data"])
+			}
+			if text == "" {
+				text = textFromExternalValue(event["delta"])
+			}
+			if text == "" {
+				text = textFromExternalValue(event["content"])
+			}
+			return text, sessionID, false, "text"
+		case "thought", "reasoning", "thinking":
+			text := firstMapString(event, "text", "content", "data", "thinking", "reasoning")
+			if text == "" {
+				text = textFromExternalValue(event["data"])
+			}
+			return text, sessionID, false, "thought"
+		}
+		// OpenAI chat.completion.chunk without going through helper (already tried).
+		return "", sessionID, false, ""
 	}
 	if provider == "gemini" {
 		if eventType == "message" && strings.EqualFold(firstMapString(event, "role"), "assistant") {
-			return textFromExternalValue(event["content"]), sessionID, false
+			return textFromExternalValue(event["content"]), sessionID, false, "text"
 		}
 		if eventType == "result" {
-			return textFromExternalValue(event["response"]), sessionID, true
+			return textFromExternalValue(event["response"]), sessionID, true, "text"
 		}
-		return "", sessionID, false
+		return "", sessionID, false, ""
+	}
+	// Official Grok Build headless streaming-json (verified against CLI sample):
+	//   {"type":"thought","data":"The"}
+	//   {"type":"text","data":"hi"}
+	//   {"type":"end","sessionId":"...","stopReason":"EndTurn"}
+	// See ~/.grok/docs/user-guide/14-headless-mode.md
+	if provider == "grok" {
+		switch eventType {
+		case "text", "assistant_delta", "message_delta", "content_block_delta":
+			text := firstMapString(event, "data", "text", "delta", "content")
+			if text == "" {
+				text = textFromExternalValue(event["data"])
+			}
+			if text == "" {
+				text = textFromExternalValue(event["delta"])
+			}
+			return text, sessionID, false, "text"
+		case "thought", "reasoning", "thinking":
+			text := firstMapString(event, "data", "text", "delta", "content")
+			if text == "" {
+				text = textFromExternalValue(event["data"])
+			}
+			return text, sessionID, false, "thought"
+		case "end", "result", "final", "completed":
+			// End usually has no full text; keep accumulated deltas.
+			text := firstMapString(event, "text", "result", "data", "content")
+			if text == "" {
+				text = textFromExternalValue(event["result"])
+			}
+			return text, sessionID, true, "text"
+		case "error":
+			msg := firstMapString(event, "message", "error", "data", "text")
+			if msg == "" {
+				msg = textFromExternalValue(event["message"])
+			}
+			if msg == "" {
+				msg = "Grok stream error"
+			}
+			return msg, sessionID, true, "error"
+		default:
+			return "", sessionID, false, ""
+		}
 	}
 	if strings.Contains(eventType, "delta") {
-		return textFromExternalValue(event["delta"]), sessionID, false
+		return textFromExternalValue(event["delta"]), sessionID, false, "text"
 	}
 	if eventType == "assistant" || eventType == "message" {
-		return textFromExternalValue(event["content"]), sessionID, false
+		return textFromExternalValue(event["content"]), sessionID, false, "text"
 	}
 	if eventType == "result" || eventType == "final" || eventType == "completed" {
-		return textFromExternalValue(event["result"]), sessionID, true
+		return textFromExternalValue(event["result"]), sessionID, true, "text"
 	}
-	return "", sessionID, false
+	if eventType == "text" {
+		text := firstMapString(event, "data", "text")
+		if text == "" {
+			text = textFromExternalValue(event["data"])
+		}
+		return text, sessionID, false, "text"
+	}
+	if eventType == "thought" || eventType == "reasoning" {
+		text := firstMapString(event, "data", "text")
+		if text == "" {
+			text = textFromExternalValue(event["data"])
+		}
+		return text, sessionID, false, "thought"
+	}
+	return "", sessionID, false, ""
 }
 
 func firstMapString(value map[string]any, keys ...string) string {
@@ -742,6 +1295,79 @@ func firstMapString(value map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// claudeOpenAIStyleDelta extracts incremental text from OpenAI-compatible chunks
+// that some Claude Code proxies (GPT / GLM / custom gateways) emit inside stream-json.
+// Returns ok=false when the line is not an OpenAI-style delta.
+func claudeOpenAIStyleDelta(event map[string]any) (string, bool) {
+	// {"choices":[{"delta":{"content":"x"}}]}
+	// {"choices":[{"delta":{"content":[{"type":"text","text":"x"}]}}]}
+	// {"choices":[{"message":{"content":"full"}}]}  → treat as non-delta (caller handles assistant)
+	choices, ok := event["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		// {"delta":{"content":"x"}} flattened
+		if delta, ok := event["delta"].(map[string]any); ok {
+			if t := claudeExtractDeltaContent(delta); t != "" {
+				return t, true
+			}
+		}
+		return "", false
+	}
+	choice, ok := choices[0].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	if delta, ok := choice["delta"].(map[string]any); ok {
+		if t := claudeExtractDeltaContent(delta); t != "" {
+			return t, true
+		}
+		// reasoning_content used by some reasoning models
+		if t := firstMapString(delta, "reasoning_content", "reasoning"); t != "" {
+			return t, true
+		}
+	}
+	return "", false
+}
+
+func claudeExtractDeltaContent(delta map[string]any) string {
+	if t := firstMapString(delta, "content", "text", "output_text"); t != "" {
+		return t
+	}
+	// content as array of parts
+	if text := textFromExternalValue(delta["content"]); text != "" {
+		return text
+	}
+	if text := textFromClaudeContentBlocks(delta["content"], false); text != "" {
+		return text
+	}
+	return ""
+}
+
+// textFromClaudeContentBlocks extracts text (or optional thinking) from Claude message content arrays.
+func textFromClaudeContentBlocks(value any, thinking bool) string {
+	items, ok := value.([]any)
+	if !ok {
+		return ""
+	}
+	var builder strings.Builder
+	for _, item := range items {
+		block, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		blockType := strings.ToLower(firstMapString(block, "type"))
+		if thinking {
+			if blockType == "thinking" || blockType == "reasoning" {
+				builder.WriteString(firstMapString(block, "thinking", "text"))
+			}
+			continue
+		}
+		if blockType == "text" || blockType == "" {
+			builder.WriteString(firstMapString(block, "text"))
+		}
+	}
+	return builder.String()
 }
 
 func textFromExternalValue(value any) string {
@@ -788,7 +1414,6 @@ func (s *AppService) cancelExternalRuns() {
 		cancel()
 	}
 }
-
 
 func (s *AppService) emitExternalNotification(method string, data any) {
 	s.app.Event.Emit("codex:event", codex.Event{Type: "notification", Method: method, Data: data})

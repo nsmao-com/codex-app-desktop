@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -16,6 +17,15 @@ import (
 )
 
 const maxMessageSize = 64 * 1024 * 1024
+
+// ClientInfo is sent in app-server initialize and becomes the upstream
+// User-Agent / originator (e.g. "codex_desktop/0.144.6 ... (codex_desktop; 0.1.0)").
+// Some reverse-proxy Codex channels only allow official client names.
+type ClientInfo struct {
+	Name    string
+	Title   string
+	Version string
+}
 
 type Client struct {
 	mu             sync.Mutex
@@ -29,6 +39,8 @@ type Client struct {
 	inboundRequest map[string]json.RawMessage
 	status         Status
 	onEvent        func(Event)
+	// processCleanup tears down the OS process tree (Windows Job Object / process group).
+	processCleanup func()
 }
 
 func NewClient(onEvent func(Event)) *Client {
@@ -46,7 +58,7 @@ func (c *Client) Status() Status {
 	return c.status
 }
 
-func (c *Client) Start(ctx context.Context, workspace string) error {
+func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) error {
 	c.startMu.Lock()
 	defer c.startMu.Unlock()
 
@@ -65,9 +77,24 @@ func (c *Client) Start(ctx context.Context, workspace string) error {
 		return err
 	}
 
+	// Priority: settings (info) > env vars > official desktop defaults.
+	// Unofficial names like "nice_codex_desktop" are rejected by some channels with:
+	//   "This channel does not allow the current client"
+	clientName := firstNonEmpty(info.Name, os.Getenv("NICE_CODEX_CLIENT_NAME"), "codex_desktop")
+	clientTitle := firstNonEmpty(info.Title, os.Getenv("NICE_CODEX_CLIENT_TITLE"), "Codex Desktop")
+	clientVersion := firstNonEmpty(info.Version, os.Getenv("NICE_CODEX_CLIENT_VERSION"), "0.1.0")
+	clientInfo := map[string]any{
+		"name":    clientName,
+		"title":   clientTitle,
+		"version": clientVersion,
+	}
+
 	args := append(append([]string{}, spec.prefixArgs...), "app-server", "--listen", "stdio://")
 	command := exec.Command(spec.path, args...)
 	command.Dir = workspace
+	// Force originator early (before initialize) so the first HTTP client also
+	// carries the spoofed identity. Matches app-server initialize clientInfo.name.
+	command.Env = withEnvOverride(os.Environ(), "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", clientName)
 	configureProcess(command)
 
 	stdin, err := command.StdinPipe()
@@ -90,12 +117,23 @@ func (c *Client) Start(ctx context.Context, workspace string) error {
 		return err
 	}
 
+	// Bind app-server (+ MCP children) so Stop/exit can reap the whole tree.
+	// Best-effort: failure must not block starting Codex.
+	cleanup, cleanupErr := attachKillOnCloseJob(command.Process)
+	if cleanupErr != nil {
+		cleanup = func() {}
+		c.emit(Event{Type: "stderr", Data: map[string]any{
+			"message": "process-tree guard unavailable: " + cleanupErr.Error(),
+		}})
+	}
+
 	detection := Detect()
 	done := make(chan struct{})
 	c.mu.Lock()
 	c.command = command
 	c.stdin = stdin
 	c.done = done
+	c.processCleanup = cleanup
 	c.status = Status{
 		State:     "initializing",
 		Running:   true,
@@ -113,12 +151,8 @@ func (c *Client) Start(ctx context.Context, workspace string) error {
 
 	handshakeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	_, err = c.Request(handshakeCtx, "initialize", map[string]any{
-		"clientInfo": map[string]any{
-			"name":    "nice_codex_desktop",
-			"title":   "Nice Codex",
-			"version": "0.1.0",
-		},
+	initResult, err := c.Request(handshakeCtx, "initialize", map[string]any{
+		"clientInfo": clientInfo,
 		"capabilities": map[string]any{
 			"experimentalApi":    true,
 			"requestAttestation": false,
@@ -133,12 +167,20 @@ func (c *Client) Start(ctx context.Context, workspace string) error {
 		return fmt.Errorf("acknowledge app-server initialization: %w", err)
 	}
 
+	userAgent := parseInitializeUserAgent(initResult)
+
 	c.mu.Lock()
 	c.status.State = "ready"
 	c.status.Running = true
 	c.status.Message = "Codex is ready"
+	c.status.UserAgent = userAgent
 	c.mu.Unlock()
 	c.emit(Event{Type: "status", Data: c.Status()})
+	if userAgent != "" {
+		c.emit(Event{Type: "stderr", Data: map[string]any{
+			"message": "upstream client User-Agent: " + userAgent,
+		}})
+	}
 	return nil
 }
 
@@ -147,8 +189,13 @@ func (c *Client) Stop() error {
 	command := c.command
 	stdin := c.stdin
 	done := c.done
+	cleanup := c.processCleanup
+	c.processCleanup = nil
 	if command == nil || done == nil {
 		c.mu.Unlock()
+		if cleanup != nil {
+			cleanup()
+		}
 		return nil
 	}
 	c.status.State = "stopping"
@@ -162,15 +209,30 @@ func (c *Client) Stop() error {
 		c.writeMu.Unlock()
 	}
 
+	// Soft wait for graceful exit after stdin close.
 	select {
 	case <-done:
+		if cleanup != nil {
+			cleanup()
+		}
 		return nil
 	case <-time.After(1500 * time.Millisecond):
 	}
 
+	// Hard stop: kill entire process tree (app-server + MCP python/node/npx/…).
+	pid := 0
 	if command.Process != nil {
+		pid = command.Process.Pid
 		_ = command.Process.Kill()
 	}
+	if cleanup != nil {
+		// Job Object KILL_ON_JOB_CLOSE tears down children even if parent already exited.
+		cleanup()
+	}
+	if pid > 0 {
+		killProcessTree(pid)
+	}
+
 	select {
 	case <-done:
 		return nil
@@ -370,6 +432,8 @@ func (c *Client) waitLoop(command *exec.Cmd, done chan struct{}) {
 	pending := c.pending
 	c.pending = make(map[int64]chan rpcResult)
 	c.inboundRequest = make(map[string]json.RawMessage)
+	cleanup := c.processCleanup
+	c.processCleanup = nil
 	c.command = nil
 	c.stdin = nil
 	c.done = nil
@@ -384,6 +448,14 @@ func (c *Client) waitLoop(command *exec.Cmd, done chan struct{}) {
 	status := c.status
 	close(done)
 	c.mu.Unlock()
+
+	// Process exited unexpectedly: still close the job so orphan MCP children die.
+	if cleanup != nil {
+		cleanup()
+	}
+	if command.Process != nil && command.Process.Pid > 0 && status.State == "error" {
+		killProcessTree(command.Process.Pid)
+	}
 
 	for _, channel := range pending {
 		channel <- rpcResult{err: errors.New("Codex app-server stopped")}
@@ -424,4 +496,39 @@ func decodeJSON(raw json.RawMessage) any {
 		return map[string]any{"raw": string(raw)}
 	}
 	return value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// withEnvOverride returns a copy of env with key=value, replacing any existing key.
+func withEnvOverride(env []string, key, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return append(out, prefix+value)
+}
+
+func parseInitializeUserAgent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var payload struct {
+		UserAgent string `json:"userAgent"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.UserAgent)
 }

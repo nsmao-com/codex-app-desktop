@@ -1,4 +1,6 @@
-import type { AccountUsageDailyBucket, AccountUsageSummary } from '@/types/codex'
+import type { AccountUsageDailyBucket, AccountUsageSummary, ThreadTokenUsage } from '@/types/codex'
+
+export const CODEX_CONTEXT_BASELINE_TOKENS = 12_000
 
 export type UsageRangeDays = 1 | 7 | 14 | 30
 
@@ -9,6 +11,68 @@ export type UsageRangeView = {
   averageTokens: number
   buckets: AccountUsageDailyBucket[]
   maxTokens: number
+}
+
+export type ContextUsageView = {
+  available: boolean
+  usedTokens: number
+  contextWindow: number
+  usedPercent: number
+}
+
+type ProviderModelContext = {
+  model: string
+  contextWindow?: number | null
+}
+
+type ProviderContextCatalog = {
+  kind: string
+  models?: ProviderModelContext[] | null
+}
+
+export function resolveProviderModelContextWindow(
+  providers: ProviderContextCatalog[] | null | undefined,
+  runtime: 'grok' | 'claude',
+  model: string,
+): number {
+  const normalizedModel = model.trim().toLowerCase()
+  if (!normalizedModel) return 0
+  const catalogs = providers ?? []
+  const runtimeCatalog = catalogs.find((provider) => provider.kind === runtime)
+  const exact = runtimeCatalog?.models?.find((item) => item.model.trim().toLowerCase() === normalizedModel)
+    ?? catalogs.flatMap((provider) => provider.models ?? [])
+      .find((item) => item.model.trim().toLowerCase() === normalizedModel)
+  const exactWindow = Math.max(0, Number(exact?.contextWindow) || 0)
+  if (exactWindow > 0) return exactWindow
+
+  if (runtime === 'claude') {
+    const family = ['fable', 'opus', 'sonnet', 'haiku']
+      .find((name) => normalizedModel.includes(name))
+    if (family) {
+      const alias = runtimeCatalog?.models?.find((item) => item.model.trim().toLowerCase() === family)
+      return Math.max(0, Number(alias?.contextWindow) || 0)
+    }
+  }
+  return 0
+}
+
+export function buildContextUsageView(
+  usage: ThreadTokenUsage | null | undefined,
+  baselineTokens = 0,
+): ContextUsageView {
+  const contextWindow = Math.max(0, Number(usage?.modelContextWindow) || 0)
+  const usedTokens = Math.max(0, Number(usage?.last.totalTokens) || 0)
+  if (!contextWindow) {
+    return { available: false, usedTokens, contextWindow: 0, usedPercent: 0 }
+  }
+
+  const requestedBaseline = Math.max(0, baselineTokens)
+  const baseline = contextWindow > requestedBaseline ? requestedBaseline : 0
+  const effectiveWindow = Math.max(1, contextWindow - baseline)
+  const effectiveUsed = Math.max(0, usedTokens - baseline)
+  const usedPercent = Math.min(100, Math.max(0, (effectiveUsed / effectiveWindow) * 100))
+
+  return { available: true, usedTokens, contextWindow, usedPercent }
 }
 
 function startOfLocalDay(date: Date): Date {

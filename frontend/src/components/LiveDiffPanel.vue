@@ -44,7 +44,7 @@ function close(): void {
 <template>
   <Motion
     as="aside"
-    class="flex h-full w-[min(48vw,640px)] shrink-0 flex-col border-l bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-40 max-lg:w-[min(100vw,640px)] max-lg:shadow-xl"
+    class="flex h-full min-h-0 w-[min(48vw,640px)] shrink-0 flex-col overflow-hidden border-l bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-40 max-lg:w-[min(100vw,640px)] max-lg:shadow-xl"
     :initial="panelFromRight.initial"
     :animate="panelFromRight.animate"
     :exit="panelFromRight.exit"
@@ -61,7 +61,7 @@ function close(): void {
       </Button>
     </header>
 
-    <div class="flex min-h-0 flex-1 flex-col p-2">
+    <div class="flex min-h-0 flex-1 flex-col overflow-hidden p-2">
       <DiffViewer :diff="diffText" class="min-h-0 flex-1" />
     </div>
   </Motion>

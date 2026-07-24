@@ -10,6 +10,7 @@ export interface AgentProviderModel {
     "displayName": string;
     "description": string;
     "isDefault": boolean;
+    "contextWindow": number;
 }
 
 export interface AgentProviderReasoningEffort {
@@ -37,12 +38,237 @@ export interface AgentProviderRuntime {
 
 export interface BootstrapData {
     "codex": codex$0.Detection;
+    "grok": GrokRuntimeStatus;
     "agentProviders": AgentProviderRuntime[] | null;
     "settings": UserSettings;
     "workspace"?: WorkspaceInfo | null;
     "terminalProfiles": TerminalProfile[] | null;
     "appVersion": string;
     "updateRepo": string;
+}
+
+/**
+ * CLIToolActionResult is returned after install / update.
+ */
+export interface CLIToolActionResult {
+    "ok": boolean;
+    "message": string;
+    "output": string;
+    "tool": CLIToolStatus;
+}
+
+/**
+ * CLIToolStatus describes install / update state for one CLI.
+ */
+export interface CLIToolStatus {
+    "id": string;
+    "name": string;
+    "package": string;
+    "installCommand": string;
+    "installed": boolean;
+    "executable": string;
+    "version": string;
+    "latestVersion": string;
+    "updateAvailable": boolean;
+    "packageManager": string;
+    "message": string;
+    "canInstall": boolean;
+    "nodeAvailable": boolean;
+}
+
+/**
+ * CLIToolsReport is the aggregate response for CheckCLITools.
+ */
+export interface CLIToolsReport {
+    "tools": CLIToolStatus[] | null;
+    "packageManager": string;
+    "nodeAvailable": boolean;
+    "nodeVersion": string;
+    "checkedAt": number;
+
+    /**
+     * Platform is GOOS: windows | darwin | linux — for UI install hints.
+     */
+    "platform": string;
+
+    /**
+     * Config homes (env override aware) so Settings can show real paths on each OS.
+     */
+    "codexHome": string;
+    "grokHome": string;
+}
+
+/**
+ * ClaudeAgentView is a custom agent under ~/.claude/agents or project.
+ */
+export interface ClaudeAgentView {
+    "name": string;
+    "displayName": string;
+    "description": string;
+    "path": string;
+    "scope": string;
+}
+
+/**
+ * ClaudeCapabilitiesCatalog powers the Claude capability center (aligned with ~/.claude layout).
+ */
+export interface ClaudeCapabilitiesCatalog {
+    "runtime": ClaudeRuntimeStatus;
+    "configPath": string;
+    "claudeHome": string;
+    "claudeJsonPath": string;
+    "settings": ClaudeSettingsSummary;
+    "mcp": ClaudeMCPServerView[] | null;
+    "skills": ClaudeSkillView[] | null;
+    "plugins": ClaudePluginView[] | null;
+    "agents": ClaudeAgentView[] | null;
+    "commands": ClaudeCommandView[] | null;
+    "hooks": ClaudeHookView[] | null;
+    "globalInstructions": GlobalInstructionsInfo;
+    "projectInstructions": ProjectInstructionsInfo;
+}
+
+/**
+ * ClaudeCommandView is a slash command / skill alias under commands/.
+ */
+export interface ClaudeCommandView {
+    "name": string;
+    "path": string;
+    "scope": string;
+}
+
+/**
+ * ClaudeHookView summarizes configured hooks from settings.json.
+ */
+export interface ClaudeHookView {
+    "event": string;
+    "command": string;
+    "source": string;
+}
+
+/**
+ * ClaudeMCPServerView is an MCP server discovered from Claude Code config.
+ */
+export interface ClaudeMCPServerView {
+    "name": string;
+    "enabled": boolean;
+    "command": string;
+    "args": string;
+    "transport": string;
+    "url": string;
+
+    /**
+     * user | project
+     */
+    "scope": string;
+    "source": string;
+}
+
+/**
+ * ClaudeMessage is one timeline row stored with a session.
+ */
+export interface ClaudeMessage {
+    "id": string;
+    "role": string;
+    "text": string;
+    "toolName"?: string;
+    "status"?: string;
+    "createdAt": number;
+}
+
+/**
+ * ClaudePluginView is an installed Claude Code plugin.
+ */
+export interface ClaudePluginView {
+    "name": string;
+    "version": string;
+    "scope": string;
+    "path": string;
+}
+
+/**
+ * ClaudeRuntimeStatus is the live probe for Claude Code CLI.
+ */
+export interface ClaudeRuntimeStatus {
+    "available": boolean;
+    "authenticated": boolean;
+    "version": string;
+    "executable": string;
+    "message": string;
+}
+
+/**
+ * ClaudeSendRequest starts a Claude Code turn.
+ */
+export interface ClaudeSendRequest {
+    "sessionId": string;
+    "workspace": string;
+    "text": string;
+    "images": string[] | null;
+    "model": string;
+    "effort": string;
+}
+
+/**
+ * ClaudeSessionDetail is the full open conversation.
+ */
+export interface ClaudeSessionDetail {
+    "summary": ClaudeSessionSummary;
+    "messages": ClaudeMessage[] | null;
+}
+
+/**
+ * ClaudeSessionSummary is a sidebar row for Claude history.
+ */
+export interface ClaudeSessionSummary {
+    "id": string;
+    "workspace": string;
+    "name": string;
+    "preview": string;
+    "model": string;
+    "effort": string;
+    "createdAt": number;
+    "updatedAt": number;
+}
+
+/**
+ * ClaudeSettingsSummary is a safe subset of ~/.claude/settings.json for the UI.
+ */
+export interface ClaudeSettingsSummary {
+    "path": string;
+    "exists": boolean;
+    "model": string;
+    "permissionMode": string;
+    "allowRules": number;
+    "denyRules": number;
+    "envKeys": string[] | null;
+    "baseURL": string;
+    "skipDangerPrompt": boolean;
+    "hasStatusLine": boolean;
+    "rawPermissionMode": string;
+}
+
+/**
+ * ClaudeSkillView is a Claude skill (SKILL.md) under ~/.claude/skills or project.
+ */
+export interface ClaudeSkillView {
+    "name": string;
+    "displayName": string;
+    "description": string;
+    "path": string;
+
+    /**
+     * user | project | plugin
+     */
+    "scope": string;
+}
+
+/**
+ * ClaudeTurnRef identifies a running turn.
+ */
+export interface ClaudeTurnRef {
+    "sessionId": string;
+    "turnId": string;
 }
 
 export interface CodexFeatureFlags {
@@ -84,6 +310,114 @@ export interface GlobalInstructionsInfo {
     "exists": boolean;
     "emptyFile": boolean;
     "available": boolean;
+}
+
+/**
+ * GrokCapabilitiesCatalog is the Grok-mode capability center payload.
+ */
+export interface GrokCapabilitiesCatalog {
+    "runtime": GrokRuntimeStatus;
+    "configPath": string;
+    "grokHome": string;
+    "mcp": GrokMCPServerView[] | null;
+    "skills": GrokSkillView[] | null;
+    "plugins": GrokPluginView[] | null;
+    "globalInstructions": GlobalInstructionsInfo;
+    "projectInstructions": ProjectInstructionsInfo;
+}
+
+/**
+ * GrokMCPServerView is a server entry from ~/.grok/config.toml [mcp_servers.*].
+ */
+export interface GrokMCPServerView {
+    "name": string;
+    "enabled": boolean;
+    "command": string;
+    "args": string;
+    "transport": string;
+    "url": string;
+}
+
+export interface GrokMessage {
+    "id": string;
+    "role": string;
+    "text": string;
+    "toolName"?: string;
+
+    /**
+     * ToolKind classifies Grok Build tools for the workbench timeline:
+     * file | command | search | mcp | tool
+     */
+    "toolKind"?: string;
+    "command"?: string;
+    "path"?: string;
+    "detail"?: string;
+    "status"?: string;
+    "createdAt": number;
+}
+
+/**
+ * GrokPluginView is an installed Grok plugin package.
+ */
+export interface GrokPluginView {
+    "name": string;
+    "path": string;
+}
+
+export interface GrokRuntimeStatus {
+    "buildAvailable": boolean;
+    "buildAuthenticated": boolean;
+    "buildVersion": string;
+    "buildExecutable": string;
+    "apiConfigured": boolean;
+}
+
+export interface GrokSendRequest {
+    "backend": string;
+    "sessionId": string;
+    "workspace": string;
+    "text": string;
+    "images": string[] | null;
+    "model": string;
+    "effort": string;
+}
+
+export interface GrokSessionDetail {
+    "summary": GrokSessionSummary;
+    "messages": GrokMessage[] | null;
+}
+
+export interface GrokSessionSummary {
+    "id": string;
+    "backend": string;
+    "workspace": string;
+    "name": string;
+    "preview": string;
+    "model": string;
+    "effort": string;
+    "createdAt": number;
+    "updatedAt": number;
+}
+
+/**
+ * GrokSkillView is a discovered Grok skill (SKILL.md).
+ */
+export interface GrokSkillView {
+    "name": string;
+    "displayName": string;
+    "description": string;
+    "path": string;
+
+    /**
+     * user | project
+     */
+    "scope": string;
+}
+
+export interface GrokTurnRef {
+    "backend": string;
+    "sessionId": string;
+    "turnId": string;
 }
 
 export interface MCPServerWriteRequest {
@@ -225,8 +559,43 @@ export interface UpdateProgress {
 }
 
 export interface UserSettings {
+    "activeRuntime": string;
     "workspace": string;
     "recentWorkspaces": string[] | null;
+    "grokWorkspace": string;
+    "grokRecentWorkspaces": string[] | null;
+    "grokBackend": string;
+    "grokBuildModel": string;
+    "grokAPIModel": string;
+    "grokEffort": string;
+    "grokSandbox": string;
+    "grokApprovalPolicy": string;
+    "grokWebSearch": boolean;
+    "grokXSearch": boolean;
+
+    /**
+     * GrokAPIKey / GrokAPIBaseURL configure NiceCodex Grok API mode (OpenAI-compatible).
+     * Empty key falls back to XAI_API_KEY / GROK_API_KEY env; empty base uses https://api.x.ai/v1.
+     */
+    "grokAPIKey": string;
+    "grokAPIBaseURL": string;
+
+    /**
+     * Claude Code independent stack (workspace / model / permissions).
+     */
+    "claudeWorkspace": string;
+    "claudeRecentWorkspaces": string[] | null;
+    "claudeModel": string;
+    "claudeEffort": string;
+    "claudeSandbox": string;
+    "claudeApprovalPolicy": string;
+
+    /**
+     * ClaudePermissionMode is the official Claude Code --permission-mode value when set:
+     * acceptEdits | auto | bypassPermissions | manual | dontAsk | plan.
+     * Empty falls back to ClaudeSandbox + ClaudeApprovalPolicy mapping.
+     */
+    "claudePermissionMode": string;
     "model": string;
     "modelProvider": string;
     "customModels": string[] | null;
@@ -268,6 +637,14 @@ export interface UserSettings {
     "shortcutNewThread": string;
     "shortcutTerminal": string;
     "shortcutBrowser": string;
+
+    /**
+     * CodexClient* is the app-server initialize clientInfo sent upstream as User-Agent.
+     * Empty values fall back to official Codex Desktop defaults (or NICE_CODEX_CLIENT_* env).
+     */
+    "codexClientName": string;
+    "codexClientTitle": string;
+    "codexClientVersion": string;
     "onboardingCompleted": boolean;
 }
 

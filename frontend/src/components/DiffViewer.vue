@@ -5,7 +5,6 @@ import { useI18n } from 'vue-i18n'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import type { DiffLineView } from '@/types/codex'
 import { parseUnifiedDiff } from '@/utils/diff'
 
@@ -138,7 +137,9 @@ function showMoreLines(): void {
       </Button>
     </div>
 
-    <ScrollArea class="flex-1">
+    <!-- Native overflow so long diffs always get a real vertical/horizontal scrollbar
+         (reka ScrollArea needs a fixed height and often hides the thumb). -->
+    <div class="scrollbar-thin min-h-0 flex-1 overflow-auto overscroll-contain">
       <div v-if="selectedFile" class="min-w-max font-mono text-[10px] leading-relaxed">
         <section v-for="view in selectedHunkViews" :key="view.hunk.header" class="border-b last:border-0">
           <header class="sticky top-0 z-[1] bg-muted px-3 py-1 text-[9px] text-muted-foreground">{{ view.hunk.header }}</header>
@@ -185,10 +186,10 @@ function showMoreLines(): void {
           </Button>
         </div>
       </div>
-      <div v-else class="grid h-full place-items-center text-xs text-muted-foreground">
+      <div v-else class="grid h-full min-h-32 place-items-center text-xs text-muted-foreground">
         {{ t('inspector.noFileDiff') }}
       </div>
-    </ScrollArea>
+    </div>
 
     <p v-if="truncated" class="border-t px-3 py-1.5 text-[10px] text-muted-foreground">{{ t('inspector.truncated') }}</p>
   </section>

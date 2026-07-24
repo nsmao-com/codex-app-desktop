@@ -12,10 +12,12 @@ import UpdateCheckDialog from '@/components/UpdateCheckDialog.vue'
 import OnboardingView from '@/views/OnboardingView.vue'
 import { Toaster } from '@/components/ui/sonner'
 import { useNavigationHistory } from '@/composables/useNavigationHistory'
-import { useAppStore, useBrowserStore, useCodexStore, useTerminalStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useTerminalStore, useWorkspaceStore } from '@/stores'
 
 const appStore = useAppStore()
 const codexStore = useCodexStore()
+const grokStore = useGrokStore()
+const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const terminalStore = useTerminalStore()
 const browserStore = useBrowserStore()
@@ -47,10 +49,21 @@ function openMemoriesDialog(): void {
 
 onMounted(() => {
   codexStore.bootstrapEvents()
-  void appStore.bootstrap().then(() => {
+  grokStore.bootstrapEvents()
+  claudeStore.bootstrapEvents()
+  void appStore.bootstrap().then(async () => {
     if (appStore.workspace) workspaceStore.hydrateWorkspace(appStore.workspace)
+    else void workspaceStore.hydrateActiveRuntimeWorkspace()
     void codexStore.loadModels()
     void codexStore.loadModelProviders()
+    if (appStore.isGrokMode) {
+      await grokStore.enterRuntime()
+      return
+    }
+    if (appStore.isClaudeMode) {
+      await claudeStore.enterRuntime()
+      return
+    }
     if (appStore.settings.workspace && appStore.settings.autoConnect && appStore.codexAvailable) {
       void codexStore.connect(appStore.settings.workspace)
     }
@@ -59,11 +72,35 @@ onMounted(() => {
   window.addEventListener('nice-codex:open-memories', openMemoriesDialog)
 })
 
+// Defer heavy work until after the tab paint — double-loading here was freezing the switch.
+watch(
+  () => appStore.activeRuntime,
+  (runtime) => {
+    window.setTimeout(() => {
+      void workspaceStore.hydrateActiveRuntimeWorkspace()
+      if (runtime === 'grok') {
+        void grokStore.enterRuntime(false)
+        return
+      }
+      if (runtime === 'claude') {
+        void claudeStore.enterRuntime(false)
+        return
+      }
+      void codexStore.loadThreads()
+      if (!codexStore.isReady && appStore.settings.workspace && appStore.settings.autoConnect) {
+        void codexStore.connect(appStore.settings.workspace)
+      }
+    }, 0)
+  },
+)
+
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('nice-codex:open-memories', openMemoriesDialog)
   void backend.SetPreventSleepActive(false).catch(() => undefined)
   codexStore.dispose()
+  grokStore.dispose()
+  claudeStore.dispose()
 })
 
 function matchShortcut(event: KeyboardEvent, binding: string): boolean {
@@ -103,9 +140,17 @@ function onGlobalKeydown(event: KeyboardEvent): void {
     return
   }
   const newThreadBinding = settings.shortcutNewThread || 'Ctrl+N'
-  if (matchShortcut(event, newThreadBinding) && codexStore.isReady) {
+  if (matchShortcut(event, newThreadBinding)) {
     event.preventDefault()
-    void codexStore.newThread()
+    if (appStore.isGrokMode) {
+      grokStore.newSession()
+      return
+    }
+    if (appStore.isClaudeMode) {
+      claudeStore.newSession()
+      return
+    }
+    if (codexStore.isReady) void codexStore.newThread()
   }
 }
 </script>

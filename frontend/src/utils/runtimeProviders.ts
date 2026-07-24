@@ -21,6 +21,19 @@ export const FALLBACK_CODEX_MODELS = [
   'gpt-5.2',
 ] as const
 
+export const FALLBACK_GROK_MODELS = [
+  'grok-4.5',
+  'grok-4',
+  'grok-3-mini',
+  'grok-3',
+] as const
+
+export const DEFAULT_GROK_REASONING = [
+  { effort: 'low', description: 'Faster replies with lighter reasoning' },
+  { effort: 'medium', description: 'Balanced speed and depth' },
+  { effort: 'high', description: 'Highest quality for complex implementation' },
+] as const
+
 /** Strip proxy nicknames such as "gpt-5.6-sol · claude-opus-4-8". */
 export function cleanModelDisplayName(model: string, displayName = ''): string {
   const raw = (displayName || model).trim()
@@ -105,6 +118,41 @@ export function modelsForRuntime(
     for (const [index, id] of FALLBACK_CODEX_MODELS.entries()) {
       options.push({ model: id, displayName: formatModelLabel(id), isDefault: index === 0 })
     }
+  }
+  return options
+}
+
+export function modelsForGrokRuntime(
+  providerModels: Array<{ model: string; displayName?: string; isDefault?: boolean }> = [],
+  preferredModel = '',
+): Array<{ model: string; displayName: string; isDefault: boolean }> {
+  const options: Array<{ model: string; displayName: string; isDefault: boolean }> = []
+  const push = (id: string, displayName = '', isDefault = false) => {
+    const model = id.trim()
+    if (!model) return
+    if (options.some((item) => item.model.toLocaleLowerCase() === model.toLocaleLowerCase())) return
+    options.push({
+      model,
+      displayName: displayName || formatModelLabel(model),
+      isDefault,
+    })
+  }
+  for (const item of providerModels) {
+    push(item.model, item.displayName || item.model, item.isDefault === true)
+  }
+  if (preferredModel.trim()) push(preferredModel.trim(), preferredModel.trim(), options.length === 0)
+  if (!options.length) {
+    for (const [index, id] of FALLBACK_GROK_MODELS.entries()) {
+      push(id, formatModelLabel(id), index === 0)
+    }
+  }
+  if (preferredModel.trim()) {
+    for (const option of options) {
+      option.isDefault = option.model.toLocaleLowerCase() === preferredModel.trim().toLocaleLowerCase()
+    }
+    if (!options.some((item) => item.isDefault) && options[0]) options[0].isDefault = true
+  } else if (!options.some((item) => item.isDefault) && options[0]) {
+    options[0].isDefault = true
   }
   return options
 }

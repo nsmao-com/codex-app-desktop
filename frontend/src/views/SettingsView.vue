@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   Anchor,
+  Archive,
   ArrowLeft,
   Blocks,
   Check,
@@ -27,6 +28,7 @@ import { computed, onMounted, onUnmounted, shallowRef, watch, type Component } f
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
+import GrokIcon from '@/components/icons/GrokIcon.vue'
 import OpenAIIcon from '@/components/icons/OpenAIIcon.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import { Badge } from '@/components/ui/badge'
@@ -45,11 +47,24 @@ import { Textarea } from '@/components/ui/textarea'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import { supportedLocales } from '@/i18n'
 import { ACCENT_OPTIONS, type AppAccent } from '@/lib/accents'
-import { useAppStore, useCodexStore, useWorkspaceStore } from '@/stores'
+import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
+import { useAppStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import {
+  readClaudeGlobalInstructions,
+  readClaudeProjectInstructions,
+  saveClaudeGlobalInstructions,
+  saveClaudeProjectInstructions,
+} from '@/utils/claudeBindings'
 import type { SelectOption } from '@/types/codex'
 import { formatTokenCount } from '@/utils/accountUsage'
 import { notify } from '@/utils/notify'
-import { modelsForRuntime } from '@/utils/runtimeProviders'
+import {
+  checkCLITools,
+  installCLITool,
+  type CLIToolStatus,
+  type CLIToolsReport,
+} from '@/utils/cliTools'
+import { DEFAULT_GROK_REASONING, modelsForGrokRuntime, modelsForRuntime } from '@/utils/runtimeProviders'
 
 type SettingsPanel =
   | 'general'
@@ -58,6 +73,7 @@ type SettingsPanel =
   | 'agent'
   | 'personalization'
   | 'account'
+  | 'archived'
   | 'plugins'
   | 'browser'
   | 'hooks'
@@ -84,12 +100,30 @@ const router = useRouter()
 const route = useRoute()
 const appStore = useAppStore()
 const codexStore = useCodexStore()
+const grokStore = useGrokStore()
+const claudeStore = useClaudeStore()
+const claudeModel = shallowRef(appStore.settings.claudeModel || 'sonnet')
+const claudeEffort = shallowRef(appStore.settings.claudeEffort || 'high')
+const claudeSandbox = shallowRef(appStore.settings.claudeSandbox || 'workspace-write')
+const claudeApprovalPolicy = shallowRef(appStore.settings.claudeApprovalPolicy || 'on-request')
+/** Official Claude Code --permission-mode values. */
+const claudePermissionMode = shallowRef(appStore.settings.claudePermissionMode || 'acceptEdits')
+const claudePermissionOptions = [
+  { value: 'acceptEdits', label: 'acceptEdits' },
+  { value: 'auto', label: 'auto' },
+  { value: 'plan', label: 'plan' },
+  { value: 'dontAsk', label: 'dontAsk' },
+  { value: 'manual', label: 'manual' },
+  { value: 'bypassPermissions', label: 'bypassPermissions' },
+]
 const workspaceStore = useWorkspaceStore()
+const dialogStore = useDialogStore()
 const { t } = useI18n()
 
 const saving = shallowRef(false)
 const saved = shallowRef(false)
 const settingsSearch = shallowRef('')
+const archivedSearch = shallowRef('')
 const DEFAULT_MODEL_VALUE = '__nice_codex_default_model__'
 
 const model = shallowRef(appStore.settings.model)
@@ -102,6 +136,16 @@ const personality = shallowRef(appStore.settings.personality)
 const multiAgentMode = shallowRef(appStore.settings.multiAgentMode)
 const sandbox = shallowRef(appStore.settings.sandbox)
 const approvalPolicy = shallowRef(appStore.settings.approvalPolicy)
+const grokBackend = shallowRef(appStore.settings.grokBackend === 'api' ? 'api' : 'build')
+const grokBuildModel = shallowRef(appStore.settings.grokBuildModel || '')
+const grokAPIModel = shallowRef(appStore.settings.grokAPIModel || 'grok-4.5')
+const grokEffort = shallowRef(appStore.settings.grokEffort || 'high')
+const grokSandbox = shallowRef(appStore.settings.grokSandbox || 'workspace-write')
+const grokApprovalPolicy = shallowRef(appStore.settings.grokApprovalPolicy || 'on-request')
+const grokWebSearch = shallowRef(appStore.settings.grokWebSearch !== false)
+const grokXSearch = shallowRef(Boolean(appStore.settings.grokXSearch))
+const grokAPIKey = shallowRef(appStore.settings.grokAPIKey || '')
+const grokAPIBaseURL = shallowRef(appStore.settings.grokAPIBaseURL || '')
 const theme = shallowRef(appStore.settings.theme)
 const accentColor = shallowRef(appStore.settings.accentColor)
 const fontFamily = shallowRef(appStore.settings.fontFamily)
@@ -115,7 +159,13 @@ const terminalProfile = shallowRef(appStore.settings.terminalProfile)
 const language = shallowRef(appStore.settings.language)
 const autoConnect = shallowRef(appStore.settings.autoConnect)
 const sendWithModifier = shallowRef(Boolean(appStore.settings.sendWithModifier))
-const followUpBehavior = shallowRef(appStore.settings.followUpBehavior === 'queue' ? 'queue' : 'steer')
+const followUpBehavior = shallowRef(appStore.settings.followUpBehavior === 'steer' ? 'steer' : 'queue')
+watch(followUpBehavior, (value) => {
+  const next = value === 'steer' ? 'steer' : 'queue'
+  if (appStore.settings.followUpBehavior === next) return
+  // Apply immediately so composer queue/steer matches the picker before Save.
+  appStore.patchSettings({ followUpBehavior: next })
+})
 const notifyOnTurnComplete = shallowRef(appStore.settings.notifyOnTurnComplete !== false)
 const preventSleepWhileRunning = shallowRef(Boolean(appStore.settings.preventSleepWhileRunning))
 const alwaysOnTop = shallowRef(Boolean(appStore.settings.alwaysOnTop))
@@ -130,6 +180,9 @@ const shortcutCommandPalette = shallowRef(appStore.settings.shortcutCommandPalet
 const shortcutNewThread = shallowRef(appStore.settings.shortcutNewThread || 'Ctrl+N')
 const shortcutTerminal = shallowRef(appStore.settings.shortcutTerminal || 'Ctrl+`')
 const shortcutBrowser = shallowRef(appStore.settings.shortcutBrowser || 'Ctrl+Shift+B')
+const codexClientName = shallowRef(appStore.settings.codexClientName ?? '')
+const codexClientTitle = shallowRef(appStore.settings.codexClientTitle ?? '')
+const codexClientVersion = shallowRef(appStore.settings.codexClientVersion ?? '')
 const browserAllowedHostsText = shallowRef((appStore.settings.browserAllowedHosts ?? []).join('\n'))
 const browserBlockedHostsText = shallowRef((appStore.settings.browserBlockedHosts ?? []).join('\n'))
 const browserDownloadDir = shallowRef(appStore.settings.browserDownloadDir ?? '')
@@ -185,6 +238,42 @@ const modelSelection = computed({
 
 const selectedModel = computed(() => appStore.models.find((item) => item.model === model.value))
 const codexStatus = computed(() => appStore.agentProviders.find((provider) => provider.kind === 'codex'))
+const isGrokSettings = computed(() => appStore.isGrokMode)
+const isClaudeSettings = computed(() => appStore.isClaudeMode)
+const claudeStatus = computed(() => {
+  const fromProviders = appStore.agentProviders.find((provider) => provider.kind === 'claude')
+  const rt = claudeStore.runtime
+  const ready = Boolean(rt.available || fromProviders?.runtimeReady)
+  return {
+    name: 'Claude',
+    kind: 'claude',
+    runtimeReady: ready,
+    version: rt.version || fromProviders?.version || '',
+    executable: rt.executable || fromProviders?.executable || '',
+    message: fromProviders?.message || rt.message || t('sidebar.claudeRuntimeMissing'),
+    models: fromProviders?.models ?? null,
+    reasoningEfforts: fromProviders?.reasoningEfforts ?? null,
+  }
+})
+/** Prefer live Grok probe over Bootstrap snapshot (PATH may miss ~/.grok/bin). */
+const grokStatus = computed(() => {
+  const fromProviders = appStore.agentProviders.find((provider) => provider.kind === 'grok')
+  const rt = grokStore.runtime
+  const ready = Boolean(rt.buildAvailable || rt.apiConfigured || fromProviders?.runtimeReady)
+  return {
+    name: 'Grok',
+    kind: 'grok',
+    runtimeReady: ready,
+    version: rt.buildVersion || fromProviders?.version || '',
+    executable: rt.buildExecutable || fromProviders?.executable || '',
+    message: fromProviders?.message
+      || (rt.buildAvailable
+        ? (rt.buildAuthenticated ? 'Grok Build ready' : 'Grok Build installed')
+        : (rt.apiConfigured ? 'Grok API configured' : 'Install Grok Build CLI or configure a Grok API key')),
+    models: fromProviders?.models ?? null,
+    reasoningEfforts: fromProviders?.reasoningEfforts ?? null,
+  }
+})
 
 const modelOptions = computed<SelectOption[]>(() => {
   const catalog = modelsForRuntime(appStore.models, customModels.value)
@@ -199,6 +288,30 @@ const modelOptions = computed<SelectOption[]>(() => {
   ]
 })
 
+const grokModelOptions = computed<SelectOption[]>(() => {
+  const preferred = grokBackend.value === 'api' ? grokAPIModel.value : grokBuildModel.value
+  const catalog = (grokStatus.value.models ?? []).map((item) => ({
+    model: item.model,
+    displayName: item.displayName,
+    isDefault: item.isDefault,
+  }))
+  return modelsForGrokRuntime(catalog, preferred).map((option) => ({
+    value: option.model,
+    label: option.displayName,
+    description: option.model,
+    badge: option.isDefault ? t('common.recommended') : '',
+  }))
+})
+
+const grokModelSelection = computed({
+  get: () => (grokBackend.value === 'api' ? grokAPIModel.value : grokBuildModel.value) || DEFAULT_MODEL_VALUE,
+  set: (value: string) => {
+    const next = value === DEFAULT_MODEL_VALUE ? '' : value
+    if (grokBackend.value === 'api') grokAPIModel.value = next
+    else grokBuildModel.value = next
+  },
+})
+
 const effortOptions = computed(() => {
   const options = selectedModel.value?.supportedReasoningEfforts ?? []
   return options.length ? options : [
@@ -209,6 +322,18 @@ const effortOptions = computed(() => {
     { effort: 'max', description: 'Maximum reasoning for hard problems' },
     { effort: 'ultra', description: 'Ultra reasoning depth' },
   ]
+})
+
+const grokEffortOptions = computed(() => {
+  const fromProvider = grokStatus.value.reasoningEfforts ?? []
+  if (fromProvider.length) {
+    return fromProvider.map((item: { effort: string, displayName?: string, description?: string }) => ({
+      effort: item.effort,
+      displayName: item.displayName,
+      description: item.description,
+    }))
+  }
+  return [...DEFAULT_GROK_REASONING]
 })
 
 const fastTier = computed(() => selectedModel.value?.serviceTiers.find((tier) =>
@@ -228,11 +353,13 @@ const approvalOptions = computed<SelectOption[]>(() => [
   { value: 'never', label: t('settings.never') },
 ])
 
-/** Codex-style exclusive permission levels. */
+/** Exclusive permission levels — bind to Codex or Grok fields by active runtime. */
 const permissionLevel = computed<'default' | 'autoReview' | 'full' | 'strict'>(() => {
-  if (sandbox.value === 'danger-full-access' && approvalPolicy.value === 'never') return 'full'
-  if (sandbox.value === 'workspace-write' && approvalPolicy.value === 'never') return 'autoReview'
-  if (sandbox.value === 'read-only') return 'strict'
+  const box = isGrokSettings.value ? grokSandbox.value : sandbox.value
+  const approval = isGrokSettings.value ? grokApprovalPolicy.value : approvalPolicy.value
+  if (box === 'danger-full-access' && approval === 'never') return 'full'
+  if (box === 'workspace-write' && approval === 'never') return 'autoReview'
+  if (box === 'read-only') return 'strict'
   return 'default'
 })
 
@@ -261,6 +388,50 @@ const multiAgentOptions = computed<SelectOption[]>(() => [
 const followUpOptions = computed<SelectOption[]>(() => [
   { value: 'steer', label: t('settings.followUpSteer'), description: t('settings.followUpSteerHint') },
   { value: 'queue', label: t('settings.followUpQueue'), description: t('settings.followUpQueueHint') },
+])
+
+/** Official client identities accepted by most Codex reverse-proxy channels. */
+const CODEX_CLIENT_PRESETS = [
+  { id: 'desktop', name: 'codex_desktop', title: 'Codex Desktop', version: '0.1.0' },
+  { id: 'cli', name: 'codex_cli_rs', title: 'Codex CLI', version: '0.1.0' },
+  { id: 'vscode', name: 'codex_vscode', title: 'Codex VS Code Extension', version: '0.1.0' },
+] as const
+
+const codexClientPreset = computed({
+  get: () => {
+    const name = codexClientName.value.trim()
+    const title = codexClientTitle.value.trim()
+    const version = codexClientVersion.value.trim()
+    // Empty settings → runtime defaults to official desktop.
+    if (!name && !title && !version) return 'desktop'
+    const match = CODEX_CLIENT_PRESETS.find((item) => {
+      if (item.name !== name) return false
+      if (title && item.title !== title) return false
+      if (version && item.version !== version) return false
+      return true
+    })
+    return match?.id ?? 'custom'
+  },
+  set: (value: string) => {
+    if (value === 'custom') {
+      if (!codexClientName.value.trim()) codexClientName.value = 'codex_desktop'
+      if (!codexClientTitle.value.trim()) codexClientTitle.value = 'Codex Desktop'
+      if (!codexClientVersion.value.trim()) codexClientVersion.value = '0.1.0'
+      return
+    }
+    const preset = CODEX_CLIENT_PRESETS.find((item) => item.id === value)
+    if (!preset) return
+    codexClientName.value = preset.name
+    codexClientTitle.value = preset.title
+    codexClientVersion.value = preset.version
+  },
+})
+
+const codexClientPresetOptions = computed<SelectOption[]>(() => [
+  { value: 'desktop', label: t('settings.codexClientPresetDesktop'), description: 'codex_desktop' },
+  { value: 'cli', label: t('settings.codexClientPresetCli'), description: 'codex_cli_rs' },
+  { value: 'vscode', label: t('settings.codexClientPresetVscode'), description: 'codex_vscode' },
+  { value: 'custom', label: t('settings.codexClientPresetCustom'), description: t('settings.codexClientPresetCustomHint') },
 ])
 
 const sendModifierLabel = computed(() =>
@@ -332,6 +503,7 @@ const navGroups = computed<NavGroup[]>(() => [
       { id: 'agent', label: t('settings.navAgent'), icon: OpenAIIcon, keywords: 'agent model codex 配置 模型' },
       { id: 'personalization', label: t('settings.navPersonalization'), icon: Smile, keywords: 'personality collaboration instructions AGENTS memories 个性化 记忆 全局提示词 项目提示词' },
       { id: 'account', label: t('settings.navAccount'), icon: UserRound, keywords: 'account login usage token 账户 登录 用量' },
+      { id: 'archived', label: t('settings.navArchived'), icon: Archive, keywords: 'archived restore conversations 已归档 恢复 对话' },
     ],
   },
   {
@@ -348,7 +520,7 @@ const navGroups = computed<NavGroup[]>(() => [
     id: 'coding',
     label: t('settings.navCoding'),
     items: [
-      { id: 'environment', label: t('settings.navEnvironment'), icon: Laptop, keywords: 'environment codex cli 环境' },
+      { id: 'environment', label: t('settings.navEnvironment'), icon: Laptop, keywords: 'environment codex cli client user-agent originator 环境 客户端 标识' },
       { id: 'git', label: t('settings.navGit'), icon: GitBranch, keywords: 'git branch pr prefix 工作区' },
     ],
   },
@@ -356,8 +528,27 @@ const navGroups = computed<NavGroup[]>(() => [
 
 const filteredNavGroups = computed(() => {
   const query = settingsSearch.value.trim().toLocaleLowerCase()
-  if (!query) return navGroups.value
-  return navGroups.value
+  // Grok/Claude mode: keep agent config + archived; hide pure Codex product surfaces.
+  const hideExternal = new Set(['plugins', 'hooks', 'scheduled', 'environment', 'account'])
+  let base = navGroups.value
+  if (isGrokSettings.value || isClaudeSettings.value) {
+    base = navGroups.value
+      .map((group) => ({
+        ...group,
+        items: group.items
+          .filter((item) => !hideExternal.has(item.id))
+          .map((item) => {
+            if (item.id !== 'agent') return item
+            if (isGrokSettings.value) {
+              return { ...item, label: t('settings.navGrokAgent'), keywords: 'grok model backend xai 配置 模型 后端' }
+            }
+            return { ...item, label: t('settings.navClaudeAgent'), keywords: 'claude model permission sonnet opus 配置 模型 权限' }
+          }),
+      }))
+      .filter((group) => group.items.length > 0)
+  }
+  if (!query) return base
+  return base
     .map((group) => ({
       ...group,
       items: group.items.filter((item) =>
@@ -370,6 +561,52 @@ const filteredNavGroups = computed(() => {
 const activeNavItem = computed(() =>
   navGroups.value.flatMap((group) => group.items).find((item) => item.id === activePanel.value),
 )
+
+const archivedThreads = computed(() => {
+  const query = archivedSearch.value.trim().toLocaleLowerCase()
+  const list = appStore.isGrokMode
+    ? grokStore.archivedSessions.map((session) => ({
+        id: session.id,
+        name: session.name,
+        preview: session.preview,
+      }))
+    : appStore.isClaudeMode
+      ? claudeStore.archivedSessions.map((session) => ({
+          id: session.id,
+          name: session.name,
+          preview: session.preview,
+        }))
+      : codexStore.archivedThreads
+  if (!query) return list
+  return list.filter((thread) => `${thread.name} ${thread.preview}`.toLocaleLowerCase().includes(query))
+})
+
+async function restoreArchived(threadID: string): Promise<void> {
+  if (appStore.isGrokMode) {
+    await grokStore.unarchiveSession(threadID)
+    if (grokStore.activeSessionId === threadID) router.push('/')
+    return
+  }
+  if (appStore.isClaudeMode) {
+    await claudeStore.unarchiveSession(threadID)
+    if (claudeStore.activeSessionId === threadID) router.push('/')
+    return
+  }
+  await codexStore.unarchiveThread(threadID)
+  if (codexStore.activeThreadId === threadID) router.push('/')
+}
+
+function deleteArchived(threadID: string): void {
+  if (appStore.isGrokMode) {
+    void grokStore.deleteSession(threadID)
+    return
+  }
+  if (appStore.isClaudeMode) {
+    void claudeStore.deleteSession(threadID)
+    return
+  }
+  void codexStore.deleteThread(threadID)
+}
 
 watch([theme, accentColor, fontFamily, translucentSidebar, highContrast, pointerCursor, reduceMotion, uiFontSize, codeFontSize], () => {
   appStore.previewAppearance({
@@ -399,15 +636,36 @@ watch(activePanel, (panel) => {
   }
   if (panel === 'scheduled') void loadScheduledTasks()
   if (panel === 'browser') void loadFeatureFlags()
+  if (panel === 'archived') {
+    if (appStore.isGrokMode) void grokStore.loadArchivedSessions()
+    else if (appStore.isClaudeMode) void claudeStore.loadArchivedSessions()
+    else void codexStore.loadThreads().catch(() => undefined)
+  }
+  if (panel === 'environment') void refreshCLITools({ silent: true })
 })
 
 onMounted(() => {
   syncFromStore()
   void loadCollaborationModes()
-  void appStore.refreshAccountData().catch(() => undefined)
+  if (!isGrokSettings.value) void appStore.refreshAccountData().catch(() => undefined)
+  else void grokStore.refreshRuntime()
   const section = typeof route.query.section === 'string' ? route.query.section : ''
   if (isSettingsPanel(section)) activePanel.value = section
+  clampPanelForRuntime()
 })
+
+watch(isGrokSettings, (grok) => {
+  syncFromStore()
+  clampPanelForRuntime()
+  if (grok) void grokStore.refreshRuntime()
+})
+
+function clampPanelForRuntime(): void {
+  if (!isGrokSettings.value) return
+  // Archived is supported for Grok (local archive index).
+  const hideInGrok = new Set(['plugins', 'hooks', 'scheduled', 'environment', 'account'])
+  if (hideInGrok.has(activePanel.value)) activePanel.value = 'agent'
+}
 
 onUnmounted(() => {
   if (!saved.value) appStore.restoreAppearance()
@@ -415,7 +673,7 @@ onUnmounted(() => {
 
 function isSettingsPanel(value: string): value is SettingsPanel {
   return [
-    'general', 'appearance', 'shortcuts', 'agent', 'personalization', 'account',
+    'general', 'appearance', 'shortcuts', 'agent', 'personalization', 'account', 'archived',
     'plugins', 'browser', 'hooks', 'environment', 'git', 'scheduled',
   ].includes(value)
 }
@@ -451,6 +709,21 @@ function syncFromStore(): void {
   multiAgentMode.value = settings.multiAgentMode
   sandbox.value = settings.sandbox
   approvalPolicy.value = settings.approvalPolicy
+  grokBackend.value = settings.grokBackend === 'api' ? 'api' : 'build'
+  grokBuildModel.value = settings.grokBuildModel || ''
+  grokAPIModel.value = settings.grokAPIModel || 'grok-4.5'
+  grokEffort.value = settings.grokEffort || 'high'
+  grokSandbox.value = settings.grokSandbox || 'workspace-write'
+  grokApprovalPolicy.value = settings.grokApprovalPolicy || 'on-request'
+  grokWebSearch.value = settings.grokWebSearch !== false
+  grokXSearch.value = Boolean(settings.grokXSearch)
+  grokAPIKey.value = settings.grokAPIKey || ''
+  grokAPIBaseURL.value = settings.grokAPIBaseURL || ''
+  claudeModel.value = settings.claudeModel || 'sonnet'
+  claudeEffort.value = settings.claudeEffort || 'high'
+  claudeSandbox.value = settings.claudeSandbox || 'workspace-write'
+  claudeApprovalPolicy.value = settings.claudeApprovalPolicy || 'on-request'
+  claudePermissionMode.value = settings.claudePermissionMode || 'acceptEdits'
   theme.value = settings.theme
   accentColor.value = settings.accentColor
   fontFamily.value = settings.fontFamily
@@ -464,7 +737,7 @@ function syncFromStore(): void {
   language.value = settings.language
   autoConnect.value = settings.autoConnect
   sendWithModifier.value = Boolean(settings.sendWithModifier)
-  followUpBehavior.value = settings.followUpBehavior === 'queue' ? 'queue' : 'steer'
+  followUpBehavior.value = settings.followUpBehavior === 'steer' ? 'steer' : 'queue'
   notifyOnTurnComplete.value = settings.notifyOnTurnComplete !== false
   preventSleepWhileRunning.value = Boolean(settings.preventSleepWhileRunning)
   alwaysOnTop.value = Boolean(settings.alwaysOnTop)
@@ -480,6 +753,9 @@ function syncFromStore(): void {
   shortcutNewThread.value = settings.shortcutNewThread || 'Ctrl+N'
   shortcutTerminal.value = settings.shortcutTerminal || 'Ctrl+`'
   shortcutBrowser.value = settings.shortcutBrowser || 'Ctrl+Shift+B'
+  codexClientName.value = settings.codexClientName ?? ''
+  codexClientTitle.value = settings.codexClientTitle ?? ''
+  codexClientVersion.value = settings.codexClientVersion ?? ''
   void loadAgentsInstructions()
   void loadFeatureFlags()
 }
@@ -590,20 +866,37 @@ async function loadAgentsInstructions(): Promise<void> {
 
 async function loadGlobalInstructions(): Promise<void> {
   try {
-    const info = await backend.ReadGlobalInstructions()
+    const info = isGrokSettings.value
+      ? await (await import('@/utils/grokBindings')).readGrokGlobalInstructions()
+      : isClaudeSettings.value
+        ? await readClaudeGlobalInstructions() as any
+        : await backend.ReadGlobalInstructions()
     customInstructions.value = info?.content ?? ''
     globalInstructionsPath.value = info?.path ?? ''
-    globalInstructionsSource.value = info?.source || 'AGENTS.md'
+    globalInstructionsSource.value = info?.source
+      || (isGrokSettings.value
+        ? 'AGENTS.md (~/.grok)'
+        : isClaudeSettings.value
+          ? 'CLAUDE.md (~/.claude)'
+          : 'AGENTS.md')
     globalInstructionsExists.value = Boolean(info?.exists)
     globalInstructionsEmptyFile.value = Boolean(info?.emptyFile)
-    appStore.settings = {
-      ...appStore.settings,
-      customInstructions: customInstructions.value,
+    if (!isGrokSettings.value && !isClaudeSettings.value) {
+      appStore.settings = {
+        ...appStore.settings,
+        customInstructions: customInstructions.value,
+      }
     }
   } catch {
-    customInstructions.value = appStore.settings.customInstructions ?? ''
+    customInstructions.value = (isGrokSettings.value || isClaudeSettings.value)
+      ? ''
+      : (appStore.settings.customInstructions ?? '')
     globalInstructionsPath.value = ''
-    globalInstructionsSource.value = 'AGENTS.md'
+    globalInstructionsSource.value = isGrokSettings.value
+      ? 'AGENTS.md (~/.grok)'
+      : isClaudeSettings.value
+        ? 'CLAUDE.md (~/.claude)'
+        : 'AGENTS.md'
     globalInstructionsExists.value = false
     globalInstructionsEmptyFile.value = false
   }
@@ -611,10 +904,14 @@ async function loadGlobalInstructions(): Promise<void> {
 
 async function loadProjectInstructions(): Promise<void> {
   try {
-    const info = await backend.ReadProjectInstructions()
+    const info = isGrokSettings.value
+      ? await (await import('@/utils/grokBindings')).readGrokProjectInstructions()
+      : isClaudeSettings.value
+        ? await readClaudeProjectInstructions() as any
+        : await backend.ReadProjectInstructions()
     projectInstructionsAvailable.value = Boolean(info?.available)
     projectInstructionsPath.value = info?.path ?? ''
-    projectInstructionsSource.value = info?.source || 'AGENTS.md'
+    projectInstructionsSource.value = info?.source || (isClaudeSettings.value ? 'CLAUDE.md' : 'AGENTS.md')
     projectInstructionsExists.value = Boolean(info?.exists)
     projectInstructionsEmptyFile.value = Boolean(info?.emptyFile)
     projectInstructionsWorkspace.value = info?.workspace ?? ''
@@ -623,10 +920,14 @@ async function loadProjectInstructions(): Promise<void> {
   } catch {
     projectInstructionsAvailable.value = false
     projectInstructionsPath.value = ''
-    projectInstructionsSource.value = 'AGENTS.md'
+    projectInstructionsSource.value = isClaudeSettings.value ? 'CLAUDE.md' : 'AGENTS.md'
     projectInstructionsExists.value = false
     projectInstructionsEmptyFile.value = false
-    projectInstructionsWorkspace.value = appStore.settings.workspace || ''
+    projectInstructionsWorkspace.value = isGrokSettings.value
+      ? (appStore.settings.grokWorkspace || '')
+      : isClaudeSettings.value
+        ? (appStore.settings.claudeWorkspace || '')
+        : (appStore.settings.workspace || '')
     projectInstructionsWorkspaceName.value = ''
     projectInstructions.value = ''
   }
@@ -669,6 +970,26 @@ function toggleFast(value?: boolean): void {
 }
 
 function applyPermissionLevel(level: 'default' | 'autoReview' | 'full' | 'strict'): void {
+  if (isGrokSettings.value) {
+    if (level === 'full') {
+      grokSandbox.value = 'danger-full-access'
+      grokApprovalPolicy.value = 'never'
+      return
+    }
+    if (level === 'autoReview') {
+      grokSandbox.value = 'workspace-write'
+      grokApprovalPolicy.value = 'never'
+      return
+    }
+    if (level === 'strict') {
+      grokSandbox.value = 'read-only'
+      grokApprovalPolicy.value = 'on-request'
+      return
+    }
+    grokSandbox.value = 'workspace-write'
+    grokApprovalPolicy.value = 'on-request'
+    return
+  }
   if (level === 'full') {
     sandbox.value = 'danger-full-access'
     approvalPolicy.value = 'never'
@@ -756,18 +1077,100 @@ async function openBrowserDownloadDir(): Promise<void> {
   }
 }
 
-async function reconnectCodexRuntime(): Promise<void> {
+async function reconnectCodexRuntime(options: { silent?: boolean } = {}): Promise<boolean> {
   const workspace = appStore.settings.workspace || workspaceStore.workspace?.path || ''
   if (!workspace) {
-    notify('error', t('settings.runtimeReconnect'), t('app.needWorkspaceHintReady'))
-    return
+    if (!options.silent) {
+      notify('error', t('settings.runtimeReconnect'), t('app.needWorkspaceHintReady'))
+    }
+    return false
   }
   try {
-    await backend.StartCodex(workspace)
-    notify('success', t('settings.runtimeReconnect'), t('settings.runtimeReady'))
+    // Prefer store connect so thread/queue state is reset with the new app-server.
+    const ok = await codexStore.connect(workspace)
+    if (ok) {
+      if (!options.silent) {
+        notify('success', t('settings.runtimeReconnect'), t('settings.runtimeReady'))
+      }
+      return true
+    }
+    if (!options.silent) {
+      notify('error', t('settings.runtimeReconnect'), codexStore.connection.message || t('notifications.connectionFailed'))
+    }
+    return false
   } catch (error) {
-    notify('error', t('settings.runtimeReconnect'), error instanceof Error ? error.message : String(error))
+    if (!options.silent) {
+      notify('error', t('settings.runtimeReconnect'), error instanceof Error ? error.message : String(error))
+    }
+    return false
   }
+}
+
+const cliReport = shallowRef<CLIToolsReport | null>(null)
+const cliLoading = shallowRef(false)
+const cliInstalling = shallowRef<Record<string, boolean>>({})
+const cliTools = computed(() => cliReport.value?.tools ?? [])
+
+async function refreshCLITools(options: { silent?: boolean } = {}): Promise<void> {
+  cliLoading.value = true
+  try {
+    cliReport.value = await checkCLITools()
+  } catch (error) {
+    if (!options.silent) {
+      notify('error', t('settings.cliToolsTitle'), error instanceof Error ? error.message : String(error))
+    }
+  } finally {
+    cliLoading.value = false
+  }
+}
+
+async function installOrUpdateCLITool(tool: CLIToolStatus): Promise<void> {
+  if (!tool?.id || cliInstalling.value[tool.id]) return
+  cliInstalling.value = { ...cliInstalling.value, [tool.id]: true }
+  try {
+    const result = await installCLITool(tool.id)
+    if (result.tool) {
+      const list = [...(cliReport.value?.tools ?? [])]
+      const idx = list.findIndex((item) => item.id === tool.id)
+      if (idx >= 0) list[idx] = result.tool
+      else list.push(result.tool)
+      cliReport.value = {
+        ...(cliReport.value || {
+          packageManager: result.tool.packageManager,
+          nodeAvailable: result.tool.nodeAvailable,
+          nodeVersion: '',
+          checkedAt: Date.now() / 1000,
+        }),
+        tools: list,
+      }
+    }
+    if (result.ok) {
+      notify('success', tool.name, result.message || t('onboarding.cliInstallOk'))
+      void refreshCLITools({ silent: true })
+      void appStore.refreshRuntimes()
+    } else {
+      notify('error', tool.name, result.message || t('onboarding.cliInstallFailed'))
+    }
+  } catch (error) {
+    notify('error', tool.name, error instanceof Error ? error.message : String(error))
+  } finally {
+    cliInstalling.value = { ...cliInstalling.value, [tool.id]: false }
+  }
+}
+
+function cliToolStatusLabel(tool: CLIToolStatus): string {
+  if (!tool.installed) return t('onboarding.cliMissing')
+  if (tool.updateAvailable) return t('onboarding.cliUpdateAvailable')
+  return t('onboarding.cliReady')
+}
+
+function codexClientIdentityChanged(): boolean {
+  const saved = appStore.settings
+  return (
+    codexClientName.value.trim() !== (saved.codexClientName ?? '').trim()
+    || codexClientTitle.value.trim() !== (saved.codexClientTitle ?? '').trim()
+    || codexClientVersion.value.trim() !== (saved.codexClientVersion ?? '').trim()
+  )
 }
 
 function terminalProfileDescription(id: string, fallback: string): string {
@@ -840,27 +1243,85 @@ async function runPush(): Promise<void> {
 }
 
 async function save(): Promise<void> {
+  if (saving.value) return
+
+  // Upstream client identity only applies after app-server re-handshake (Codex only).
+  const identityChanged = !isGrokSettings.value && !isClaudeSettings.value && codexClientIdentityChanged()
+  let reconnectAfterSave = false
+  if (identityChanged) {
+    reconnectAfterSave = await dialogStore.confirm({
+      title: t('settings.codexClientRestartTitle'),
+      description: t('settings.codexClientRestartDesc'),
+      confirmLabel: t('settings.codexClientRestartConfirm'),
+      cancelLabel: t('settings.codexClientRestartLater'),
+      destructive: true,
+    })
+    // confirm → save + restart; cancel → save only (user was already on Save).
+  }
+
   saving.value = true
   try {
-    // Persist AGENTS.md first so SavePreferences can re-read disk into the settings cache.
-    const globalInfo = await backend.SaveGlobalInstructions(customInstructions.value)
-    customInstructions.value = globalInfo?.content ?? customInstructions.value
-    globalInstructionsPath.value = globalInfo?.path ?? globalInstructionsPath.value
-    globalInstructionsSource.value = globalInfo?.source || globalInstructionsSource.value
-    globalInstructionsExists.value = Boolean(globalInfo?.exists)
-    globalInstructionsEmptyFile.value = Boolean(globalInfo?.emptyFile)
-    if (projectInstructionsAvailable.value) {
-      const info = await backend.SaveProjectInstructions(projectInstructions.value)
-      projectInstructions.value = info?.content ?? projectInstructions.value
-      projectInstructionsPath.value = info?.path ?? projectInstructionsPath.value
-      projectInstructionsSource.value = info?.source || projectInstructionsSource.value
-      projectInstructionsExists.value = Boolean(info?.exists)
-      projectInstructionsEmptyFile.value = Boolean(info?.emptyFile)
-      projectInstructionsWorkspace.value = info?.workspace ?? projectInstructionsWorkspace.value
-      projectInstructionsWorkspaceName.value = info?.workspaceName ?? projectInstructionsWorkspaceName.value
+    // Persist instruction files first (Codex / Claude / Grok homes).
+    if (isGrokSettings.value) {
+      const grok = await import('@/utils/grokBindings')
+      const globalInfo = await grok.saveGrokGlobalInstructions(customInstructions.value)
+      customInstructions.value = globalInfo?.content ?? customInstructions.value
+      globalInstructionsPath.value = globalInfo?.path ?? globalInstructionsPath.value
+      globalInstructionsSource.value = globalInfo?.source || globalInstructionsSource.value
+      globalInstructionsExists.value = Boolean(globalInfo?.exists)
+      globalInstructionsEmptyFile.value = Boolean(globalInfo?.emptyFile)
+      if (projectInstructionsAvailable.value) {
+        const info = await grok.saveGrokProjectInstructions(projectInstructions.value)
+        projectInstructions.value = info?.content ?? projectInstructions.value
+        projectInstructionsPath.value = info?.path ?? projectInstructionsPath.value
+        projectInstructionsSource.value = info?.source || projectInstructionsSource.value
+        projectInstructionsExists.value = Boolean(info?.exists)
+        projectInstructionsEmptyFile.value = Boolean(info?.emptyFile)
+        projectInstructionsWorkspace.value = info?.workspace ?? projectInstructionsWorkspace.value
+        projectInstructionsWorkspaceName.value = info?.workspaceName ?? projectInstructionsWorkspaceName.value
+      }
+    } else if (isClaudeSettings.value) {
+      const globalInfo = await saveClaudeGlobalInstructions(customInstructions.value) as any
+      customInstructions.value = globalInfo?.content ?? customInstructions.value
+      globalInstructionsPath.value = globalInfo?.path ?? globalInstructionsPath.value
+      globalInstructionsSource.value = globalInfo?.source || globalInstructionsSource.value
+      globalInstructionsExists.value = Boolean(globalInfo?.exists)
+      globalInstructionsEmptyFile.value = Boolean(globalInfo?.emptyFile)
+      if (projectInstructionsAvailable.value) {
+        const info = await saveClaudeProjectInstructions(projectInstructions.value) as any
+        projectInstructions.value = info?.content ?? projectInstructions.value
+        projectInstructionsPath.value = info?.path ?? projectInstructionsPath.value
+        projectInstructionsSource.value = info?.source || projectInstructionsSource.value
+        projectInstructionsExists.value = Boolean(info?.exists)
+        projectInstructionsEmptyFile.value = Boolean(info?.emptyFile)
+        projectInstructionsWorkspace.value = info?.workspace ?? projectInstructionsWorkspace.value
+        projectInstructionsWorkspaceName.value = info?.workspaceName ?? projectInstructionsWorkspaceName.value
+      }
+    } else {
+      const globalInfo = await backend.SaveGlobalInstructions(customInstructions.value)
+      customInstructions.value = globalInfo?.content ?? customInstructions.value
+      globalInstructionsPath.value = globalInfo?.path ?? globalInstructionsPath.value
+      globalInstructionsSource.value = globalInfo?.source || globalInstructionsSource.value
+      globalInstructionsExists.value = Boolean(globalInfo?.exists)
+      globalInstructionsEmptyFile.value = Boolean(globalInfo?.emptyFile)
+      if (projectInstructionsAvailable.value) {
+        const info = await backend.SaveProjectInstructions(projectInstructions.value)
+        projectInstructions.value = info?.content ?? projectInstructions.value
+        projectInstructionsPath.value = info?.path ?? projectInstructionsPath.value
+        projectInstructionsSource.value = info?.source || projectInstructionsSource.value
+        projectInstructionsExists.value = Boolean(info?.exists)
+        projectInstructionsEmptyFile.value = Boolean(info?.emptyFile)
+        projectInstructionsWorkspace.value = info?.workspace ?? projectInstructionsWorkspace.value
+        projectInstructionsWorkspaceName.value = info?.workspaceName ?? projectInstructionsWorkspaceName.value
+      }
     }
     await appStore.savePreferences({
       ...appStore.settings,
+      activeRuntime: appStore.settings.activeRuntime === 'grok'
+        ? 'grok'
+        : appStore.settings.activeRuntime === 'claude'
+          ? 'claude'
+          : 'codex',
       recentWorkspaces: appStore.settings.recentWorkspaces ?? [],
       model: model.value,
       modelProvider: '',
@@ -872,6 +1333,21 @@ async function save(): Promise<void> {
       multiAgentMode: multiAgentMode.value,
       sandbox: sandbox.value,
       approvalPolicy: approvalPolicy.value,
+      grokBackend: grokBackend.value === 'api' ? 'api' : 'build',
+      grokBuildModel: grokBuildModel.value.trim(),
+      grokAPIModel: grokAPIModel.value.trim() || 'grok-4.5',
+      grokAPIKey: grokAPIKey.value.trim(),
+      grokAPIBaseURL: grokAPIBaseURL.value.trim(),
+      grokEffort: grokEffort.value || 'high',
+      grokSandbox: grokSandbox.value || 'workspace-write',
+      grokApprovalPolicy: grokApprovalPolicy.value || 'on-request',
+      grokWebSearch: grokWebSearch.value,
+      grokXSearch: grokXSearch.value,
+      claudeModel: claudeModel.value.trim() || 'sonnet',
+      claudeEffort: claudeEffort.value || 'high',
+      claudeSandbox: claudeSandbox.value || 'workspace-write',
+      claudeApprovalPolicy: claudeApprovalPolicy.value || 'on-request',
+      claudePermissionMode: claudePermissionMode.value || 'acceptEdits',
       theme: theme.value,
       accentColor: accentColor.value,
       fontFamily: fontFamily.value,
@@ -901,19 +1377,35 @@ async function save(): Promise<void> {
       shortcutNewThread: shortcutNewThread.value,
       shortcutTerminal: shortcutTerminal.value,
       shortcutBrowser: shortcutBrowser.value,
+      codexClientName: codexClientName.value.trim(),
+      codexClientTitle: codexClientTitle.value.trim(),
+      codexClientVersion: codexClientVersion.value.trim(),
       customInstructions: customInstructions.value,
       onboardingCompleted: true,
     })
-    await backend.SaveCodexFeatureFlags({
-      memoriesEnabled: memoriesEnabled.value,
-      memoriesGenerate: memoriesGenerate.value,
-      memoriesUse: memoriesUse.value,
-      memoriesDisableExternalContext: memoriesDisableExternal.value,
-      browserUseFullCDP: browserFullCDP.value,
-      inAppBrowser: true,
-    })
+    if (!isGrokSettings.value) {
+      await backend.SaveCodexFeatureFlags({
+        memoriesEnabled: memoriesEnabled.value,
+        memoriesGenerate: memoriesGenerate.value,
+        memoriesUse: memoriesUse.value,
+        memoriesDisableExternalContext: memoriesDisableExternal.value,
+        browserUseFullCDP: browserFullCDP.value,
+        inAppBrowser: true,
+      })
+    }
     saved.value = true
-    await codexStore.loadModels()
+    if (!isGrokSettings.value) await codexStore.loadModels()
+
+    if (!isGrokSettings.value && identityChanged && reconnectAfterSave) {
+      const ok = await reconnectCodexRuntime({ silent: true })
+      if (ok) {
+        notify('success', t('settings.codexClientRestartDone'), t('settings.codexClientRestartDoneHint'))
+      } else {
+        notify('warning', t('settings.codexClientRestartFailed'), t('settings.codexClientRestartSavedOnlyHint'))
+      }
+    } else if (identityChanged) {
+      notify('info', t('settings.codexClientRestartSavedOnly'), t('settings.codexClientRestartSavedOnlyHint'))
+    }
     // Stay on settings after save; user can leave via back/close.
   } catch {
     saved.value = false
@@ -980,7 +1472,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
       </nav>
 
       <div class="px-4 py-2 text-[10px] text-muted-foreground">
-        Codex {{ appStore.codexVersion || 'app-server' }} · v{{ appStore.appVersion }}
+        {{ isGrokSettings ? 'Grok' : `Codex ${appStore.codexVersion || 'app-server'}` }} · v{{ appStore.appVersion }}
       </div>
     </aside>
 
@@ -991,7 +1483,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
           <div class="min-w-0 flex-1">
             <h1 class="text-[15px] font-semibold tracking-tight">{{ activeNavItem?.label || t('settings.title') }}</h1>
           </div>
-          <Button form="settings-form" type="submit" size="sm" :disabled="saving">
+          <Button v-if="activePanel !== 'archived'" form="settings-form" type="submit" size="sm" :disabled="saving">
             {{ saving ? t('common.saving') : t('settings.save') }}
           </Button>
         </header>
@@ -1396,9 +1888,246 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
               </section>
             </template>
 
-            <!-- Agent / config -->
+            <!-- Agent / config (Codex / Claude / Grok) -->
             <template v-else-if="activePanel === 'agent'">
-              <section class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="isClaudeSettings" class="overflow-hidden rounded-xl border bg-card">
+                <div class="flex items-center gap-3 border-b px-4 py-3">
+                  <div class="grid size-8 place-items-center rounded-md border bg-muted/40">
+                    <ClaudeIcon :size="16" />
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <p class="text-[13px] font-medium">Claude Code</p>
+                    <p class="truncate text-[11px] text-muted-foreground">
+                      <span v-if="claudeStatus.version" class="mr-1 font-mono">{{ claudeStatus.version }}</span>
+                      {{ t('settings.providerClaudeHint') }}
+                    </p>
+                    <p v-if="claudeStatus.executable" class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80" :title="claudeStatus.executable">
+                      {{ claudeStatus.executable }}
+                    </p>
+                  </div>
+                  <Badge :variant="claudeStatus.runtimeReady ? 'default' : 'outline'" class="text-[9px]">
+                    {{ claudeStatus.runtimeReady ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
+                  </Badge>
+                </div>
+                <p class="border-b bg-muted/20 px-4 py-2 text-[11px] leading-4 text-muted-foreground">
+                  {{ claudeStatus.message }}
+                </p>
+                <div class="space-y-4 p-4">
+                  <div class="space-y-1">
+                    <Label class="text-xs">{{ t('settings.model') }}</Label>
+                    <Input v-model="claudeModel" class="h-9 font-mono text-xs" placeholder="sonnet" maxlength="160" />
+                    <p class="text-[10px] text-muted-foreground">{{ t('settings.claudeModelHint') }}</p>
+                  </div>
+                  <div class="space-y-1">
+                    <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
+                    <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      <Button
+                        v-for="option in ['low', 'medium', 'high', 'xhigh', 'max']"
+                        :key="option"
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-8 capitalize"
+                        :class="claudeEffort === option ? 'border-primary bg-primary/5' : ''"
+                        @click="claudeEffort = option"
+                      >
+                        {{ option }}
+                      </Button>
+                    </div>
+                  </div>
+                  <div class="space-y-1">
+                    <Label class="text-xs">{{ t('settings.claudePermissionMode') }}</Label>
+                    <Select v-model="claudePermissionMode">
+                      <SelectTrigger class="h-8 font-mono text-xs">
+                        <SelectValue>{{ claudePermissionMode }}</SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem
+                          v-for="option in claudePermissionOptions"
+                          :key="option.value"
+                          :value="option.value"
+                          class="font-mono text-xs"
+                        >
+                          {{ option.label }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-[10px] text-muted-foreground">{{ t('settings.claudePermissionModeHint') }}</p>
+                  </div>
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <div class="space-y-1">
+                      <Label class="text-xs">{{ t('settings.sandbox') }} <span class="text-muted-foreground">(legacy)</span></Label>
+                      <Select v-model="claudeSandbox">
+                        <SelectTrigger class="h-8 text-xs">
+                          <SelectValue>{{ selectedOptionLabel(sandboxOptions, claudeSandbox) }}</SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="option in sandboxOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div class="space-y-1">
+                      <Label class="text-xs">{{ t('settings.approvals') }} <span class="text-muted-foreground">(legacy)</span></Label>
+                      <Select v-model="claudeApprovalPolicy">
+                        <SelectTrigger class="h-8 text-xs">
+                          <SelectValue>{{ selectedOptionLabel(approvalOptions, claudeApprovalPolicy) }}</SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="option in approvalOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <p class="text-[10px] leading-4 text-muted-foreground">{{ t('settings.claudeLegacyPermissionHint') }}</p>
+                </div>
+              </section>
+
+              <section v-else-if="isGrokSettings" class="overflow-hidden rounded-xl border bg-card">
+                <div class="flex items-center gap-3 border-b px-4 py-3">
+                  <div class="grid size-8 place-items-center rounded-md border bg-muted/40">
+                    <GrokIcon :size="16" />
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <p class="text-[13px] font-medium">Grok</p>
+                    <p class="truncate text-[11px] text-muted-foreground">
+                      <span v-if="grokStatus.version" class="mr-1 font-mono">{{ grokStatus.version }}</span>
+                      {{ t('settings.providerGrokHint') }}
+                    </p>
+                    <p v-if="grokStatus.executable" class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80" :title="grokStatus.executable">
+                      {{ grokStatus.executable }}
+                    </p>
+                  </div>
+                  <Badge :variant="grokStatus.runtimeReady ? 'default' : 'outline'" class="text-[9px]">
+                    {{ grokStatus.runtimeReady ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
+                  </Badge>
+                </div>
+                <p class="border-b bg-muted/20 px-4 py-2 text-[11px] leading-4 text-muted-foreground">
+                  {{ grokStatus.message || t('settings.grokConfigHint') }}
+                </p>
+                <div class="space-y-4 p-4">
+                  <div class="space-y-1">
+                    <Label class="text-xs">{{ t('settings.grokBackend') }}</Label>
+                    <div class="grid grid-cols-2 gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-9"
+                        :class="grokBackend === 'build' ? 'border-primary bg-primary/5' : ''"
+                        @click="grokBackend = 'build'"
+                      >
+                        Grok Build
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-9"
+                        :class="grokBackend === 'api' ? 'border-primary bg-primary/5' : ''"
+                        @click="grokBackend = 'api'"
+                      >
+                        Grok API
+                      </Button>
+                    </div>
+                  </div>
+                  <div v-if="grokBackend === 'api'" class="space-y-3 rounded-lg border bg-muted/20 p-3">
+                    <p class="text-[11px] leading-4 text-muted-foreground">{{ t('settings.grokAPIConfigHint') }}</p>
+                    <div class="space-y-1">
+                      <Label class="text-xs">{{ t('settings.grokAPIBaseURL') }}</Label>
+                      <Input
+                        v-model="grokAPIBaseURL"
+                        class="h-9 font-mono text-xs"
+                        :placeholder="t('settings.grokAPIBaseURLPlaceholder')"
+                        maxlength="512"
+                      />
+                    </div>
+                    <div class="space-y-1">
+                      <Label class="text-xs">{{ t('settings.grokAPIKey') }}</Label>
+                      <Input
+                        v-model="grokAPIKey"
+                        type="password"
+                        class="h-9 font-mono text-xs"
+                        :placeholder="t('settings.grokAPIKeyPlaceholder')"
+                        maxlength="512"
+                        autocomplete="off"
+                      />
+                      <p class="text-[10px] text-muted-foreground">{{ t('settings.grokAPIKeyHint') }}</p>
+                    </div>
+                  </div>
+                  <div class="space-y-1">
+                    <Label class="text-xs">{{ t('settings.model') }}</Label>
+                    <SearchableSelect
+                      v-model="grokModelSelection"
+                      class="h-9"
+                      content-class="min-w-[320px]"
+                      align="start"
+                      :options="grokModelOptions"
+                      :aria-label="t('settings.model')"
+                      :search-placeholder="t('settings.modelSearch')"
+                    />
+                  </div>
+                  <div class="space-y-1">
+                    <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
+                    <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      <Button
+                        v-for="option in grokEffortOptions"
+                        :key="option.effort"
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-auto min-w-0 w-full shrink flex-col items-stretch justify-start gap-1 whitespace-normal px-3 py-2 text-left text-xs"
+                        :class="grokEffort === option.effort ? 'border-primary bg-primary/5' : ''"
+                        @click="grokEffort = option.effort"
+                      >
+                        <span class="flex w-full min-w-0 items-center justify-between gap-1">
+                          <strong class="min-w-0 truncate capitalize">{{ 'displayName' in option ? option.displayName : option.effort }}</strong>
+                          <Check v-if="grokEffort === option.effort" :size="13" class="shrink-0 text-primary" />
+                        </span>
+                        <small class="w-full whitespace-normal break-words line-clamp-2 text-[10px] font-normal leading-snug text-muted-foreground">
+                          {{ option.description }}
+                        </small>
+                      </Button>
+                    </div>
+                  </div>
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <div class="space-y-1">
+                      <Label class="text-xs">{{ t('settings.sandbox') }}</Label>
+                      <Select v-model="grokSandbox">
+                        <SelectTrigger class="h-9 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="option in sandboxOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div class="space-y-1">
+                      <Label class="text-xs">{{ t('settings.approval') }}</Label>
+                      <Select v-model="grokApprovalPolicy">
+                        <SelectTrigger class="h-9 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="on-request">{{ t('settings.onRequest') }}</SelectItem>
+                          <SelectItem value="never">{{ t('settings.never') }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div class="flex items-center justify-between rounded-lg border px-3 py-2.5">
+                    <div class="space-y-0.5">
+                      <Label class="text-xs">{{ t('settings.grokWebSearch') }}</Label>
+                      <p class="text-[10px] text-muted-foreground">{{ t('settings.grokWebSearchHint') }}</p>
+                    </div>
+                    <Switch :checked="grokWebSearch" @update:checked="grokWebSearch = $event" />
+                  </div>
+                  <div class="flex items-center justify-between rounded-lg border px-3 py-2.5">
+                    <div class="space-y-0.5">
+                      <Label class="text-xs">{{ t('settings.grokXSearch') }}</Label>
+                      <p class="text-[10px] text-muted-foreground">{{ t('settings.grokXSearchHint') }}</p>
+                    </div>
+                    <Switch :checked="grokXSearch" @update:checked="grokXSearch = $event" />
+                  </div>
+                </div>
+              </section>
+
+              <section v-else class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-center gap-3 border-b px-4 py-3">
                   <div class="grid size-8 place-items-center rounded-md border bg-muted/40">
                     <OpenAIIcon :size="16" />
@@ -1493,7 +2222,13 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
 
             <!-- Personalization -->
             <template v-else-if="activePanel === 'personalization'">
-              <section class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="isGrokSettings" class="overflow-hidden rounded-xl border bg-card">
+                <div class="border-b px-4 py-3">
+                  <h2 class="text-[13px] font-semibold">{{ t('settings.grokInstructionsTitle') }}</h2>
+                  <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.grokInstructionsHint') }}</p>
+                </div>
+              </section>
+              <section v-if="!isGrokSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="divide-y">
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
@@ -1527,8 +2262,20 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
               <section class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
                   <div class="min-w-0">
-                    <h2 class="text-[13px] font-semibold">{{ t('settings.customInstructions') }}</h2>
-                    <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.customInstructionsHint') }}</p>
+                    <h2 class="text-[13px] font-semibold">
+                      {{ isGrokSettings
+                        ? t('settings.grokGlobalInstructions')
+                        : isClaudeSettings
+                          ? t('settings.claudeGlobalInstructions')
+                          : t('settings.customInstructions') }}
+                    </h2>
+                    <p class="mt-0.5 text-[11px] text-muted-foreground">
+                      {{ isGrokSettings
+                        ? t('settings.grokGlobalInstructionsHint')
+                        : isClaudeSettings
+                          ? t('settings.claudeGlobalInstructionsHint')
+                          : t('settings.customInstructionsHint') }}
+                    </p>
                   </div>
                   <Button type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-[11px]" :disabled="instructionsLoading" @click="loadGlobalInstructions">
                     <RefreshCw :size="12" class="mr-1" :class="instructionsLoading ? 'animate-spin' : ''" />
@@ -1546,25 +2293,50 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   </div>
                   <Textarea
                     v-model="customInstructions"
-                    :placeholder="t('settings.customInstructionsPlaceholder')"
+                    :placeholder="isGrokSettings ? t('settings.grokGlobalInstructionsPlaceholder') : t('settings.customInstructionsPlaceholder')"
                     class="min-h-[120px] resize-y text-xs leading-5"
                     maxlength="16000"
                   />
-                  <p class="text-[10px] text-muted-foreground">{{ t('settings.customInstructionsSync') }}</p>
+                  <p class="text-[10px] text-muted-foreground">
+                    {{ isGrokSettings
+                      ? t('settings.grokGlobalInstructionsSync')
+                      : isClaudeSettings
+                        ? t('settings.claudeGlobalInstructionsHint')
+                        : t('settings.customInstructionsSync') }}
+                  </p>
                 </div>
               </section>
               <section class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
                   <div class="min-w-0">
-                    <h2 class="text-[13px] font-semibold">{{ t('settings.projectInstructions') }}</h2>
-                    <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.projectInstructionsHint') }}</p>
+                    <h2 class="text-[13px] font-semibold">
+                      {{ isGrokSettings
+                        ? t('settings.grokProjectInstructions')
+                        : isClaudeSettings
+                          ? t('settings.claudeProjectInstructions')
+                          : t('settings.projectInstructions') }}
+                    </h2>
+                    <p class="mt-0.5 text-[11px] text-muted-foreground">
+                      {{ isGrokSettings
+                        ? t('settings.grokProjectInstructionsHint')
+                        : isClaudeSettings
+                          ? t('settings.claudeProjectInstructionsHint')
+                          : t('settings.projectInstructionsHint') }}
+                    </p>
                   </div>
                   <div class="flex shrink-0">
                     <Button type="button" variant="ghost" size="sm" class="h-7 px-2 text-[11px]" :disabled="instructionsLoading" @click="loadProjectInstructions">
                       <RefreshCw :size="12" class="mr-1" :class="instructionsLoading ? 'animate-spin' : ''" />
                       {{ t('settings.instructionsReload') }}
                     </Button>
-                    <Button type="button" variant="ghost" size="sm" class="h-7 px-2 text-[11px]" @click="pickProjectWorkspace">
+                    <Button
+                      v-if="!isGrokSettings && !isClaudeSettings"
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      class="h-7 px-2 text-[11px]"
+                      @click="pickProjectWorkspace"
+                    >
                       <FolderOpen :size="12" class="mr-1" />
                       {{ t('settings.projectInstructionsPick') }}
                     </Button>
@@ -1599,7 +2371,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   <p class="text-[10px] text-muted-foreground">{{ t('settings.projectInstructionsSync') }}</p>
                 </div>
               </section>
-              <section class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="!isGrokSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="border-b px-4 py-3">
                   <h2 class="text-[13px] font-semibold">{{ t('settings.multiAgent') }}</h2>
                 </div>
@@ -1622,7 +2394,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   </Button>
                 </div>
               </section>
-              <section class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="!isGrokSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="border-b px-4 py-3">
                   <h2 class="text-[13px] font-semibold">{{ t('settings.memories') }}</h2>
                   <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.memoriesHint') }}</p>
@@ -1738,8 +2510,176 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
               </section>
             </template>
 
+            <!-- Archived conversations -->
+            <template v-else-if="activePanel === 'archived'">
+              <section class="overflow-hidden rounded-xl border bg-card">
+                <div class="border-b px-4 py-3">
+                  <h2 class="text-[13px] font-semibold">{{ t('settings.archivedTitle') }}</h2>
+                  <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.archivedHint') }}</p>
+                </div>
+                <div class="border-b px-4 py-2.5">
+                  <div class="relative">
+                    <Search :size="13" class="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      v-model="archivedSearch"
+                      class="h-8 rounded-lg pl-8 text-xs"
+                      :placeholder="t('settings.archivedSearch')"
+                      :aria-label="t('settings.archivedSearch')"
+                    />
+                  </div>
+                </div>
+                <div v-if="archivedThreads.length" class="divide-y">
+                  <div
+                    v-for="thread in archivedThreads"
+                    :key="thread.id"
+                    class="flex items-center gap-3 px-4 py-3"
+                  >
+                    <div class="min-w-0 flex-1">
+                      <p class="truncate text-[13px] font-medium">{{ thread.name || t('sidebar.noPreview') }}</p>
+                      <p class="mt-0.5 truncate text-[11px] text-muted-foreground">
+                        {{ thread.preview || t('sidebar.noPreview') }}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      class="h-7 shrink-0 text-xs"
+                      :disabled="appStore.isGrokMode ? Boolean(grokStore.sessionMutation) : Boolean(codexStore.threadMutation)"
+                      @click="restoreArchived(thread.id)"
+                    >
+                      {{ t('sidebar.restore') }}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      class="h-7 shrink-0 text-xs text-destructive hover:text-destructive"
+                      :disabled="appStore.isGrokMode ? Boolean(grokStore.sessionMutation) : Boolean(codexStore.threadMutation)"
+                      @click="deleteArchived(thread.id)"
+                    >
+                      <Trash2 :size="13" class="mr-1" />
+                      {{ t('threadActions.delete') }}
+                    </Button>
+                  </div>
+                </div>
+                <p v-else class="px-4 py-8 text-center text-[12px] text-muted-foreground">
+                  {{ archivedSearch.trim() ? t('sidebar.noSearchResults') : t('sidebar.archivedEmpty') }}
+                </p>
+              </section>
+            </template>
+
             <!-- Environment -->
             <template v-else-if="activePanel === 'environment'">
+              <section class="overflow-hidden rounded-xl border bg-card">
+                <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
+                  <div class="min-w-0">
+                    <h2 class="text-[13px] font-semibold">{{ t('settings.cliToolsTitle') }}</h2>
+                    <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.cliToolsHint') }}</p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    class="h-8 shrink-0 text-xs"
+                    :disabled="cliLoading"
+                    @click="refreshCLITools()"
+                  >
+                    <RefreshCw :size="12" class="mr-1.5" :class="cliLoading ? 'animate-spin' : ''" />
+                    {{ t('onboarding.cliRecheck') }}
+                  </Button>
+                </div>
+                <div
+                  v-if="cliReport && !cliReport.nodeAvailable"
+                  class="border-b bg-amber-500/10 px-4 py-2.5 text-[11px] text-amber-900 dark:text-amber-100"
+                >
+                  {{ t('onboarding.nodeMissingBody') }}
+                </div>
+                <div
+                  v-if="cliReport && (cliReport.codexHome || cliReport.grokHome)"
+                  class="space-y-1 border-b px-4 py-2.5 text-[11px] text-muted-foreground"
+                >
+                  <p class="text-[12px] font-medium text-foreground">{{ t('settings.cliToolsHomes') }}</p>
+                  <p v-if="cliReport.codexHome" class="truncate font-mono text-[10px]" :title="cliReport.codexHome">
+                    {{ t('settings.cliToolsCodexHome') }}: {{ cliReport.codexHome }}
+                  </p>
+                  <p v-if="cliReport.grokHome" class="truncate font-mono text-[10px]" :title="cliReport.grokHome">
+                    {{ t('settings.cliToolsGrokHome') }}: {{ cliReport.grokHome }}
+                  </p>
+                  <p v-if="cliReport.platform" class="text-[10px]">
+                    {{ t('onboarding.cliPlatformHint', { platform: cliReport.platform }) }}
+                  </p>
+                </div>
+                <div class="divide-y">
+                  <div
+                    v-for="tool in cliTools"
+                    :key="tool.id"
+                    class="flex items-start justify-between gap-3 px-4 py-3"
+                  >
+                    <div class="min-w-0 flex-1">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <p class="text-[13px] font-medium">{{ tool.name }}</p>
+                        <Badge
+                          :variant="tool.installed && !tool.updateAvailable ? 'default' : 'outline'"
+                          class="text-[9px]"
+                        >
+                          {{ cliToolStatusLabel(tool) }}
+                        </Badge>
+                      </div>
+                      <p class="mt-1 font-mono text-[11px] text-muted-foreground">{{ tool.package }}</p>
+                      <p class="mt-0.5 text-[11px] text-muted-foreground">
+                        <template v-if="tool.installed">
+                          {{ t('onboarding.cliVersion', { version: tool.version || '—' }) }}
+                          <span v-if="tool.latestVersion">
+                            · {{ t('onboarding.cliLatest', { version: tool.latestVersion }) }}
+                          </span>
+                        </template>
+                        <template v-else>
+                          {{ t('onboarding.cliInstallHint', { command: tool.installCommand }) }}
+                        </template>
+                      </p>
+                    </div>
+                    <Button
+                      v-if="!tool.installed || tool.updateAvailable"
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      class="h-8 shrink-0 text-xs"
+                      :disabled="!tool.canInstall || Boolean(cliInstalling[tool.id])"
+                      @click="installOrUpdateCLITool(tool)"
+                    >
+                      <RefreshCw
+                        v-if="cliInstalling[tool.id]"
+                        :size="12"
+                        class="mr-1.5 animate-spin"
+                      />
+                      <Download v-else :size="12" class="mr-1.5" />
+                      {{
+                        cliInstalling[tool.id]
+                          ? t('onboarding.cliInstalling')
+                          : tool.installed
+                            ? t('onboarding.cliUpdate')
+                            : t('onboarding.cliInstall')
+                      }}
+                    </Button>
+                    <Badge v-else variant="outline" class="shrink-0 text-[10px]">
+                      {{ t('settings.cliToolsUpToDate') }}
+                    </Badge>
+                  </div>
+                  <p
+                    v-if="cliLoading && !cliTools.length"
+                    class="px-4 py-6 text-center text-[12px] text-muted-foreground"
+                  >
+                    {{ t('onboarding.cliChecking') }}
+                  </p>
+                  <div v-if="!cliLoading && !cliReport" class="px-4 py-4 text-center">
+                    <Button type="button" variant="outline" size="sm" class="h-8 text-xs" @click="refreshCLITools()">
+                      {{ t('onboarding.cliRecheck') }}
+                    </Button>
+                  </div>
+                </div>
+              </section>
+
               <section class="overflow-hidden rounded-xl border bg-card">
                 <div class="divide-y">
                   <div class="flex items-center justify-between gap-3 px-4 py-3">
@@ -1770,6 +2710,71 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   <div class="flex items-center justify-between gap-3 px-4 py-3">
                     <p class="text-[13px]">{{ t('updates.currentVersion') }}</p>
                     <code class="rounded bg-muted px-2 py-1 font-mono text-[11px]">v{{ appStore.appVersion }}</code>
+                  </div>
+                </div>
+              </section>
+
+              <section class="overflow-hidden rounded-xl border bg-card">
+                <div class="border-b px-4 py-3">
+                  <h2 class="text-[13px] font-semibold">{{ t('settings.codexClientTitle') }}</h2>
+                  <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.codexClientHint') }}</p>
+                </div>
+                <div class="divide-y">
+                  <div class="space-y-1.5 px-4 py-3">
+                    <p class="text-[13px]">{{ t('settings.codexClientPreset') }}</p>
+                    <Select v-model="codexClientPreset">
+                      <SelectTrigger class="h-9 text-xs" :aria-label="t('settings.codexClientPreset')">
+                        <SelectValue>
+                          {{ selectedOptionLabel(codexClientPresetOptions, codexClientPreset) }}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem
+                          v-for="option in codexClientPresetOptions"
+                          :key="option.value"
+                          :value="option.value"
+                        >
+                          <div class="flex flex-col gap-0.5">
+                            <span>{{ option.label }}</span>
+                            <span v-if="option.description" class="text-[10px] text-muted-foreground">{{ option.description }}</span>
+                          </div>
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="space-y-1.5 px-4 py-3">
+                    <p class="text-[13px]">{{ t('settings.codexClientName') }}</p>
+                    <p class="text-[11px] text-muted-foreground">{{ t('settings.codexClientNameHint') }}</p>
+                    <Input
+                      v-model="codexClientName"
+                      class="h-8 font-mono text-xs"
+                      maxlength="64"
+                      :placeholder="t('settings.codexClientNamePlaceholder')"
+                    />
+                  </div>
+                  <div class="space-y-1.5 px-4 py-3">
+                    <p class="text-[13px]">{{ t('settings.codexClientDisplayTitle') }}</p>
+                    <Input
+                      v-model="codexClientTitle"
+                      class="h-8 text-xs"
+                      maxlength="80"
+                      :placeholder="t('settings.codexClientDisplayTitlePlaceholder')"
+                    />
+                  </div>
+                  <div class="space-y-1.5 px-4 py-3">
+                    <p class="text-[13px]">{{ t('settings.codexClientVersion') }}</p>
+                    <p class="text-[11px] text-muted-foreground">{{ t('settings.codexClientVersionHint') }}</p>
+                    <Input
+                      v-model="codexClientVersion"
+                      class="h-8 font-mono text-xs"
+                      maxlength="32"
+                      :placeholder="t('settings.codexClientVersionPlaceholder')"
+                    />
+                  </div>
+                  <div class="px-4 py-3">
+                    <p class="text-[11px] leading-relaxed text-muted-foreground">
+                      {{ t('settings.codexClientApplyHint') }}
+                    </p>
                   </div>
                 </div>
               </section>

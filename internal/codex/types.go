@@ -3,12 +3,15 @@ package codex
 import "encoding/json"
 
 type Status struct {
-	State     string `json:"state"`
-	Running   bool   `json:"running"`
-	Message   string `json:"message"`
-	Binary    string `json:"binary"`
-	Version   string `json:"version"`
-	Workspace string `json:"workspace"`
+	State      string `json:"state"`
+	Running    bool   `json:"running"`
+	Message    string `json:"message"`
+	Binary     string `json:"binary"`
+	Version    string `json:"version"`
+	Workspace  string `json:"workspace"`
+	// UserAgent is the effective app-server originator UA after initialize
+	// (e.g. "codex_desktop/0.144.6 (Windows …) … (codex_desktop; 0.1.0)").
+	UserAgent string `json:"userAgent,omitempty"`
 }
 
 type Event struct {

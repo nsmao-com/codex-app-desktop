@@ -19,7 +19,10 @@ const needsWorkspace = computed(() => isIdleDisconnected.value && !appStore.sett
 const canConnect = computed(() => isIdleDisconnected.value && Boolean(appStore.settings.workspace) && appStore.codexAvailable)
 const missingCli = computed(() => isIdleDisconnected.value && !appStore.codexAvailable)
 
-const visible = computed(() => state.value !== 'ready')
+// Codex connection banner only — Claude / Grok use their own CLI readiness paths.
+const visible = computed(() =>
+  appStore.isCodexMode && state.value !== 'ready',
+)
 
 const title = computed(() => {
   if (isError.value) return t('app.connectionError')

@@ -3,6 +3,7 @@ import { computed, shallowRef } from 'vue'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type { WorkspaceInfo } from '../../bindings/nice_codex_desktop/models'
+import { selectClaudeWorkspace, useClaudeWorkspace } from '@/utils/claudeBindings'
 import { useAppStore } from './app'
 import { notify } from '../utils/notify'
 import { translate } from '../i18n'
@@ -30,7 +31,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function selectWorkspace(): Promise<string> {
     try {
-      const selected = await backend.SelectWorkspace()
+      const selected = appStore.isGrokMode
+        ? await backend.SelectGrokWorkspace()
+        : appStore.isClaudeMode
+          ? await selectClaudeWorkspace() as WorkspaceInfo
+          : await backend.SelectWorkspace()
       if (!selected.path) return ''
       await activateWorkspace(selected)
       return selected.path
@@ -47,7 +52,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
     switchingWorkspace.value = true
     try {
-      const selected = await backend.UseWorkspace(path)
+      const selected = appStore.isGrokMode
+        ? await backend.UseGrokWorkspace(path)
+        : appStore.isClaudeMode
+          ? await useClaudeWorkspace(path) as WorkspaceInfo
+          : await backend.UseWorkspace(path)
       await activateWorkspace(selected)
       return true
     } catch (error) {
@@ -60,6 +69,29 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function activateWorkspace(selected: WorkspaceInfo): Promise<void> {
     hydrateWorkspace(selected)
+    if (appStore.isGrokMode) {
+      // SelectGrokWorkspace / UseGrokWorkspace already persisted Grok workspace on disk.
+      appStore.settings = {
+        ...appStore.settings,
+        grokWorkspace: selected.path,
+        grokRecentWorkspaces: uniqueWorkspacePaths(
+          selected.path,
+          appStore.settings.grokRecentWorkspaces ?? [],
+        ).slice(0, 8),
+      }
+      return
+    }
+    if (appStore.isClaudeMode) {
+      appStore.settings = {
+        ...appStore.settings,
+        claudeWorkspace: selected.path,
+        claudeRecentWorkspaces: uniqueWorkspacePaths(
+          selected.path,
+          appStore.settings.claudeRecentWorkspaces ?? [],
+        ).slice(0, 8),
+      }
+      return
+    }
     const settings = {
       ...appStore.settings,
       workspace: selected.path,
@@ -67,6 +99,35 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
     appStore.settings = settings
     await appStore.savePreferences(settings, { silent: true })
+  }
+
+  async function hydrateActiveRuntimeWorkspace(): Promise<void> {
+    const path = appStore.currentWorkspacePath
+    if (!path) {
+      workspace.value = null
+      return
+    }
+    // Same path already shown — skip disk I/O so runtime tab stays snappy.
+    if (workspace.value?.path && sameWorkspace(workspace.value.path, path)) {
+      return
+    }
+    // Optimistic local hydrate first (no round-trip).
+    const leaf = path.split(/[\\/]/).filter(Boolean).at(-1) || path
+    hydrateWorkspace({
+      name: leaf,
+      path,
+      isGit: Boolean(workspace.value?.isGit && sameWorkspace(workspace.value.path, path)),
+      branch: workspace.value && sameWorkspace(workspace.value.path, path) ? (workspace.value.branch || '') : '',
+      changes: workspace.value && sameWorkspace(workspace.value.path, path) ? (workspace.value.changes ?? []) : [],
+      gitError: '',
+    })
+    // Background refresh via active-runtime workspace (Grok or Codex).
+    try {
+      const selected = await backend.RefreshWorkspace()
+      if (selected?.path) hydrateWorkspace(selected)
+    } catch {
+      // Keep optimistic snapshot if the path is temporarily unavailable.
+    }
   }
 
   function hydrateWorkspace(selected: WorkspaceInfo): void {
@@ -180,6 +241,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     useWorkspace,
     activateWorkspace,
     hydrateWorkspace,
+    hydrateActiveRuntimeWorkspace,
     refreshWorkspace,
     inspectWorkspaceDiff,
     inspectInlineDiff,

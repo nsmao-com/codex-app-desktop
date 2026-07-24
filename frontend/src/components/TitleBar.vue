@@ -20,12 +20,16 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { useAppStore, useCodexStore, useNavigationStore, useShellStore } from '@/stores'
+import { SimpleTooltip } from '@/components/ui/tooltip'
+import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useNavigationStore, useShellStore, useWorkspaceStore } from '@/stores'
 
 const { t } = useI18n()
 const router = useRouter()
 const appStore = useAppStore()
 const codexStore = useCodexStore()
+const grokStore = useGrokStore()
+const claudeStore = useClaudeStore()
+const workspaceStore = useWorkspaceStore()
 const shellStore = useShellStore()
 const navStore = useNavigationStore()
 
@@ -116,37 +120,40 @@ function openGitHub(): void {
     @dblclick="onTitlebarDblClick"
   >
     <div class="titlebar-controls flex items-center gap-0.5 pl-2 pr-1">
-      <button
-        type="button"
-        class="chrome-btn"
-        :title="t('sidebar.toggle')"
-        :aria-label="t('sidebar.toggle')"
-        @click.stop="shellStore.toggleSidebar()"
-      >
-        <PanelLeft :size="15" />
-      </button>
-      <button
-        type="button"
-        class="chrome-btn"
-        :class="{ 'is-disabled': !navStore.canGoBack }"
-        :disabled="!navStore.canGoBack"
-        :title="backTitle"
-        :aria-label="backTitle"
-        @click.stop="goBack"
-      >
-        <ChevronLeft :size="16" />
-      </button>
-      <button
-        type="button"
-        class="chrome-btn"
-        :class="{ 'is-disabled': !navStore.canGoForward }"
-        :disabled="!navStore.canGoForward"
-        :title="forwardTitle"
-        :aria-label="forwardTitle"
-        @click.stop="goForward"
-      >
-        <ChevronRight :size="16" />
-      </button>
+      <SimpleTooltip :content="t('sidebar.toggle')">
+        <button
+          type="button"
+          class="chrome-btn"
+          :aria-label="t('sidebar.toggle')"
+          @click.stop="shellStore.toggleSidebar()"
+        >
+          <PanelLeft :size="15" />
+        </button>
+      </SimpleTooltip>
+      <SimpleTooltip :content="backTitle">
+        <button
+          type="button"
+          class="chrome-btn"
+          :class="{ 'is-disabled': !navStore.canGoBack }"
+          :disabled="!navStore.canGoBack"
+          :aria-label="backTitle"
+          @click.stop="goBack"
+        >
+          <ChevronLeft :size="16" />
+        </button>
+      </SimpleTooltip>
+      <SimpleTooltip :content="forwardTitle">
+        <button
+          type="button"
+          class="chrome-btn"
+          :class="{ 'is-disabled': !navStore.canGoForward }"
+          :disabled="!navStore.canGoForward"
+          :aria-label="forwardTitle"
+          @click.stop="goForward"
+        >
+          <ChevronRight :size="16" />
+        </button>
+      </SimpleTooltip>
     </div>
 
     <nav class="titlebar-menus flex items-center gap-0.5 pr-2">
@@ -157,23 +164,63 @@ function openGitHub(): void {
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" class="min-w-44">
-          <DropdownMenuItem :disabled="!codexStore.isReady" @click="void codexStore.newThread()">
+          <DropdownMenuItem
+            :disabled="appStore.isGrokMode
+              ? !grokStore.workspacePath
+              : appStore.isClaudeMode
+                ? !claudeStore.workspacePath
+                : !codexStore.isReady"
+            @click="appStore.isGrokMode
+              ? grokStore.newSession()
+              : appStore.isClaudeMode
+                ? claudeStore.newSession()
+                : void codexStore.newThread()"
+          >
             {{ t('sidebar.newTask') }}
           </DropdownMenuItem>
-          <DropdownMenuItem @click="void codexStore.selectProject()">
+          <DropdownMenuItem
+            @click="appStore.isGrokMode
+              ? void workspaceStore.selectWorkspace().then(() => void grokStore.loadSessions())
+              : appStore.isClaudeMode
+                ? void workspaceStore.selectWorkspace().then(() => void claudeStore.loadSessions())
+                : void codexStore.selectProject()"
+          >
             {{ t('welcome.chooseWorkspace') }}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
+            v-if="appStore.isCodexMode"
             :disabled="!codexStore.activeThread || Boolean(codexStore.threadMutation) || codexStore.activeThreadBusy"
             @click="void codexStore.archiveActiveThread()"
           >
             {{ t('threadActions.archive') }}
           </DropdownMenuItem>
           <DropdownMenuItem
+            v-else-if="appStore.isClaudeMode"
+            :disabled="!claudeStore.activeSessionId"
+            @click="void claudeStore.archiveActiveSession()"
+          >
+            {{ t('threadActions.archive') }}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            v-else-if="appStore.isGrokMode"
+            :disabled="!grokStore.activeSessionId"
+            @click="void grokStore.archiveActiveSession()"
+          >
+            {{ t('threadActions.archive') }}
+          </DropdownMenuItem>
+          <DropdownMenuItem
             class="text-destructive focus:text-destructive"
-            :disabled="!codexStore.activeThread || Boolean(codexStore.threadMutation) || codexStore.activeThreadBusy"
-            @click="void codexStore.deleteActiveThread()"
+            :disabled="appStore.isGrokMode
+              ? !grokStore.activeSessionId
+              : appStore.isClaudeMode
+                ? !claudeStore.activeSessionId
+                : (!codexStore.activeThread || Boolean(codexStore.threadMutation) || codexStore.activeThreadBusy)"
+            @click="appStore.isGrokMode
+              ? void grokStore.deleteSession(grokStore.activeSessionId)
+              : appStore.isClaudeMode
+                ? void claudeStore.deleteActiveSession()
+                : void codexStore.deleteActiveThread()"
           >
             {{ t('threadActions.delete') }}
           </DropdownMenuItem>
@@ -257,34 +304,37 @@ function openGitHub(): void {
 
     <!-- Windows-style caption buttons on the right -->
     <div class="window-controls flex h-full shrink-0 items-stretch">
-      <button
-        type="button"
-        class="caption-btn"
-        :title="t('window.minimise')"
-        :aria-label="t('window.minimise')"
-        @click.stop="minimise"
-      >
-        <Minus :size="14" stroke-width="1.75" />
-      </button>
-      <button
-        type="button"
-        class="caption-btn"
-        :title="maximised ? t('window.restore') : t('window.maximise')"
-        :aria-label="maximised ? t('window.restore') : t('window.maximise')"
-        @click.stop="toggleMaximise"
-      >
-        <Copy v-if="maximised" :size="11" stroke-width="1.75" class="-scale-x-100" />
-        <Square v-else :size="11" stroke-width="1.75" />
-      </button>
-      <button
-        type="button"
-        class="caption-btn caption-close"
-        :title="t('window.close')"
-        :aria-label="t('window.close')"
-        @click.stop="closeWindow"
-      >
-        <X :size="14" stroke-width="1.75" />
-      </button>
+      <SimpleTooltip :content="t('window.minimise')">
+        <button
+          type="button"
+          class="caption-btn"
+          :aria-label="t('window.minimise')"
+          @click.stop="minimise"
+        >
+          <Minus :size="14" stroke-width="1.75" />
+        </button>
+      </SimpleTooltip>
+      <SimpleTooltip :content="maximised ? t('window.restore') : t('window.maximise')">
+        <button
+          type="button"
+          class="caption-btn"
+          :aria-label="maximised ? t('window.restore') : t('window.maximise')"
+          @click.stop="toggleMaximise"
+        >
+          <Copy v-if="maximised" :size="11" stroke-width="1.75" class="-scale-x-100" />
+          <Square v-else :size="11" stroke-width="1.75" />
+        </button>
+      </SimpleTooltip>
+      <SimpleTooltip :content="t('window.close')">
+        <button
+          type="button"
+          class="caption-btn caption-close"
+          :aria-label="t('window.close')"
+          @click.stop="closeWindow"
+        >
+          <X :size="14" stroke-width="1.75" />
+        </button>
+      </SimpleTooltip>
     </div>
   </header>
 </template>

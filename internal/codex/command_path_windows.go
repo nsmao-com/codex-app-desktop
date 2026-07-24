@@ -126,6 +126,10 @@ func splitPathList(value string) []string {
 	return out
 }
 
+func resolveUnixExtraCommands() (commandSpec, bool) {
+	return commandSpec{}, false
+}
+
 func resolveWindowsExtraCommands() (commandSpec, bool) {
 	home, _ := os.UserHomeDir()
 	appData := os.Getenv("APPDATA")

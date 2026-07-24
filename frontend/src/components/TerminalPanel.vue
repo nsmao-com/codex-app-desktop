@@ -7,6 +7,7 @@ import { nextTick, onBeforeUnmount, shallowRef, useTemplateRef, watch } from 'vu
 import { useI18n } from 'vue-i18n'
 
 import { Button } from '@/components/ui/button'
+import { SimpleTooltip } from '@/components/ui/tooltip'
 import { panelFromRight } from '@/lib/motion'
 import { useAppStore, useTerminalStore } from '@/stores'
 
@@ -171,12 +172,16 @@ function focusTerminal(): void {
           {{ appStore.settings.terminalProfile }} · {{ terminalStore.terminalStarting ? t('terminal.starting') : terminalStore.terminalRunning ? t('terminal.running') : t('terminal.exited') }}
         </p>
       </div>
-      <Button type="button" variant="ghost" size="icon-xs" :aria-label="t('terminal.clear')" :title="t('terminal.clear')" @click.stop="clearTerminal">
-        <Trash2 :size="14" />
-      </Button>
-      <Button type="button" variant="ghost" size="icon-xs" :aria-label="t('terminal.close')" :title="t('terminal.close')" @click.stop.prevent="onCloseTerminal">
-        <X :size="15" />
-      </Button>
+      <SimpleTooltip :content="t('terminal.clear')">
+        <Button type="button" variant="ghost" size="icon-xs" :aria-label="t('terminal.clear')" @click.stop="clearTerminal">
+          <Trash2 :size="14" />
+        </Button>
+      </SimpleTooltip>
+      <SimpleTooltip :content="t('terminal.close')">
+        <Button type="button" variant="ghost" size="icon-xs" :aria-label="t('terminal.close')" @click.stop.prevent="onCloseTerminal">
+          <X :size="15" />
+        </Button>
+      </SimpleTooltip>
     </header>
 
     <div class="relative min-h-0 flex-1 bg-[#181817] p-2" @click="focusTerminal">

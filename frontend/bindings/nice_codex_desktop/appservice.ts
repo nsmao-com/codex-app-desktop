@@ -21,6 +21,17 @@ export function ApplyUpdateAndRestart(): $CancellablePromise<void> {
     return $Call.ByID(3133742711);
 }
 
+export function ArchiveClaudeSession(sessionID: string): $CancellablePromise<void> {
+    return $Call.ByID(890897534, sessionID);
+}
+
+/**
+ * ArchiveGrokSession hides a session from the main list (local archive index).
+ */
+export function ArchiveGrokSession(backend: string, sessionID: string): $CancellablePromise<void> {
+    return $Call.ByID(785972473, backend, sessionID);
+}
+
 export function ArchiveThread(threadID: string): $CancellablePromise<void> {
     return $Call.ByID(404527456, threadID);
 }
@@ -53,6 +64,13 @@ export function CancelUpdateDownload(): $CancellablePromise<void> {
     return $Call.ByID(1670800741);
 }
 
+/**
+ * CheckCLITools detects local Codex/Grok CLIs and queries npm for latest versions.
+ */
+export function CheckCLITools(): $CancellablePromise<$models.CLIToolsReport> {
+    return $Call.ByID(4153243591);
+}
+
 export function CheckForUpdates(): $CancellablePromise<$models.UpdateInfo> {
     return $Call.ByID(3671876993);
 }
@@ -75,6 +93,14 @@ export function CreateGitBranch(request: $models.GitBranchRequest): $Cancellable
 
 export function CreateThread(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(1065248874);
+}
+
+export function DeleteClaudeSession(sessionID: string): $CancellablePromise<void> {
+    return $Call.ByID(3047900465, sessionID);
+}
+
+export function DeleteGrokSession(backend: string, sessionID: string): $CancellablePromise<void> {
+    return $Call.ByID(2818978826, backend, sessionID);
 }
 
 export function DeleteMCPServer(name: string): $CancellablePromise<void> {
@@ -101,8 +127,23 @@ export function ForkThread(threadID: string): $CancellablePromise<{ [_ in string
     return $Call.ByID(1034771762, threadID);
 }
 
+/**
+ * InstallCLITool installs or upgrades a CLI via pnpm/npm (global).
+ */
+export function InstallCLITool(toolID: string): $CancellablePromise<$models.CLIToolActionResult> {
+    return $Call.ByID(1201058047, toolID);
+}
+
 export function InstallPlugin(request: $models.PluginInstallRequest): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3003226110, request);
+}
+
+export function InterruptClaudeTurn(ref: $models.ClaudeTurnRef): $CancellablePromise<void> {
+    return $Call.ByID(2866027964, ref);
+}
+
+export function InterruptGrokTurn(ref: $models.GrokTurnRef): $CancellablePromise<void> {
+    return $Call.ByID(1498414485, ref);
 }
 
 export function InterruptTurn(threadID: string, turnID: string): $CancellablePromise<void> {
@@ -113,8 +154,31 @@ export function ListApps(): $CancellablePromise<{ [_ in string]?: any } | null> 
     return $Call.ByID(2844972250);
 }
 
+export function ListArchivedClaudeSessions(): $CancellablePromise<$models.ClaudeSessionSummary[] | null> {
+    return $Call.ByID(376361943);
+}
+
+/**
+ * ListArchivedGrokSessions returns NiceCodex-local archived Grok sessions.
+ */
+export function ListArchivedGrokSessions(backend: string, search: string): $CancellablePromise<$models.GrokSessionSummary[] | null> {
+    return $Call.ByID(2504986910, backend, search);
+}
+
 export function ListArchivedThreads(search: string): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(795343881, search);
+}
+
+/**
+ * ListClaudeSessionTurnUsages restores the most recent request context after
+ * reopening a native Claude Code transcript.
+ */
+export function ListClaudeSessionTurnUsages(sessionID: string): $CancellablePromise<({ [_ in string]?: any } | null)[] | null> {
+    return $Call.ByID(1618295575, sessionID);
+}
+
+export function ListClaudeSessions(workspace: string, search: string): $CancellablePromise<$models.ClaudeSessionSummary[] | null> {
+    return $Call.ByID(4114062377, workspace, search);
 }
 
 export function ListCollaborationModes(): $CancellablePromise<{ [_ in string]?: any } | null> {
@@ -123,6 +187,18 @@ export function ListCollaborationModes(): $CancellablePromise<{ [_ in string]?: 
 
 export function ListExperimentalFeatures(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(626848283);
+}
+
+/**
+ * ListGrokSessionTurnUsages returns per-turn token breakdown for one Grok session
+ * (from updates.jsonl turn_completed). Used to populate the chat message footer.
+ */
+export function ListGrokSessionTurnUsages(sessionID: string): $CancellablePromise<({ [_ in string]?: any } | null)[] | null> {
+    return $Call.ByID(3387849376, sessionID);
+}
+
+export function ListGrokSessions(backend: string, workspace: string, search: string): $CancellablePromise<$models.GrokSessionSummary[] | null> {
+    return $Call.ByID(1741024260, backend, workspace, search);
 }
 
 export function ListHooks(): $CancellablePromise<{ [_ in string]?: any } | null> {
@@ -192,8 +268,32 @@ export function OpenBrowserDownloadDir(): $CancellablePromise<void> {
     return $Call.ByID(4097011765);
 }
 
+export function OpenClaudeConfigFile(): $CancellablePromise<void> {
+    return $Call.ByID(3636053624);
+}
+
+export function OpenClaudeHome(): $CancellablePromise<void> {
+    return $Call.ByID(3858670087);
+}
+
 export function OpenExternal(rawURL: string): $CancellablePromise<void> {
     return $Call.ByID(2121391737, rawURL);
+}
+
+export function OpenGrokConfigFile(): $CancellablePromise<void> {
+    return $Call.ByID(3862982997);
+}
+
+export function OpenGrokHome(): $CancellablePromise<void> {
+    return $Call.ByID(2792450522);
+}
+
+/**
+ * OpenLocalPath opens a workspace-local file or folder with the OS default handler.
+ * Accepts absolute paths, workspace-relative paths, and file:// URLs.
+ */
+export function OpenLocalPath(rawPath: string): $CancellablePromise<void> {
+    return $Call.ByID(2064324498, rawPath);
 }
 
 export function OpenMemoriesFolder(): $CancellablePromise<void> {
@@ -224,12 +324,29 @@ export function ReadAccountRateLimits(): $CancellablePromise<{ [_ in string]?: a
 }
 
 /**
- * ReadAccountUsage prefers local usage.json.
- * When empty, it backfills from ~/.codex session rollouts (true local history),
- * then optionally seeds from ChatGPT account/usage/read as a fallback.
+ * ReadAccountUsage returns spend for the *active* runtime only (codex | grok | claude).
+ * Codex may backfill from ~/.codex rollouts / ChatGPT cloud when its local bucket is empty.
+ * Grok backfills input/output/cache/reasoning from ~/.grok session updates.jsonl when missing.
+ * Claude backfills from ~/.claude/projects/** /*.jsonl assistant message.usage when missing.
  */
 export function ReadAccountUsage(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3812997328);
+}
+
+export function ReadClaudeCapabilities(): $CancellablePromise<$models.ClaudeCapabilitiesCatalog> {
+    return $Call.ByID(3255146774);
+}
+
+export function ReadClaudeGlobalInstructions(): $CancellablePromise<$models.GlobalInstructionsInfo> {
+    return $Call.ByID(2905891186);
+}
+
+export function ReadClaudeProjectInstructions(): $CancellablePromise<$models.ProjectInstructionsInfo> {
+    return $Call.ByID(1543098932);
+}
+
+export function ReadClaudeSession(sessionID: string): $CancellablePromise<$models.ClaudeSessionDetail> {
+    return $Call.ByID(392135644, sessionID);
 }
 
 export function ReadCodexFeatureFlags(): $CancellablePromise<$models.CodexFeatureFlags> {
@@ -241,6 +358,29 @@ export function ReadCodexFeatureFlags(): $CancellablePromise<$models.CodexFeatur
  */
 export function ReadGlobalInstructions(): $CancellablePromise<$models.GlobalInstructionsInfo> {
     return $Call.ByID(2724052924);
+}
+
+export function ReadGrokCapabilities(): $CancellablePromise<$models.GrokCapabilitiesCatalog> {
+    return $Call.ByID(2350853243);
+}
+
+/**
+ * ReadGrokGlobalInstructions returns personal Grok rules (~/.grok/AGENTS.md).
+ * Official Grok Build loads home-level AGENTS*.md and ~/.grok/rules/*.md.
+ */
+export function ReadGrokGlobalInstructions(): $CancellablePromise<$models.GlobalInstructionsInfo> {
+    return $Call.ByID(324441159);
+}
+
+/**
+ * ReadGrokProjectInstructions returns AGENTS.md for the active Grok workspace.
+ */
+export function ReadGrokProjectInstructions(): $CancellablePromise<$models.ProjectInstructionsInfo> {
+    return $Call.ByID(2285358151);
+}
+
+export function ReadGrokSession(backend: string, sessionID: string): $CancellablePromise<$models.GrokSessionDetail> {
+    return $Call.ByID(2063656043, backend, sessionID);
 }
 
 /**
@@ -260,9 +400,25 @@ export function ReadWorkspaceDiff(relativePath: string): $CancellablePromise<str
 
 /**
  * RecordLocalTurnUsage lets the frontend persist per-turn totals (belt-and-suspenders with event hook).
+ * Always attributes to the Codex runtime (frontend Codex store only calls this).
  */
 export function RecordLocalTurnUsage(threadID: string, turnID: string, totalTokens: number): $CancellablePromise<void> {
     return $Call.ByID(657737560, threadID, turnID, totalTokens);
+}
+
+/**
+ * RecordLocalTurnUsageDetailed persists a full input/output/cache/reasoning breakdown for a runtime.
+ */
+export function RecordLocalTurnUsageDetailed(runtime: string, threadID: string, turnID: string, inputTokens: number, cachedInputTokens: number, outputTokens: number, reasoningOutputTokens: number, totalTokens: number): $CancellablePromise<void> {
+    return $Call.ByID(219955952, runtime, threadID, turnID, inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens, totalTokens);
+}
+
+export function RefreshClaudeRuntime(): $CancellablePromise<$models.ClaudeRuntimeStatus> {
+    return $Call.ByID(1371517301);
+}
+
+export function RefreshGrokRuntime(): $CancellablePromise<$models.GrokRuntimeStatus> {
+    return $Call.ByID(1680332538);
 }
 
 export function RefreshMCPServers(): $CancellablePromise<void> {
@@ -271,6 +427,17 @@ export function RefreshMCPServers(): $CancellablePromise<void> {
 
 export function RefreshWorkspace(): $CancellablePromise<$models.WorkspaceInfo> {
     return $Call.ByID(2632368162);
+}
+
+export function RenameClaudeSession(sessionID: string, name: string): $CancellablePromise<void> {
+    return $Call.ByID(2613138530, sessionID, name);
+}
+
+/**
+ * RenameGrokSession updates the session title (native summary.json + local override).
+ */
+export function RenameGrokSession(backend: string, sessionID: string, name: string): $CancellablePromise<$models.GrokSessionSummary> {
+    return $Call.ByID(2689730813, backend, sessionID, name);
 }
 
 export function ResizeTerminal(processID: string, rows: number, cols: number): $CancellablePromise<void> {
@@ -289,6 +456,14 @@ export function RollbackThread(threadID: string, numTurns: number): $Cancellable
     return $Call.ByID(4017068374, threadID, numTurns);
 }
 
+export function SaveClaudeGlobalInstructions(content: string): $CancellablePromise<$models.GlobalInstructionsInfo> {
+    return $Call.ByID(3048108819, content);
+}
+
+export function SaveClaudeProjectInstructions(content: string): $CancellablePromise<$models.ProjectInstructionsInfo> {
+    return $Call.ByID(4083074467, content);
+}
+
 export function SaveCodexFeatureFlags(flags: $models.CodexFeatureFlags): $CancellablePromise<$models.CodexFeatureFlags> {
     return $Call.ByID(199517151, flags);
 }
@@ -298,6 +473,14 @@ export function SaveCodexFeatureFlags(flags: $models.CodexFeatureFlags): $Cancel
  */
 export function SaveGlobalInstructions(content: string): $CancellablePromise<$models.GlobalInstructionsInfo> {
     return $Call.ByID(4035646133, content);
+}
+
+export function SaveGrokGlobalInstructions(content: string): $CancellablePromise<$models.GlobalInstructionsInfo> {
+    return $Call.ByID(1655319778, content);
+}
+
+export function SaveGrokProjectInstructions(content: string): $CancellablePromise<$models.ProjectInstructionsInfo> {
+    return $Call.ByID(363786212, content);
 }
 
 export function SavePreferences(settings: $models.UserSettings): $CancellablePromise<$models.UserSettings> {
@@ -322,6 +505,14 @@ export function SelectBrowserDownloadDir(): $CancellablePromise<string> {
     return $Call.ByID(3603113877);
 }
 
+export function SelectClaudeWorkspace(): $CancellablePromise<$models.WorkspaceInfo> {
+    return $Call.ByID(3764125613);
+}
+
+export function SelectGrokWorkspace(): $CancellablePromise<$models.WorkspaceInfo> {
+    return $Call.ByID(1796203834);
+}
+
 export function SelectImages(): $CancellablePromise<string[] | null> {
     return $Call.ByID(1863599724);
 }
@@ -330,8 +521,20 @@ export function SelectWorkspace(): $CancellablePromise<$models.WorkspaceInfo> {
     return $Call.ByID(3302172243);
 }
 
+export function SendClaudeMessage(request: $models.ClaudeSendRequest): $CancellablePromise<$models.ClaudeTurnRef> {
+    return $Call.ByID(454475273, request);
+}
+
+export function SendGrokMessage(request: $models.GrokSendRequest): $CancellablePromise<$models.GrokTurnRef> {
+    return $Call.ByID(3724715910, request);
+}
+
 export function SendMessage(request: $models.SendMessageRequest): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(4154529951, request);
+}
+
+export function SetActiveRuntime(runtimeID: string): $CancellablePromise<{ [_ in string]?: any } | null> {
+    return $Call.ByID(610883024, runtimeID);
 }
 
 export function SetAlwaysOnTop(enabled: boolean): $CancellablePromise<void> {
@@ -402,6 +605,17 @@ export function StopTerminalSession(processID: string): $CancellablePromise<void
     return $Call.ByID(1898194606, processID);
 }
 
+export function UnarchiveClaudeSession(sessionID: string): $CancellablePromise<void> {
+    return $Call.ByID(3713905517, sessionID);
+}
+
+/**
+ * UnarchiveGrokSession restores a session to the main list.
+ */
+export function UnarchiveGrokSession(backend: string, sessionID: string): $CancellablePromise<$models.GrokSessionSummary> {
+    return $Call.ByID(677986454, backend, sessionID);
+}
+
 export function UnarchiveThread(threadID: string): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(1003864789, threadID);
 }
@@ -424,6 +638,14 @@ export function UpdateStatus(): $CancellablePromise<$models.UpdateProgress> {
 
 export function UpsertMCPServer(request: $models.MCPServerWriteRequest): $CancellablePromise<void> {
     return $Call.ByID(4078237320, request);
+}
+
+export function UseClaudeWorkspace(path: string): $CancellablePromise<$models.WorkspaceInfo> {
+    return $Call.ByID(1983556052, path);
+}
+
+export function UseGrokWorkspace(path: string): $CancellablePromise<$models.WorkspaceInfo> {
+    return $Call.ByID(2288325727, path);
 }
 
 export function UseWorkspace(path: string): $CancellablePromise<$models.WorkspaceInfo> {

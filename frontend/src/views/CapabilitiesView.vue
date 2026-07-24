@@ -11,6 +11,7 @@ import {
   PlugZap,
   RefreshCw,
   Search,
+  Settings2,
   Sparkles,
   Trash2,
   Unplug,
@@ -20,6 +21,8 @@ import { computed, onMounted, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
+import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
+import GrokIcon from '@/components/icons/GrokIcon.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -29,18 +32,76 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
-import { useAppStore, useCapabilitiesStore } from '@/stores'
+import { useAppStore, useCapabilitiesStore, useClaudeStore, useGrokStore } from '@/stores'
+import {
+  openClaudeConfigFile,
+  openClaudeHome,
+  readClaudeCapabilities,
+  type ClaudeCapabilitiesCatalog,
+} from '@/utils/claudeBindings'
 import type { MCPServerView } from '@/types/codex'
+import {
+  openGrokConfigFile,
+  openGrokHome,
+  readGrokCapabilities,
+  type GrokCapabilitiesCatalog,
+} from '@/utils/grokBindings'
 import { notify } from '@/utils/notify'
 import { parseMCPImportJSON } from '@/utils/mcpImport'
 
 type CapabilityTab = 'plugins' | 'skills' | 'apps' | 'mcp' | 'automation'
+type GrokCapTab = 'runtime' | 'mcp' | 'skills' | 'plugins' | 'instructions'
+type ClaudeCapTab = 'runtime' | 'mcp' | 'skills' | 'plugins' | 'agents' | 'hooks' | 'instructions'
 
 const router = useRouter()
 const route = useRoute()
 const appStore = useAppStore()
+const grokStore = useGrokStore()
+const claudeStore = useClaudeStore()
 const capabilitiesStore = useCapabilitiesStore()
 const { t } = useI18n()
+const isGrokMode = computed(() => appStore.isGrokMode)
+const isClaudeMode = computed(() => appStore.isClaudeMode)
+const grokProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'grok'))
+const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
+const grokCatalog = shallowRef<GrokCapabilitiesCatalog | null>(null)
+const grokCatalogLoading = shallowRef(false)
+const grokTab = shallowRef<GrokCapTab>('runtime')
+const claudeCatalog = shallowRef<ClaudeCapabilitiesCatalog | null>(null)
+const claudeCatalogLoading = shallowRef(false)
+const claudeTab = shallowRef<ClaudeCapTab>('runtime')
+
+const grokTabs = computed(() => [
+  { value: 'runtime' as const, label: t('capabilities.grokTabRuntime'), icon: GrokIcon, count: 0 },
+  { value: 'mcp' as const, label: t('capabilities.grokTabMcp'), icon: PlugZap, count: grokCatalog.value?.mcp?.length ?? 0 },
+  { value: 'skills' as const, label: t('capabilities.grokTabSkills'), icon: Sparkles, count: grokCatalog.value?.skills?.length ?? 0 },
+  { value: 'plugins' as const, label: t('capabilities.grokTabPlugins'), icon: Blocks, count: grokCatalog.value?.plugins?.length ?? 0 },
+  { value: 'instructions' as const, label: t('capabilities.grokTabInstructions'), icon: Settings2, count: 0 },
+])
+
+const claudeTabs = computed(() => [
+  { value: 'runtime' as const, label: t('capabilities.claudeTabRuntime'), icon: ClaudeIcon, count: 0 },
+  { value: 'mcp' as const, label: t('capabilities.claudeTabMcp'), icon: PlugZap, count: claudeCatalog.value?.mcp?.length ?? 0 },
+  { value: 'skills' as const, label: t('capabilities.claudeTabSkills'), icon: Sparkles, count: claudeCatalog.value?.skills?.length ?? 0 },
+  { value: 'plugins' as const, label: t('capabilities.claudeTabPlugins'), icon: Blocks, count: claudeCatalog.value?.plugins?.length ?? 0 },
+  { value: 'agents' as const, label: t('capabilities.claudeTabAgents'), icon: Bot, count: (claudeCatalog.value?.agents?.length ?? 0) + (claudeCatalog.value?.commands?.length ?? 0) },
+  { value: 'hooks' as const, label: t('capabilities.claudeTabHooks'), icon: Webhook, count: claudeCatalog.value?.hooks?.length ?? 0 },
+  { value: 'instructions' as const, label: t('capabilities.claudeTabInstructions'), icon: Settings2, count: 0 },
+])
+
+function claudeScopeLabel(scope: string): string {
+  if (scope === 'project') return t('capabilities.grokScopeProject')
+  if (scope === 'plugin' || scope === 'bundled' || scope === 'cache') return t('capabilities.grokScopeBundled')
+  return t('capabilities.grokScopeUser')
+}
+
+function openClaudeSettings(): void {
+  router.push({ name: 'settings', query: { section: 'agent' } })
+}
+
+function openClaudeInstructionsSettings(): void {
+  router.push({ name: 'settings', query: { section: 'personalization' } })
+}
 
 const activeTab = shallowRef<CapabilityTab>('plugins')
 const query = shallowRef('')
@@ -114,7 +175,81 @@ const capabilityStats = computed(() => [
   { label: t('capabilities.features'), value: capabilitiesStore.features.filter((item) => item.enabled).length, total: capabilitiesStore.features.length },
 ])
 
+async function loadGrokCatalog(): Promise<void> {
+  grokCatalogLoading.value = true
+  try {
+    // Always refresh runtime first so install detection is current.
+    await grokStore.refreshRuntime()
+    grokCatalog.value = await readGrokCapabilities()
+    if (grokCatalog.value?.runtime) {
+      grokStore.runtime = grokCatalog.value.runtime
+    }
+  } catch (error) {
+    // Runtime may still be usable even if catalog binding is stale — surface clear text.
+    const message = error instanceof Error ? error.message : String(error)
+    notify('error', t('capabilities.loading'), message)
+    // Fallback: still show runtime-only panel from store.
+    grokCatalog.value = {
+      runtime: grokStore.runtime,
+      configPath: '',
+      grokHome: '',
+      mcp: [],
+      skills: [],
+      plugins: [],
+      globalInstructions: { content: '', path: '', source: '', exists: false, emptyFile: false, available: false },
+      projectInstructions: {
+        content: '', workspace: '', workspaceName: '', path: '', source: '',
+        exists: false, emptyFile: false, available: false,
+      },
+    }
+  } finally {
+    grokCatalogLoading.value = false
+  }
+}
+
+async function loadClaudeCatalog(): Promise<void> {
+  claudeCatalogLoading.value = true
+  try {
+    claudeCatalog.value = await readClaudeCapabilities()
+    void claudeStore.refreshRuntime()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    notify('error', t('capabilities.loading'), message)
+    claudeCatalog.value = {
+      runtime: claudeStore.runtime,
+      configPath: '',
+      claudeHome: '',
+      claudeJsonPath: '',
+      settings: {
+        path: '', exists: false, model: '', permissionMode: '', allowRules: 0, denyRules: 0,
+        envKeys: [], baseURL: '', skipDangerPrompt: false, hasStatusLine: false, rawPermissionMode: '',
+      },
+      mcp: [],
+      skills: [],
+      plugins: [],
+      agents: [],
+      commands: [],
+      hooks: [],
+      globalInstructions: { content: '', path: '', source: '', exists: false, emptyFile: false, available: false },
+      projectInstructions: {
+        content: '', workspace: '', workspaceName: '', path: '', source: '',
+        exists: false, emptyFile: false, available: false,
+      },
+    }
+  } finally {
+    claudeCatalogLoading.value = false
+  }
+}
+
 function loadWhenReady(): void {
+  if (isGrokMode.value) {
+    void loadGrokCatalog()
+    return
+  }
+  if (isClaudeMode.value) {
+    void loadClaudeCatalog()
+    return
+  }
   if (appStore.codexAvailable && !capabilitiesStore.capabilitiesLoading) {
     void capabilitiesStore.loadCapabilities()
   }
@@ -128,6 +263,8 @@ onMounted(() => {
   loadWhenReady()
 })
 watch(() => appStore.codexAvailable, loadWhenReady)
+watch(isGrokMode, loadWhenReady)
+watch(isClaudeMode, loadWhenReady)
 watch(
   () => route.query.tab,
   (tab) => {
@@ -173,7 +310,38 @@ function mcpAuthLabel(status: string): string {
 }
 
 function closeCapabilities(): void {
+  // Preserve activeRuntime; only navigate back to the same product stack.
   void router.replace(route.query.from === 'settings' ? { name: 'settings' } : { name: 'workbench' })
+}
+
+function openGrokSettings(): void {
+  void router.push({ name: 'settings', query: { section: 'agent', from: 'capabilities' } })
+}
+
+function openGrokInstructionsSettings(): void {
+  void router.push({ name: 'settings', query: { section: 'personalization', from: 'capabilities' } })
+}
+
+async function openConfig(): Promise<void> {
+  try {
+    await openGrokConfigFile()
+  } catch (error) {
+    notify('error', t('capabilities.grokOpenConfig'), error instanceof Error ? error.message : String(error))
+  }
+}
+
+async function openHome(): Promise<void> {
+  try {
+    await openGrokHome()
+  } catch (error) {
+    notify('error', t('capabilities.grokOpenHome'), error instanceof Error ? error.message : String(error))
+  }
+}
+
+function grokScopeLabel(scope: string): string {
+  if (scope === 'project') return t('capabilities.grokScopeProject')
+  if (scope === 'bundled') return t('capabilities.grokScopeBundled')
+  return t('capabilities.grokScopeUser')
 }
 
 function openMcpEditor(server?: MCPServerView): void {
@@ -229,12 +397,34 @@ async function saveMcpImport(): Promise<void> {
           {{ t('settings.backToApp') }}
         </Button>
         <div class="px-1">
-          <p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{{ t('capabilities.kicker') }}</p>
-          <h1 class="text-[15px] font-semibold tracking-tight">{{ t('capabilities.title') }}</h1>
+          <p class="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {{ isGrokMode
+              ? t('capabilities.grokKicker')
+              : isClaudeMode
+                ? t('capabilities.claudeKicker')
+                : t('capabilities.kicker') }}
+          </p>
+          <h1 class="text-[15px] font-semibold tracking-tight">
+            {{ isGrokMode
+              ? t('capabilities.grokTitle')
+              : isClaudeMode
+                ? t('capabilities.claudeTitle')
+                : t('capabilities.title') }}
+          </h1>
+          <p v-if="isGrokMode" class="mt-1 text-[10px] leading-4 text-muted-foreground">
+            {{ t('capabilities.grokModeBanner') }}
+          </p>
+          <p v-else-if="isClaudeMode" class="mt-1 text-[10px] leading-4 text-muted-foreground">
+            {{ t('capabilities.claudeModeBanner') }}
+          </p>
         </div>
       </div>
 
-      <nav class="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3" :aria-label="t('capabilities.title')">
+      <nav
+        v-if="!isGrokMode && !isClaudeMode"
+        class="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
+        :aria-label="t('capabilities.title')"
+      >
         <button
           v-for="tab in tabs"
           :key="tab.value"
@@ -251,11 +441,451 @@ async function saveMcpImport(): Promise<void> {
           <span class="rounded-full bg-foreground/[0.06] px-1.5 text-[10px] tabular-nums text-muted-foreground">{{ tab.count }}</span>
         </button>
       </nav>
+      <nav
+        v-else-if="isClaudeMode"
+        class="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
+        :aria-label="t('capabilities.claudeTitle')"
+      >
+        <button
+          v-for="tab in claudeTabs"
+          :key="tab.value"
+          type="button"
+          class="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[12.5px] transition-colors"
+          :class="claudeTab === tab.value
+            ? 'bg-card font-medium text-foreground shadow-sm'
+            : 'text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground'"
+          @click="claudeTab = tab.value"
+        >
+          <component :is="tab.icon" :size="14" class="shrink-0 opacity-70" />
+          <span class="min-w-0 flex-1 truncate">{{ tab.label }}</span>
+          <span
+            v-if="tab.count > 0"
+            class="rounded-full bg-foreground/[0.06] px-1.5 text-[10px] tabular-nums text-muted-foreground"
+          >{{ tab.count }}</span>
+        </button>
+      </nav>
+      <nav
+        v-else
+        class="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
+        :aria-label="t('capabilities.grokTitle')"
+      >
+        <button
+          v-for="tab in grokTabs"
+          :key="tab.value"
+          type="button"
+          class="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[12.5px] transition-colors"
+          :class="grokTab === tab.value
+            ? 'bg-card font-medium text-foreground shadow-sm'
+            : 'text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground'"
+          @click="grokTab = tab.value"
+        >
+          <component :is="tab.icon" :size="14" class="shrink-0 opacity-70" />
+          <span class="min-w-0 flex-1 truncate">{{ tab.label }}</span>
+          <span
+            v-if="tab.count > 0"
+            class="rounded-full bg-foreground/[0.06] px-1.5 text-[10px] tabular-nums text-muted-foreground"
+          >{{ tab.count }}</span>
+        </button>
+      </nav>
     </aside>
 
     <!-- Rounded content card -->
     <div class="flex min-h-0 min-w-0 flex-1 flex-col pb-2 pr-2 pl-1.5 pt-0">
       <section class="workbench-card relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[14px] border bg-card">
+        <!-- Claude capability center (aligned with ~/.claude official layout) -->
+        <template v-if="isClaudeMode">
+          <header class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+            <ClaudeIcon :size="16" class="opacity-80" />
+            <h2 class="text-[14px] font-semibold">
+              {{ claudeTabs.find((item) => item.value === claudeTab)?.label || t('capabilities.claudeTitle') }}
+            </h2>
+            <div class="flex-1" />
+            <Button variant="outline" size="sm" class="h-8" :disabled="claudeCatalogLoading" @click="void loadClaudeCatalog()">
+              <RefreshCw :size="13" class="mr-1.5" :class="{ 'animate-spin': claudeCatalogLoading }" />
+              {{ t('common.refresh') }}
+            </Button>
+            <Button variant="outline" size="sm" class="h-8" @click="void openClaudeConfigFile()">
+              {{ t('capabilities.claudeOpenConfig') }}
+            </Button>
+            <Button size="sm" class="h-8" @click="openClaudeSettings">
+              <Settings2 :size="13" class="mr-1.5" />
+              {{ t('capabilities.claudeOpenSettings') }}
+            </Button>
+          </header>
+          <ScrollArea class="min-h-0 flex-1">
+              <div class="mx-auto max-w-3xl space-y-4 p-5">
+                <div v-if="claudeCatalogLoading && !claudeCatalog" class="flex items-center gap-2 py-16 text-[12px] text-muted-foreground">
+                  <LoaderCircle :size="14" class="animate-spin" />
+                  {{ t('capabilities.loading') }}
+                </div>
+
+                <template v-else-if="claudeTab === 'runtime'">
+                  <Card>
+                    <CardHeader class="pb-2">
+                      <CardTitle class="text-[13px]">Claude Code CLI</CardTitle>
+                    </CardHeader>
+                    <CardContent class="space-y-3 text-[12px]">
+                      <p class="text-muted-foreground">{{ t('capabilities.claudeRuntimeHint') }}</p>
+                      <div class="grid gap-2 sm:grid-cols-2">
+                        <div class="rounded-lg border px-3 py-2">
+                          <p class="text-[10px] uppercase tracking-wide text-muted-foreground">CLI</p>
+                          <p class="mt-1 font-medium">
+                            {{ (claudeCatalog?.runtime.available || claudeProvider?.runtimeReady)
+                              ? t('capabilities.ready')
+                              : t('capabilities.unavailable') }}
+                          </p>
+                          <p class="mt-0.5 font-mono text-[10px] text-muted-foreground">
+                            {{ claudeCatalog?.runtime.version || claudeProvider?.version || '—' }}
+                          </p>
+                        </div>
+                        <div class="rounded-lg border px-3 py-2">
+                          <p class="text-[10px] uppercase tracking-wide text-muted-foreground">Auth</p>
+                          <p class="mt-1 font-medium">
+                            {{ claudeCatalog?.runtime.authenticated
+                              ? t('capabilities.ready')
+                              : t('capabilities.unavailable') }}
+                          </p>
+                          <p class="mt-0.5 text-[10px] text-muted-foreground">
+                            {{ claudeCatalog?.runtime.message || claudeProvider?.message || '—' }}
+                          </p>
+                        </div>
+                      </div>
+                      <div class="rounded-lg border px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ t('settings.model') }}</p>
+                        <p class="mt-1 font-medium">{{ appStore.settings.claudeModel || claudeCatalog?.settings?.model || 'sonnet' }}</p>
+                        <p class="mt-0.5 text-[10px] text-muted-foreground">
+                          effort={{ appStore.settings.claudeEffort || 'high' }}
+                          · permission={{ appStore.settings.claudePermissionMode || claudeCatalog?.settings?.permissionMode || 'acceptEdits' }}
+                        </p>
+                      </div>
+                      <div v-if="claudeCatalog?.settings" class="rounded-lg border px-3 py-2 space-y-1">
+                        <p class="text-[10px] uppercase tracking-wide text-muted-foreground">settings.json</p>
+                        <p class="font-mono text-[10px] text-muted-foreground break-all">{{ claudeCatalog.settings.path }}</p>
+                        <p v-if="claudeCatalog.settings.baseURL" class="font-mono text-[10px]">
+                          ANTHROPIC_BASE_URL={{ claudeCatalog.settings.baseURL }}
+                        </p>
+                        <p class="text-[10px] text-muted-foreground">
+                          allow={{ claudeCatalog.settings.allowRules }} · deny={{ claudeCatalog.settings.denyRules }}
+                          <span v-if="claudeCatalog.settings.envKeys?.length"> · env={{ claudeCatalog.settings.envKeys.length }} keys</span>
+                        </p>
+                      </div>
+                      <div class="flex flex-wrap gap-2">
+                        <Button size="sm" variant="outline" class="h-8" @click="void openClaudeHome()">{{ t('capabilities.claudeOpenHome') }}</Button>
+                        <Button size="sm" variant="outline" class="h-8" @click="void openClaudeConfigFile()">{{ t('capabilities.claudeOpenConfig') }}</Button>
+                      </div>
+                      <p class="text-[10px] text-muted-foreground">{{ t('capabilities.claudeNoCodexPlugins') }}</p>
+                    </CardContent>
+                  </Card>
+                </template>
+
+                <template v-else-if="claudeTab === 'mcp'">
+                  <Card v-for="server in (claudeCatalog?.mcp || [])" :key="`${server.scope}:${server.name}`" class="p-4">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <p class="text-[13px] font-medium">{{ server.name }}</p>
+                        <p class="mt-1 font-mono text-[11px] text-muted-foreground">
+                          {{ server.command || server.url || '—' }}
+                        </p>
+                        <p v-if="server.args" class="mt-0.5 line-clamp-2 font-mono text-[10px] text-muted-foreground/80">{{ server.args }}</p>
+                        <p class="mt-1 text-[10px] text-muted-foreground">{{ server.transport || 'stdio' }} · {{ claudeScopeLabel(server.scope) }}</p>
+                      </div>
+                      <Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">
+                        {{ server.enabled ? t('capabilities.ready') : t('capabilities.disabled') }}
+                      </Badge>
+                    </div>
+                  </Card>
+                  <div
+                    v-if="!(claudeCatalog?.mcp?.length)"
+                    class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
+                  >
+                    <p>{{ t('capabilities.claudeMcpEmpty') }}</p>
+                    <Button class="mt-3" size="sm" variant="outline" @click="void openClaudeConfigFile()">{{ t('capabilities.claudeOpenConfig') }}</Button>
+                  </div>
+                </template>
+
+                <template v-else-if="claudeTab === 'skills'">
+                  <Card v-for="skill in (claudeCatalog?.skills || [])" :key="skill.path" class="p-4">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <p class="text-[13px] font-medium">{{ skill.displayName || skill.name }}</p>
+                        <p class="mt-1 text-[11px] text-muted-foreground">{{ skill.description || skill.path }}</p>
+                      </div>
+                      <Badge variant="outline" class="text-[9px]">{{ claudeScopeLabel(skill.scope) }}</Badge>
+                    </div>
+                  </Card>
+                  <div
+                    v-if="!(claudeCatalog?.skills?.length)"
+                    class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
+                  >
+                    {{ t('capabilities.claudeSkillsEmpty') }}
+                  </div>
+                </template>
+
+                <template v-else-if="claudeTab === 'plugins'">
+                  <Card v-for="plugin in (claudeCatalog?.plugins || [])" :key="plugin.path + plugin.name" class="p-4">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <p class="text-[13px] font-medium">{{ plugin.name }}</p>
+                        <p class="mt-1 font-mono text-[10px] text-muted-foreground">{{ plugin.path }}</p>
+                      </div>
+                      <div class="flex shrink-0 flex-col items-end gap-1">
+                        <Badge v-if="plugin.version" variant="outline" class="text-[9px]">v{{ plugin.version }}</Badge>
+                        <Badge variant="secondary" class="text-[9px]">{{ claudeScopeLabel(plugin.scope || 'user') }}</Badge>
+                      </div>
+                    </div>
+                  </Card>
+                  <div
+                    v-if="!(claudeCatalog?.plugins?.length)"
+                    class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
+                  >
+                    {{ t('capabilities.claudePluginsEmpty') }}
+                  </div>
+                </template>
+
+                <template v-else-if="claudeTab === 'agents'">
+                  <p class="text-[11px] text-muted-foreground">{{ t('capabilities.claudeAgentsHint') }}</p>
+                  <Card v-for="agent in (claudeCatalog?.agents || [])" :key="agent.path" class="p-4">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <p class="text-[13px] font-medium">{{ agent.displayName || agent.name }}</p>
+                        <p class="mt-1 text-[11px] text-muted-foreground">{{ agent.description || agent.path }}</p>
+                      </div>
+                      <Badge variant="outline" class="text-[9px]">{{ claudeScopeLabel(agent.scope) }}</Badge>
+                    </div>
+                  </Card>
+                  <Card v-for="cmd in (claudeCatalog?.commands || [])" :key="cmd.path" class="p-4">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <p class="text-[13px] font-medium">/{{ cmd.name }}</p>
+                        <p class="mt-1 font-mono text-[10px] text-muted-foreground">{{ cmd.path }}</p>
+                      </div>
+                      <Badge variant="secondary" class="text-[9px]">{{ t('capabilities.claudeCommand') }} · {{ claudeScopeLabel(cmd.scope) }}</Badge>
+                    </div>
+                  </Card>
+                  <div
+                    v-if="!(claudeCatalog?.agents?.length) && !(claudeCatalog?.commands?.length)"
+                    class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
+                  >
+                    {{ t('capabilities.claudeAgentsEmpty') }}
+                  </div>
+                </template>
+
+                <template v-else-if="claudeTab === 'hooks'">
+                  <Card v-for="(hook, index) in (claudeCatalog?.hooks || [])" :key="`${hook.event}-${index}`" class="p-4">
+                    <p class="text-[13px] font-medium">{{ hook.event }}</p>
+                    <p class="mt-1 font-mono text-[11px] text-muted-foreground">{{ hook.command }}</p>
+                    <p class="mt-1 font-mono text-[10px] text-muted-foreground/80">{{ hook.source }}</p>
+                  </Card>
+                  <div
+                    v-if="!(claudeCatalog?.hooks?.length)"
+                    class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
+                  >
+                    {{ t('capabilities.claudeHooksEmpty') }}
+                  </div>
+                </template>
+
+                <template v-else-if="claudeTab === 'instructions'">
+                  <Card class="p-4 space-y-3 text-[12px]">
+                    <div>
+                      <p class="text-[13px] font-medium">{{ t('settings.claudeGlobalInstructions') }}</p>
+                      <p class="mt-1 text-muted-foreground">{{ t('settings.claudeGlobalInstructionsHint') }}</p>
+                      <code class="mt-2 block rounded-md border bg-muted/40 px-2 py-1.5 font-mono text-[11px]">
+                        {{ claudeCatalog?.globalInstructions?.path || '~/.claude/CLAUDE.md' }}
+                      </code>
+                      <p class="mt-1 text-[10px] text-muted-foreground">
+                        {{ claudeCatalog?.globalInstructions?.exists
+                          ? (claudeCatalog.globalInstructions.emptyFile ? t('settings.instructionsFileEmpty') : t('settings.instructionsFileHasContent'))
+                          : t('settings.instructionsFileMissing') }}
+                      </p>
+                    </div>
+                    <div>
+                      <p class="text-[13px] font-medium">{{ t('settings.claudeProjectInstructions') }}</p>
+                      <p class="mt-1 text-muted-foreground">{{ t('settings.claudeProjectInstructionsHint') }}</p>
+                      <code class="mt-2 block rounded-md border bg-muted/40 px-2 py-1.5 font-mono text-[11px]">
+                        {{ claudeCatalog?.projectInstructions?.path || 'CLAUDE.md' }}
+                      </code>
+                    </div>
+                    <Button size="sm" class="h-8" @click="openClaudeInstructionsSettings">
+                      {{ t('capabilities.claudeOpenSettings') }}
+                    </Button>
+                  </Card>
+                </template>
+              </div>
+          </ScrollArea>
+        </template>
+
+        <!-- Grok capability center (no Codex plugin catalog) -->
+        <template v-else-if="isGrokMode">
+          <header class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+            <GrokIcon :size="16" class="opacity-80" />
+            <h2 class="text-[14px] font-semibold">{{ grokTabs.find((item) => item.value === grokTab)?.label || t('capabilities.grokTitle') }}</h2>
+            <div class="flex-1" />
+            <Button variant="outline" size="sm" class="h-8" :disabled="grokCatalogLoading" @click="void loadGrokCatalog()">
+              <RefreshCw :size="13" class="mr-1.5" :class="{ 'animate-spin': grokCatalogLoading }" />
+              {{ t('common.refresh') }}
+            </Button>
+            <Button variant="outline" size="sm" class="h-8" @click="void openConfig()">
+              {{ t('capabilities.grokOpenConfig') }}
+            </Button>
+            <Button size="sm" class="h-8" @click="openGrokSettings">
+              <Settings2 :size="13" class="mr-1.5" />
+              {{ t('capabilities.grokOpenSettings') }}
+            </Button>
+          </header>
+          <ScrollArea class="min-h-0 flex-1">
+            <div class="mx-auto max-w-3xl space-y-4 p-5">
+              <div v-if="grokCatalogLoading && !grokCatalog" class="flex items-center gap-2 py-16 text-[12px] text-muted-foreground">
+                <LoaderCircle :size="14" class="animate-spin" />
+                {{ t('capabilities.loading') }}
+              </div>
+
+              <template v-else-if="grokTab === 'runtime'">
+                <Card>
+                  <CardHeader class="pb-2">
+                    <CardTitle class="text-[13px]">Grok Build / API</CardTitle>
+                  </CardHeader>
+                  <CardContent class="space-y-3 text-[12px]">
+                    <p class="text-muted-foreground">{{ t('capabilities.grokRuntimeHint') }}</p>
+                    <div class="grid gap-2 sm:grid-cols-2">
+                      <div class="rounded-lg border px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-muted-foreground">Build</p>
+                        <p class="mt-1 font-medium">
+                          {{ (grokCatalog?.runtime || grokStore.runtime).buildAvailable ? t('capabilities.ready') : t('capabilities.unavailable') }}
+                        </p>
+                        <p v-if="(grokCatalog?.runtime || grokStore.runtime).buildVersion" class="mt-0.5 font-mono text-[10px] text-muted-foreground">
+                          {{ (grokCatalog?.runtime || grokStore.runtime).buildVersion }}
+                        </p>
+                      </div>
+                      <div class="rounded-lg border px-3 py-2">
+                        <p class="text-[10px] uppercase tracking-wide text-muted-foreground">API</p>
+                        <p class="mt-1 font-medium">
+                          {{ (grokCatalog?.runtime || grokStore.runtime).apiConfigured || appStore.settings.grokAPIKey
+                            ? t('capabilities.ready')
+                            : t('capabilities.unavailable') }}
+                        </p>
+                        <p class="mt-0.5 text-[10px] text-muted-foreground">
+                          {{ appStore.settings.grokAPIBaseURL || 'https://api.x.ai/v1' }}
+                        </p>
+                      </div>
+                    </div>
+                    <div class="rounded-lg border px-3 py-2">
+                      <p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ t('settings.model') }}</p>
+                      <p class="mt-1 font-medium">
+                        {{ appStore.settings.grokBackend === 'api'
+                          ? (appStore.settings.grokAPIModel || 'grok-4.5')
+                          : (appStore.settings.grokBuildModel || 'grok-4.5') }}
+                      </p>
+                      <p class="mt-0.5 text-[10px] text-muted-foreground">
+                        backend={{ appStore.settings.grokBackend || 'build' }} · effort={{ appStore.settings.grokEffort || 'high' }}
+                      </p>
+                    </div>
+                    <div v-if="grokProvider?.models?.length" class="rounded-lg border px-3 py-2">
+                      <p class="text-[10px] uppercase tracking-wide text-muted-foreground">Model catalog</p>
+                      <div class="mt-2 flex flex-wrap gap-1.5">
+                        <Badge
+                          v-for="model in grokProvider.models"
+                          :key="model.model"
+                          variant="secondary"
+                          class="text-[10px] font-normal"
+                        >
+                          {{ model.displayName || model.model }}
+                        </Badge>
+                      </div>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                      <Button size="sm" variant="outline" class="h-8" @click="void openHome()">{{ t('capabilities.grokOpenHome') }}</Button>
+                    </div>
+                    <p class="text-[10px] text-muted-foreground">{{ t('capabilities.grokNoCodexPlugins') }}</p>
+                  </CardContent>
+                </Card>
+              </template>
+
+              <template v-else-if="grokTab === 'mcp'">
+                <Card v-for="server in (grokCatalog?.mcp || [])" :key="server.name" class="p-4">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                      <p class="text-[13px] font-medium">{{ server.name }}</p>
+                      <p class="mt-1 font-mono text-[11px] text-muted-foreground">
+                        {{ server.command || server.url || '—' }}
+                      </p>
+                      <p v-if="server.args" class="mt-0.5 line-clamp-2 font-mono text-[10px] text-muted-foreground/80">{{ server.args }}</p>
+                    </div>
+                    <Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">
+                      {{ server.enabled ? t('capabilities.ready') : t('capabilities.disabled') }}
+                    </Badge>
+                  </div>
+                </Card>
+                <div
+                  v-if="!(grokCatalog?.mcp?.length)"
+                  class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
+                >
+                  <p>{{ t('capabilities.grokMcpEmpty') }}</p>
+                  <Button class="mt-3" size="sm" variant="outline" @click="void openConfig()">{{ t('capabilities.grokOpenConfig') }}</Button>
+                </div>
+              </template>
+
+              <template v-else-if="grokTab === 'skills'">
+                <Card v-for="skill in (grokCatalog?.skills || [])" :key="skill.path" class="p-4">
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                      <p class="text-[13px] font-medium">{{ skill.displayName || skill.name }}</p>
+                      <p class="mt-1 text-[11px] text-muted-foreground">{{ skill.description || skill.path }}</p>
+                    </div>
+                    <Badge variant="outline" class="text-[9px]">{{ grokScopeLabel(skill.scope) }}</Badge>
+                  </div>
+                </Card>
+                <div
+                  v-if="!(grokCatalog?.skills?.length)"
+                  class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
+                >
+                  {{ t('capabilities.grokSkillsEmpty') }}
+                </div>
+              </template>
+
+              <template v-else-if="grokTab === 'plugins'">
+                <Card v-for="plugin in (grokCatalog?.plugins || [])" :key="plugin.path" class="p-4">
+                  <p class="text-[13px] font-medium">{{ plugin.name }}</p>
+                  <p class="mt-1 font-mono text-[10px] text-muted-foreground">{{ plugin.path }}</p>
+                </Card>
+                <div
+                  v-if="!(grokCatalog?.plugins?.length)"
+                  class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
+                >
+                  {{ t('capabilities.grokPluginsEmpty') }}
+                </div>
+              </template>
+
+              <template v-else-if="grokTab === 'instructions'">
+                <Card class="p-4 space-y-3 text-[12px]">
+                  <div>
+                    <p class="text-[13px] font-medium">{{ t('settings.grokGlobalInstructions') }}</p>
+                    <p class="mt-1 text-muted-foreground">{{ t('settings.grokGlobalInstructionsHint') }}</p>
+                    <code class="mt-2 block rounded-md border bg-muted/40 px-2 py-1.5 font-mono text-[11px]">
+                      {{ grokCatalog?.globalInstructions?.path || '~/.grok/AGENTS.md' }}
+                    </code>
+                    <p class="mt-1 text-[10px] text-muted-foreground">
+                      {{ grokCatalog?.globalInstructions?.exists
+                        ? (grokCatalog.globalInstructions.emptyFile ? t('settings.instructionsFileEmpty') : t('settings.instructionsFileHasContent'))
+                        : t('settings.instructionsFileMissing') }}
+                    </p>
+                  </div>
+                  <div>
+                    <p class="text-[13px] font-medium">{{ t('settings.grokProjectInstructions') }}</p>
+                    <p class="mt-1 text-muted-foreground">{{ t('settings.grokProjectInstructionsHint') }}</p>
+                    <code class="mt-2 block rounded-md border bg-muted/40 px-2 py-1.5 font-mono text-[11px]">
+                      {{ grokCatalog?.projectInstructions?.path || t('settings.projectInstructionsUnavailable') }}
+                    </code>
+                  </div>
+                  <Button size="sm" class="h-8" @click="openGrokInstructionsSettings">
+                    {{ t('capabilities.grokOpenSettings') }}
+                  </Button>
+                </Card>
+              </template>
+            </div>
+          </ScrollArea>
+        </template>
+
+        <template v-else>
         <header class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
           <div class="relative min-w-0 flex-1">
             <Search class="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -549,6 +1179,7 @@ async function saveMcpImport(): Promise<void> {
             </div>
           </ScrollArea>
         </Tabs>
+        </template>
       </section>
     </div>
   </div>

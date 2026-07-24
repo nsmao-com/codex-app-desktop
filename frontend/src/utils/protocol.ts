@@ -51,6 +51,19 @@ export function isInterruptedStatus(status: unknown): boolean {
   return key === 'interrupted' || key === 'cancelled' || key === 'canceled'
 }
 
+/** Turn has finished (success or failure) — anything else should keep the queue blocked. */
+export function isTerminalTurnStatus(status: unknown): boolean {
+  const key = normalizeStatusKey(asString(status))
+  if (!key) return false
+  return key === 'completed'
+    || key === 'complete'
+    || key === 'done'
+    || key === 'success'
+    || key === 'succeeded'
+    || isFailedStatus(status)
+    || isInterruptedStatus(status)
+}
+
 export function asNumber(value: unknown, fallback = 0): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   if (typeof value === 'bigint') {
@@ -227,37 +240,90 @@ export function normalizeAccountUsage(value: unknown): AccountUsageSummary | nul
     return {
       startDate: asString(record.startDate, asString(record.start_date)),
       tokens: asNumber(record.tokens),
+      inputTokens: asNumber(record.inputTokens ?? record.input_tokens),
+      cachedInputTokens: asNumber(record.cachedInputTokens ?? record.cached_input_tokens),
+      outputTokens: asNumber(record.outputTokens ?? record.output_tokens),
+      reasoningOutputTokens: asNumber(record.reasoningOutputTokens ?? record.reasoning_output_tokens),
     }
   }).filter((item) => item.startDate && item.tokens > 0)
 
   const lifetimeTokens = nullableNumber(summary.lifetimeTokens ?? summary.lifetime_tokens)
+  const lifetimeInputTokens = nullableNumber(summary.lifetimeInputTokens ?? summary.lifetime_input_tokens)
+  const lifetimeCachedInputTokens = nullableNumber(summary.lifetimeCachedInputTokens ?? summary.lifetime_cached_input_tokens)
+  const lifetimeOutputTokens = nullableNumber(summary.lifetimeOutputTokens ?? summary.lifetime_output_tokens)
+  const lifetimeReasoningTokens = nullableNumber(summary.lifetimeReasoningTokens ?? summary.lifetime_reasoning_tokens)
   const peakDailyTokens = nullableNumber(summary.peakDailyTokens ?? summary.peak_daily_tokens)
   const currentStreakDays = nullableNumber(summary.currentStreakDays ?? summary.current_streak_days)
   const longestStreakDays = nullableNumber(summary.longestStreakDays ?? summary.longest_streak_days)
   const longestRunningTurnSec = nullableNumber(summary.longestRunningTurnSec ?? summary.longest_running_turn_sec)
+  const runtime = asString(response.runtime)
 
-  const hasSummary = [lifetimeTokens, peakDailyTokens, currentStreakDays, longestStreakDays, longestRunningTurnSec]
-    .some((item) => item != null && item > 0)
+  const hasSummary = [
+    lifetimeTokens,
+    lifetimeInputTokens,
+    lifetimeCachedInputTokens,
+    lifetimeOutputTokens,
+    lifetimeReasoningTokens,
+    peakDailyTokens,
+    currentStreakDays,
+    longestStreakDays,
+    longestRunningTurnSec,
+  ].some((item) => item != null && item > 0)
   if (!hasSummary && !dailyBuckets.length) return null
 
   return {
     lifetimeTokens,
+    lifetimeInputTokens,
+    lifetimeCachedInputTokens,
+    lifetimeOutputTokens,
+    lifetimeReasoningTokens,
     peakDailyTokens,
     currentStreakDays,
     longestStreakDays,
     longestRunningTurnSec,
     dailyBuckets,
+    runtime: runtime || undefined,
   }
 }
 
 function normalizeTokenBreakdown(value: unknown): TokenUsageBreakdown {
   const record = asRecord(value)
+  // Codex app-server / rollouts use snake_case; Grok may use either.
+  const inputTokens = asNumber(record.inputTokens ?? record.input_tokens ?? record.prompt_tokens)
+  const cachedInputTokens = asNumber(
+    record.cachedInputTokens
+    ?? record.cached_input_tokens
+    ?? record.cache_read_input_tokens
+    ?? record.cachedReadTokens
+    ?? record.cacheReadInputTokens,
+  )
+  const outputTokens = asNumber(record.outputTokens ?? record.output_tokens ?? record.completion_tokens)
+  const reasoningOutputTokens = asNumber(
+    record.reasoningOutputTokens
+    ?? record.reasoning_output_tokens
+    ?? record.reasoning_tokens
+    ?? record.reasoningTokens,
+  )
+  let totalTokens = asNumber(record.totalTokens ?? record.total_tokens)
+  if (totalTokens <= 0) {
+    totalTokens = inputTokens + cachedInputTokens + outputTokens + reasoningOutputTokens
+  }
+  // Codex often reports input_tokens as FULL prompt (includes cache). Prefer uncached for display.
+  let uncachedInput = inputTokens
+  if (
+    cachedInputTokens > 0
+    && inputTokens >= cachedInputTokens
+    && totalTokens > 0
+    && Math.abs(totalTokens - (inputTokens + outputTokens)) <= 2
+  ) {
+    uncachedInput = Math.max(0, inputTokens - cachedInputTokens)
+  }
   return {
-    inputTokens: asNumber(record.inputTokens),
-    cachedInputTokens: asNumber(record.cachedInputTokens),
-    outputTokens: asNumber(record.outputTokens),
-    reasoningOutputTokens: asNumber(record.reasoningOutputTokens),
-    totalTokens: asNumber(record.totalTokens),
+    inputTokens: uncachedInput,
+    cachedInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens,
   }
 }
 
@@ -446,7 +512,14 @@ function normalizeReasoningParts(value: unknown): string {
       .map((part) => {
         if (typeof part === 'string') return part.trim()
         const record = asRecord(part)
-        return normalizeTextValue(record.text ?? record.content ?? record.summary ?? part).trim()
+        // Official shapes: { type: 'summary_text'|'reasoning_text', text }
+        return normalizeTextValue(
+          record.text
+          ?? record.content
+          ?? record.summary
+          ?? record.value
+          ?? part,
+        ).trim()
       })
       .filter(Boolean)
       .join('\n\n')
