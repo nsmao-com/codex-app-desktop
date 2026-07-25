@@ -264,6 +264,8 @@ export const useGrokStore = defineStore('grok', () => {
   const search = shallowRef('')
   let eventUnsub: (() => void) | null = null
   let sessionsLoadedAt = 0
+  let sessionsLoadedKey = ''
+  let sessionLoadSequence = 0
   let enterInFlight: Promise<void> | null = null
   let queuedSequence = 0
   /** pending/local session id → native Grok session id (and reverse lookups). */
@@ -922,17 +924,34 @@ export const useGrokStore = defineStore('grok', () => {
   }
 
   async function loadSessions(force = false): Promise<void> {
+    const requestedBackend = backendId.value
+    const requestedWorkspace = workspacePath.value
+    const requestedSearch = search.value.trim()
+    const requestKey = `${requestedBackend}\n${requestedWorkspace.trim().toLowerCase()}\n${requestedSearch}`
     // Avoid rescanning ~/.grok on every tab flip — that is the main switch hitch.
-    if (!force && sessions.value.length > 0 && Date.now() - sessionsLoadedAt < 20_000 && !search.value.trim()) {
+    if (!force && sessions.value.length > 0 && sessionsLoadedKey === requestKey && Date.now() - sessionsLoadedAt < 20_000) {
       return
     }
+    const sequence = ++sessionLoadSequence
     // Workspace is preferred for ordering/active group, but native sessions can list across projects.
-    const workspace = workspacePath.value
     try {
-      const list = await listGrokSessions(backendId.value, workspace, search.value.trim())
+      const list = await listGrokSessions(requestedBackend, requestedWorkspace, requestedSearch)
+      if (
+        sequence !== sessionLoadSequence
+        || requestedBackend !== backendId.value
+        || !sameWorkspacePath(requestedWorkspace, workspacePath.value)
+        || requestedSearch !== search.value.trim()
+      ) return
       sessions.value = list ?? []
       sessionsLoadedAt = Date.now()
+      sessionsLoadedKey = requestKey
     } catch (error) {
+      if (
+        sequence !== sessionLoadSequence
+        || requestedBackend !== backendId.value
+        || !sameWorkspacePath(requestedWorkspace, workspacePath.value)
+        || requestedSearch !== search.value.trim()
+      ) return
       sessions.value = []
       const message = errorMessage(error)
       if (/unknown bound method|binding call failed/i.test(message)) {

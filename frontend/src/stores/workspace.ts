@@ -23,6 +23,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const inspectedDiffPath = shallowRef('')
   const diffSidebarOpen = shallowRef(false)
   const diffSource = shallowRef<'file' | 'turn'>('file')
+  let workspaceSwitchSequence = 0
+  let workspaceRefreshSequence = 0
 
   const currentPath = computed(() => workspace.value?.path ?? '')
   const changes = computed(() => workspace.value?.changes ?? [])
@@ -30,14 +32,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const branch = computed(() => workspace.value?.branch ?? '')
 
   async function selectWorkspace(): Promise<string> {
+    const runtime = appStore.activeRuntime
+    const sequence = ++workspaceSwitchSequence
+    workspaceRefreshSequence += 1
     try {
-      const selected = appStore.isGrokMode
+      const selected = runtime === 'grok'
         ? await backend.SelectGrokWorkspace()
-        : appStore.isClaudeMode
+        : runtime === 'claude'
           ? await selectClaudeWorkspace() as WorkspaceInfo
           : await backend.SelectWorkspace()
-      if (!selected.path) return ''
-      await activateWorkspace(selected)
+      if (sequence !== workspaceSwitchSequence || appStore.activeRuntime !== runtime || !selected.path) return ''
+      await activateWorkspace(selected, runtime)
       return selected.path
     } catch (error) {
       notify('error', translate('notifications.workspaceNotOpened'), errorMessage(error))
@@ -50,14 +55,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (sameWorkspace(path, appStore.currentWorkspacePath)) {
       return true
     }
+    const runtime = appStore.activeRuntime
+    const sequence = ++workspaceSwitchSequence
+    workspaceRefreshSequence += 1
     switchingWorkspace.value = true
     try {
-      const selected = appStore.isGrokMode
+      const selected = runtime === 'grok'
         ? await backend.UseGrokWorkspace(path)
-        : appStore.isClaudeMode
+        : runtime === 'claude'
           ? await useClaudeWorkspace(path) as WorkspaceInfo
           : await backend.UseWorkspace(path)
-      await activateWorkspace(selected)
+      if (sequence !== workspaceSwitchSequence || appStore.activeRuntime !== runtime) return false
+      await activateWorkspace(selected, runtime)
       return true
     } catch (error) {
       notify('error', translate('notifications.workspaceNotOpened'), errorMessage(error))
@@ -67,9 +76,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function activateWorkspace(selected: WorkspaceInfo): Promise<void> {
+  async function activateWorkspace(selected: WorkspaceInfo, runtime: 'codex' | 'claude' | 'grok'): Promise<void> {
     hydrateWorkspace(selected)
-    if (appStore.isGrokMode) {
+    if (runtime === 'grok') {
       // SelectGrokWorkspace / UseGrokWorkspace already persisted Grok workspace on disk.
       appStore.settings = {
         ...appStore.settings,
@@ -81,7 +90,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       }
       return
     }
-    if (appStore.isClaudeMode) {
+    if (runtime === 'claude') {
       appStore.settings = {
         ...appStore.settings,
         claudeWorkspace: selected.path,
@@ -102,11 +111,15 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function hydrateActiveRuntimeWorkspace(): Promise<void> {
+    const sequence = ++workspaceRefreshSequence
+    const runtime = appStore.activeRuntime
     const path = appStore.currentWorkspacePath
     if (!path) {
       workspace.value = null
       return
     }
+    if (!await appStore.ensureActiveRuntimeSynced(runtime)) return
+    if (sequence !== workspaceRefreshSequence || appStore.activeRuntime !== runtime || !sameWorkspace(path, appStore.currentWorkspacePath)) return
     // Same path already shown — skip disk I/O so runtime tab stays snappy.
     if (workspace.value?.path && sameWorkspace(workspace.value.path, path)) {
       return
@@ -124,7 +137,13 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     // Background refresh via active-runtime workspace (Grok or Codex).
     try {
       const selected = await backend.RefreshWorkspace()
-      if (selected?.path) hydrateWorkspace(selected)
+      if (
+        sequence === workspaceRefreshSequence
+        && appStore.activeRuntime === runtime
+        && sameWorkspace(path, appStore.currentWorkspacePath)
+        && selected?.path
+        && sameWorkspace(selected.path, path)
+      ) hydrateWorkspace(selected)
     } catch {
       // Keep optimistic snapshot if the path is temporarily unavailable.
     }
@@ -135,9 +154,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function refreshWorkspace(): Promise<void> {
-    if (!workspace.value?.path) return
+    const sequence = ++workspaceRefreshSequence
+    const runtime = appStore.activeRuntime
+    const path = appStore.currentWorkspacePath
+    if (!path || !await appStore.ensureActiveRuntimeSynced(runtime)) return
     try {
-      workspace.value = normalizeWorkspace(await backend.RefreshWorkspace())
+      const selected = normalizeWorkspace(await backend.RefreshWorkspace())
+      if (
+        sequence === workspaceRefreshSequence
+        && appStore.activeRuntime === runtime
+        && sameWorkspace(path, appStore.currentWorkspacePath)
+        && sameWorkspace(selected.path, path)
+      ) workspace.value = selected
     } catch (error) {
       notify('warning', translate('notifications.gitUnavailable'), errorMessage(error))
     }

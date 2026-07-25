@@ -5,10 +5,13 @@ package codex
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
 )
+
+var windowsCodexShimTargetPattern = regexp.MustCompile(`(?i)%(?:dp0%|~dp0)[\\/]+([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
 
 // enrichProcessPath merges Machine/User PATH and common Node/pnpm/npm install
 // directories into this process. GUI apps launched from Explorer often miss
@@ -167,16 +170,46 @@ func resolveWindowsExtraCommands() (commandSpec, bool) {
 			if jsInfo, err := os.Stat(item.js); err != nil || jsInfo.IsDir() {
 				continue
 			}
-			nodePath, err := execLookPath("node.exe")
-			if err != nil {
-				nodePath, err = execLookPath("node")
+			if spec, ok := resolveBundledCodexBinary(item.js); ok {
+				return spec, true
 			}
-			if err != nil {
-				continue
-			}
-			return commandSpec{path: nodePath, prefixArgs: []string{item.js}}, true
+			continue
 		}
-		return commandSpec{path: item.cmd}, true
+		if strings.EqualFold(filepath.Ext(item.cmd), ".exe") {
+			return commandSpec{path: item.cmd}, true
+		}
+		if spec, ok := resolveWindowsCodexShim(item.cmd); ok {
+			return spec, true
+		}
+	}
+	return commandSpec{}, false
+}
+
+func resolveWindowsCodexShim(commandPath string) (commandSpec, bool) {
+	content, err := os.ReadFile(commandPath)
+	if err != nil {
+		return commandSpec{}, false
+	}
+	matches := windowsCodexShimTargetPattern.FindAllSubmatch(content, -1)
+	if len(matches) == 0 {
+		return commandSpec{}, false
+	}
+	for index := len(matches) - 1; index >= 0; index-- {
+		match := matches[index]
+		if len(match) < 2 {
+			continue
+		}
+		relative := filepath.FromSlash(strings.ReplaceAll(string(match[1]), `\`, `/`))
+		target := filepath.Clean(filepath.Join(filepath.Dir(commandPath), relative))
+		if info, err := os.Stat(target); err != nil || info.IsDir() {
+			continue
+		}
+		if strings.EqualFold(filepath.Ext(target), ".exe") {
+			return commandSpec{path: target}, true
+		}
+		if spec, ok := resolveBundledCodexBinary(target); ok {
+			return spec, true
+		}
 	}
 	return commandSpec{}, false
 }

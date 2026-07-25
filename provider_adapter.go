@@ -596,7 +596,10 @@ func (s *AppService) executeExternalTurn(
 		// observe provider-owned tool history without mixing it into the text stream.
 		onStream("session", sessionID)
 	}
-	commandPath, commandArgs := providerCommand(executable, args)
+	commandPath, commandArgs, resolveErr := providerCommand(executable, args)
+	if resolveErr != nil {
+		return "", sessionID, nil, resolveErr
+	}
 	command := exec.CommandContext(ctx, commandPath, commandArgs...)
 	command.Dir = workspace
 	stdout, err := command.StdoutPipe()
@@ -607,9 +610,11 @@ func (s *AppService) executeExternalTurn(
 	if err != nil {
 		return "", sessionID, nil, err
 	}
-	if err := command.Start(); err != nil {
+	cleanup, err := startManagedBackgroundProcess(ctx, command)
+	if err != nil {
 		return "", sessionID, nil, err
 	}
+	defer cleanup()
 	stderrResult := make(chan []byte, 1)
 	go func() {
 		payload, _ := io.ReadAll(io.LimitReader(stderr, 256*1024))

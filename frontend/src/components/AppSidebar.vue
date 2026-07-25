@@ -272,24 +272,20 @@ function visibleClaudeSessions(group: { path: string; sessions: Array<{
 }
 
 /** Open a session; if it lives under another project folder, switch workspace first (Codex-style). */
-function openClaudeSession(group: { path: string; active: boolean }, sessionId: string): void {
+async function openClaudeSession(group: { path: string; active: boolean }, sessionId: string): Promise<void> {
   if (!group.active && group.path && group.path !== '(unknown)') {
-    void workspaceStore.useWorkspace(group.path).then(() => {
-      void claudeStore.openSession(sessionId, { switchWorkspace: false })
-    })
-    return
+    if (!await workspaceStore.useWorkspace(group.path)) return
+    await claudeStore.openSession(sessionId, { switchWorkspace: false })
+  } else {
+    await claudeStore.openSession(sessionId)
   }
-  void claudeStore.openSession(sessionId)
 }
 
-function openGrokSession(group: { path: string; active: boolean }, sessionId: string): void {
+async function openGrokSession(group: { path: string; active: boolean }, sessionId: string): Promise<void> {
   if (!group.active && group.path && group.path !== '(unknown)') {
-    void workspaceStore.useWorkspace(group.path).then(() => {
-      void grokStore.openSession(sessionId)
-    })
-    return
+    if (!await workspaceStore.useWorkspace(group.path)) return
   }
-  void grokStore.openSession(sessionId)
+  await grokStore.openSession(sessionId)
 }
 
 async function newInClaudeProject(group: { path: string; active: boolean }, event?: Event): Promise<void> {
@@ -297,7 +293,7 @@ async function newInClaudeProject(group: { path: string; active: boolean }, even
   event?.preventDefault()
   if (!group.path || group.path === '(unknown)') return
   if (!group.active) {
-    await workspaceStore.useWorkspace(group.path)
+    if (!await workspaceStore.useWorkspace(group.path)) return
   }
   claudeStore.newSession()
 }
@@ -307,7 +303,7 @@ async function newInGrokProject(group: { path: string; active: boolean }, event?
   event?.preventDefault()
   if (!group.path || group.path === '(unknown)') return
   if (!group.active) {
-    await workspaceStore.useWorkspace(group.path)
+    if (!await workspaceStore.useWorkspace(group.path)) return
   }
   grokStore.newSession()
 }
@@ -336,24 +332,30 @@ function openThread(group: ThreadGroup, thread: ThreadSummary): void {
   }
 }
 
-function switchWorkspace(path: string): void {
+async function switchWorkspace(path: string): Promise<void> {
   if (appStore.isGrokMode) {
-    void workspaceStore.useWorkspace(path)
-    void grokStore.loadSessions()
+    if (!await workspaceStore.useWorkspace(path)) return
+    await grokStore.loadSessions(true)
     return
   }
   if (appStore.isClaudeMode) {
-    void workspaceStore.useWorkspace(path)
-    void claudeStore.loadSessions()
+    if (!await workspaceStore.useWorkspace(path)) return
+    await claudeStore.loadSessions()
     return
   }
-  void codexStore.switchProject(path)
+  await codexStore.switchProject(path)
 }
 
 function chooseWorkspace(): void {
   if (appStore.isGrokMode) {
-    void workspaceStore.selectWorkspace().then(() => {
-      void grokStore.loadSessions()
+    void workspaceStore.selectWorkspace().then((path) => {
+      if (path) void grokStore.loadSessions(true)
+    })
+    return
+  }
+  if (appStore.isClaudeMode) {
+    void workspaceStore.selectWorkspace().then((path) => {
+      if (path) void claudeStore.loadSessions()
     })
     return
   }

@@ -23,6 +23,10 @@ const terminalStore = useTerminalStore()
 const browserStore = useBrowserStore()
 const commandPaletteOpen = shallowRef(false)
 const memoriesOpen = shallowRef(false)
+let runtimeSwitchReady = false
+let runtimeActivationSequence = 0
+let bootstrapActivationRuntime: 'codex' | 'claude' | 'grok' | null = null
+let bootstrapActivationCompleted = false
 
 useNavigationHistory()
 
@@ -47,50 +51,61 @@ function openMemoriesDialog(): void {
   memoriesOpen.value = true
 }
 
+async function activateRuntime(runtime: 'codex' | 'claude' | 'grok'): Promise<void> {
+  const sequence = ++runtimeActivationSequence
+  if (!await appStore.ensureActiveRuntimeSynced(runtime)) return
+  await workspaceStore.hydrateActiveRuntimeWorkspace()
+  if (sequence !== runtimeActivationSequence || appStore.activeRuntime !== runtime) return
+  if (runtime === 'grok') {
+    await grokStore.enterRuntime()
+    return
+  }
+  if (runtime === 'claude') {
+    await claudeStore.enterRuntime()
+    return
+  }
+  await codexStore.loadThreads()
+  if (
+    !codexStore.isReady
+    && appStore.settings.workspace
+    && appStore.settings.autoConnect
+    && appStore.codexAvailable
+  ) {
+    void codexStore.connect(appStore.settings.workspace)
+  }
+}
+
 onMounted(() => {
   codexStore.bootstrapEvents()
   grokStore.bootstrapEvents()
   claudeStore.bootstrapEvents()
   void appStore.bootstrap().then(async () => {
     if (appStore.workspace) workspaceStore.hydrateWorkspace(appStore.workspace)
-    else void workspaceStore.hydrateActiveRuntimeWorkspace()
     void codexStore.loadModels()
     void codexStore.loadModelProviders()
-    if (appStore.isGrokMode) {
-      await grokStore.enterRuntime()
-      return
-    }
-    if (appStore.isClaudeMode) {
-      await claudeStore.enterRuntime()
-      return
-    }
-    if (appStore.settings.workspace && appStore.settings.autoConnect && appStore.codexAvailable) {
-      void codexStore.connect(appStore.settings.workspace)
+    bootstrapActivationRuntime = appStore.activeRuntime
+    await activateRuntime(bootstrapActivationRuntime)
+    bootstrapActivationCompleted = true
+  }).finally(() => {
+    runtimeSwitchReady = true
+    const currentRuntime = appStore.activeRuntime
+    if (!bootstrapActivationCompleted || currentRuntime !== bootstrapActivationRuntime) {
+      void activateRuntime(currentRuntime)
     }
   })
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('nice-codex:open-memories', openMemoriesDialog)
 })
 
-// Defer heavy work until after the tab paint — double-loading here was freezing the switch.
+// Defer heavy work until after the tab paint. Bootstrap owns the first activation.
 watch(
   () => appStore.activeRuntime,
-  (runtime) => {
-    window.setTimeout(() => {
-      void workspaceStore.hydrateActiveRuntimeWorkspace()
-      if (runtime === 'grok') {
-        void grokStore.enterRuntime(false)
-        return
-      }
-      if (runtime === 'claude') {
-        void claudeStore.enterRuntime(false)
-        return
-      }
-      void codexStore.loadThreads()
-      if (!codexStore.isReady && appStore.settings.workspace && appStore.settings.autoConnect) {
-        void codexStore.connect(appStore.settings.workspace)
-      }
+  (runtime, _previous, onCleanup) => {
+    if (!runtimeSwitchReady) return
+    const timer = window.setTimeout(() => {
+      void activateRuntime(runtime)
     }, 0)
+    onCleanup(() => window.clearTimeout(timer))
   },
 )
 

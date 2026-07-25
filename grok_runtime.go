@@ -143,18 +143,27 @@ func detectGrokRuntime() GrokRuntimeStatus {
 	status.BuildExecutable = executable
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	if output, err := exec.CommandContext(ctx, executable, "--version").CombinedOutput(); err == nil {
-		status.BuildVersion = strings.TrimSpace(firstOutputLine(string(output)))
-	} else if len(output) > 0 {
-		// Some builds print version to stderr on non-zero codes; still capture it.
-		if line := strings.TrimSpace(firstOutputLine(string(output))); line != "" {
-			status.BuildVersion = line
+	versionPath, versionArgs, resolveErr := providerCommand(executable, []string{"--version"})
+	if resolveErr == nil {
+		versionCommand := exec.CommandContext(ctx, versionPath, versionArgs...)
+		output, versionErr := runManagedCombinedOutput(ctx, versionCommand)
+		if versionErr == nil {
+			status.BuildVersion = strings.TrimSpace(firstOutputLine(string(output)))
+		} else if len(output) > 0 {
+			// Some builds print version to stderr on non-zero codes; still capture it.
+			if line := strings.TrimSpace(firstOutputLine(string(output))); line != "" {
+				status.BuildVersion = line
+			}
 		}
 	}
 	ctxAuth, cancelAuth := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancelAuth()
-	if err := exec.CommandContext(ctxAuth, executable, "models").Run(); err == nil {
-		status.BuildAuthenticated = true
+	authPath, authArgs, authResolveErr := providerCommand(executable, []string{"models"})
+	if authResolveErr == nil {
+		authCommand := exec.CommandContext(ctxAuth, authPath, authArgs...)
+		if _, err := runManagedCombinedOutput(ctxAuth, authCommand); err == nil {
+			status.BuildAuthenticated = true
+		}
 	}
 	return status
 }
@@ -200,8 +209,11 @@ func (s *AppService) SetActiveRuntime(runtimeID string) (map[string]any, error) 
 	s.settings = settings
 	s.mu.Unlock()
 	workspace := settings.Workspace
-	if runtimeID == "grok" {
+	switch runtimeID {
+	case "grok":
 		workspace = settings.GrokWorkspace
+	case "claude":
+		workspace = settings.ClaudeWorkspace
 	}
 	result := map[string]any{"runtime": runtimeID}
 	if strings.TrimSpace(workspace) != "" {
@@ -411,7 +423,12 @@ func (s *AppService) DeleteGrokSession(backend, sessionID string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, executable, "sessions", "delete", sessionID).CombinedOutput()
+	commandPath, commandArgs, resolveErr := providerCommand(executable, []string{"sessions", "delete", sessionID})
+	if resolveErr != nil {
+		return resolveErr
+	}
+	command := exec.CommandContext(ctx, commandPath, commandArgs...)
+	output, err := runManagedCombinedOutput(ctx, command)
 	if err != nil {
 		return fmt.Errorf("delete Grok session: %s", strings.TrimSpace(string(output)))
 	}

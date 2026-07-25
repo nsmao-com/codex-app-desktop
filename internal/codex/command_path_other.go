@@ -145,6 +145,10 @@ func resolveWindowsExtraCommands() (commandSpec, bool) {
 	return commandSpec{}, false
 }
 
+func resolveWindowsCodexShim(_ string) (commandSpec, bool) {
+	return commandSpec{}, false
+}
+
 // resolveUnixExtraCommands looks for codex outside PATH (npm global, homebrew).
 func resolveUnixExtraCommands() (commandSpec, bool) {
 	home, _ := os.UserHomeDir()

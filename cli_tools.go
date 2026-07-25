@@ -139,21 +139,25 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 
 	// Ensure child process inherits the enriched PATH (critical on macOS GUI).
 	codex.EnrichPathForLookups()
-	var cmd *exec.Cmd
+	var commandArgs []string
 	switch pm {
 	case "pnpm":
-		cmd = exec.CommandContext(ctx, packageManagerBinary("pnpm"), "add", "-g", spec.npmPkg+"@latest")
+		commandArgs = []string{"add", "-g", spec.npmPkg + "@latest"}
 	case "npm":
-		cmd = exec.CommandContext(ctx, packageManagerBinary("npm"), "install", "-g", spec.npmPkg+"@latest")
+		commandArgs = []string{"install", "-g", spec.npmPkg + "@latest"}
 	case "yarn":
-		cmd = exec.CommandContext(ctx, packageManagerBinary("yarn"), "global", "add", spec.npmPkg+"@latest")
+		commandArgs = []string{"global", "add", spec.npmPkg + "@latest"}
 	default:
 		return CLIToolActionResult{}, fmt.Errorf("unsupported package manager: %s", pm)
 	}
-	configureBackgroundProcess(cmd)
+	commandPath, resolvedArgs, resolveErr := providerCommand(packageManagerBinary(pm), commandArgs)
+	if resolveErr != nil {
+		return CLIToolActionResult{}, resolveErr
+	}
+	cmd := exec.CommandContext(ctx, commandPath, resolvedArgs...)
 	cmd.Env = os.Environ()
 
-	output, err := cmd.CombinedOutput()
+	output, err := runManagedCombinedOutput(ctx, cmd)
 	text := strings.TrimSpace(string(output))
 	if len(text) > 8000 {
 		text = text[len(text)-8000:]
@@ -270,7 +274,9 @@ func detectNodePackageManager() (manager string, nodeOK bool, nodeVersion string
 		nodeOK = true
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		if out, err := exec.CommandContext(ctx, nodePath, "--version").CombinedOutput(); err == nil {
+		command := exec.CommandContext(ctx, nodePath, "--version")
+		configureBackgroundProcess(command)
+		if out, err := command.CombinedOutput(); err == nil {
 			nodeVersion = strings.TrimSpace(string(out))
 		}
 	}

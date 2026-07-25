@@ -287,13 +287,6 @@ func (s *AppService) Settings() UserSettings {
 }
 
 func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error) {
-	current := s.Settings()
-	settings.Workspace = current.Workspace
-	settings.RecentWorkspaces = current.RecentWorkspaces
-	settings.GrokWorkspace = current.GrokWorkspace
-	settings.GrokRecentWorkspaces = current.GrokRecentWorkspaces
-	settings.ClaudeWorkspace = current.ClaudeWorkspace
-	settings.ClaudeRecentWorkspaces = current.ClaudeRecentWorkspaces
 	settings.Workspace = strings.TrimSpace(settings.Workspace)
 	settings.Model = strings.TrimSpace(settings.Model)
 	settings.ModelProvider = "" // Codex-only: never persist Claude/Gemini/Grok workbench providers
@@ -384,14 +377,25 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	}
 	// Disk AGENTS.md is only mutated by SaveGlobalInstructions — never wipe it from generic preference saves.
 	settings.CustomInstructions = readCodexPersonalInstructions()
+	s.mu.Lock()
+	// Workspace/runtime fields have dedicated mutation APIs. Merge them while
+	// holding the same lock as the write so an older preferences request cannot
+	// overwrite a folder or runtime selected concurrently.
+	latest := cloneSettings(s.settings)
+	settings.Workspace = latest.Workspace
+	settings.RecentWorkspaces = latest.RecentWorkspaces
+	settings.GrokWorkspace = latest.GrokWorkspace
+	settings.GrokRecentWorkspaces = latest.GrokRecentWorkspaces
+	settings.ClaudeWorkspace = latest.ClaudeWorkspace
+	settings.ClaudeRecentWorkspaces = latest.ClaudeRecentWorkspaces
+	settings.ActiveRuntime = latest.ActiveRuntime
 	// Onboarding completion is monotonic — concurrent preference saves must not reopen the wizard.
-	if current.OnboardingCompleted || settings.OnboardingCompleted || strings.TrimSpace(settings.Workspace) != "" {
+	if latest.OnboardingCompleted || settings.OnboardingCompleted || strings.TrimSpace(settings.Workspace) != "" {
 		settings.OnboardingCompleted = true
 	}
 	flags := readCodexFeatureFlags()
 	flags.BrowserUseFullCDP = settings.BrowserFullCDP
 	_ = writeCodexFeatureFlags(flags)
-	s.mu.Lock()
 	err := writeSettings(s.settingsPath, settings)
 	if err == nil {
 		s.settings = cloneSettings(settings)
@@ -1114,7 +1118,7 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 	}
 
 	// App-server process restarts drop in-memory threads; turn/start then 422s
-	// "thread not found". Always re-bind before starting a turn.
+	// "thread not found". Existing sessions must be resumed once before sending.
 	if session == nil || session.BackendRef != "" {
 		if _, err := s.loadBackendThread(backendID, workspace, settings, session); err != nil {
 			return nil, fmt.Errorf("load thread for send: %w", err)
@@ -2986,14 +2990,9 @@ func (s *AppService) loadBackendThread(backendID, workspace string, settings Use
 	if err != nil {
 		return nil, err
 	}
-	// Fast path: already loaded in this app-server process.
-	if result, err := s.call("thread/read", map[string]any{
-		"threadId":      backendID,
-		"includeTurns":  true,
-	}); err == nil {
-		s.rememberThread(backendID, cleanWorkspace)
-		return result, nil
-	}
+	// thread/read can read rollout history from disk without registering the
+	// thread in the current app-server process. Only thread/resume guarantees a
+	// subsequent turn/start can find it, and it safely rejoins a running thread.
 	params := map[string]any{
 		"threadId":       backendID,
 		"cwd":            cleanWorkspace,
@@ -3029,10 +3028,7 @@ func (s *AppService) ensureCodexBackendThread(session *SessionRecord, settings U
 		return "", errors.New("session not found")
 	}
 	if session.BackendRef != "" {
-		// Existing Codex thread — must be resumed after app-server restart.
-		if _, err := s.loadBackendThread(session.BackendRef, workspace, settings, session); err != nil {
-			return "", fmt.Errorf("resume codex thread: %w", err)
-		}
+		// SendMessage performs the single resume immediately before turn/start.
 		return session.BackendRef, nil
 	}
 	params := map[string]any{

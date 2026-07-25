@@ -58,6 +58,12 @@ func resolveCommand() (commandSpec, error) {
 			return commandSpec{}, err
 		}
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			if runtime.GOOS == "windows" && (strings.EqualFold(filepath.Ext(path), ".cmd") || strings.EqualFold(filepath.Ext(path), ".bat")) {
+				if spec, ok := resolveWindowsCodexShim(path); ok {
+					return spec, nil
+				}
+				return commandSpec{}, errors.New("CODEX_BIN points to an unsupported Windows command shim")
+			}
 			return commandSpec{path: path}, nil
 		}
 		return commandSpec{}, errors.New("CODEX_BIN does not point to an executable file")
@@ -96,21 +102,39 @@ func resolveWindowsNPMCommand() (commandSpec, bool) {
 	if err != nil {
 		return commandSpec{}, false
 	}
+	return resolveWindowsCodexShim(commandPath)
+}
 
-	scriptPath := filepath.Join(filepath.Dir(commandPath), "node_modules", "@openai", "codex", "bin", "codex.js")
-	if info, err := os.Stat(scriptPath); err != nil || info.IsDir() {
+func resolveBundledCodexBinary(scriptPath string) (commandSpec, bool) {
+	resolvedScript := scriptPath
+	if evaluated, err := filepath.EvalSymlinks(scriptPath); err == nil {
+		resolvedScript = evaluated
+	}
+	packageRoot := filepath.Dir(filepath.Dir(resolvedScript))
+	targetTriple := ""
+	platformPackage := ""
+	switch runtime.GOARCH {
+	case "amd64":
+		targetTriple = "x86_64-pc-windows-msvc"
+		platformPackage = "codex-win32-x64"
+	case "arm64":
+		targetTriple = "aarch64-pc-windows-msvc"
+		platformPackage = "codex-win32-arm64"
+	default:
 		return commandSpec{}, false
 	}
 
-	nodePath, err := execLookPath("node.exe")
-	if err != nil {
-		nodePath, err = execLookPath("node")
+	candidates := []string{
+		filepath.Join(packageRoot, "node_modules", "@openai", platformPackage, "vendor", targetTriple, "bin", "codex.exe"),
+		filepath.Join(packageRoot, "vendor", targetTriple, "bin", "codex.exe"),
+		filepath.Join(filepath.Dir(packageRoot), platformPackage, "vendor", targetTriple, "bin", "codex.exe"),
 	}
-	if err != nil {
-		return commandSpec{}, false
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return commandSpec{path: candidate}, true
+		}
 	}
-
-	return commandSpec{path: nodePath, prefixArgs: []string{scriptPath}}, true
+	return commandSpec{}, false
 }
 
 func execLookPath(name string) (string, error) {

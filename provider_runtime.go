@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,8 @@ import (
 
 	"nice_codex_desktop/internal/codex"
 )
+
+var windowsProviderShimTargetPattern = regexp.MustCompile(`(?i)%(?:dp0%|~dp0)[\\/]+([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
 
 type AgentProviderRuntime struct {
 	ID               string                         `json:"id"`
@@ -915,8 +919,12 @@ func findCommand(candidates []string) string {
 func runProbeCommand(executable string, args []string, timeout time.Duration) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	command, commandArgs := providerCommand(executable, args)
-	output, err := exec.CommandContext(ctx, command, commandArgs...).CombinedOutput()
+	command, commandArgs, resolveErr := providerCommand(executable, args)
+	if resolveErr != nil {
+		return "", resolveErr
+	}
+	cmd := exec.CommandContext(ctx, command, commandArgs...)
+	output, err := runManagedCombinedOutput(ctx, cmd)
 	value := strings.TrimSpace(ansiEscapePattern.ReplaceAllString(string(output), ""))
 	if len(value) > 4096 {
 		value = value[:4096]
@@ -927,24 +935,59 @@ func runProbeCommand(executable string, args []string, timeout time.Duration) (s
 	return value, err
 }
 
-func providerCommand(executable string, args []string) (string, []string) {
+func providerCommand(executable string, args []string) (string, []string, error) {
 	if runtime.GOOS != "windows" {
-		return executable, args
+		return executable, args, nil
 	}
 	switch strings.ToLower(filepath.Ext(executable)) {
 	case ".cmd", ".bat":
-		command := os.Getenv("COMSPEC")
-		if command == "" {
-			command = "cmd.exe"
-		}
-		return command, append([]string{"/d", "/s", "/c", executable}, args...)
+		return resolveWindowsProviderShim(executable, args)
 	case ".ps1":
-		return "powershell.exe", append([]string{
+		command := findCommand([]string{"powershell.exe", "pwsh.exe"})
+		if command == "" {
+			return "", nil, errors.New("PowerShell is required to run this provider")
+		}
+		return command, append([]string{
 			"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", executable,
-		}, args...)
+		}, args...), nil
 	default:
-		return executable, args
+		return executable, args, nil
 	}
+}
+
+func resolveWindowsProviderShim(executable string, args []string) (string, []string, error) {
+	content, err := os.ReadFile(executable)
+	if err != nil {
+		return "", nil, err
+	}
+	matches := windowsProviderShimTargetPattern.FindAllSubmatch(content, -1)
+	if len(matches) == 0 {
+		return "", nil, fmt.Errorf("unsupported Windows command shim: %s", filepath.Base(executable))
+	}
+	// npm/pnpm shims often mention an optional local node.exe before the actual
+	// package entrypoint. Walk backwards so the invoked package target wins.
+	for index := len(matches) - 1; index >= 0; index-- {
+		match := matches[index]
+		if len(match) < 2 {
+			continue
+		}
+		relative := filepath.FromSlash(strings.ReplaceAll(string(match[1]), `\`, `/`))
+		target := filepath.Clean(filepath.Join(filepath.Dir(executable), relative))
+		if info, statErr := os.Stat(target); statErr != nil || info.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(target)) {
+		case ".js", ".cjs", ".mjs":
+			node := findCommand([]string{"node.exe", "node"})
+			if node == "" {
+				return "", nil, errors.New("Node.js is required to run this provider")
+			}
+			return node, append([]string{target}, args...), nil
+		default:
+			return target, args, nil
+		}
+	}
+	return "", nil, fmt.Errorf("provider command target was not found: %s", filepath.Base(executable))
 }
 
 func containsConfigurationError(output string) bool {

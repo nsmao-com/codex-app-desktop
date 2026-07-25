@@ -23,7 +23,7 @@ import {
 } from '../utils/protocol'
 import { translate } from '../i18n'
 
-const AppVersionFallback = '1.0.1'
+const AppVersionFallback = '1.0.4'
 
 const defaultSettings: UserSettings = {
   activeRuntime: 'codex',
@@ -119,7 +119,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.0.1')
+  const appVersion = shallowRef('1.0.4')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -165,6 +165,8 @@ export const useAppStore = defineStore('app', () => {
 
   let preferenceTimer = 0
   let preferenceVersion = 0
+  let preferenceSync: Promise<void> = Promise.resolve()
+  let runtimeSync: Promise<void> = Promise.resolve()
 
   async function bootstrap(): Promise<void> {
     bootstrapping.value = true
@@ -272,15 +274,48 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function setActiveRuntime(runtimeID: 'codex' | 'claude' | 'grok'): Promise<boolean> {
-    if (activeRuntime.value === runtimeID) return true
     const nextRuntime = normalizeRuntimeID(runtimeID)
-    // Instant UI switch — never await backend on the click path (that freezes the tab).
-    settings.value = { ...settings.value, activeRuntime: nextRuntime }
-    setRuntime(nextRuntime)
-    patchSettings({ activeRuntime: nextRuntime })
-    // Background persist; patchSettings already writes ActiveRuntime shortly after.
-    void backend.SetActiveRuntime(nextRuntime).catch(() => undefined)
-    return true
+    if (activeRuntime.value !== nextRuntime) {
+      // Instant UI switch — backend persistence continues in the returned promise.
+      settings.value = { ...settings.value, activeRuntime: nextRuntime }
+      setRuntime(nextRuntime)
+      patchSettings({ activeRuntime: nextRuntime })
+    }
+    // Keep backend transitions ordered while preserving the instant UI switch.
+    const request = runtimeSync
+      .catch(() => undefined)
+      .then(async () => {
+        await backend.SetActiveRuntime(nextRuntime)
+      })
+    runtimeSync = request
+    try {
+      await request
+      return activeRuntime.value === nextRuntime
+    } catch (error) {
+      if (activeRuntime.value === nextRuntime) {
+        notify('error', translate('sidebar.runtimeSwitchFailed'), errorMessage(error))
+      }
+      return false
+    }
+  }
+
+  async function ensureActiveRuntimeSynced(runtimeID: 'codex' | 'claude' | 'grok'): Promise<boolean> {
+    try {
+      await runtimeSync
+    } catch {
+      const retry = runtimeSync
+        .catch(() => undefined)
+        .then(async () => {
+          await backend.SetActiveRuntime(runtimeID)
+        })
+      runtimeSync = retry
+      try {
+        await retry
+      } catch {
+        return false
+      }
+    }
+    return activeRuntime.value === runtimeID
   }
 
   /** Merge saved prefs without dropping Grok-specific fields or activeRuntime. */
@@ -496,12 +531,14 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function savePreferences(next: UserSettings, options: { silent?: boolean } = {}): Promise<void> {
+    const version = beginPreferenceWrite()
     try {
-      const saved = await backend.SavePreferences({
+      const saved = await queuePreferenceWrite({
         ...next,
         recentWorkspaces: next.recentWorkspaces ?? [],
         activeRuntime: normalizeRuntimeID(next.activeRuntime),
       })
+      if (version !== preferenceVersion) return
       settings.value = mergeSavedSettings(saved, next)
       applyAppearance(settings.value)
       setRuntime(normalizeRuntimeID(settings.value.activeRuntime))
@@ -512,7 +549,9 @@ export const useAppStore = defineStore('app', () => {
         notify('success', translate('notifications.preferencesSaved'), translate('notifications.preferencesSavedHint'))
       }
     } catch (error) {
-      notify('error', translate('notifications.preferencesFailed'), errorMessage(error))
+      if (version === preferenceVersion) {
+        notify('error', translate('notifications.preferencesFailed'), errorMessage(error))
+      }
       throw error
     }
   }
@@ -526,12 +565,16 @@ export const useAppStore = defineStore('app', () => {
         ? 'dark'
         : systemIsLight ? 'dark' : 'light'
     const next = { ...previous, theme: nextTheme }
+    const version = beginPreferenceWrite()
     settings.value = next
     applyAppearance(next)
     try {
-      const saved = await backend.SavePreferences(next)
-      settings.value = { ...saved, recentWorkspaces: saved.recentWorkspaces ?? [], customModels: saved.customModels ?? [] }
+      const saved = await queuePreferenceWrite(next)
+      if (version !== preferenceVersion) return
+      settings.value = mergeSavedSettings(saved, next)
+      applyAppearance(settings.value)
     } catch (error) {
+      if (version !== preferenceVersion) return
       settings.value = previous
       applyAppearance(previous)
       notify('error', translate('notifications.preferencesFailed'), errorMessage(error))
@@ -650,7 +693,7 @@ export const useAppStore = defineStore('app', () => {
   async function persistAgentPreferences(version: number): Promise<void> {
     const next = settings.value
     try {
-      const saved = await backend.SavePreferences(next)
+      const saved = await queuePreferenceWrite(next)
       if (version === preferenceVersion) {
         settings.value = mergeSavedSettings(saved, next)
         setRuntime(normalizeRuntimeID(settings.value.activeRuntime))
@@ -660,6 +703,23 @@ export const useAppStore = defineStore('app', () => {
         notify('error', translate('notifications.agentPreferencesFailed'), errorMessage(error))
       }
     }
+  }
+
+  function beginPreferenceWrite(): number {
+    const version = ++preferenceVersion
+    if (preferenceTimer) {
+      window.clearTimeout(preferenceTimer)
+      preferenceTimer = 0
+    }
+    return version
+  }
+
+  function queuePreferenceWrite(next: UserSettings): Promise<UserSettings> {
+    const request = preferenceSync
+      .catch(() => undefined)
+      .then(() => backend.SavePreferences(next))
+    preferenceSync = request.then(() => undefined, () => undefined)
+    return request
   }
 
   function updateGrokPreferences(partial: Partial<Pick<UserSettings,
@@ -704,6 +764,7 @@ export const useAppStore = defineStore('app', () => {
     bootstrap,
     refreshRuntimes,
     setActiveRuntime,
+    ensureActiveRuntimeSynced,
     savePreferences,
     toggleTheme,
     previewAppearance,

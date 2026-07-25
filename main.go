@@ -4,6 +4,7 @@ import (
 	"embed"
 	"log"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -59,10 +60,11 @@ func main() {
 		BackgroundColour: application.NewRGB(243, 243, 243),
 		URL:              "/",
 		EnableFileDrop:   true,
-		// Hide residual native caption controls if DWM still paints them.
-		MinimiseButtonState: application.ButtonHidden,
-		MaximiseButtonState: application.ButtonHidden,
-		CloseButtonState:    application.ButtonHidden,
+		// Frameless removes the native caption visually. Keep the Windows button
+		// capabilities enabled so taskbar clicks and DWM window actions still work.
+		MinimiseButtonState: application.ButtonEnabled,
+		MaximiseButtonState: application.ButtonEnabled,
+		CloseButtonState:    application.ButtonEnabled,
 		Mac: application.MacWindow{
 			Backdrop: application.MacBackdropTranslucent,
 			TitleBar: application.MacTitleBarHidden,
@@ -75,9 +77,11 @@ func main() {
 	})
 	// Reinforce after construction (docs also allow runtime SetFrameless).
 	window.SetFrameless(true)
-	window.SetMinimiseButtonState(application.ButtonHidden)
-	window.SetMaximiseButtonState(application.ButtonHidden)
-	window.SetCloseButtonState(application.ButtonHidden)
+	if runtime.GOOS == "darwin" {
+		window.SetMinimiseButtonState(application.ButtonHidden)
+		window.SetMaximiseButtonState(application.ButtonHidden)
+		window.SetCloseButtonState(application.ButtonHidden)
+	}
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)

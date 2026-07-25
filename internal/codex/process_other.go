@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 )
 
@@ -14,8 +15,16 @@ func configureProcess(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func attachKillOnCloseJob(_ *os.Process) (func(), error) {
-	return func() {}, nil
+func attachKillOnCloseJob(process *os.Process) (func(), error) {
+	if process == nil || process.Pid <= 0 {
+		return func() {}, nil
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = syscall.Kill(-process.Pid, syscall.SIGKILL)
+		})
+	}, nil
 }
 
 func killProcessTree(pid int) {

@@ -210,6 +210,7 @@ export const useClaudeStore = defineStore('claude', () => {
   const finalizedTurnIds = new Set<string>()
   let eventsBound = false
   let disposed = false
+  let sessionLoadSequence = 0
 
   const workspacePath = computed(() =>
     appStore.settings.claudeWorkspace || appStore.settings.workspace || '',
@@ -677,7 +678,8 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function enterRuntime(refreshSessions = true): Promise<void> {
-    await refreshRuntime()
+    // History is local and should not wait for a slow CLI version/auth probe.
+    void refreshRuntime()
     if (refreshSessions) await loadSessions()
     // Warm Claude token totals (may backfill from ~/.claude/projects).
     void appStore.loadLocalUsage().catch(() => undefined)
@@ -708,10 +710,23 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function loadSessions(): Promise<void> {
+    const sequence = ++sessionLoadSequence
+    const requestedWorkspace = workspacePath.value
+    const requestedSearch = search.value
     try {
-      const list = await listClaudeSessions(workspacePath.value, search.value)
+      const list = await listClaudeSessions(requestedWorkspace, requestedSearch)
+      if (
+        sequence !== sessionLoadSequence
+        || !sameWorkspacePath(requestedWorkspace, workspacePath.value)
+        || requestedSearch !== search.value
+      ) return
       sessions.value = list || []
     } catch (error) {
+      if (
+        sequence !== sessionLoadSequence
+        || !sameWorkspacePath(requestedWorkspace, workspacePath.value)
+        || requestedSearch !== search.value
+      ) return
       notify('error', translate('sidebar.claudeEmpty'), errorMessage(error))
     }
   }

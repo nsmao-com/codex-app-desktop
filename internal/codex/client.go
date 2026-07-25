@@ -121,7 +121,6 @@ func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) e
 	// Best-effort: failure must not block starting Codex.
 	cleanup, cleanupErr := attachKillOnCloseJob(command.Process)
 	if cleanupErr != nil {
-		cleanup = func() {}
 		c.emit(Event{Type: "stderr", Data: map[string]any{
 			"message": "process-tree guard unavailable: " + cleanupErr.Error(),
 		}})
@@ -223,14 +222,14 @@ func (c *Client) Stop() error {
 	pid := 0
 	if command.Process != nil {
 		pid = command.Process.Pid
-		_ = command.Process.Kill()
 	}
 	if cleanup != nil {
-		// Job Object KILL_ON_JOB_CLOSE tears down children even if parent already exited.
+		// Job Object / process-group cleanup tears down the whole tree at once.
 		cleanup()
-	}
-	if pid > 0 {
+	} else if pid > 0 {
+		// Keep the parent alive until taskkill has discovered its descendants.
 		killProcessTree(pid)
+		_ = command.Process.Kill()
 	}
 
 	select {
@@ -438,12 +437,17 @@ func (c *Client) waitLoop(command *exec.Cmd, done chan struct{}) {
 	c.stdin = nil
 	c.done = nil
 	c.status.Running = false
-	if c.status.State == "stopping" || err == nil {
+	stopping := c.status.State == "stopping"
+	if stopping {
 		c.status.State = "disconnected"
 		c.status.Message = "Codex is stopped"
 	} else {
 		c.status.State = "error"
-		c.status.Message = err.Error()
+		if err != nil {
+			c.status.Message = err.Error()
+		} else {
+			c.status.Message = "Codex app-server exited unexpectedly"
+		}
 	}
 	status := c.status
 	close(done)
@@ -452,13 +456,15 @@ func (c *Client) waitLoop(command *exec.Cmd, done chan struct{}) {
 	// Process exited unexpectedly: still close the job so orphan MCP children die.
 	if cleanup != nil {
 		cleanup()
-	}
-	if command.Process != nil && command.Process.Pid > 0 && status.State == "error" {
+	} else if command.Process != nil && command.Process.Pid > 0 && status.State == "error" {
 		killProcessTree(command.Process.Pid)
 	}
 
 	for _, channel := range pending {
 		channel <- rpcResult{err: errors.New("Codex app-server stopped")}
+	}
+	if !stopping {
+		c.emit(Event{Type: "transport-error", Data: map[string]any{"message": status.Message}})
 	}
 	c.emit(Event{Type: "status", Data: status})
 }

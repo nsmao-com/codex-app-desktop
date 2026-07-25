@@ -5,7 +5,6 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -21,22 +20,7 @@ func openPathInOS(path string) error {
 		return err
 	}
 
-	var command *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		if info.IsDir() {
-			command = exec.Command("explorer.exe", path)
-		} else {
-			// explorer.exe selects files; start opens with the default app.
-			command = exec.Command("cmd", "/c", "start", "", path)
-		}
-	case "darwin":
-		command = exec.Command("open", path)
-	default:
-		command = exec.Command("xdg-open", path)
-	}
-	configureBackgroundProcess(command)
-	return command.Start()
+	return openPathWithPlatform(path, info.IsDir())
 }
 
 // OpenLocalPath opens a workspace-local file or folder with the OS default handler.
