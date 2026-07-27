@@ -25,6 +25,7 @@ import {
 import { resolveProviderModelContextWindow } from '@/utils/accountUsage'
 import { normalizeThreadTokenUsage } from '@/utils/protocol'
 import { notify } from '@/utils/notify'
+import { sameWorkspacePath } from '@/utils/workspacePath'
 import { translate } from '@/i18n'
 import { useAppStore } from './app'
 import { useDialogStore } from './dialog'
@@ -181,6 +182,69 @@ function humanizeGrokToolName(name: string): string {
     .join(' ')
 }
 
+function isActiveGrokStatus(status = ''): boolean {
+  const normalized = status.toLowerCase().replace(/[_-]/g, '')
+  return normalized === 'inprogress'
+    || normalized === 'running'
+    || normalized === 'started'
+    || normalized === 'pending'
+    || normalized === 'active'
+}
+
+function finalizeGrokMessages(messages: GrokMessage[], status: string): GrokMessage[] {
+  let terminalStart = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const role = (messages[index]?.role || '').toLowerCase()
+    if (role === 'user' || role === 'human') {
+      terminalStart = index
+      break
+    }
+  }
+  let changed = false
+  const next = messages.map((message, index) => {
+    if (!isActiveGrokStatus(message.status)) return message
+    changed = true
+    return { ...message, status: terminalStart >= 0 && index < terminalStart ? 'completed' : status }
+  })
+  return changed ? next : messages
+}
+
+function mergeGrokDiskWithCurrent(disk: GrokMessage[], current: GrokMessage[]): GrokMessage[] {
+  if (!current.length) return disk
+  const result = [...disk]
+  const ids = new Set(disk.map((message) => message.id).filter(Boolean))
+  const diskUserCounts = new Map<string, number>()
+  const currentUserCounts = new Map<string, number>()
+  let latestDiskTime = 0
+  for (const message of disk) {
+    latestDiskTime = Math.max(latestDiskTime, Number(message.createdAt) || 0)
+    const role = (message.role || '').toLowerCase()
+    if (role !== 'user' && role !== 'human') continue
+    const text = (message.text || '').trim()
+    diskUserCounts.set(text, (diskUserCounts.get(text) || 0) + 1)
+  }
+
+  for (const message of current) {
+    const role = (message.role || '').toLowerCase()
+    const isUser = role === 'user' || role === 'human'
+    const text = isUser ? (message.text || '').trim() : ''
+    const occurrence = isUser ? (currentUserCounts.get(text) || 0) + 1 : 0
+    if (isUser) currentUserCounts.set(text, occurrence)
+    if (message.id && ids.has(message.id)) continue
+    if (isUser) {
+      if (occurrence <= (diskUserCounts.get(text) || 0)) continue
+      result.push(message)
+      if (message.id) ids.add(message.id)
+      continue
+    }
+    if (isActiveGrokStatus(message.status) || (Number(message.createdAt) || 0) >= latestDiskTime) {
+      result.push(message)
+      if (message.id) ids.add(message.id)
+    }
+  }
+  return result
+}
+
 export interface GrokSessionGroup {
   path: string
   name: string
@@ -199,11 +263,6 @@ export interface GrokQueuedMessage {
   createdAt: number
   /** Timeline user row already injected for this queue item. */
   localAppended?: boolean
-}
-
-function sameWorkspacePath(left: string, right: string): boolean {
-  const normalize = (value: string) => value.trim().replace(/[\\/]+$/, '').toLowerCase()
-  return normalize(left) === normalize(right)
 }
 
 function workspaceLeafName(path: string): string {
@@ -254,6 +313,8 @@ export const useGrokStore = defineStore('grok', () => {
   const queuedBySession = shallowRef<Record<string, GrokQueuedMessage[]>>({})
   /** Cumulative text snapshots + sequence numbers protect against bridge reordering. */
   const streamSequenceByTurn = new Map<string, number>()
+  const pendingLiveText = new Map<string, string>()
+  const pendingLiveThought = new Map<string, string | null>()
   const finalizedTurnIds = new Set<string>()
   /** Timeline turnId (`session:tN`) → metrics (tokens + duration). */
   const turnMetricsByKey = shallowRef<Record<string, TurnMetrics>>({})
@@ -263,6 +324,7 @@ export const useGrokStore = defineStore('grok', () => {
   const tokenUsageBySession = shallowRef<Record<string, ReturnType<typeof normalizeThreadTokenUsage>>>({})
   const search = shallowRef('')
   let eventUnsub: (() => void) | null = null
+  let liveStreamFlushTimer = 0
   let sessionsLoadedAt = 0
   let sessionsLoadedKey = ''
   let sessionLoadSequence = 0
@@ -398,11 +460,8 @@ export const useGrokStore = defineStore('grok', () => {
       : usage
   })
 
-  const activeItems = computed<TimelineItem[]>(() => {
+  const activeHistoryItems = computed<TimelineItem[]>(() => {
     const sessionId = activeSessionId.value
-    // Codex-style timeline collage: persisted history stays immutable while the
-    // current answer has one in-memory owner. Completion reloads native history
-    // once so tool rows and assistant segments regain their authoritative order.
     let turn = 0
     const items: TimelineItem[] = []
     const messages = activeMessages.value
@@ -412,6 +471,23 @@ export const useGrokStore = defineStore('grok', () => {
       else if (turn === 0) turn = 1
       items.push(messageToItem(message, `${sessionId}:t${turn}`))
     }
+    return items
+  })
+  const activeHistoryTurnCount = computed(() => {
+    let count = 0
+    for (const message of activeMessages.value) {
+      const role = (message.role || '').toLowerCase()
+      if (role === 'user' || role === 'human') count += 1
+    }
+    return count
+  })
+
+  const activeItems = computed<TimelineItem[]>(() => {
+    const sessionId = activeSessionId.value
+    // Persisted history keeps stable object references while only the live tail
+    // changes. This prevents every Grok delta from rebuilding old timeline rows.
+    const items = [...activeHistoryItems.value]
+    const turn = Math.max(activeHistoryTurnCount.value, items.length ? 1 : 0)
 
     const turnRef = activeTurn.value
     const liveOnActive = Boolean(
@@ -552,6 +628,34 @@ export const useGrokStore = defineStore('grok', () => {
   function dispose(): void {
     eventUnsub?.()
     eventUnsub = null
+    if (liveStreamFlushTimer) window.clearTimeout(liveStreamFlushTimer)
+    liveStreamFlushTimer = 0
+    pendingLiveText.clear()
+    pendingLiveThought.clear()
+  }
+
+  function scheduleLiveStreamFlush(): void {
+    if (!liveStreamFlushTimer) liveStreamFlushTimer = window.setTimeout(flushLiveStreams, 48)
+  }
+
+  function flushLiveStreams(): void {
+    if (liveStreamFlushTimer) window.clearTimeout(liveStreamFlushTimer)
+    liveStreamFlushTimer = 0
+    if (pendingLiveText.size) {
+      const next = { ...liveTextBySession.value }
+      for (const [key, text] of pendingLiveText) next[key] = text
+      pendingLiveText.clear()
+      liveTextBySession.value = next
+    }
+    if (pendingLiveThought.size) {
+      const next = { ...liveThoughtBySession.value }
+      for (const [key, thought] of pendingLiveThought) {
+        if (thought === null) delete next[key]
+        else next[key] = thought
+      }
+      pendingLiveThought.clear()
+      liveThoughtBySession.value = next
+    }
   }
 
   function liveWriteKey(eventSessionId: string): string {
@@ -602,6 +706,8 @@ export const useGrokStore = defineStore('grok', () => {
       }
       sending.value = true
       if (!sameTurn && !upgradingFromPending) {
+        pendingLiveText.delete(key)
+        pendingLiveThought.delete(key)
         liveTextBySession.value = { ...liveTextBySession.value, [key]: '' }
         liveThoughtBySession.value = { ...liveThoughtBySession.value, [key]: '' }
         liveActivityBySession.value = { ...liveActivityBySession.value, [key]: [] }
@@ -625,7 +731,10 @@ export const useGrokStore = defineStore('grok', () => {
           turnId: turnId || activeTurn.value?.turnId || `grok-turn-${Date.now()}`,
         }
       }
-      const prev = liveThoughtBySession.value[key] || ''
+      const pendingThought = pendingLiveThought.get(key)
+      const prev = pendingThought === null
+        ? ''
+        : (pendingThought ?? liveThoughtBySession.value[key] ?? '')
       const sequence = Number(data.sequence || 0)
       const streamKey = `${turnId || key}:thought`
       if (sequence > 0) {
@@ -636,7 +745,8 @@ export const useGrokStore = defineStore('grok', () => {
       const snapshot = String(data.text || '')
       // Cap thought buffer so long reasoning doesn't bloat the UI state.
       const next = (sequence > 0 && snapshot ? snapshot : prev + delta).slice(-4000)
-      liveThoughtBySession.value = { ...liveThoughtBySession.value, [key]: next }
+      pendingLiveThought.set(key, next)
+      scheduleLiveStreamFlush()
       return
     }
     if (type === 'activity.snapshot') {
@@ -667,19 +777,17 @@ export const useGrokStore = defineStore('grok', () => {
         if (sequence <= previousSequence) return
         streamSequenceByTurn.set(streamKey, sequence)
       }
-      const prev = liveTextBySession.value[key] || ''
+      const prev = pendingLiveText.get(key) ?? liveTextBySession.value[key] ?? ''
       const snapshot = String(data.text || '')
       const nextLive = sequence > 0 && snapshot ? snapshot : prev + delta
-      liveTextBySession.value = { ...liveTextBySession.value, [key]: nextLive }
+      pendingLiveText.set(key, nextLive)
       // Answer tokens started — drop thought stream from the live row.
-      if (liveThoughtBySession.value[key]) {
-        const nextThought = { ...liveThoughtBySession.value }
-        delete nextThought[key]
-        liveThoughtBySession.value = nextThought
-      }
+      if (pendingLiveThought.has(key) || liveThoughtBySession.value[key]) pendingLiveThought.set(key, null)
+      scheduleLiveStreamFlush()
       return
     }
     if (type === 'session.bound') {
+      flushLiveStreams()
       const nextId = String(data.sessionId || '')
       if (nextId && nextId !== sessionId) {
         rememberSessionAlias(sessionId, nextId)
@@ -711,6 +819,8 @@ export const useGrokStore = defineStore('grok', () => {
       return
     }
     if (type === 'turn.completed' || type === 'turn.failed' || type === 'turn.interrupted') {
+      if (turnId && finalizedTurnIds.has(turnId)) return
+      flushLiveStreams()
       // Ignore stale completion for a turn that is no longer active (or never was).
       if (
         turnId
@@ -746,7 +856,7 @@ export const useGrokStore = defineStore('grok', () => {
         liveActivityBySession.value = nextActivity
       }
       if (type === 'turn.failed') {
-        notify('error', translate('notifications.turnFailed'), String(data.message || ''))
+        notify('error', translate('chat.turnFailed'), String(data.message || ''))
       }
       // Reload sidebar usage after local usage.json is updated by the backend.
       void appStore.loadLocalUsage()
@@ -754,7 +864,12 @@ export const useGrokStore = defineStore('grok', () => {
       void (async () => {
         try {
           if (targetSession && !targetSession.startsWith('pending-grok-')) {
-            await openSession(targetSession)
+            const terminalStatus = type === 'turn.failed'
+              ? 'failed'
+              : type === 'turn.interrupted'
+                ? 'interrupted'
+                : 'completed'
+            await openSession(targetSession, { terminalStatus })
           } else {
             await loadSessions(true)
           }
@@ -962,16 +1077,23 @@ export const useGrokStore = defineStore('grok', () => {
     }
   }
 
-  async function openSession(sessionID: string): Promise<void> {
+  async function openSession(sessionID: string, options?: { terminalStatus?: string }): Promise<void> {
     const id = sessionID.trim()
     if (!id) return
     loadingSessionId.value = id
     activeSessionId.value = id
     try {
       const detail = await readGrokSession(backendId.value, id)
+      const messages = detail.messages ?? []
+      const busy = isSessionBusy(id)
+      const terminalStatus = options?.terminalStatus || (!busy ? 'completed' : '')
+      const fromDisk = terminalStatus ? finalizeGrokMessages(messages, terminalStatus) : messages
+      const nextMessages = busy
+        ? mergeGrokDiskWithCurrent(fromDisk, messagesBySession.value[id] ?? [])
+        : fromDisk
       messagesBySession.value = {
         ...messagesBySession.value,
-        [id]: detail.messages ?? [],
+        [id]: nextMessages,
       }
       if (detail.summary?.id) {
         const others = sessions.value.filter((item) => item.id !== detail.summary.id)

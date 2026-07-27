@@ -634,6 +634,14 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 	backendRef := session.BackendRef
 	s.persistClaudeSessionsLocked()
 	s.mu.Unlock()
+	// A failed first turn can leave a NiceCodex session without a Claude native
+	// transcript. Never pass that local-only id to `--resume` on the next send.
+	resumeID := backendRef
+	if resumeID != "" {
+		if _, ok := findClaudeNativeSession(resumeID); !ok {
+			resumeID = ""
+		}
+	}
 
 	s.emitClaudeEvent("message", request.SessionID, turnID, map[string]any{
 		"message": userMsg,
@@ -652,23 +660,23 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 	s.emitClaudeEvent("message.started", request.SessionID, turnID, map[string]any{
 		"id": agentID, "role": "assistant",
 	})
-	// Persist in-progress assistant drafts so switching sessions mid-stream does not
-	// lose already-rendered tokens when the UI reloads from disk.
-	lastDraftPersist := time.Now()
-	persistDraft := func(force bool) {
+	// Keep an in-memory draft for session switches; the completed turn is the only
+	// stream update persisted to disk, avoiding a full session rewrite every 400ms.
+	lastDraftPatch := time.Now()
+	patchDraft := func() {
 		text := agentText.String()
 		if strings.TrimSpace(text) == "" {
 			return
 		}
-		if !force && time.Since(lastDraftPersist) < 400*time.Millisecond {
+		if time.Since(lastDraftPatch) < 400*time.Millisecond {
 			return
 		}
-		lastDraftPersist = time.Now()
+		lastDraftPatch = time.Now()
 		s.patchClaudeAssistantDraft(request.SessionID, agentID, text)
 	}
 
 	output, newSessionID, usage, runErr := s.executeExternalTurn(
-		ctx, "claude", backendRef, request.Workspace, turnSettings, request.Text, request.Images,
+		ctx, "claude", resumeID, request.Workspace, turnSettings, request.Text, request.Images,
 		func(kind, delta string) {
 			switch kind {
 			case "session":
@@ -716,7 +724,7 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 					"id": agentID, "role": "assistant", "delta": next, "text": next,
 					"mode": "replace", "sequence": streamSequence,
 				})
-				persistDraft(false)
+				patchDraft()
 			case "text":
 				if delta == "" {
 					return
@@ -727,7 +735,7 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 					"id": agentID, "role": "assistant", "delta": delta, "text": agentText.String(),
 					"mode": "append", "sequence": streamSequence,
 				})
-				persistDraft(false)
+				patchDraft()
 			}
 		},
 	)
@@ -774,6 +782,15 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 	assistantMsg := ClaudeMessage{
 		ID: agentID, Role: "assistant", Text: agentText.String(), Status: status, CreatedAt: completed,
 	}
+	resolvedBackendRef := ""
+	if newSessionID != "" {
+		_, nativeSessionExists := findClaudeNativeSession(newSessionID)
+		// Successful custom/proxy-backed runs may not expose a transcript through
+		// discovery immediately. Failed runs must prove the native session exists.
+		if runErr == nil || nativeSessionExists {
+			resolvedBackendRef = newSessionID
+		}
+	}
 	finalActivity, _ := loadClaudeCurrentTurnActivity(newSessionID, request.Text, turnID)
 	for index := range finalActivity {
 		role := strings.ToLower(strings.TrimSpace(finalActivity[index].Role))
@@ -804,9 +821,9 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 		}
 		session.Messages = nextMessages
 		session.UpdatedAt = completed
-		if newSessionID != "" {
-			session.BackendRef = newSessionID
-		}
+		// Clear stale/local-only refs after failed startup so the next send creates
+		// a fresh native conversation instead of repeating "No conversation found".
+		session.BackendRef = resolvedBackendRef
 		if model != "" {
 			session.Model = model
 		}
@@ -845,11 +862,31 @@ func (s *AppService) pollClaudeActivity(
 	ticker := time.NewTicker(180 * time.Millisecond)
 	defer ticker.Stop()
 	lastSignature := ""
+	nativePath := ""
+	lastSize := int64(-1)
+	lastModified := int64(0)
 	emit := func() {
-		activity, err := loadClaudeCurrentTurnActivity(nativeSessionID, prompt, turnID)
+		if nativePath == "" {
+			native, ok := findClaudeNativeSession(nativeSessionID)
+			if !ok {
+				return
+			}
+			nativePath = native.Path
+		}
+		info, err := os.Stat(nativePath)
 		if err != nil {
 			return
 		}
+		modified := info.ModTime().UnixNano()
+		if info.Size() == lastSize && modified == lastModified {
+			return
+		}
+		activity, err := readClaudeCurrentTurnActivity(nativePath, prompt, turnID)
+		if err != nil {
+			return
+		}
+		lastSize = info.Size()
+		lastModified = modified
 		payload, _ := json.Marshal(activity)
 		signature := string(payload)
 		if signature == lastSignature {
@@ -943,8 +980,8 @@ func (s *AppService) ensureClaudeSessionLocked(request ClaudeSendRequest, model,
 	return session
 }
 
-// patchClaudeAssistantDraft upserts an in-progress assistant message so session
-// reloads mid-stream still show already-generated text.
+// patchClaudeAssistantDraft updates only the in-memory session index. The final
+// turn result owns persistence, so streaming never rewrites the whole index.
 func (s *AppService) patchClaudeAssistantDraft(sessionID, agentID, text string) {
 	sessionID = strings.TrimSpace(sessionID)
 	agentID = strings.TrimSpace(agentID)
@@ -968,7 +1005,6 @@ func (s *AppService) patchClaudeAssistantDraft(sessionID, agentID, text string) 
 			session.Messages[i].Status = "inProgress"
 			session.Messages[i].CreatedAt = now
 			session.UpdatedAt = now
-			s.persistClaudeSessionsLocked()
 			return
 		}
 	}

@@ -11,6 +11,7 @@ import (
 )
 
 const localUsageTurnRetentionDays = 60
+const localUsagePersistDelay = 400 * time.Millisecond
 
 // localDayStats is one calendar day's aggregated spend for a single runtime.
 type localDayStats struct {
@@ -24,10 +25,10 @@ type localDayStats struct {
 // localRuntimeBucket holds lifetime + daily totals for codex | grok | claude.
 type localRuntimeBucket struct {
 	LifetimeTokens    int64                    `json:"lifetimeTokens"`
-	LifetimeInput      int64                    `json:"lifetimeInputTokens"`
-	LifetimeCached     int64                    `json:"lifetimeCachedInputTokens"`
-	LifetimeOutput     int64                    `json:"lifetimeOutputTokens"`
-	LifetimeReasoning  int64                    `json:"lifetimeReasoningTokens"`
+	LifetimeInput     int64                    `json:"lifetimeInputTokens"`
+	LifetimeCached    int64                    `json:"lifetimeCachedInputTokens"`
+	LifetimeOutput    int64                    `json:"lifetimeOutputTokens"`
+	LifetimeReasoning int64                    `json:"lifetimeReasoningTokens"`
 	Days              map[string]localDayStats `json:"days"`
 }
 
@@ -48,8 +49,8 @@ type localTurnUsage struct {
 // Legacy v1 fields (top-level lifetimeTokens/days) are migrated into byRuntime.codex on load.
 type localUsageFile struct {
 	Version         int                            `json:"version"`
-	LifetimeTokens   int64                          `json:"lifetimeTokens,omitempty"` // legacy v1
-	Days            map[string]int64               `json:"days,omitempty"`          // legacy v1
+	LifetimeTokens  int64                          `json:"lifetimeTokens,omitempty"` // legacy v1
+	Days            map[string]int64               `json:"days,omitempty"`           // legacy v1
 	Turns           map[string]localTurnUsage      `json:"turns"`
 	ByRuntime       map[string]*localRuntimeBucket `json:"byRuntime"`
 	SeededFromCloud bool                           `json:"seededFromCloud,omitempty"`
@@ -282,15 +283,118 @@ func (s *AppService) persistTurnUsage(runtime, threadID, turnID string, b tokenB
 		at = time.Now()
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
 
-	usage := loadLocalUsage(s.settingsPath)
+	usage := s.localUsageLocked()
 	if !applyTurnToUsageDetailed(usage, runtime, threadID, turnID, b, at) {
 		return
 	}
 	pruneLocalUsageTurns(usage, at)
-	persistLocalUsage(s.settingsPath, usage)
+	s.scheduleLocalUsagePersistLocked()
+}
+
+func (s *AppService) localUsageLocked() *localUsageFile {
+	if s.usageCache == nil {
+		s.usageCache = loadLocalUsage(s.settingsPath)
+	}
+	return s.usageCache
+}
+
+func (s *AppService) scheduleLocalUsagePersistLocked() {
+	if s.usageFlushTimer != nil {
+		s.usageFlushTimer.Stop()
+	}
+	s.usageFlushGen++
+	generation := s.usageFlushGen
+	s.usageFlushTimer = time.AfterFunc(localUsagePersistDelay, func() {
+		s.flushLocalUsageGeneration(generation)
+	})
+}
+
+func (s *AppService) flushLocalUsage() {
+	s.usageMu.Lock()
+	s.usageFlushGen++
+	if s.usageFlushTimer != nil {
+		s.usageFlushTimer.Stop()
+		s.usageFlushTimer = nil
+	}
+	snapshot := cloneLocalUsage(s.usageCache)
+	s.usageMu.Unlock()
+	if snapshot != nil {
+		s.usagePersistMu.Lock()
+		persistLocalUsage(s.settingsPath, snapshot)
+		s.usagePersistMu.Unlock()
+	}
+}
+
+func (s *AppService) flushLocalUsageGeneration(generation uint64) {
+	s.usageMu.Lock()
+	if generation != s.usageFlushGen {
+		s.usageMu.Unlock()
+		return
+	}
+	s.usageFlushTimer = nil
+	snapshot := cloneLocalUsage(s.usageCache)
+	s.usageMu.Unlock()
+	if snapshot != nil {
+		s.usagePersistMu.Lock()
+		s.usageMu.Lock()
+		stillCurrent := generation == s.usageFlushGen
+		s.usageMu.Unlock()
+		if stillCurrent {
+			persistLocalUsage(s.settingsPath, snapshot)
+		}
+		s.usagePersistMu.Unlock()
+	}
+}
+
+func cloneLocalUsage(source *localUsageFile) *localUsageFile {
+	if source == nil {
+		return nil
+	}
+	clone := &localUsageFile{
+		Version:         source.Version,
+		LifetimeTokens:  source.LifetimeTokens,
+		SeededFromCloud: source.SeededFromCloud,
+		Days:            make(map[string]int64, len(source.Days)),
+		Turns:           make(map[string]localTurnUsage, len(source.Turns)),
+		ByRuntime:       make(map[string]*localRuntimeBucket, len(source.ByRuntime)),
+	}
+	for day, tokens := range source.Days {
+		clone.Days[day] = tokens
+	}
+	for key, turn := range source.Turns {
+		clone.Turns[key] = turn
+	}
+	for runtime, bucket := range source.ByRuntime {
+		if bucket == nil {
+			clone.ByRuntime[runtime] = nil
+			continue
+		}
+		bucketClone := *bucket
+		bucketClone.Days = make(map[string]localDayStats, len(bucket.Days))
+		for day, stats := range bucket.Days {
+			bucketClone.Days[day] = stats
+		}
+		clone.ByRuntime[runtime] = &bucketClone
+	}
+	return clone
+}
+
+func (s *AppService) shouldRunUsageBackfill(runtime string) bool {
+	runtime = normalizeUsageRuntime(runtime)
+	now := time.Now()
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	if s.usageBackfillAt == nil {
+		s.usageBackfillAt = make(map[string]time.Time)
+	}
+	if last := s.usageBackfillAt[runtime]; !last.IsZero() && now.Sub(last) < 5*time.Minute {
+		return false
+	}
+	s.usageBackfillAt[runtime] = now
+	return true
 }
 
 func applyTurnToUsageDetailed(
@@ -441,10 +545,11 @@ func (s *AppService) localUsageSummary() map[string]any {
 
 func (s *AppService) localUsageSummaryFor(runtime string) map[string]any {
 	runtime = normalizeUsageRuntime(runtime)
-	s.mu.Lock()
-	usage := loadLocalUsage(s.settingsPath)
-	s.mu.Unlock()
-	return buildLocalUsageResponse(usage, runtime)
+	s.usageMu.Lock()
+	usage := s.localUsageLocked()
+	response := buildLocalUsageResponse(usage, runtime)
+	s.usageMu.Unlock()
+	return response
 }
 
 func (s *AppService) seedLocalUsageFromCloud(cloud map[string]any) bool {
@@ -461,9 +566,9 @@ func (s *AppService) seedLocalUsageFromCloud(cloud map[string]any) bool {
 		lifetime = int64(anyToFloat(summary["lifetime_tokens"]))
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	usage := loadLocalUsage(s.settingsPath)
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	usage := s.localUsageLocked()
 	// Only seed into the empty codex bucket — never overwrite Grok/Claude.
 	codexBucket := usage.ensureRuntime("codex")
 	if codexBucket.LifetimeTokens > 0 || len(codexBucket.Days) > 0 {
@@ -512,7 +617,7 @@ func (s *AppService) seedLocalUsageFromCloud(cloud map[string]any) bool {
 		return false
 	}
 	usage.SeededFromCloud = true
-	persistLocalUsage(s.settingsPath, usage)
+	s.scheduleLocalUsagePersistLocked()
 	return true
 }
 

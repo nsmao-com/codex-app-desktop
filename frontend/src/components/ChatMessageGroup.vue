@@ -184,6 +184,46 @@ const stream = computed<StreamBlock[]>(() => {
   return blocks
 })
 
+const ACTIVITY_BLOCK_PAGE = 32
+const TOOL_ITEM_PAGE = 40
+const FILE_CHANGE_PAGE = 50
+const earlierActivityBlocks = shallowRef(0)
+const earlierToolItems = shallowRef<Record<string, number>>({})
+const extraFileChanges = shallowRef(0)
+const renderableStream = computed(() => stream.value.filter((block) => block.kind !== 'reasoning'))
+const visibleStream = computed(() => {
+  const blocks = renderableStream.value
+  const limit = ACTIVITY_BLOCK_PAGE + earlierActivityBlocks.value
+  return blocks.slice(Math.max(0, blocks.length - limit))
+})
+const hiddenActivityCount = computed(() => Math.max(0, renderableStream.value.length - visibleStream.value.length))
+
+function showEarlierActivity(): void {
+  earlierActivityBlocks.value += ACTIVITY_BLOCK_PAGE
+}
+
+function visibleToolGroupItems(block: Extract<StreamBlock, { kind: 'toolGroup' }>): TimelineItem[] {
+  const limit = TOOL_ITEM_PAGE + (earlierToolItems.value[block.id] || 0)
+  return block.items.slice(Math.max(0, block.items.length - limit))
+}
+
+function hiddenToolGroupCount(block: Extract<StreamBlock, { kind: 'toolGroup' }>): number {
+  return Math.max(0, block.items.length - visibleToolGroupItems(block).length)
+}
+
+function showEarlierToolItems(block: Extract<StreamBlock, { kind: 'toolGroup' }>): void {
+  earlierToolItems.value = {
+    ...earlierToolItems.value,
+    [block.id]: (earlierToolItems.value[block.id] || 0) + TOOL_ITEM_PAGE,
+  }
+}
+
+watch(turnId, () => {
+  earlierActivityBlocks.value = 0
+  earlierToolItems.value = {}
+  extraFileChanges.value = 0
+})
+
 /** Hidden stream kinds that must not split consecutive same-integration tool groups. */
 function isSkippableToolMergeBlock(block: StreamBlock): boolean {
   return block.kind === 'reasoning'
@@ -210,10 +250,9 @@ function pushToolGroupItem(blocks: StreamBlock[], item: TimelineItem): void {
   if (mergeIndex >= 0) {
     const last = blocks[mergeIndex]
     if (last?.kind === 'toolGroup') {
-      blocks[mergeIndex] = {
-        ...last,
-        items: [...last.items, item],
-      }
+      // `blocks` is a fresh local value for this computed run, so appending is
+      // safe and avoids O(n²) array copies during long repeated-tool turns.
+      last.items.push(item)
       return
     }
   }
@@ -320,55 +359,15 @@ const liveTextId = computed(() => {
   }
   return ''
 })
+const visibleResolvedFileChanges = computed(() =>
+  resolvedFileChanges.value.slice(0, FILE_CHANGE_PAGE + extraFileChanges.value),
+)
+const hiddenFileChangeCount = computed(() =>
+  Math.max(0, resolvedFileChanges.value.length - visibleResolvedFileChanges.value.length),
+)
 
-/**
- * Put the typewriter caret at the end of the last *text* node, not as a sibling
- * under the whole `.prose` (which lands on a new line after ul/ol/pre/div).
- */
-function injectStreamingCaret(html: string): string {
-  const caret =
-    '<span class="streaming-caret" aria-hidden="true"></span>'
-  const source = html || ''
-  if (!source.trim()) return caret
-
-  // Prefer DOM walk so lists/tables/code put the caret after the last glyph.
-  if (typeof DOMParser !== 'undefined') {
-    try {
-      const doc = new DOMParser().parseFromString(
-        `<div id="__stream_root">${source}</div>`,
-        'text/html',
-      )
-      const root = doc.getElementById('__stream_root')
-      if (root) {
-        const chrome = 'button, .markdown-code-copy, .markdown-code-expand, .markdown-code-lang'
-        let target: Element = root
-        while (true) {
-          const kids = [...target.children].filter((el) => !el.matches(chrome))
-          if (!kids.length) break
-          target = kids[kids.length - 1]!
-        }
-        const voidLike = /^(HR|BR|IMG|INPUT|META|LINK)$/i
-        if (target !== root && voidLike.test(target.tagName)) {
-          target.insertAdjacentHTML('afterend', caret)
-        } else if (target.tagName === 'PRE') {
-          const code = target.querySelector('code')
-          ;(code || target).insertAdjacentHTML('beforeend', caret)
-        } else {
-          target.insertAdjacentHTML('beforeend', caret)
-        }
-        return root.innerHTML
-      }
-    } catch {
-      // fall through
-    }
-  }
-
-  // Regex fallback when DOMParser is unavailable.
-  const close = /<\/(p|li|h[1-6]|td|th|blockquote|code|strong|em|span|a)>(\s*)$/i
-  if (close.test(source)) {
-    return source.replace(close, `${caret}</$1>$2`)
-  }
-  return `${source}${caret}`
+function showMoreFileChanges(): void {
+  extraFileChanges.value += FILE_CHANGE_PAGE
 }
 
 /**
@@ -998,9 +997,20 @@ function diffStats(diff: string): { add: number; del: number } {
     <!-- Agent stream — CSS enter only (no TransitionGroup FLIP while streaming). -->
     <div v-else class="space-y-2">
       <div class="timeline-step-list space-y-1.5">
+        <div v-if="hiddenActivityCount" class="flex items-center gap-2 py-0.5">
+          <div class="h-px flex-1 bg-border/60" />
+          <Button
+            variant="ghost"
+            size="sm"
+            class="h-6 shrink-0 px-2 text-[11px] text-muted-foreground"
+            @click="showEarlierActivity"
+          >
+            {{ t('timeline.showEarlierActivity', { count: Math.min(ACTIVITY_BLOCK_PAGE, hiddenActivityCount) }) }}
+          </Button>
+          <div class="h-px flex-1 bg-border/60" />
+        </div>
         <div
-          v-for="block in stream"
-          v-show="block.kind !== 'reasoning'"
+          v-for="block in visibleStream"
           :key="streamBlockKey(block)"
           class="timeline-step-item"
           :class="animateEnter ? 'timeline-step-item--enter' : ''"
@@ -1196,8 +1206,17 @@ function diffStats(diff: string): { add: number; del: number } {
             >
               <div class="timeline-collapse-inner">
                 <div class="mt-0.5 space-y-0.5 pl-1">
+                  <Button
+                    v-if="hiddenToolGroupCount(block)"
+                    variant="ghost"
+                    size="sm"
+                    class="h-6 px-1.5 text-[11px] text-muted-foreground"
+                    @click.stop="showEarlierToolItems(block)"
+                  >
+                    {{ t('timeline.showEarlierActivity', { count: Math.min(TOOL_ITEM_PAGE, hiddenToolGroupCount(block)) }) }}
+                  </Button>
                   <div
-                    v-for="item in block.items"
+                    v-for="item in visibleToolGroupItems(block)"
                     :key="item.id"
                     class="min-w-0"
                     :class="animateEnter ? 'timeline-tool-row--enter' : ''"
@@ -1276,9 +1295,9 @@ function diffStats(diff: string): { add: number; del: number } {
           >
             <template v-if="block.item.id === liveTextId">
               <div
-                class="prose max-w-none prose-headings:mb-2.5 prose-headings:mt-4 prose-headings:text-[1.05em] prose-headings:font-semibold prose-headings:tracking-tight prose-p:my-2.5 prose-p:leading-7 prose-li:my-1 prose-ul:my-2.5 prose-ol:my-2.5 prose-pre:my-3 prose-pre:rounded-xl prose-code:rounded-md prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:before:content-none prose-code:after:content-none prose-a:font-medium prose-strong:font-semibold"
+                class="streaming-markdown-caret prose max-w-none prose-headings:mb-2.5 prose-headings:mt-4 prose-headings:text-[1.05em] prose-headings:font-semibold prose-headings:tracking-tight prose-p:my-2.5 prose-p:leading-7 prose-li:my-1 prose-ul:my-2.5 prose-ol:my-2.5 prose-pre:my-3 prose-pre:rounded-xl prose-code:rounded-md prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:before:content-none prose-code:after:content-none prose-a:font-medium prose-strong:font-semibold"
                 @click="onMarkdownClick"
-                v-html="injectStreamingCaret(markdownHTML(plainStreamText(block.item), block.item))"
+                v-html="markdownHTML(plainStreamText(block.item), block.item)"
               />
             </template>
             <div
@@ -1328,9 +1347,9 @@ function diffStats(diff: string): { add: number; del: number } {
         </button>
         <div class="timeline-collapse" :class="turnFilesOpen ? 'is-open' : ''">
           <div class="timeline-collapse-inner">
-            <div class="space-y-0.5 pl-2 pt-0.5">
+            <div v-if="turnFilesOpen" class="space-y-0.5 pl-2 pt-0.5">
               <button
-                v-for="change in resolvedFileChanges"
+                v-for="change in visibleResolvedFileChanges"
                 :key="change.path"
                 type="button"
                 class="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
@@ -1345,6 +1364,15 @@ function diffStats(diff: string): { add: number; del: number } {
                 <span class="shrink-0 tabular-nums text-[11px] text-positive">+{{ change.add }}</span>
                 <span class="shrink-0 tabular-nums text-[11px] text-destructive">-{{ change.del }}</span>
               </button>
+              <Button
+                v-if="hiddenFileChangeCount"
+                variant="ghost"
+                size="sm"
+                class="h-6 px-1.5 text-[11px] text-muted-foreground"
+                @click="showMoreFileChanges"
+              >
+                {{ t('timeline.showMoreFiles', { count: Math.min(FILE_CHANGE_PAGE, hiddenFileChangeCount) }) }}
+              </Button>
             </div>
           </div>
         </div>

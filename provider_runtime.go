@@ -12,12 +12,25 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"nice_codex_desktop/internal/codex"
 )
 
 var windowsProviderShimTargetPattern = regexp.MustCompile(`(?i)%(?:dp0%|~dp0)[\\/]+([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
+
+const providerProbeCacheTTL = 30 * time.Second
+
+type providerProbeCacheEntry struct {
+	provider  AgentProviderRuntime
+	expiresAt time.Time
+}
+
+var providerProbeCache = struct {
+	sync.Mutex
+	entries map[string]providerProbeCacheEntry
+}{entries: make(map[string]providerProbeCacheEntry)}
 
 type AgentProviderRuntime struct {
 	ID               string                         `json:"id"`
@@ -76,25 +89,19 @@ var geminiModelPattern = regexp.MustCompile(`gemini-[A-Za-z0-9._-]+`)
 
 func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime {
 	// Product runtimes: Codex workbench + Claude Code + optional Grok Build/API.
-	codexProvider := AgentProviderRuntime{
-		ID:           "codex",
-		Name:         "Codex",
-		Kind:         "codex",
-		Installed:    codexDetection.Available,
-		Healthy:      codexDetection.Available,
-		RuntimeReady: codexDetection.Available,
-		Version:      codexDetection.Version,
-		Executable:   codexDetection.Binary,
-		Status:       providerStatus(codexDetection.Available, codexDetection.Available, true),
-		Capabilities: []string{"app-server", "streaming", "reasoning", "tools", "mcp", "skills", "diff", "resume"},
-	}
-	claudeProvider := runProviderProbe(providerProbe{
+	codexProvider := codexAgentProvider(codexDetection)
+	claudeProbe := providerProbe{
 		id:           "claude",
 		name:         "Claude Code",
 		commands:     commandCandidates("claude"),
 		capabilities: []string{"cli", "streaming", "tools", "mcp"},
 		healthArgs:   []string{"auth", "status", "--json"},
-	})
+	}
+	// Both CLIs may take several seconds through Windows npm shims. Probe them in
+	// parallel so explicit refresh latency is bounded by the slower provider.
+	grokStatusCh := make(chan GrokRuntimeStatus, 1)
+	go func() { grokStatusCh <- detectGrokRuntime() }()
+	claudeProvider := cachedRunProviderProbe(claudeProbe)
 	// Fallback health probe when `auth status --json` is unavailable on older CLIs.
 	if claudeProvider.Installed && claudeProvider.Status == "configuration-error" {
 		if _, err := runProbeCommand(claudeProvider.Executable, []string{"--version"}, 3*time.Second); err == nil {
@@ -110,10 +117,60 @@ func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime
 	if !claudeProvider.Installed {
 		claudeProvider.Message = "Install Claude Code CLI (claude) to use this runtime"
 	}
-	grokStatus := detectGrokRuntime()
+	grokProvider := grokAgentProvider(<-grokStatusCh)
+	return []AgentProviderRuntime{codexProvider, claudeProvider, grokProvider}
+}
+
+// detectAgentProvidersQuick is safe for Bootstrap: it performs path/config
+// discovery only. Authentication/version probes remain lazy provider actions.
+func detectAgentProvidersQuick(codexDetection codex.Detection, grokStatus GrokRuntimeStatus) []AgentProviderRuntime {
+	claudeModels, claudeEfforts := discoverProviderCatalog("claude")
+	claudeExecutable := findCommand(commandCandidates("claude"))
+	claudeAvailable := claudeExecutable != ""
+	claudeMessage := "Install Claude Code CLI (claude) to use this runtime"
+	if claudeAvailable {
+		claudeMessage = "Claude Code installed; authentication is checked when opened"
+	}
+	claudeProvider := AgentProviderRuntime{
+		ID:               "claude",
+		Name:             "Claude Code",
+		Kind:             "claude",
+		Installed:        claudeAvailable,
+		Healthy:          claudeAvailable,
+		RuntimeReady:     claudeAvailable,
+		Executable:       claudeExecutable,
+		Status:           providerStatus(claudeAvailable, claudeAvailable, true),
+		Message:          claudeMessage,
+		Capabilities:     []string{"cli", "streaming", "tools", "mcp"},
+		Models:           claudeModels,
+		ReasoningEfforts: claudeEfforts,
+	}
+	return []AgentProviderRuntime{
+		codexAgentProvider(codexDetection),
+		claudeProvider,
+		grokAgentProvider(grokStatus),
+	}
+}
+
+func codexAgentProvider(codexDetection codex.Detection) AgentProviderRuntime {
+	return AgentProviderRuntime{
+		ID:           "codex",
+		Name:         "Codex",
+		Kind:         "codex",
+		Installed:    codexDetection.Available,
+		Healthy:      codexDetection.Available,
+		RuntimeReady: codexDetection.Available,
+		Version:      codexDetection.Version,
+		Executable:   codexDetection.Binary,
+		Status:       providerStatus(codexDetection.Available, codexDetection.Available, true),
+		Capabilities: []string{"app-server", "streaming", "reasoning", "tools", "mcp", "skills", "diff", "resume"},
+	}
+}
+
+func grokAgentProvider(grokStatus GrokRuntimeStatus) AgentProviderRuntime {
 	grokModels, grokEfforts := discoverProviderCatalog("grok")
 	grokReady := grokStatus.BuildAvailable || grokStatus.APIConfigured
-	grokProvider := AgentProviderRuntime{
+	return AgentProviderRuntime{
 		ID:               "grok",
 		Name:             "Grok",
 		Kind:             "grok",
@@ -128,7 +185,25 @@ func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime
 		Models:           grokModels,
 		ReasoningEfforts: grokEfforts,
 	}
-	return []AgentProviderRuntime{codexProvider, claudeProvider, grokProvider}
+}
+
+func cachedRunProviderProbe(probe providerProbe) AgentProviderRuntime {
+	now := time.Now()
+	providerProbeCache.Lock()
+	if cached, ok := providerProbeCache.entries[probe.id]; ok && now.Before(cached.expiresAt) {
+		providerProbeCache.Unlock()
+		return cached.provider
+	}
+	providerProbeCache.Unlock()
+
+	provider := runProviderProbe(probe)
+	providerProbeCache.Lock()
+	providerProbeCache.entries[probe.id] = providerProbeCacheEntry{
+		provider:  provider,
+		expiresAt: time.Now().Add(providerProbeCacheTTL),
+	}
+	providerProbeCache.Unlock()
+	return provider
 }
 
 func grokProviderMessage(status GrokRuntimeStatus) string {

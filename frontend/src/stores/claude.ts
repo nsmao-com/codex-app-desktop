@@ -24,21 +24,10 @@ import { notify } from '@/utils/notify'
 import { translate } from '@/i18n'
 import { normalizeThreadTokenUsage } from '@/utils/protocol'
 import { resolveProviderModelContextWindow } from '@/utils/accountUsage'
+import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
 import { useAppStore } from './app'
 import { useDialogStore } from './dialog'
 import { useWorkspaceStore } from './workspace'
-
-function sameWorkspacePath(left: string, right: string): boolean {
-  return workspaceKey(left) === workspaceKey(right)
-}
-
-function workspaceKey(path: string): string {
-  return path
-    .trim()
-    .replace(/[\\/]+$/, '')
-    .replace(/\//g, '\\')
-    .toLowerCase() || '(unknown)'
-}
 
 function workspaceLeafName(path: string): string {
   if (!path || path === '(unknown)') return path || 'unknown'
@@ -121,6 +110,15 @@ export interface ClaudeQueuedMessage {
   error: string
   createdAt: number
   localAppended?: boolean
+}
+
+interface ClaudeStreamPatch {
+  sessionId: string
+  turnId: string
+  id: string
+  role: string
+  text: string
+  mode: 'append' | 'replace'
 }
 
 function claudeTextTailAfterActivity(fullText: string, activity: ClaudeMessage[]): string {
@@ -206,10 +204,11 @@ export const useClaudeStore = defineStore('claude', () => {
   const sessionAlias = new Map<string, string>()
   /** Per-item bridge sequence; cumulative snapshots make out-of-order delivery harmless. */
   const streamSequenceByItem = new Map<string, number>()
+  const pendingStreamPatches = new Map<string, ClaudeStreamPatch>()
   const streamedAssistantTurns = new Set<string>()
   const finalizedTurnIds = new Set<string>()
-  let eventsBound = false
-  let disposed = false
+  let eventUnsub: (() => void) | null = null
+  let streamFlushTimer = 0
   let sessionLoadSequence = 0
 
   const workspacePath = computed(() =>
@@ -248,6 +247,7 @@ export const useClaudeStore = defineStore('claude', () => {
    */
   function promotePendingSession(pendingId: string, realId: string): void {
     if (!pendingId || !realId || pendingId === realId) return
+    flushStreamPatches()
     sessionAlias.set(pendingId, realId)
     sessionAlias.set(realId, realId)
 
@@ -356,17 +356,79 @@ export const useClaudeStore = defineStore('claude', () => {
   })
 
   function bootstrapEvents(): void {
-    if (eventsBound) return
-    eventsBound = true
-    Events.On('claude:event', (event: any) => {
-      if (disposed) return
+    if (eventUnsub) return
+    eventUnsub = Events.On('claude:event', (event: any) => {
       const data = (event?.data ?? event) as Record<string, any>
       handleEvent(data)
     })
   }
 
   function dispose(): void {
-    disposed = true
+    eventUnsub?.()
+    eventUnsub = null
+    if (streamFlushTimer) window.clearTimeout(streamFlushTimer)
+    streamFlushTimer = 0
+    pendingStreamPatches.clear()
+  }
+
+  function queueStreamPatch(patch: ClaudeStreamPatch): void {
+    const key = `${patch.sessionId}:${patch.id}`
+    const previous = pendingStreamPatches.get(key)
+    if (previous && patch.mode === 'append') {
+      pendingStreamPatches.set(key, {
+        ...patch,
+        text: previous.text + patch.text,
+        mode: previous.mode,
+      })
+    } else {
+      pendingStreamPatches.set(key, patch)
+    }
+    if (!streamFlushTimer) streamFlushTimer = window.setTimeout(flushStreamPatches, 48)
+  }
+
+  function flushStreamPatches(): void {
+    if (streamFlushTimer) window.clearTimeout(streamFlushTimer)
+    streamFlushTimer = 0
+    if (!pendingStreamPatches.size) return
+
+    const nextItems = { ...itemsBySession.value }
+    const lists = new Map<string, TimelineItem[]>()
+    for (const patch of pendingStreamPatches.values()) {
+      let list = lists.get(patch.sessionId)
+      if (!list) {
+        list = [...(nextItems[patch.sessionId] || [])]
+        lists.set(patch.sessionId, list)
+      }
+      let index = list.findIndex((item) => item.id === patch.id)
+      if (index < 0 && patch.turnId) {
+        index = list.findIndex((item) =>
+          item.turnId === patch.turnId
+          && (patch.role === 'reasoning' ? item.type === 'reasoning' : item.type === 'agentMessage'),
+        )
+      }
+      if (index >= 0) {
+        const current = list[index]!
+        list[index] = {
+          ...current,
+          id: current.id || patch.id,
+          turnId: patch.turnId || current.turnId,
+          text: patch.mode === 'replace' ? patch.text : (current.text || '') + patch.text,
+          status: 'inProgress',
+          type: patch.role === 'reasoning' ? 'reasoning' : 'agentMessage',
+        }
+      } else {
+        list.push(messageToItem({
+          id: patch.id,
+          role: patch.role,
+          text: patch.text,
+          status: 'inProgress',
+          createdAt: Math.floor(Date.now() / 1000),
+        }, patch.turnId || patch.sessionId))
+      }
+    }
+    for (const [sessionId, list] of lists) nextItems[sessionId] = list
+    pendingStreamPatches.clear()
+    itemsBySession.value = nextItems
   }
 
   function handleEvent(data: Record<string, any>): void {
@@ -409,6 +471,7 @@ export const useClaudeStore = defineStore('claude', () => {
     }
 
     if (kind === 'message' && data.message) {
+      flushStreamPatches()
       const msg = data.message as ClaudeMessage
       const role = (msg.role || '').toLowerCase()
       // Skip duplicate user rows (optimistic UI already showed this text).
@@ -501,34 +564,20 @@ export const useClaudeStore = defineStore('claude', () => {
       const snapshot = String(data.text || '')
       const mode = sequence > 0 && snapshot ? 'replace' : String(data.mode || 'append')
       const nextChunk = mode === 'replace' && snapshot ? snapshot : delta
-      const list = [...(itemsBySession.value[sessionId] || [])]
-      let index = list.findIndex((item) => item.id === id)
-      if (index < 0 && turnId) {
-        index = list.findIndex((item) =>
-          item.turnId === turnId
-          && (role === 'reasoning' ? item.type === 'reasoning' : item.type === 'agentMessage'),
-        )
-      }
-      if (index >= 0) {
-        const current = list[index]
-        list[index] = {
-          ...current,
-          id: current.id || id,
-          turnId: turnId || current.turnId,
-          text: mode === 'replace' ? nextChunk : (current.text || '') + nextChunk,
-          status: 'inProgress',
-          type: role === 'reasoning' ? 'reasoning' : current.type === 'userMessage' ? current.type : (role === 'reasoning' ? 'reasoning' : 'agentMessage'),
-        }
-      } else {
-        list.push(messageToItem({
-          id, role, text: nextChunk, status: 'inProgress', createdAt: Math.floor(Date.now() / 1000),
-        }, turnId || sessionId))
-      }
-      itemsBySession.value = { ...itemsBySession.value, [sessionId]: list }
+      queueStreamPatch({
+        sessionId,
+        turnId,
+        id,
+        role,
+        text: nextChunk,
+        mode: mode === 'replace' ? 'replace' : 'append',
+      })
       return
     }
 
     if (kind === 'turn.completed') {
+      if (turnId && finalizedTurnIds.has(turnId)) return
+      flushStreamPatches()
       const activeTurn = activeTurnBySession.value[sessionId]
       if (turnId && activeTurn?.turnId && activeTurn.turnId !== turnId) return
       if (turnId) finalizedTurnIds.add(turnId)
@@ -577,13 +626,16 @@ export const useClaudeStore = defineStore('claude', () => {
         activeTurnBySession.value = nextTurns
       }
       if (data.error) {
-        notify('error', translate('notifications.agentFailed'), String(data.error))
+        notify('error', translate('chat.turnFailed'), String(data.error))
       }
       void appStore.loadLocalUsage().catch(() => undefined)
       void (async () => {
         try {
           if (sessionId && !sessionId.startsWith('pending-claude-')) {
-            await openSession(sessionId, { switchWorkspace: false })
+            await openSession(sessionId, {
+              switchWorkspace: false,
+              terminalStatus: String(data.status || (data.error ? 'failed' : 'completed')),
+            })
           } else {
             await loadSessions()
           }
@@ -739,7 +791,10 @@ export const useClaudeStore = defineStore('claude', () => {
     }
   }
 
-  async function openSession(sessionId: string, options?: { switchWorkspace?: boolean }): Promise<void> {
+  async function openSession(
+    sessionId: string,
+    options?: { switchWorkspace?: boolean; terminalStatus?: string },
+  ): Promise<void> {
     if (!sessionId) return
     activeSessionId.value = sessionId
     loadingSessionId.value = sessionId
@@ -757,15 +812,16 @@ export const useClaudeStore = defineStore('claude', () => {
         await workspaceStore.useWorkspace(targetWorkspace)
       }
 
-      // Keep any in-memory timeline (especially an active stream) so switching
-      // away and back does not wipe already-rendered tokens.
-      const cached = itemsBySession.value[sessionId] || []
-      const liveTurn = activeTurnBySession.value[sessionId]
-      const isLive = runningSessionIds.value.includes(sessionId) || Boolean(liveTurn)
-
       const detail = await readClaudeSession(sessionId)
       const messages = detail.messages || []
       const fromDisk = buildTimelineFromMessages(sessionId, messages)
+
+      // Re-read live state after the await. A new turn can start while the native
+      // transcript is loading; using the pre-request snapshot would overwrite its
+      // optimistic user row with stale disk history.
+      const cached = itemsBySession.value[sessionId] || []
+      const liveTurn = activeTurnBySession.value[sessionId]
+      const isLive = runningSessionIds.value.includes(sessionId) || Boolean(liveTurn)
 
       let nextItems: TimelineItem[]
       if (isLive && cached.length > 0) {
@@ -777,6 +833,12 @@ export const useClaudeStore = defineStore('claude', () => {
         // are genuinely newer/active so an old local snapshot cannot replace
         // or reorder the native transcript.
         nextItems = mergeDiskWithCachedTimeline(fromDisk, cached)
+      }
+      if (!isLive) {
+        nextItems = finalizeTimelineItemStatuses(
+          nextItems,
+          options?.terminalStatus || 'completed',
+        )
       }
       itemsBySession.value = { ...itemsBySession.value, [sessionId]: nextItems }
       // Ensure summary is present / refreshed at top of list.
@@ -947,6 +1009,29 @@ export const useClaudeStore = defineStore('claude', () => {
   function isActiveItemStatus(status: string): boolean {
     const s = (status || '').toLowerCase().replace(/[_-]/g, '')
     return s === 'inprogress' || s === 'running' || s === 'started' || s === 'pending' || s === 'active'
+  }
+
+  function finalizeTimelineItemStatuses(items: TimelineItem[], status: string): TimelineItem[] {
+    let terminalTurnId = ''
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index]
+      if (item?.type === 'userMessage' && item.turnId) {
+        terminalTurnId = item.turnId
+        break
+      }
+    }
+    if (!terminalTurnId) terminalTurnId = items.at(-1)?.turnId || ''
+    let changed = false
+    const next = items.map((item) => {
+      if (!isActiveItemStatus(item.status)) return item
+      changed = true
+      return {
+        ...item,
+        status: terminalTurnId && item.turnId !== terminalTurnId ? 'completed' : status,
+        completedAt: item.completedAt || Date.now(),
+      }
+    })
+    return changed ? next : items
   }
 
   function newSession(): void {

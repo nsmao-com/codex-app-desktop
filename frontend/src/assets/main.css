@@ -993,31 +993,30 @@ kbd {
   50%, 100% { opacity: 0; }
 }
 
-/* Inline typewriter caret — must sit beside the last glyph, never as a block row. */
-.streaming-caret {
+/* CSS-only caret avoids reparsing the complete streamed HTML on every frame. */
+.streaming-markdown-caret {
+  --streaming-caret-animation: streaming-caret-blink 1s step-end infinite;
+}
+
+.streaming-markdown-caret:empty::after,
+.streaming-markdown-caret > :is(p, h1, h2, h3, h4, h5, h6):last-child::after,
+.streaming-markdown-caret > :is(ul, ol):last-child > li:last-child:not(:has(> *))::after,
+.streaming-markdown-caret > :is(ul, ol):last-child > li:last-child > :last-child:not(ul, ol)::after,
+.streaming-markdown-caret > :is(ul, ol):last-child > li:last-child > :is(ul, ol):last-child > li:last-child:not(:has(> *))::after,
+.streaming-markdown-caret > :is(ul, ol):last-child > li:last-child > :is(ul, ol):last-child > li:last-child > :last-child::after,
+.streaming-markdown-caret > blockquote:last-child > :last-child::after,
+.streaming-markdown-caret > table:last-child > :is(thead, tbody, tfoot):last-child > tr:last-child > :is(td, th):last-child::after,
+.streaming-markdown-caret > .markdown-code:last-child pre code::after {
+  content: '';
   display: inline-block;
   width: 2px;
   height: 1.05em;
   margin-left: 1px;
   vertical-align: text-bottom;
   background: color-mix(in oklab, var(--foreground) 80%, transparent);
-  animation: streaming-caret-blink 1s step-end infinite;
+  animation: var(--streaming-caret-animation);
   pointer-events: none;
   flex-shrink: 0;
-}
-
-/* Keep caret from inheriting prose block margins / display quirks. */
-.claude-prose .prose .streaming-caret,
-.claude-prose .streaming-caret {
-  display: inline-block !important;
-  margin-top: 0 !important;
-  margin-bottom: 0 !important;
-  margin-right: 0 !important;
-  padding: 0 !important;
-  border: 0 !important;
-  line-height: 1;
-  position: relative;
-  top: -0.05em;
 }
 
 @keyframes thinking-dot {
@@ -1501,7 +1500,6 @@ kbd {
   }
 
   .thinking-dots > span,
-  .streaming-caret,
   .timeline-enter,
   .timeline-step-item--enter,
   .timeline-tool-row--enter,
@@ -1509,6 +1507,10 @@ kbd {
   .stream-settle,
   .reasoning-shimmer__sheen {
     animation: none !important;
+  }
+
+  .streaming-markdown-caret {
+    --streaming-caret-animation: none;
   }
 
   .reasoning-shimmer__sheen {

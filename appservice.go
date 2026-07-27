@@ -25,6 +25,8 @@ type AppService struct {
 	app              *application.App
 	pluginAssets     *pluginAssetServer
 	mu               sync.Mutex
+	usageMu          sync.Mutex
+	usagePersistMu   sync.Mutex
 	client           *codex.Client
 	settings         UserSettings
 	settingsPath     string
@@ -39,6 +41,11 @@ type AppService struct {
 	claudeSessions   map[string]*claudeStoredSession
 	scheduledTasks   *scheduledTaskStore
 	schedulerStop    chan struct{}
+	shutdownOnce     sync.Once
+	usageCache       *localUsageFile
+	usageFlushTimer  *time.Timer
+	usageFlushGen    uint64
+	usageBackfillAt  map[string]time.Time
 	updateState      updateDownloadState
 }
 
@@ -246,14 +253,18 @@ func (s *AppService) Bootstrap() BootstrapData {
 	settings := s.Settings()
 	settings.ModelProvider = sanitizeWorkbenchProvider(settings.ModelProvider)
 	codexDetection := codex.Detect()
-	agentProviders := detectAgentProviders(codexDetection)
+	grokStatus := detectGrokRuntimeQuick()
+	if !grokStatus.APIConfigured {
+		grokStatus.APIConfigured = strings.TrimSpace(resolveGrokAPIKey(settings)) != ""
+	}
+	agentProviders := detectAgentProvidersQuick(codexDetection, grokStatus)
 	s.mu.Lock()
 	s.agentProviders = agentProviders
 	s.settings.ModelProvider = settings.ModelProvider
 	s.mu.Unlock()
 	data := BootstrapData{
 		Codex:            codexDetection,
-		Grok:             s.RefreshGrokRuntime(),
+		Grok:             grokStatus,
 		AgentProviders:   agentProviders,
 		Settings:         settings,
 		TerminalProfiles: listTerminalProfiles(),
@@ -1821,15 +1832,15 @@ func (s *AppService) ReadAccountUsage() (map[string]any, error) {
 	runtime := normalizeUsageRuntime(s.Settings().ActiveRuntime)
 
 	// Grok: rebuild breakdown from local sessions when the bucket is empty or total-only.
-	if runtime == "grok" {
+	if runtime == "grok" && s.shouldRunUsageBackfill(runtime) {
 		_ = s.backfillGrokUsageFromSessions()
 	}
 	// Claude: rebuild from official Claude Code project transcripts.
-	if runtime == "claude" {
+	if runtime == "claude" && s.shouldRunUsageBackfill(runtime) {
 		_ = s.backfillClaudeUsageFromProjects()
 	}
 	// Codex: rebuild input/output/cache from ~/.codex rollouts when missing detail.
-	if runtime == "codex" {
+	if runtime == "codex" && s.shouldRunUsageBackfill(runtime) {
 		_ = s.backfillLocalUsageFromRollouts()
 	}
 
@@ -2150,20 +2161,19 @@ func (s *AppService) withBrowserWindow(action func(application.Window)) error {
 }
 
 func (s *AppService) shutdown() {
-	setSystemSleepPrevention(false)
-	s.cancelExternalRuns()
-	s.stopAllTerminalSessions()
-	if s.schedulerStop != nil {
-		select {
-		case <-s.schedulerStop:
-		default:
+	s.shutdownOnce.Do(func() {
+		setSystemSleepPrevention(false)
+		s.cancelExternalRuns()
+		s.stopAllTerminalSessions()
+		s.flushLocalUsage()
+		if s.schedulerStop != nil {
 			close(s.schedulerStop)
 		}
-	}
-	s.mu.Lock()
-	client := s.client
-	s.mu.Unlock()
-	_ = client.Stop()
+		s.mu.Lock()
+		client := s.client
+		s.mu.Unlock()
+		_ = client.Stop()
+	})
 }
 
 func (s *AppService) call(method string, params any) (map[string]any, error) {

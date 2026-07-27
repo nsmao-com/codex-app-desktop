@@ -500,7 +500,11 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	})
 	cancel()
 	s.mu.Lock()
-	delete(s.externalRuns, threadID)
+	currentRun := s.externalRuns[threadID]
+	finishedRunStillOwnsThread := currentRun != nil && currentRun.turnID == turnID
+	if finishedRunStillOwnsThread {
+		delete(s.externalRuns, threadID)
+	}
 	s.mu.Unlock()
 
 	status := "completed"
@@ -567,7 +571,9 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	})
 	turnResult := externalTurnMap(turn)
 	s.emitExternalNotification("turn/completed", map[string]any{"threadId": threadID, "turn": turnResult})
-	s.emitExternalNotification("thread/status/changed", map[string]any{"threadId": threadID, "status": map[string]any{"type": "idle"}})
+	if finishedRunStillOwnsThread {
+		s.emitExternalNotification("thread/status/changed", map[string]any{"threadId": threadID, "status": map[string]any{"type": "idle"}})
+	}
 	if nameChanged {
 		s.emitExternalNotification("thread/name/updated", map[string]any{"threadId": threadID, "name": truncateRunes(turn.UserText, 56)})
 	}
@@ -637,13 +643,17 @@ func (s *AppService) executeExternalTurn(
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		chunk, nextSessionID, final, kind := parseExternalEvent(provider, line)
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil || event == nil {
+			continue
+		}
+		chunk, nextSessionID, final, kind := parseExternalEvent(provider, event)
 		if nextSessionID != "" {
 			sessionID = nextSessionID
 		}
 		// Always try to capture spend fields — Grok end events often have empty text
 		// so kind/final alone is not enough; also catch mid-stream usage if present.
-		if next := extractExternalUsage(line); next != nil {
+		if next := extractExternalUsage(event); next != nil {
 			usage = next
 		}
 		if kind == "error" {
@@ -898,11 +908,7 @@ func externalPrompt(text string, images []string) string {
 //   - session updates.jsonl turn_completed:
 //     usage: {inputTokens, cachedReadTokens, outputTokens, reasoningTokens, totalTokens}
 //     (ACP inputTokens is FULL prompt incl. cache; headless input_tokens is uncached-only)
-func extractExternalUsage(line []byte) map[string]any {
-	var event map[string]any
-	if err := json.Unmarshal(line, &event); err != nil || event == nil {
-		return nil
-	}
+func extractExternalUsage(event map[string]any) map[string]any {
 	raw := event["usage"]
 	// Claude Code stream-json / transcripts: usage often lives on message.usage
 	// for type=assistant, or top-level usage on type=result.
@@ -1105,11 +1111,7 @@ func tokenTotalFromUsage(usage map[string]any) int64 {
 
 // parseExternalEvent returns (chunk, sessionID, final, kind).
 // kind is "text" | "thought" | "".
-func parseExternalEvent(provider string, line []byte) (string, string, bool, string) {
-	var event map[string]any
-	if err := json.Unmarshal(line, &event); err != nil {
-		return "", "", false, ""
-	}
+func parseExternalEvent(provider string, event map[string]any) (string, string, bool, string) {
 	sessionID := firstMapString(event, "session_id", "sessionId")
 	eventType := strings.ToLower(firstMapString(event, "type", "event"))
 	if provider == "claude" {

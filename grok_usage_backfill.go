@@ -25,25 +25,25 @@ func (s *AppService) backfillGrokUsageFromSessions() bool {
 		return false
 	}
 
-	s.mu.Lock()
-	usage := loadLocalUsage(s.settingsPath)
+	s.usageMu.Lock()
+	usage := s.localUsageLocked()
 	// Only backfill when the grok bucket has no breakdown yet (empty or total-only legacy).
 	bucket := usage.ensureRuntime("grok")
 	hasBreakdown := bucket.LifetimeInput > 0 || bucket.LifetimeCached > 0 || bucket.LifetimeOutput > 0 || bucket.LifetimeReasoning > 0
 	if hasBreakdown && bucket.LifetimeTokens > 0 {
-		s.mu.Unlock()
+		s.usageMu.Unlock()
 		return false
 	}
-	s.mu.Unlock()
+	s.usageMu.Unlock()
 
 	hits := scanGrokSessionTurnUsage(root)
 	if len(hits) == 0 {
 		return false
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	usage = loadLocalUsage(s.settingsPath)
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	usage = s.localUsageLocked()
 	// Re-check under lock.
 	bucket = usage.ensureRuntime("grok")
 	hasBreakdown = bucket.LifetimeInput > 0 || bucket.LifetimeCached > 0 || bucket.LifetimeOutput > 0 || bucket.LifetimeReasoning > 0
@@ -62,15 +62,15 @@ func (s *AppService) backfillGrokUsageFromSessions() bool {
 		return false
 	}
 	pruneLocalUsageTurns(usage, now)
-	persistLocalUsage(s.settingsPath, usage)
+	s.scheduleLocalUsagePersistLocked()
 	return true
 }
 
 type grokTurnUsageHit struct {
-	SessionID  string
-	TurnID     string
-	Breakdown  tokenBreakdown
-	At         time.Time
+	SessionID string
+	TurnID    string
+	Breakdown tokenBreakdown
+	At        time.Time
 }
 
 func scanGrokSessionTurnUsage(root string) []grokTurnUsageHit {

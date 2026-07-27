@@ -56,7 +56,11 @@ const emit = defineEmits<{
 const scrollAreaRef = useTemplateRef<HTMLElement>('scrollAreaRef')
 const contentRef = useTemplateRef<HTMLElement>('contentRef')
 const scrollFrame = shallowRef<number | null>(null)
-const renderLimit = shallowRef(80)
+const INITIAL_RENDER_GROUPS = 40
+const RENDER_PAGE_GROUPS = 24
+const MAX_RENDER_GROUPS = 64
+const renderWindowStart = shallowRef(0)
+const renderWindowEnd = shallowRef(0)
 const showJumpBottom = shallowRef(false)
 const stickToBottom = shallowRef(true)
 /** Distance past which we treat the user as having left the bottom (no sticky snap-back). */
@@ -79,19 +83,65 @@ interface MessageGroup {
   kind: 'user' | 'agent'
   items: TimelineItem[]
   turnId: string
+  startItem: number
+  endItem: number
+}
+
+let previousTimelineItems: TimelineItem[] = []
+let previousGroups: MessageGroup[] = []
+
+function findGroupIndexForItem(groups: MessageGroup[], itemIndex: number): number {
+  let low = 0
+  let high = groups.length - 1
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2)
+    const group = groups[middle]
+    if (!group) return -1
+    if (group.endItem < itemIndex) low = middle + 1
+    else high = middle - 1
+  }
+  return low < groups.length ? low : -1
 }
 
 const groups = computed<MessageGroup[]>(() => {
-  const result: MessageGroup[] = []
-  for (const item of timelineItems.value) {
+  const items = timelineItems.value
+  let firstChanged = 0
+  const sharedLength = Math.min(items.length, previousTimelineItems.length)
+  while (firstChanged < sharedLength && items[firstChanged] === previousTimelineItems[firstChanged]) {
+    firstChanged += 1
+  }
+  if (firstChanged === items.length && firstChanged === previousTimelineItems.length) {
+    return previousGroups
+  }
+
+  let rebuildFrom = 0
+  let prefixCount = 0
+  if (firstChanged > 0 && previousGroups.length) {
+    const changedItem = Math.min(firstChanged, Math.max(0, previousTimelineItems.length - 1))
+    const groupIndex = findGroupIndexForItem(previousGroups, changedItem)
+    if (groupIndex >= 0) {
+      rebuildFrom = previousGroups[groupIndex]?.startItem ?? 0
+      prefixCount = groupIndex
+    }
+  }
+
+  const result = previousGroups.slice(0, prefixCount)
+  for (let itemIndex = rebuildFrom; itemIndex < items.length; itemIndex += 1) {
+    const item = items[itemIndex]
+    if (!item) continue
     const kind = item.type === 'userMessage' ? 'user' : 'agent'
     const last = result[result.length - 1]
     if (last && last.kind === kind && last.turnId === item.turnId) {
       last.items.push(item)
+      last.endItem = itemIndex
     } else {
-      result.push({ kind, items: [item], turnId: item.turnId })
+      result.push({ kind, items: [item], turnId: item.turnId, startItem: itemIndex, endItem: itemIndex })
     }
   }
+  // Provider stores publish immutable replacement arrays, so retaining the old
+  // array is enough for the next reference comparison and avoids a full copy.
+  previousTimelineItems = items
+  previousGroups = result
   return result
 })
 
@@ -105,6 +155,10 @@ const turnOrder = computed(() => {
   }
   return ids
 })
+
+const turnIndexById = computed(() => new Map(
+  turnOrder.value.map((turnId, index) => [turnId, index]),
+))
 
 const userMarkers = computed(() => {
   const markers: Array<{
@@ -168,14 +222,18 @@ function markerTopPercent(index: number): string {
 const renderedGroups = computed(() => {
   const all = groups.value
   const order = turnOrder.value
-  const start = Math.max(0, all.length - renderLimit.value)
-  return all.slice(start).map((group, index) => ({
+  const end = Math.min(all.length, Math.max(renderWindowStart.value, renderWindowEnd.value))
+  const start = Math.min(end, Math.max(0, renderWindowStart.value))
+  return all.slice(start, end).map((group, index) => ({
     group,
     index: start + index,
-    turnIndex: order.indexOf(group.turnId),
+    turnIndex: turnIndexById.value.get(group.turnId) ?? -1,
     turnCount: order.length,
   }))
 })
+
+const hiddenEarlierGroups = computed(() => Math.max(0, renderWindowStart.value))
+const hiddenLaterGroups = computed(() => Math.max(0, groups.value.length - renderWindowEnd.value))
 
 const lastItemSignature = computed(() => {
   const item = timelineItems.value.at(-1)
@@ -193,6 +251,15 @@ const activeTurnKey = computed(() => {
   if (appStore.isClaudeMode) return claudeStore.activeTurn?.turnId || claudeStore.activeSessionId || ''
   return codexStore.activeTurnId || codexStore.activeTurnFeedback?.turnId || ''
 })
+
+function findLastAgentGroup(turnId: string): MessageGroup | undefined {
+  const all = groups.value
+  for (let index = all.length - 1; index >= 0; index -= 1) {
+    const group = all[index]
+    if (group?.kind === 'agent' && group.turnId === turnId) return group
+  }
+  return undefined
+}
 
 /**
  * Timeline turn id currently streaming in an agent group.
@@ -214,9 +281,7 @@ const lastStreamingTurnId = computed(() => {
     // Live thought/text share the user turn id; if an agent group for that
     // turn already exists above a trailing user row (rare), prefer it.
     if (lastGroup?.kind === 'user' && lastGroup.turnId) {
-      const agentForTurn = [...groups.value].reverse().find(
-        (group) => group.kind === 'agent' && group.turnId === lastGroup.turnId,
-      )
+      const agentForTurn = findLastAgentGroup(lastGroup.turnId)
       if (agentForTurn) return agentForTurn.turnId
     }
     return ''
@@ -224,7 +289,7 @@ const lastStreamingTurnId = computed(() => {
   if (!codexStore.isTurnRunning && codexStore.activeTurnFeedback?.state !== 'running') return ''
   const turnID = activeTurnKey.value
   if (!turnID) return ''
-  const agentGroup = [...groups.value].reverse().find((group) => group.kind === 'agent' && group.turnId === turnID)
+  const agentGroup = findLastAgentGroup(turnID)
   return agentGroup?.turnId ?? ''
 })
 
@@ -453,13 +518,48 @@ async function settleToBottom(options: SettleOptions = {}): Promise<void> {
 }
 
 function isFirstTurnGroup(index: number, turnID: string): boolean {
-  return groups.value.findIndex((group) => group.turnId === turnID) === index
+  return index === 0 || groups.value[index - 1]?.turnId !== turnID
+}
+
+function resetRenderWindowToLatest(): void {
+  const end = groups.value.length
+  renderWindowEnd.value = end
+  renderWindowStart.value = Math.max(0, end - INITIAL_RENDER_GROUPS)
+}
+
+let windowShiftPending = false
+
+async function shiftRenderWindow(nextStart: number, nextEnd: number, anchorIndex?: number): Promise<void> {
+  const container = scrollAreaRef.value
+  if (!container || windowShiftPending) return
+  windowShiftPending = true
+  const anchor = typeof anchorIndex === 'number'
+    ? contentRef.value?.querySelector(`[data-group-index="${anchorIndex}"]`) as HTMLElement | null
+    : null
+  const anchorTop = anchor?.getBoundingClientRect().top ?? null
+  renderWindowStart.value = Math.max(0, nextStart)
+  renderWindowEnd.value = Math.min(groups.value.length, Math.max(nextStart, nextEnd))
+  await nextTick()
+  await waitFrame()
+  if (anchorTop != null) {
+    const nextAnchor = contentRef.value?.querySelector(`[data-group-index="${anchorIndex}"]`) as HTMLElement | null
+    if (nextAnchor) {
+      markProgrammaticScroll()
+      container.scrollTop += nextAnchor.getBoundingClientRect().top - anchorTop
+    }
+  }
+  windowShiftPending = false
+  updateJumpBottom()
 }
 
 async function ensureGroupRendered(groupIndex: number): Promise<void> {
-  const start = Math.max(0, groups.value.length - renderLimit.value)
-  if (groupIndex >= start) return
-  renderLimit.value = groups.value.length - groupIndex + 24
+  if (groupIndex >= renderWindowStart.value && groupIndex < renderWindowEnd.value) return
+  const total = groups.value.length
+  let start = Math.max(0, groupIndex - Math.floor(RENDER_PAGE_GROUPS / 2))
+  let end = Math.min(total, start + MAX_RENDER_GROUPS)
+  start = Math.max(0, end - MAX_RENDER_GROUPS)
+  renderWindowStart.value = start
+  renderWindowEnd.value = end
   await nextTick()
   await waitFrame()
 }
@@ -479,12 +579,10 @@ async function scrollToTop(): Promise<void> {
   unlockFromBottom()
   const container = scrollAreaRef.value
   if (!container) return
-  // Expand in chunks instead of mounting the entire history at once.
-  if (renderLimit.value < groups.value.length) {
-    renderLimit.value = Math.min(groups.value.length, renderLimit.value + 160)
-    await nextTick()
-    await waitFrame()
-  }
+  renderWindowStart.value = 0
+  renderWindowEnd.value = Math.min(groups.value.length, MAX_RENDER_GROUPS)
+  await nextTick()
+  await waitFrame()
   container.scrollTo({ top: 0, behavior: 'smooth' })
   updateJumpBottom()
 }
@@ -494,6 +592,9 @@ async function jumpToLatest(): Promise<void> {
   stickToBottom.value = true
   const container = scrollAreaRef.value
   if (!container) return
+  resetRenderWindowToLatest()
+  await nextTick()
+  await waitFrame()
   markProgrammaticScroll()
   container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
   showJumpBottom.value = false
@@ -511,26 +612,41 @@ async function jumpToLatest(): Promise<void> {
 }
 
 async function loadEarlier(): Promise<void> {
-  const container = scrollAreaRef.value
-  if (!container) return
-  const previousHeight = container.scrollHeight
-  const previousTop = container.scrollTop
+  if (renderWindowStart.value <= 0) return
   unlockFromBottom()
-  renderLimit.value = Math.min(groups.value.length, renderLimit.value + 80)
-  await nextTick()
-  await waitFrame()
-  markProgrammaticScroll()
-  container.scrollTop = previousTop + (container.scrollHeight - previousHeight)
+  const anchorIndex = renderWindowStart.value
+  const nextStart = Math.max(0, renderWindowStart.value - RENDER_PAGE_GROUPS)
+  const nextEnd = Math.min(
+    renderWindowEnd.value,
+    nextStart + MAX_RENDER_GROUPS,
+  )
+  await shiftRenderWindow(nextStart, nextEnd, anchorIndex)
+}
+
+async function loadLater(): Promise<void> {
+  if (renderWindowEnd.value >= groups.value.length) return
+  unlockFromBottom()
+  const anchorIndex = Math.max(renderWindowStart.value, renderWindowEnd.value - 1)
+  const nextEnd = Math.min(groups.value.length, renderWindowEnd.value + RENDER_PAGE_GROUPS)
+  const nextStart = Math.max(0, nextEnd - MAX_RENDER_GROUPS)
+  await shiftRenderWindow(nextStart, nextEnd, anchorIndex)
 }
 
 function onScroll(): void {
   if (performance.now() < ignoreScrollUntil) return
+  const container = scrollAreaRef.value
+  if (!container) return
   const distance = distanceFromBottom()
-  showJumpBottom.value = distance > 220
-  if (distance <= RESTICK_DISTANCE) {
+  showJumpBottom.value = hiddenLaterGroups.value > 0 || distance > 220
+  if (hiddenLaterGroups.value === 0 && distance <= RESTICK_DISTANCE) {
     stickToBottom.value = true
   } else if (distance > UNSTICK_DISTANCE) {
     unlockFromBottom()
+  }
+  if (!windowShiftPending && container.scrollTop < 120 && hiddenEarlierGroups.value > 0) {
+    void loadEarlier()
+  } else if (!windowShiftPending && distance < 120 && hiddenLaterGroups.value > 0) {
+    void loadLater()
   }
 }
 
@@ -559,6 +675,19 @@ function onKeyDown(event: KeyboardEvent): void {
 watch(() => timelineItems.value.length, () => {
   if (stickToBottom.value) scheduleScroll(true)
 })
+watch(groups, (all) => {
+  if (!all.length) {
+    renderWindowStart.value = 0
+    renderWindowEnd.value = 0
+    return
+  }
+  if (stickToBottom.value || renderWindowEnd.value === 0) {
+    resetRenderWindowToLatest()
+    return
+  }
+  renderWindowEnd.value = Math.min(renderWindowEnd.value, all.length)
+  renderWindowStart.value = Math.min(renderWindowStart.value, renderWindowEnd.value)
+}, { immediate: true })
 watch(lastItemSignature, () => {
   if (stickToBottom.value) scheduleScroll(true)
 })
@@ -578,7 +707,8 @@ watch(
   },
 )
 watch(timelineThreadId, () => {
-  renderLimit.value = 80
+  renderWindowStart.value = 0
+  renderWindowEnd.value = 0
   stickToBottom.value = true
   // Do not pin to skeleton/mid-layout: wait for load, then long settle + follow-ups.
   void settleToBottom({ waitForLoad: true, maxFrames: 48, followUp: true })
@@ -586,6 +716,7 @@ watch(timelineThreadId, () => {
 watch(isLoading, (loading, wasLoading) => {
   if (wasLoading && !loading) {
     stickToBottom.value = true
+    resetRenderWindowToLatest()
     void settleToBottom({ maxFrames: 48, followUp: true })
   }
 })
@@ -683,7 +814,7 @@ onUnmounted(() => {
             <p class="max-w-xs text-[12px] leading-5 text-muted-foreground">{{ $t('chat.emptyThreadHint') }}</p>
           </div>
 
-          <div v-if="renderLimit < groups.length" class="flex items-center gap-3 py-1">
+          <div v-if="hiddenEarlierGroups" class="flex items-center gap-3 py-1">
             <div class="h-px flex-1 bg-border/70" />
             <Button
               variant="ghost"
@@ -691,7 +822,7 @@ onUnmounted(() => {
               class="h-6 shrink-0 px-2 text-[11px] text-muted-foreground"
               @click="loadEarlier"
             >
-              {{ $t('chat.loadEarlier', { count: Math.min(80, groups.length - renderLimit) }) }}
+              {{ $t('chat.loadEarlier', { count: Math.min(RENDER_PAGE_GROUPS, hiddenEarlierGroups) }) }}
             </Button>
             <div class="h-px flex-1 bg-border/70" />
           </div>
@@ -723,6 +854,19 @@ onUnmounted(() => {
               @rollback="emit('rollback', $event)"
               @inspect-diff="emit('inspect-diff', $event)"
             />
+          </div>
+
+          <div v-if="hiddenLaterGroups" class="flex items-center gap-3 py-1">
+            <div class="h-px flex-1 bg-border/70" />
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-6 shrink-0 px-2 text-[11px] text-muted-foreground"
+              @click="loadLater"
+            >
+              {{ $t('chat.loadLater', { count: Math.min(RENDER_PAGE_GROUPS, hiddenLaterGroups) }) }}
+            </Button>
+            <div class="h-px flex-1 bg-border/70" />
           </div>
 
           <Transition name="timeline-step">

@@ -14,6 +14,7 @@ import { useDialogStore } from './dialog'
 import { useTerminalStore } from './terminal'
 import { useWorkspaceStore } from './workspace'
 import { notify } from '../utils/notify'
+import { sameWorkspacePath as sameWorkspace, workspaceKey } from '../utils/workspacePath'
 import {
   buildRuntimeProviders,
   cleanModelDisplayName,
@@ -63,6 +64,8 @@ interface DeltaBuffer {
   delta: string
 }
 
+type CollaborationMode = 'default' | 'plan'
+
 const emptyTurnMetrics = (): TurnMetrics => ({
   tokenUsage: null,
   startedAt: null,
@@ -111,6 +114,7 @@ export const useCodexStore = defineStore('codex', () => {
   const turnMetricsByThread = shallowRef<Record<string, Record<string, TurnMetrics>>>({})
   const pendingRequests = shallowRef<PendingServerRequest[]>([])
   const completedTurns = new Set<string>()
+  const completedTurnStatus = new Map<string, string>()
   const loadedThreadIDs = new Set<string>()
   const lastThreadByWorkspace = shallowRef<Record<string, string>>(loadLastThreadByWorkspace())
   const pinnedThreadIds = shallowRef<string[]>(loadPinnedThreadIds())
@@ -121,10 +125,15 @@ export const useCodexStore = defineStore('codex', () => {
     planText: string
   }>(null)
   const pendingPlanByThread = new Map<string, { turnId: string; text: string }>()
-  /** Official TUI: saw_plan_update_this_turn — update_plan alone can open the prompt. */
+  /** Plan candidate from update_plan; the turn's submitted mode still gates the prompt. */
   const sawPlanUpdateByTurn = new Map<string, string>()
+  /** Mode awaiting a turn id while SendMessage and turn/started race each other. */
+  const pendingCollaborationModeByThread = new Map<string, CollaborationMode>()
+  /** Exact mode submitted for each live turn; never infer this from mutable thread state. */
+  const collaborationModeByTurn = new Map<string, CollaborationMode>()
   const planOfferRetryTimers = new Map<string, number[]>()
   const idleReconcileTimers = new Map<string, number>()
+  const trackedTimeouts = new Set<number>()
 
   let unsubscribeEvent: (() => void) | null = null
   let openThreadSequence = 0
@@ -210,16 +219,39 @@ export const useCodexStore = defineStore('codex', () => {
   function dispose(): void {
     unsubscribeEvent?.()
     unsubscribeEvent = null
-    if (deltaTimer) window.clearTimeout(deltaTimer)
-    if (diffTimer) window.clearTimeout(diffTimer)
-    if (tokenUsageTimer) window.clearTimeout(tokenUsageTimer)
+    clearAllTrackedTimeouts()
+    deltaTimer = 0
+    diffTimer = 0
+    tokenUsageTimer = 0
     deltaBuffers.clear()
     pendingDiffs.clear()
     pendingTokenUsage.clear()
-    for (const timer of idleReconcileTimers.values()) window.clearTimeout(timer)
     idleReconcileTimers.clear()
+    planOfferRetryTimers.clear()
     completedTurns.clear()
+    completedTurnStatus.clear()
     loadedThreadIDs.clear()
+  }
+
+  function trackedTimeout(callback: () => void, delay: number): number {
+    let timer = 0
+    timer = window.setTimeout(() => {
+      trackedTimeouts.delete(timer)
+      callback()
+    }, delay)
+    trackedTimeouts.add(timer)
+    return timer
+  }
+
+  function clearTrackedTimeout(timer: number): void {
+    if (!timer) return
+    window.clearTimeout(timer)
+    trackedTimeouts.delete(timer)
+  }
+
+  function clearAllTrackedTimeouts(): void {
+    for (const timer of trackedTimeouts) window.clearTimeout(timer)
+    trackedTimeouts.clear()
   }
 
   async function connect(path = appStore.settings.workspace): Promise<boolean> {
@@ -1262,15 +1294,21 @@ export const useCodexStore = defineStore('codex', () => {
         thread.modelProvider || appStore.settings.modelProvider,
       )
 
+      const collaborationMode = resolveThreadCollaborationMode(thread)
+      pendingCollaborationModeByThread.set(thread.id, collaborationMode)
       const response = await backend.SendMessage({
         threadId: thread.id,
         text: queuedMessage.text,
         images: queuedMessage.images,
         // Official TUI: SubmitUserMessageWithMode — mode travels with the turn.
-        collaborationMode: resolveThreadCollaborationMode(thread),
+        collaborationMode,
       } satisfies SendMessageRequest)
       const turn = asRecord(asRecord(response).turn)
       const turnID = asString(turn.id)
+      if (turnID) {
+        collaborationModeByTurn.set(turnID, collaborationMode)
+        pendingCollaborationModeByThread.delete(thread.id)
+      }
       const turnStatus = asString(turn.status)
       // Default to "running" whenever we have a turn id — only release the queue on
       // an explicit terminal status. Mis-classified statuses used to drain the next
@@ -1278,6 +1316,7 @@ export const useCodexStore = defineStore('codex', () => {
       const finished = turnID
         ? (isTerminalTurnStatus(turnStatus) || completedTurns.has(turnID))
         : false
+      if (finished && turnID) rememberCompletedTurn(turnID, turnStatus)
       const running = Boolean(turnID) && !finished
       const startedAt = typeof turn.startedAt === 'number' ? turn.startedAt * 1000 : Date.now()
       const completedAt = typeof turn.completedAt === 'number' ? turn.completedAt * 1000 : null
@@ -1310,6 +1349,8 @@ export const useCodexStore = defineStore('codex', () => {
       continueDraining = finished
     } catch (error) {
       const message = errorMessage(error)
+      pendingCollaborationModeByThread.delete(resolvedThreadID)
+      if (resolvedThreadID !== threadID) pendingCollaborationModeByThread.delete(threadID)
       // A live turn means this follow-up should stay queued — never drop it on send errors.
       const liveTurnID = activeTurnByThread.value[resolvedThreadID]
         ?? activeTurnByThread.value[threadID]
@@ -1436,7 +1477,7 @@ export const useCodexStore = defineStore('codex', () => {
       setTurnFeedback(threadID, { state: 'failed', message, turnId: turnID })
       notify('error', translate('notifications.steerFailed'), message)
       // Restore running indicator shortly after — the turn itself is still live.
-      window.setTimeout(() => {
+      trackedTimeout(() => {
         if (activeTurnByThread.value[threadID] === turnID) {
           setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
         }
@@ -1468,12 +1509,12 @@ export const useCodexStore = defineStore('codex', () => {
     try {
       await backend.InterruptTurn(threadID, turnID)
       // Keep "正在停止…" until turn/completed; force-clear if Codex stalls.
-      window.setTimeout(() => {
+      trackedTimeout(() => {
         if (activeTurnByThread.value[threadID] !== turnID) {
           interruptingTurn.value = false
           return
         }
-        completedTurns.add(turnID)
+        rememberCompletedTurn(turnID, 'interrupted')
         setThreadTurn(threadID, '')
         finalizeActiveItemsForCompletedTurns(threadID, turnID)
         finalizeOrphanedActiveItems(threadID)
@@ -1726,7 +1767,13 @@ export const useCodexStore = defineStore('codex', () => {
           const threadID = asString(payload.threadId)
           const turn = asRecord(payload.turn)
           const turnID = asString(turn.id)
+          const submittedMode = pendingCollaborationModeByThread.get(threadID)
+          if (turnID && submittedMode) {
+            collaborationModeByTurn.set(turnID, submittedMode)
+            pendingCollaborationModeByThread.delete(threadID)
+          }
           completedTurns.delete(turnID)
+          completedTurnStatus.delete(turnID)
           setThreadTurn(threadID, turnID)
           const startedAt = typeof turn.startedAt === 'number' ? turn.startedAt * 1000 : Date.now()
           patchTurnMetrics(threadID, turnID, { startedAt, completedAt: null, durationMs: null })
@@ -1745,7 +1792,7 @@ export const useCodexStore = defineStore('codex', () => {
         flushThreadDeltas(threadID)
         rememberPlanCandidatesFromTurn(threadID, turnID)
         patchTurnMetrics(threadID, turnID, { startedAt, completedAt, durationMs })
-        completedTurns.add(turnID)
+        rememberCompletedTurn(turnID, status)
         const currentTurnID = activeTurnByThread.value[threadID] ?? ''
         const completedCurrentTurn = !currentTurnID
           || currentTurnID === turnID
@@ -1754,7 +1801,7 @@ export const useCodexStore = defineStore('codex', () => {
         if (!currentTurnID || currentTurnID === turnID) setThreadTurn(threadID, '')
         finalizeActiveItemsForCompletedTurns(threadID, turnID)
         setLocalThreadStatus(threadID, 'idle')
-        if (completedCurrentTurn || interruptingTurn.value) {
+        if (completedCurrentTurn) {
           interruptingTurn.value = false
           if (isInterruptedStatus(status)) {
             setTurnFeedback(threadID, {
@@ -1772,13 +1819,20 @@ export const useCodexStore = defineStore('codex', () => {
             clearTurnFeedback(threadID)
             schedulePlanImplementationOffer(threadID, turnID)
           }
+          if (isInterruptedStatus(status) || isFailedStatus(status)) {
+            clearPlanTurnTracking(threadID, turnID)
+          }
           notifyTurnCompleted(threadID, status)
         } else {
           // Mismatched turn id still means something finished — clear stale "running".
           const feedback = turnFeedbackByThread.value[threadID]
-          if (feedback?.turnId === turnID || feedback?.state === 'running' || feedback?.state === 'submitting') {
+          if (
+            feedback?.turnId === turnID
+            || (!feedback?.turnId && (feedback?.state === 'running' || feedback?.state === 'submitting'))
+          ) {
             clearTurnFeedback(threadID)
           }
+          clearPlanTurnTracking(threadID, turnID)
         }
         // Interrupt often omits item/completed — force orphan tools off the busy path.
         finalizeOrphanedActiveItems(threadID)
@@ -1787,7 +1841,7 @@ export const useCodexStore = defineStore('codex', () => {
         // Drain now and once more shortly after late item/status events settle.
         clearStaleBusyState(threadID)
         scheduleThreadQueueDrain(threadID)
-        window.setTimeout(() => {
+        trackedTimeout(() => {
           clearStaleBusyState(threadID)
           scheduleThreadQueueDrain(threadID)
         }, 60)
@@ -1797,15 +1851,22 @@ export const useCodexStore = defineStore('codex', () => {
       case 'item/completed': {
         const threadID = asString(payload.threadId)
         const turnID = asString(payload.turnId)
-        const item = normalizeTimelineItem(payload.item, turnID)
+        let item = normalizeTimelineItem(payload.item, turnID)
         if (item) {
+          if (completedTurns.has(turnID) && isActiveStatus(item.status)) {
+            item = {
+              ...item,
+              status: terminalItemStatus(turnID),
+              completedAt: item.completedAt ?? Date.now(),
+            }
+          }
           // Commit any pending streamed text before a new item appears or a
           // completed snapshot merges — otherwise the UI can briefly/permanently
           // show a truncated prefix (漏字) while deltas sit in the 24ms buffer.
           if (method === 'item/completed') flushBufferedItem(threadID, item.id)
           else flushThreadDeltas(threadID)
-          item.startedAt = typeof payload.startedAtMs === 'number' ? payload.startedAtMs : undefined
-          item.completedAt = typeof payload.completedAtMs === 'number' ? payload.completedAtMs : undefined
+          item.startedAt = typeof payload.startedAtMs === 'number' ? payload.startedAtMs : item.startedAt
+          item.completedAt = typeof payload.completedAtMs === 'number' ? payload.completedAtMs : item.completedAt
           upsertItem(threadID, item)
           if (method === 'item/completed') {
             rememberPlanCandidate(threadID, turnID, item)
@@ -1829,7 +1890,7 @@ export const useCodexStore = defineStore('codex', () => {
         const explanation = asString(payload.explanation)
         const text = [explanation, ...steps].filter(Boolean).join('\n').trim()
         if (threadID && turnID && text) {
-          // Official TUI: saw_plan_update_this_turn also opens the implement prompt.
+          // Keep the candidate, but only a turn submitted in Plan mode may offer implementation.
           pendingPlanByThread.set(threadID, { turnId: turnID, text })
           sawPlanUpdateByTurn.set(turnID, text)
           if (completedTurns.has(turnID) && !isThreadSubmitting(threadID)) {
@@ -1975,7 +2036,7 @@ export const useCodexStore = defineStore('codex', () => {
         const diff = asString(payload.diff)
         if (turnID && threadID) {
           pendingDiffs.set(turnID, { threadId: threadID, turnId: turnID, diff })
-          if (!diffTimer) diffTimer = window.setTimeout(flushDiffs, 100)
+          if (!diffTimer) diffTimer = trackedTimeout(flushDiffs, 100)
         }
         break
       }
@@ -2004,12 +2065,14 @@ export const useCodexStore = defineStore('codex', () => {
             turnId: turnID,
           })
         } else {
-          if (turnID) completedTurns.add(turnID)
+          if (turnID) rememberCompletedTurn(turnID, 'failed')
           const currentTurnID = activeTurnByThread.value[threadID] ?? ''
           const failedCurrentTurn = currentTurnID === turnID
             || (!currentTurnID && !isThreadSubmitting(threadID))
             || !turnID
           if (!turnID || currentTurnID === turnID) setThreadTurn(threadID, '')
+          finalizeActiveItemsForCompletedTurns(threadID, turnID)
+          if (!threadIsRunning(threadID)) finalizeOrphanedActiveItems(threadID)
           if (failedCurrentTurn) {
             interruptingTurn.value = false
             setTurnFeedback(threadID, { state: 'failed', message, turnId: turnID })
@@ -2078,7 +2141,7 @@ export const useCodexStore = defineStore('codex', () => {
     if (!threadID) return
     const usage = normalizeThreadTokenUsage(value)
     pendingTokenUsage.set(`${threadID}:${turnID}`, { threadId: threadID, turnId: turnID, usage })
-    if (!tokenUsageTimer) tokenUsageTimer = window.setTimeout(flushTokenUsage, 250)
+    if (!tokenUsageTimer) tokenUsageTimer = trackedTimeout(flushTokenUsage, 250)
   }
 
   function flushTokenUsage(): void {
@@ -2183,7 +2246,7 @@ export const useCodexStore = defineStore('codex', () => {
     const key = `${delta.threadId}:${delta.itemId}:${delta.field}`
     const previous = deltaBuffers.get(key)
     deltaBuffers.set(key, previous ? { ...delta, delta: previous.delta + delta.delta } : delta)
-    if (!deltaTimer) deltaTimer = window.setTimeout(flushDeltas, 48)
+    if (!deltaTimer) deltaTimer = trackedTimeout(flushDeltas, 48)
   }
 
   function flushDeltas(): void {
@@ -2202,13 +2265,16 @@ export const useCodexStore = defineStore('codex', () => {
     for (const [threadID, deltas] of grouped) {
       const nextItems = [...(current[threadID] ?? [])]
       for (const delta of deltas) {
+        const completedStatus = completedTurns.has(delta.turnId)
+          ? terminalItemStatus(delta.turnId)
+          : ''
         let index = nextItems.findIndex((item) => item.id === delta.itemId)
         if (index < 0) {
           nextItems.push({
             id: delta.itemId,
             turnId: delta.turnId,
             type: delta.type,
-            status: 'inProgress',
+            status: completedStatus || 'inProgress',
             text: '',
             command: '',
             cwd: '',
@@ -2239,6 +2305,14 @@ export const useCodexStore = defineStore('codex', () => {
           const limit = delta.field === 'output' ? 300_000 : 1_000_000
           nextItems[index] = { ...item, [delta.field]: appendBoundedDelta(item[delta.field], delta.delta, limit) }
         }
+        const updated = nextItems[index]
+        if (completedStatus && updated && isActiveStatus(updated.status)) {
+          nextItems[index] = {
+            ...updated,
+            status: completedStatus,
+            completedAt: updated.completedAt ?? Date.now(),
+          }
+        }
       }
       // Background threads: mutate without shallowRef notify (timeline only watches active).
       current[threadID] = nextItems
@@ -2262,7 +2336,7 @@ export const useCodexStore = defineStore('codex', () => {
 
   function flushPendingDeltas(): void {
     if (deltaTimer) {
-      window.clearTimeout(deltaTimer)
+      clearTrackedTimeout(deltaTimer)
       deltaTimer = 0
     }
     flushDeltas()
@@ -2362,7 +2436,7 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
-  function resolveThreadCollaborationMode(thread: ThreadSummary): 'default' | 'plan' {
+  function resolveThreadCollaborationMode(thread: ThreadSummary): CollaborationMode {
     const live = activeThread.value?.id === thread.id ? activeThread.value : null
     const mode = live?.collaborationMode
       || thread.collaborationMode
@@ -2402,28 +2476,6 @@ export const useCodexStore = defineStore('codex', () => {
     return open?.[1]?.replace(/<\/proposed_plan>\s*$/i, '').trim() ?? ''
   }
 
-  function threadIsPlanMode(threadID: string): boolean {
-    const thread = activeThread.value?.id === threadID
-      ? activeThread.value
-      : findThreadSummary(threadID)
-    const mode = thread?.collaborationMode || appStore.settings.collaborationMode
-    return mode === 'plan'
-  }
-
-  function turnHasPlanItem(threadID: string, turnID: string): boolean {
-    return (itemsByThread.value[threadID] ?? []).some((item) =>
-      item.turnId === turnID && item.type === 'plan' && Boolean(item.text.trim()),
-    )
-  }
-
-  function turnHasProposedPlan(threadID: string, turnID: string): boolean {
-    return (itemsByThread.value[threadID] ?? []).some((item) =>
-      item.turnId === turnID
-      && item.type === 'agentMessage'
-      && Boolean(extractProposedPlan(item.text)),
-    )
-  }
-
   function resolvePendingPlan(threadID: string, turnID: string): { turnId: string; text: string } | null {
     const pending = pendingPlanByThread.get(threadID)
     if (pending && pending.turnId === turnID && pending.text.trim()) return pending
@@ -2445,10 +2497,21 @@ export const useCodexStore = defineStore('codex', () => {
     return null
   }
 
+  function clearPlanCandidates(threadID: string, turnID: string): void {
+    sawPlanUpdateByTurn.delete(turnID)
+    const pending = pendingPlanByThread.get(threadID)
+    if (pending?.turnId === turnID) pendingPlanByThread.delete(threadID)
+  }
+
+  function clearPlanTurnTracking(threadID: string, turnID: string): void {
+    clearPlanCandidates(threadID, turnID)
+    collaborationModeByTurn.delete(turnID)
+  }
+
   function clearPlanOfferRetries(key: string): void {
     const timers = planOfferRetryTimers.get(key)
     if (!timers) return
-    for (const timer of timers) window.clearTimeout(timer)
+    for (const timer of timers) clearTrackedTimeout(timer)
     planOfferRetryTimers.delete(key)
   }
 
@@ -2458,8 +2521,13 @@ export const useCodexStore = defineStore('codex', () => {
     clearPlanOfferRetries(key)
     maybeOfferPlanImplementation(threadID, turnID)
     // Late plan items / plan updates often arrive after turn/completed.
-    const timers = [100, 350, 800].map((delay) => window.setTimeout(() => {
+    const delays = [100, 350, 800]
+    const timers = delays.map((delay, index) => trackedTimeout(() => {
       maybeOfferPlanImplementation(threadID, turnID)
+      if (index === delays.length - 1) {
+        clearPlanTurnTracking(threadID, turnID)
+        planOfferRetryTimers.delete(key)
+      }
     }, delay))
     planOfferRetryTimers.set(key, timers)
   }
@@ -2475,23 +2543,24 @@ export const useCodexStore = defineStore('codex', () => {
     const queued = queuedMessagesByThread.value[threadID] ?? []
     if (queued.some((message) => message.state !== 'failed')) return
 
+    const submittedMode = collaborationModeByTurn.get(turnID)
+    if (submittedMode === 'default') {
+      clearPlanCandidates(threadID, turnID)
+      return
+    }
+    // Wait for turn/started or SendMessage to bind the exact submitted mode.
+    if (submittedMode !== 'plan') return
+
     rememberPlanCandidatesFromTurn(threadID, turnID)
     const pending = resolvePendingPlan(threadID, turnID)
     if (!pending?.text.trim()) return
 
-    // Official: plan item OR update_plan OR <proposed_plan>; prefer while still in plan mode.
-    const eligible = threadIsPlanMode(threadID)
-      || turnHasPlanItem(threadID, turnID)
-      || turnHasProposedPlan(threadID, turnID)
-      || sawPlanUpdateByTurn.has(turnID)
-    if (!eligible) return
-
-    pendingPlanByThread.delete(threadID)
     planImplementPrompt.value = {
       threadId: threadID,
       turnId: turnID,
       planText: pending.text,
     }
+    clearPlanTurnTracking(threadID, turnID)
   }
 
   function dismissPlanImplementation(): void {
@@ -2739,7 +2808,7 @@ export const useCodexStore = defineStore('codex', () => {
     const disconnectedTurns = Object.entries(activeTurnByThread.value)
     activeTurnByThread.value = {}
     for (const [threadID, turnID] of disconnectedTurns) {
-      if (turnID) completedTurns.add(turnID)
+      if (turnID) rememberCompletedTurn(turnID, message ? 'failed' : 'interrupted')
       finalizeActiveItemsForCompletedTurns(threadID, turnID)
       finalizeOrphanedActiveItems(threadID)
       setLocalThreadStatus(threadID, 'idle')
@@ -2757,8 +2826,8 @@ export const useCodexStore = defineStore('codex', () => {
 
   function scheduleIdleThreadReconcile(threadID: string, turnID: string): void {
     const previous = idleReconcileTimers.get(threadID)
-    if (previous) window.clearTimeout(previous)
-    const timer = window.setTimeout(() => {
+    if (previous) clearTrackedTimeout(previous)
+    const timer = trackedTimeout(() => {
       idleReconcileTimers.delete(threadID)
       void reconcileIdleThread(threadID, turnID)
     }, 150)
@@ -2789,7 +2858,7 @@ export const useCodexStore = defineStore('codex', () => {
     }
 
     if (activeTurnByThread.value[threadID] !== turnID) return
-    completedTurns.add(turnID)
+    rememberCompletedTurn(turnID, 'completed')
     finalizeActiveItemsForCompletedTurns(threadID, turnID)
     finalizeOrphanedActiveItems(threadID)
     setThreadTurn(threadID, '')
@@ -2839,7 +2908,7 @@ export const useCodexStore = defineStore('codex', () => {
       changed = true
       return {
         ...item,
-        status: 'completed',
+        status: terminalItemStatus(itemTurn || turnID),
         completedAt: item.completedAt ?? Date.now(),
       }
     })
@@ -2854,15 +2923,28 @@ export const useCodexStore = defineStore('codex', () => {
     let changed = false
     const next = items.map((item) => {
       if (item.type === 'userMessage' || !isActiveStatus(item.status)) return item
-      if (item.turnId && !completedTurns.has(item.turnId)) completedTurns.add(item.turnId)
+      if (item.turnId && !completedTurns.has(item.turnId)) rememberCompletedTurn(item.turnId, 'completed')
       changed = true
       return {
         ...item,
-        status: 'completed',
+        status: terminalItemStatus(item.turnId || ''),
         completedAt: item.completedAt ?? Date.now(),
       }
     })
     if (changed) itemsByThread.value = { ...itemsByThread.value, [threadID]: next }
+  }
+
+  function rememberCompletedTurn(turnID: string, status: unknown = 'completed'): void {
+    if (!turnID) return
+    completedTurns.add(turnID)
+    completedTurnStatus.set(
+      turnID,
+      isFailedStatus(status) ? 'failed' : isInterruptedStatus(status) ? 'interrupted' : 'completed',
+    )
+  }
+
+  function terminalItemStatus(turnID: string): string {
+    return completedTurnStatus.get(turnID) || 'completed'
   }
 
   function setLocalThreadStatus(threadID: string, status: string): void {
@@ -2931,7 +3013,7 @@ export const useCodexStore = defineStore('codex', () => {
 
   function scheduleThreadQueueDrain(threadID: string): void {
     if (!threadID) return
-    window.setTimeout(() => {
+    trackedTimeout(() => {
       // Soft-clear stale busy before drain so completed turns don't leave the queue stuck.
       if (!threadIsRunning(threadID)) clearStaleBusyState(threadID)
       void drainThreadQueue(threadID)
@@ -3118,25 +3200,18 @@ export const useCodexStore = defineStore('codex', () => {
     pendingDiffs.clear()
     pendingTokenUsage.clear()
     completedTurns.clear()
+    completedTurnStatus.clear()
     pendingPlanByThread.clear()
     sawPlanUpdateByTurn.clear()
-    for (const timers of planOfferRetryTimers.values()) {
-      for (const timer of timers) window.clearTimeout(timer)
-    }
+    pendingCollaborationModeByThread.clear()
+    collaborationModeByTurn.clear()
+    clearAllTrackedTimeouts()
     planOfferRetryTimers.clear()
+    idleReconcileTimers.clear()
     planImplementPrompt.value = null
-    if (deltaTimer) {
-      window.clearTimeout(deltaTimer)
-      deltaTimer = 0
-    }
-    if (diffTimer) {
-      window.clearTimeout(diffTimer)
-      diffTimer = 0
-    }
-    if (tokenUsageTimer) {
-      window.clearTimeout(tokenUsageTimer)
-      tokenUsageTimer = 0
-    }
+    deltaTimer = 0
+    diffTimer = 0
+    tokenUsageTimer = 0
   }
 
   return {
@@ -3337,15 +3412,6 @@ function uniqueWorkspacePaths(current: string, recent: string[]): string[] {
     result.push(value)
   }
   return result
-}
-
-function workspaceKey(path: string): string {
-  const normalized = path.trim().replace(/\\/g, '/').replace(/\/+$/, '')
-  return navigator.userAgent.includes('Windows') ? normalized.toLocaleLowerCase() : normalized
-}
-
-function sameWorkspace(left: string, right: string): boolean {
-  return workspaceKey(left) === workspaceKey(right)
 }
 
 function workspaceName(path: string): string {

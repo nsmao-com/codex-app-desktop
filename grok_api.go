@@ -234,8 +234,29 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 		CreatedAt: time.Now().Unix(),
 	}
 	session.Messages = append(session.Messages, userMsg)
+	requestSucceeded := false
+	defer func() {
+		if requestSucceeded {
+			return
+		}
+		s.mu.Lock()
+		if current := s.grokAPISessions[request.SessionID]; current != nil {
+			for index := len(current.Messages) - 1; index >= 0; index-- {
+				if current.Messages[index].ID == userMsg.ID {
+					current.Messages[index].Status = "failed"
+					current.UpdatedAt = time.Now().Unix()
+					break
+				}
+			}
+			s.persistGrokAPISessionsLocked()
+		}
+		s.mu.Unlock()
+	}()
 	history := make([]map[string]string, 0, len(session.Messages))
 	for _, message := range session.Messages {
+		if strings.EqualFold(strings.TrimSpace(message.Status), "failed") {
+			continue
+		}
 		role := strings.ToLower(strings.TrimSpace(message.Role))
 		if role != "user" && role != "assistant" && role != "system" {
 			continue
@@ -360,6 +381,7 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 		s.persistGrokAPISessionsLocked()
 	}
 	s.mu.Unlock()
+	requestSucceeded = true
 	return usage, nil
 }
 

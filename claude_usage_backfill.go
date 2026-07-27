@@ -23,24 +23,24 @@ func (s *AppService) backfillClaudeUsageFromProjects() bool {
 		return false
 	}
 
-	s.mu.Lock()
-	usage := loadLocalUsage(s.settingsPath)
+	s.usageMu.Lock()
+	usage := s.localUsageLocked()
 	bucket := usage.ensureRuntime("claude")
 	hasBreakdown := bucket.LifetimeInput > 0 || bucket.LifetimeCached > 0 || bucket.LifetimeOutput > 0 || bucket.LifetimeReasoning > 0
 	if hasBreakdown && bucket.LifetimeTokens > 0 {
-		s.mu.Unlock()
+		s.usageMu.Unlock()
 		return false
 	}
-	s.mu.Unlock()
+	s.usageMu.Unlock()
 
 	hits := scanClaudeProjectTurnUsage(root)
 	if len(hits) == 0 {
 		return false
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	usage = loadLocalUsage(s.settingsPath)
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	usage = s.localUsageLocked()
 	bucket = usage.ensureRuntime("claude")
 	hasBreakdown = bucket.LifetimeInput > 0 || bucket.LifetimeCached > 0 || bucket.LifetimeOutput > 0 || bucket.LifetimeReasoning > 0
 	if hasBreakdown && bucket.LifetimeTokens > 0 {
@@ -58,7 +58,7 @@ func (s *AppService) backfillClaudeUsageFromProjects() bool {
 		return false
 	}
 	pruneLocalUsageTurns(usage, now)
-	persistLocalUsage(s.settingsPath, usage)
+	s.scheduleLocalUsagePersistLocked()
 	return true
 }
 

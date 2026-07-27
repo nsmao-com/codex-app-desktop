@@ -22,13 +22,13 @@ type rolloutTokenHit struct {
 // session rollouts (token_count.last_token_usage). Runs when the codex bucket is
 // empty OR has totals but no input/output/cache breakdown (legacy total-only rows).
 func (s *AppService) backfillLocalUsageFromRollouts() bool {
-	s.mu.Lock()
-	usage := loadLocalUsage(s.settingsPath)
+	s.usageMu.Lock()
+	usage := s.localUsageLocked()
 	bucket := usage.ensureRuntime("codex")
 	needsDetail := bucket.LifetimeInput <= 0 && bucket.LifetimeCached <= 0 &&
 		bucket.LifetimeOutput <= 0 && bucket.LifetimeReasoning <= 0
 	emptyCodex := bucket.LifetimeTokens <= 0 && len(bucket.Days) == 0
-	s.mu.Unlock()
+	s.usageMu.Unlock()
 	if !emptyCodex && !needsDetail {
 		return false
 	}
@@ -42,9 +42,9 @@ func (s *AppService) backfillLocalUsageFromRollouts() bool {
 		return false
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	usage = loadLocalUsage(s.settingsPath)
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	usage = s.localUsageLocked()
 	bucket = usage.ensureRuntime("codex")
 	needsDetail = bucket.LifetimeInput <= 0 && bucket.LifetimeCached <= 0 &&
 		bucket.LifetimeOutput <= 0 && bucket.LifetimeReasoning <= 0
@@ -73,7 +73,7 @@ func (s *AppService) backfillLocalUsageFromRollouts() bool {
 		return false
 	}
 	pruneLocalUsageTurns(usage, now)
-	persistLocalUsage(s.settingsPath, usage)
+	s.scheduleLocalUsagePersistLocked()
 	return true
 }
 
@@ -146,11 +146,11 @@ func parseRolloutTokenHits(path string) []rolloutTokenHit {
 
 	sessionID := sessionIDFromRolloutPath(path)
 	var (
-		pending   tokenBreakdown
-		pendingAt time.Time
+		pending    tokenBreakdown
+		pendingAt  time.Time
 		hasPending bool
-		hits      []rolloutTokenHit
-		lineNo    int
+		hits       []rolloutTokenHit
+		lineNo     int
 	)
 
 	scanner := bufio.NewScanner(file)
@@ -290,4 +290,3 @@ func stringFromAny(value any) string {
 		return ""
 	}
 }
-

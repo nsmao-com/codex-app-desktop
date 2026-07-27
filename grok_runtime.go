@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -31,6 +32,12 @@ type GrokRuntimeStatus struct {
 	BuildExecutable    string `json:"buildExecutable"`
 	APIConfigured      bool   `json:"apiConfigured"`
 }
+
+var grokRuntimeProbeCache = struct {
+	sync.Mutex
+	status    GrokRuntimeStatus
+	expiresAt time.Time
+}{}
 
 type GrokSessionSummary struct {
 	ID        string `json:"id"`
@@ -130,11 +137,21 @@ func resolveGrokHome() string {
 }
 
 func detectGrokRuntime() GrokRuntimeStatus {
+	now := time.Now()
+	grokRuntimeProbeCache.Lock()
+	if now.Before(grokRuntimeProbeCache.expiresAt) {
+		status := grokRuntimeProbeCache.status
+		grokRuntimeProbeCache.Unlock()
+		return status
+	}
+	grokRuntimeProbeCache.Unlock()
+
 	// GUI apps (Win Explorer / macOS Finder) need PATH enrichment before LookPath.
 	codex.EnrichPathForLookups()
 	status := GrokRuntimeStatus{APIConfigured: grokAPIKeyConfigured()}
 	executable := findCommand(commandCandidates("grok"))
 	if executable == "" {
+		cacheGrokRuntimeStatus(status)
 		return status
 	}
 	// Binary present = installed. Auth probe is best-effort and must not
@@ -165,7 +182,25 @@ func detectGrokRuntime() GrokRuntimeStatus {
 			status.BuildAuthenticated = true
 		}
 	}
+	cacheGrokRuntimeStatus(status)
 	return status
+}
+
+func detectGrokRuntimeQuick() GrokRuntimeStatus {
+	codex.EnrichPathForLookups()
+	executable := findCommand(commandCandidates("grok"))
+	return GrokRuntimeStatus{
+		BuildAvailable:  executable != "",
+		BuildExecutable: executable,
+		APIConfigured:   grokAPIKeyConfigured(),
+	}
+}
+
+func cacheGrokRuntimeStatus(status GrokRuntimeStatus) {
+	grokRuntimeProbeCache.Lock()
+	grokRuntimeProbeCache.status = status
+	grokRuntimeProbeCache.expiresAt = time.Now().Add(providerProbeCacheTTL)
+	grokRuntimeProbeCache.Unlock()
 }
 
 func (s *AppService) RefreshGrokRuntime() GrokRuntimeStatus {
@@ -343,6 +378,16 @@ func (s *AppService) ReadGrokSession(backend, sessionID string) (GrokSessionDeta
 	return GrokSessionDetail{Summary: session.Summary, Messages: messages}, nil
 }
 
+func (s *AppService) clearGrokRun(turnID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, run := range s.externalRuns {
+		if run != nil && run.turnID == turnID {
+			delete(s.externalRuns, key)
+		}
+	}
+}
+
 func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, error) {
 	request.Backend = normalizeGrokBackend(request.Backend)
 	request.SessionID = strings.TrimSpace(request.SessionID)
@@ -437,16 +482,7 @@ func (s *AppService) DeleteGrokSession(backend, sessionID string) error {
 
 func (s *AppService) runGrokTurn(ctx context.Context, cancel context.CancelFunc, turnID string, request GrokSendRequest) {
 	defer cancel()
-	defer func() {
-		// Drop every map entry for this turn (pending key and post-bind native key).
-		s.mu.Lock()
-		for key, run := range s.externalRuns {
-			if run != nil && run.turnID == turnID {
-				delete(s.externalRuns, key)
-			}
-		}
-		s.mu.Unlock()
-	}()
+	defer s.clearGrokRun(turnID)
 	var (
 		err   error
 		usage map[string]any
@@ -461,6 +497,10 @@ func (s *AppService) runGrokTurn(ctx context.Context, cancel context.CancelFunc,
 		// Grok spend is stored under the grok runtime bucket (never mixed with Codex).
 		s.persistTurnUsage("grok", request.SessionID, turnID, b, time.Now())
 	}
+	// Clear the run before emitting a terminal event. The frontend reloads the
+	// transcript immediately; leaving the run registered can resurrect a stale
+	// pending tool row until the next session switch.
+	s.clearGrokRun(turnID)
 	if errors.Is(err, context.Canceled) {
 		s.emitGrokEvent("turn.interrupted", request.Backend, request.SessionID, turnID, payload)
 		return
@@ -549,7 +589,12 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 		// Capture a result written immediately before process exit.
 		s.emitGrokBuildActivitySnapshot(request.SessionID, turnID, pollSessionID, request.Text)
 	}
-	if nativeID != "" && nativeID != request.SessionID {
+	bindNativeSession := err == nil
+	if !bindNativeSession && nativeID != "" {
+		_, findErr := findGrokNativeSession(nativeID)
+		bindNativeSession = findErr == nil
+	}
+	if bindNativeSession && nativeID != "" && nativeID != request.SessionID {
 		// Re-key the live run under the native session id so Interrupt works after bind.
 		s.rekeyGrokRun(request.Backend, request.SessionID, nativeID, turnID)
 		s.emitGrokEvent("session.bound", grokBackendBuild, request.SessionID, turnID, map[string]any{"sessionId": nativeID})
@@ -567,11 +612,32 @@ func (s *AppService) pollGrokBuildActivity(
 	ticker := time.NewTicker(180 * time.Millisecond)
 	defer ticker.Stop()
 	lastSignature := ""
+	sessionDir := ""
+	lastSize := int64(-1)
+	lastModified := int64(0)
 	emit := func() {
-		activity, err := readGrokCurrentTurnActivity(nativeSessionID, prompt)
+		if sessionDir == "" {
+			session, err := findGrokNativeSession(nativeSessionID)
+			if err != nil {
+				return
+			}
+			sessionDir = session.Dir
+		}
+		path := filepath.Join(sessionDir, "chat_history.jsonl")
+		info, err := os.Stat(path)
 		if err != nil {
 			return
 		}
+		modified := info.ModTime().UnixNano()
+		if info.Size() == lastSize && modified == lastModified {
+			return
+		}
+		activity, err := readGrokCurrentTurnActivityFromDir(sessionDir, prompt)
+		if err != nil {
+			return
+		}
+		lastSize = info.Size()
+		lastModified = modified
 		payload, _ := json.Marshal(activity)
 		signature := string(payload)
 		if signature == lastSignature {
@@ -609,7 +675,11 @@ func readGrokCurrentTurnActivity(sessionID, prompt string) ([]GrokMessage, error
 	if err != nil {
 		return nil, err
 	}
-	messages, err := readGrokNativeMessages(session.Dir)
+	return readGrokCurrentTurnActivityFromDir(session.Dir, prompt)
+}
+
+func readGrokCurrentTurnActivityFromDir(sessionDir, prompt string) ([]GrokMessage, error) {
+	messages, err := readGrokNativeMessages(sessionDir)
 	if err != nil {
 		return nil, err
 	}

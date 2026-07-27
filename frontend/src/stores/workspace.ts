@@ -4,6 +4,7 @@ import { computed, shallowRef } from 'vue'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type { WorkspaceInfo } from '../../bindings/nice_codex_desktop/models'
 import { selectClaudeWorkspace, useClaudeWorkspace } from '@/utils/claudeBindings'
+import { sameWorkspacePath as sameWorkspace, workspaceKey } from '@/utils/workspacePath'
 import { useAppStore } from './app'
 import { notify } from '../utils/notify'
 import { translate } from '../i18n'
@@ -297,15 +298,6 @@ function uniqueWorkspacePaths(current: string, recent: string[]): string[] {
     result.push(value)
   }
   return result
-}
-
-function workspaceKey(path: string): string {
-  const normalized = path.trim().replace(/\\/g, '/').replace(/\/+$/, '')
-  return navigator.userAgent.includes('Windows') ? normalized.toLocaleLowerCase() : normalized
-}
-
-function sameWorkspace(left: string, right: string): boolean {
-  return workspaceKey(left) === workspaceKey(right)
 }
 
 function errorMessage(error: unknown): string {
