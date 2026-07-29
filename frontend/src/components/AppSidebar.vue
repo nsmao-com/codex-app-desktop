@@ -537,7 +537,7 @@ function formatGrokUpdated(value?: number | null): string {
           </button>
         </div>
       </div>
-      <TooltipProvider>
+      <TooltipProvider v-if="mobile">
         <Tooltip>
           <TooltipTrigger as-child>
             <Button variant="ghost" size="icon-xs" class="rounded-md" :aria-label="t('sidebar.toggle')" @click="emit('toggle-sidebar')">

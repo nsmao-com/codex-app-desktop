@@ -45,6 +45,7 @@ import {
   normalizeAccountRateLimits,
   normalizeStatus,
   normalizeThread,
+  normalizeThreadStatus,
   normalizeThreadTokenUsage,
   normalizeTimelineItem,
   timelineFromTurns,
@@ -521,6 +522,15 @@ export const useCodexStore = defineStore('codex', () => {
 
   async function newThread(): Promise<ThreadSummary | null> {
     if (!isReady.value || !appStore.settings.workspace) return null
+    const currentDraft = activeThread.value
+    if (
+      currentDraft?.id.startsWith('pending-thread-')
+      && sameWorkspace(currentDraft.cwd, appStore.settings.workspace)
+      && !(itemsByThread.value[currentDraft.id] ?? []).length
+      && !(queuedMessagesByThread.value[currentDraft.id] ?? []).length
+    ) {
+      return currentDraft
+    }
     // Drop unused empty drafts so "New task" stays instant and the sidebar stays clean.
     discardEmptyPendingThreads()
     createThreadSequence += 1
@@ -1309,7 +1319,7 @@ export const useCodexStore = defineStore('codex', () => {
         collaborationModeByTurn.set(turnID, collaborationMode)
         pendingCollaborationModeByThread.delete(thread.id)
       }
-      const turnStatus = asString(turn.status)
+      const turnStatus = normalizeThreadStatus(turn.status)
       // Default to "running" whenever we have a turn id — only release the queue on
       // an explicit terminal status. Mis-classified statuses used to drain the next
       // queued message immediately as a parallel turn/start.
@@ -1724,7 +1734,10 @@ export const useCodexStore = defineStore('codex', () => {
       }
       case 'thread/status/changed': {
         const threadID = asString(payload.threadId)
-        const status = asString(asRecord(payload.status).type, 'idle')
+        const status = normalizeThreadStatus(payload.status)
+        // Missing/unknown status must not be interpreted as idle: older/newer
+        // app-server versions use different payload shapes.
+        if (!threadID || !status) break
         threads.value = threads.value.map((thread) => thread.id === threadID ? { ...thread, status } : thread)
         const nextProjects = { ...projectThreads.value }
         for (const [path, projectItems] of Object.entries(nextProjects)) {
@@ -1784,7 +1797,7 @@ export const useCodexStore = defineStore('codex', () => {
         const threadID = asString(payload.threadId)
         const turn = asRecord(payload.turn)
         const turnID = asString(turn.id)
-        const status = asString(turn.status, 'completed')
+        const status = normalizeThreadStatus(turn.status, 'completed')
         const completedAt = typeof turn.completedAt === 'number' ? turn.completedAt * 1000 : Date.now()
         const startedAt = typeof turn.startedAt === 'number' ? turn.startedAt * 1000 : undefined
         const durationMs = typeof turn.durationMs === 'number' ? turn.durationMs : undefined
@@ -2840,25 +2853,28 @@ export const useCodexStore = defineStore('codex', () => {
       return
     }
 
+    let terminalStatus = ''
     try {
       const response = await backend.ReadThread(threadID)
       const rawThread = asRecord(asRecord(response).thread)
-      const thread = normalizeRuntimeThread(rawThread, response)
-      if (thread && isActiveStatus(thread.status)) {
-        const runningTurn = [...asArray(rawThread.turns)].reverse()
-          .map(asRecord)
-          .find((turn) => isActiveStatus(turn.status))
+      const turns = [...asArray(rawThread.turns)].reverse().map(asRecord)
+      const matchingTurn = turns.find((turn) => asString(turn.id) === turnID)
+      terminalStatus = normalizeThreadStatus(matchingTurn?.status)
+      if (!isTerminalTurnStatus(terminalStatus)) {
+        const runningTurn = turns.find((turn) => isActiveStatus(turn.status))
         const runningTurnID = asString(runningTurn?.id, turnID)
         setThreadTurn(threadID, runningTurnID)
         setTurnFeedback(threadID, { state: 'running', message: '', turnId: runningTurnID })
         return
       }
     } catch {
-      // The server already declared the thread idle; release the stale local turn.
+      // A failed/read-fallback snapshot is not proof that a live turn ended.
+      // Keep follow-ups queued until turn/completed or an explicit terminal snapshot.
+      return
     }
 
     if (activeTurnByThread.value[threadID] !== turnID) return
-    rememberCompletedTurn(turnID, 'completed')
+    rememberCompletedTurn(turnID, terminalStatus)
     finalizeActiveItemsForCompletedTurns(threadID, turnID)
     finalizeOrphanedActiveItems(threadID)
     setThreadTurn(threadID, '')

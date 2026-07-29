@@ -47,6 +47,8 @@ type AppService struct {
 	usageFlushGen    uint64
 	usageBackfillAt  map[string]time.Time
 	updateState      updateDownloadState
+	codexThreadStartMu sync.Mutex
+	pendingCodexSessionID string
 }
 
 type BootstrapData struct {
@@ -3037,10 +3039,32 @@ func (s *AppService) ensureCodexBackendThread(session *SessionRecord, settings U
 	if session == nil {
 		return "", errors.New("session not found")
 	}
-	if session.BackendRef != "" {
-		// SendMessage performs the single resume immediately before turn/start.
-		return session.BackendRef, nil
+
+	// Serialize lazy allocation so concurrent first sends cannot create two threads.
+	s.codexThreadStartMu.Lock()
+	defer s.codexThreadStartMu.Unlock()
+
+	s.mu.Lock()
+	record := s.sessions[session.ID]
+	if record == nil || record.Archived {
+		s.mu.Unlock()
+		return "", errors.New("session not found")
 	}
+	if ref := strings.TrimSpace(record.BackendRef); ref != "" {
+		s.mu.Unlock()
+		return ref, nil
+	}
+	session = cloneSession(record)
+	s.pendingCodexSessionID = session.ID
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.pendingCodexSessionID == session.ID {
+			s.pendingCodexSessionID = ""
+		}
+		s.mu.Unlock()
+	}()
+
 	params := map[string]any{
 		"cwd":            workspace,
 		"sandbox":        normalizeSandbox(settings.Sandbox),
@@ -3166,6 +3190,34 @@ func (s *AppService) sessionIDForBackendRef(backendID string) string {
 	return backendID
 }
 
+func (s *AppService) claimPendingCodexSession(backendID, eventWorkspace string) string {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return ""
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sessionID := s.pendingCodexSessionID
+	record := s.sessions[sessionID]
+	if sessionID == "" || record == nil || record.Archived || isExternalSession(record) {
+		return ""
+	}
+	if eventWorkspace != "" && !samePath(eventWorkspace, record.Workspace) {
+		return ""
+	}
+	if ref := strings.TrimSpace(record.BackendRef); ref != "" && ref != backendID {
+		return ""
+	}
+	record.BackendRef = backendID
+	record.UpdatedAt = time.Now().Unix()
+	s.allowedThreads[sessionID] = record.Workspace
+	s.allowedThreads[backendID] = record.Workspace
+	s.pendingCodexSessionID = ""
+	s.persistSessionsLocked()
+	return sessionID
+}
+
 func (s *AppService) remapCodexEvent(event *codex.Event) {
 	if event == nil || event.Data == nil {
 		return
@@ -3184,6 +3236,17 @@ func (s *AppService) remapCodexEvent(event *codex.Event) {
 		return
 	}
 	mapped := s.sessionIDForBackendRef(threadID)
+	// thread/started precedes the thread/start response. Bind it to the pending
+	// NiceCodex session before the raw backend id can become a second sidebar row.
+	if mapped == threadID && event.Method == "thread/started" {
+		threadWorkspace := ""
+		if thread, ok := data["thread"].(map[string]any); ok {
+			threadWorkspace, _ = thread["cwd"].(string)
+		}
+		if sessionID := s.claimPendingCodexSession(threadID, threadWorkspace); sessionID != "" {
+			mapped = sessionID
+		}
+	}
 	if mapped == "" || mapped == threadID {
 		return
 	}

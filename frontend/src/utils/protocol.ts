@@ -30,30 +30,30 @@ export function asString(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback
 }
 
-/** Normalize Codex / CLI status strings: inProgress, in_progress, running, … */
-function normalizeStatusKey(status: string): string {
-  return status.trim().toLowerCase().replace(/[_-]/g, '')
+/** Normalize Codex / CLI statuses: strings or `{ type }`, camelCase or snake_case. */
+function normalizeStatusKey(status: unknown): string {
+  return normalizeThreadStatus(status).trim().toLowerCase().replace(/[_-]/g, '')
 }
 
 /** Turn or item is still actively running. */
 export function isActiveStatus(status: unknown): boolean {
-  const key = normalizeStatusKey(asString(status))
+  const key = normalizeStatusKey(status)
   return key === 'inprogress' || key === 'running' || key === 'started' || key === 'pending' || key === 'active'
 }
 
 export function isFailedStatus(status: unknown): boolean {
-  const key = normalizeStatusKey(asString(status))
+  const key = normalizeStatusKey(status)
   return key === 'failed' || key === 'error'
 }
 
 export function isInterruptedStatus(status: unknown): boolean {
-  const key = normalizeStatusKey(asString(status))
+  const key = normalizeStatusKey(status)
   return key === 'interrupted' || key === 'cancelled' || key === 'canceled'
 }
 
 /** Turn has finished (success or failure) — anything else should keep the queue blocked. */
 export function isTerminalTurnStatus(status: unknown): boolean {
-  const key = normalizeStatusKey(asString(status))
+  const key = normalizeStatusKey(status)
   if (!key) return false
   return key === 'completed'
     || key === 'complete'
@@ -62,6 +62,14 @@ export function isTerminalTurnStatus(status: unknown): boolean {
     || key === 'succeeded'
     || isFailedStatus(status)
     || isInterruptedStatus(status)
+}
+
+/** Codex versions have emitted statuses both as strings and `{ type }` objects. */
+export function normalizeThreadStatus(value: unknown, fallback = ''): string {
+  const direct = asString(value)
+  if (direct) return direct
+  const status = asRecord(value)
+  return asString(status.type, asString(status.status, fallback))
 }
 
 export function asNumber(value: unknown, fallback = 0): number {
@@ -82,7 +90,6 @@ export function normalizeThread(value: unknown): ThreadSummary | null {
   const id = asString(record.id)
   if (!id) return null
 
-  const status = asRecord(record.status)
   const name = asString(record.name)
   const preview = asString(record.preview)
   return {
@@ -92,7 +99,7 @@ export function normalizeThread(value: unknown): ThreadSummary | null {
     cwd: asString(record.cwd),
     createdAt: asNumber(record.createdAt),
     updatedAt: asNumber(record.recencyAt, asNumber(record.updatedAt)),
-    status: asString(status.type, 'idle'),
+    status: normalizeThreadStatus(record.status, 'idle'),
     cliVersion: asString(record.cliVersion),
     model: asString(record.model),
     modelProvider: asString(record.modelProvider),
