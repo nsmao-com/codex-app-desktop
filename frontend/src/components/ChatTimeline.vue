@@ -261,6 +261,16 @@ function findLastAgentGroup(turnId: string): MessageGroup | undefined {
   return undefined
 }
 
+function isLiveExternalItem(item: TimelineItem): boolean {
+  if (item.type === 'userMessage') return false
+  const status = item.status.toLowerCase()
+  return status === 'inprogress'
+    || status === 'running'
+    || status === 'pending'
+    || item.id.startsWith('grok-live-')
+    || item.id.startsWith('grok-thought-')
+}
+
 /**
  * Timeline turn id currently streaming in an agent group.
  * Grok/Claude items use `${sessionId}:tN`, NOT the runtime `activeTurn.turnId`
@@ -273,16 +283,11 @@ const lastStreamingTurnId = computed(() => {
       ? (grokStore.isTurnRunning || grokStore.sending)
       : (claudeStore.isTurnRunning || claudeStore.sending)
     if (!running) return ''
-    // Only mark a group as streaming when it actually exists on the timeline.
-    // Right after send the last row is the user bubble — return '' so the
-    // Codex-style footer thinking shimmer can show.
-    const lastGroup = groups.value[groups.value.length - 1]
-    if (lastGroup?.kind === 'agent') return lastGroup.turnId
-    // Live thought/text share the user turn id; if an agent group for that
-    // turn already exists above a trailing user row (rare), prefer it.
-    if (lastGroup?.kind === 'user' && lastGroup.turnId) {
-      const agentForTurn = findLastAgentGroup(lastGroup.turnId)
-      if (agentForTurn) return agentForTurn.turnId
+    // Runtime busy state can arrive before the optimistic user row. Do not
+    // reactivate the previous completed group during that short window.
+    const lastGroup = groups.value.at(-1)
+    if (lastGroup?.kind === 'agent' && lastGroup.items.some(isLiveExternalItem)) {
+      return lastGroup.turnId
     }
     return ''
   }
@@ -299,24 +304,10 @@ const showThinking = computed(() => {
   if (lastStreamingTurnId.value) return false
   if (appStore.isGrokMode) {
     // Mirror Codex: show footer shimmer until the first live agent activity lands.
-    if (!(grokStore.sending || grokStore.isTurnRunning)) return false
-    return !timelineItems.value.some((item) => (
-      item.type !== 'userMessage'
-      && (
-        item.status === 'inProgress'
-        || item.status === 'running'
-        || item.status === 'pending'
-        || item.id.startsWith('grok-live-')
-        || item.id.startsWith('grok-thought-')
-      )
-    ))
+    return grokStore.sending || grokStore.isTurnRunning
   }
   if (appStore.isClaudeMode) {
-    if (!(claudeStore.sending || claudeStore.isTurnRunning)) return false
-    return !timelineItems.value.some((item) => (
-      item.type !== 'userMessage'
-      && (item.status === 'inProgress' || item.status === 'running' || item.status === 'pending')
-    ))
+    return claudeStore.sending || claudeStore.isTurnRunning
   }
   const feedback = codexStore.activeTurnFeedback
   const waiting = codexStore.sendingMessage
