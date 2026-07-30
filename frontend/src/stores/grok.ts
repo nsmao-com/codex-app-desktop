@@ -98,6 +98,7 @@ function messageToItem(message: GrokMessage, turnId: string): TimelineItem {
   const path = (message.path || '').trim()
   const command = (message.command || '').trim()
   const detail = (message.detail || '').trim()
+  const diff = message.diff || ''
 
   // File edits (search_replace / write) → patch rows, not MCP.
   if (toolKind === 'file' || /^(search_replace|write|str_replace|apply_patch|edit_file)$/i.test(name)) {
@@ -112,8 +113,7 @@ function messageToItem(message: GrokMessage, turnId: string): TimelineItem {
       changes: [{
         path: filePath,
         kind: /^write$/i.test(name) ? 'add' : 'update',
-        // Grok history usually only stores the success line; keep it as readable detail.
-        diff: text || '',
+        diff: diff || text,
       }],
     }
   }

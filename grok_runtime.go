@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,6 +63,7 @@ type GrokMessage struct {
 	Command   string `json:"command,omitempty"`
 	Path      string `json:"path,omitempty"`
 	Detail    string `json:"detail,omitempty"`
+	Diff      string `json:"diff,omitempty"`
 	Status    string `json:"status,omitempty"`
 	CreatedAt int64  `json:"createdAt"`
 }
@@ -890,7 +892,7 @@ func readGrokNativeMessages(sessionDir string) ([]GrokMessage, error) {
 				if toolName == "" {
 					toolName = "tool"
 				}
-				toolKind, filePath, command, detail := classifyGrokTool(toolName, meta.Args, "")
+				toolKind, filePath, command, detail, diff := classifyGrokTool(toolName, meta.Args, "")
 				idx := appendMsg(GrokMessage{
 					ID:        fmt.Sprintf("%s-pending-%s", base, callID),
 					Role:      "tool",
@@ -900,6 +902,7 @@ func readGrokNativeMessages(sessionDir string) ([]GrokMessage, error) {
 					Path:      filePath,
 					Command:   command,
 					Detail:    detail,
+					Diff:      diff,
 					Status:    "inProgress",
 					CreatedAt: created,
 				})
@@ -930,7 +933,7 @@ func readGrokNativeMessages(sessionDir string) ([]GrokMessage, error) {
 				toolName = "tool"
 			}
 			output := compactGrokToolOutput(raw)
-			toolKind, filePath, command, detail := classifyGrokTool(toolName, meta.Args, output)
+			toolKind, filePath, command, detail, diff := classifyGrokTool(toolName, meta.Args, output)
 			if callID != "" {
 				completedToolCalls[callID] = true
 			}
@@ -946,6 +949,7 @@ func readGrokNativeMessages(sessionDir string) ([]GrokMessage, error) {
 						Path:      filePath,
 						Command:   command,
 						Detail:    detail,
+						Diff:      diff,
 						Status:    "completed",
 						CreatedAt: created,
 					}
@@ -955,17 +959,17 @@ func readGrokNativeMessages(sessionDir string) ([]GrokMessage, error) {
 			}
 			appendMsg(GrokMessage{
 				Role: "tool", Text: output, ToolName: toolName, ToolKind: toolKind,
-				Path: filePath, Command: command, Detail: detail, CreatedAt: created,
+				Path: filePath, Command: command, Detail: detail, Diff: diff, CreatedAt: created,
 			})
 		case "backend_tool_call":
 			// e.g. {"type":"backend_tool_call","kind":{"tool_type":"web_search","action":{...}}}
-			toolName, toolKind, filePath, command, detail, text := parseGrokBackendToolCall(raw)
+			toolName, toolKind, filePath, command, detail, text, diff := parseGrokBackendToolCall(raw)
 			if toolName == "" {
 				continue
 			}
 			appendMsg(GrokMessage{
 				Role: "tool", Text: text, ToolName: toolName, ToolKind: toolKind,
-				Path: filePath, Command: command, Detail: detail, CreatedAt: created,
+				Path: filePath, Command: command, Detail: detail, Diff: diff, CreatedAt: created,
 			})
 		default:
 			continue
@@ -1080,7 +1084,7 @@ func jsonFieldFromArgs(argsJSON string, keys ...string) string {
 }
 
 // classifyGrokTool maps Grok Build tool names to timeline-friendly kinds.
-func classifyGrokTool(name, argsJSON, output string) (kind, filePath, command, detail string) {
+func classifyGrokTool(name, argsJSON, output string) (kind, filePath, command, detail, diff string) {
 	name = strings.TrimSpace(name)
 	lower := strings.ToLower(name)
 	filePath = jsonFieldFromArgs(argsJSON, "file_path", "path", "target_file", "targetFile")
@@ -1124,7 +1128,92 @@ func classifyGrokTool(name, argsJSON, output string) (kind, filePath, command, d
 			kind = "tool"
 		}
 	}
-	return kind, filePath, command, detail
+	if kind == "file" {
+		diff = grokFileDiffFromArgs(lower, argsJSON, filePath)
+	}
+	return kind, filePath, command, detail, diff
+}
+
+func grokFileDiffFromArgs(toolName, argsJSON, filePath string) string {
+	var args map[string]any
+	if json.Unmarshal([]byte(strings.TrimSpace(argsJSON)), &args) != nil {
+		return ""
+	}
+
+	if toolName == "apply_patch" {
+		patch := firstMapString(args, "diff", "patch", "patch_text", "patchText")
+		if strings.Contains(patch, "@@ ") && strings.Contains(patch, "--- ") && strings.Contains(patch, "+++ ") {
+			return patch
+		}
+	}
+
+	oldText := firstMapString(args, "old_string", "oldString", "old_text", "oldText")
+	newText := firstMapString(args, "new_string", "newString", "new_text", "newText")
+	if toolName == "write" && newText == "" {
+		newText = firstMapString(args, "content", "text")
+	}
+	return buildGrokUnifiedDiff(filePath, oldText, newText, toolName == "write")
+}
+
+func buildGrokUnifiedDiff(filePath, oldText, newText string, newFile bool) string {
+	oldLines := splitGrokDiffLines(oldText)
+	newLines := splitGrokDiffLines(newText)
+	if slices.Equal(oldLines, newLines) {
+		return ""
+	}
+
+	prefix := 0
+	for prefix < len(oldLines) && prefix < len(newLines) && oldLines[prefix] == newLines[prefix] {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(oldLines)-prefix && suffix < len(newLines)-prefix &&
+		oldLines[len(oldLines)-1-suffix] == newLines[len(newLines)-1-suffix] {
+		suffix++
+	}
+	removed := oldLines[prefix : len(oldLines)-suffix]
+	added := newLines[prefix : len(newLines)-suffix]
+
+	path := filepath.ToSlash(strings.TrimSpace(filePath))
+	if path == "" {
+		path = "file"
+	}
+	oldPath := "a/" + path
+	if newFile {
+		oldPath = "/dev/null"
+	}
+	oldStart := prefix + 1
+	if len(removed) == 0 {
+		oldStart = prefix
+	}
+	newStart := prefix + 1
+	if len(added) == 0 {
+		newStart = prefix
+	}
+
+	var diff strings.Builder
+	fmt.Fprintf(&diff, "diff --git a/%s b/%s\n--- %s\n+++ b/%s\n", path, path, oldPath, path)
+	fmt.Fprintf(&diff, "@@ -%d,%d +%d,%d @@\n", oldStart, len(removed), newStart, len(added))
+	for _, line := range removed {
+		diff.WriteByte('-')
+		diff.WriteString(line)
+		diff.WriteByte('\n')
+	}
+	for _, line := range added {
+		diff.WriteByte('+')
+		diff.WriteString(line)
+		diff.WriteByte('\n')
+	}
+	return diff.String()
+}
+
+func splitGrokDiffLines(text string) []string {
+	if text == "" {
+		return nil
+	}
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	normalized = strings.TrimSuffix(normalized, "\n")
+	return strings.Split(normalized, "\n")
 }
 
 func extractPathFromToolOutput(output string) string {
@@ -1145,7 +1234,7 @@ func extractPathFromToolOutput(output string) string {
 	return ""
 }
 
-func parseGrokBackendToolCall(raw map[string]any) (toolName, toolKind, filePath, command, detail, text string) {
+func parseGrokBackendToolCall(raw map[string]any) (toolName, toolKind, filePath, command, detail, text, diff string) {
 	kindMap, _ := raw["kind"].(map[string]any)
 	toolName = firstMapString(kindMap, "tool_type", "type", "name")
 	if toolName == "" {
@@ -1162,7 +1251,7 @@ func parseGrokBackendToolCall(raw map[string]any) (toolName, toolKind, filePath,
 	if text == "" {
 		text = detail
 	}
-	toolKind, filePath2, command2, detail2 := classifyGrokTool(toolName, stringifyGrokArgs(action), text)
+	toolKind, filePath2, command2, detail2, diff := classifyGrokTool(toolName, stringifyGrokArgs(action), text)
 	if filePath == "" {
 		filePath = filePath2
 	}
@@ -1172,7 +1261,7 @@ func parseGrokBackendToolCall(raw map[string]any) (toolName, toolKind, filePath,
 	if detail == "" {
 		detail = detail2
 	}
-	return toolName, toolKind, filePath, command, detail, text
+	return toolName, toolKind, filePath, command, detail, text, diff
 }
 
 // extractGrokUserFacingText pulls the human-visible query from Grok Build history.

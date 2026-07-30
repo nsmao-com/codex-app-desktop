@@ -352,6 +352,7 @@ export interface GrokMessage {
     "command"?: string;
     "path"?: string;
     "detail"?: string;
+    "diff"?: string;
     "status"?: string;
     "createdAt": number;
 }
