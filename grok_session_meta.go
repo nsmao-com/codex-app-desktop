@@ -13,8 +13,8 @@ import (
 // grokMetaFile holds NiceCodex-local Grok conveniences that the CLI does not
 // expose as first-class APIs (archive list, optional name overrides).
 type grokMetaFile struct {
-	Version  int                            `json:"version"`
-	Archived map[string]GrokSessionSummary  `json:"archived"`
+	Version  int                           `json:"version"`
+	Archived map[string]GrokSessionSummary `json:"archived"`
 	// Names maps session id → user-chosen title when summary.json write is unavailable.
 	Names map[string]string `json:"names,omitempty"`
 }
@@ -31,13 +31,76 @@ func emptyGrokMeta() *grokMetaFile {
 	}
 }
 
+func readGrokJSONFile(path string, target any) error {
+	payload, err := os.ReadFile(path)
+	if err == nil {
+		if decodeErr := json.Unmarshal(payload, target); decodeErr == nil {
+			return nil
+		} else {
+			err = decodeErr
+		}
+	}
+	backup, backupErr := os.ReadFile(path + ".bak")
+	if backupErr == nil {
+		if decodeErr := json.Unmarshal(backup, target); decodeErr == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+func writeGrokJSONFile(path string, payload []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".grok-json-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := temp.Write(payload); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+
+	backupPath := path + ".bak"
+	_ = os.Remove(backupPath)
+	hadExisting := false
+	if _, statErr := os.Stat(path); statErr == nil {
+		if err := os.Rename(path, backupPath); err != nil {
+			return err
+		}
+		hadExisting = true
+	} else if !os.IsNotExist(statErr) {
+		return statErr
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		if hadExisting {
+			_ = os.Rename(backupPath, path)
+		}
+		return err
+	}
+	if hadExisting {
+		_ = os.Remove(backupPath)
+	}
+	return nil
+}
+
 func loadGrokMeta(settingsPath string) *grokMetaFile {
 	result := emptyGrokMeta()
-	payload, err := os.ReadFile(grokMetaPath(settingsPath))
-	if err != nil {
-		return result
-	}
-	if err := json.Unmarshal(payload, result); err != nil {
+	if err := readGrokJSONFile(grokMetaPath(settingsPath), result); err != nil {
 		return emptyGrokMeta()
 	}
 	if result.Archived == nil {
@@ -52,19 +115,15 @@ func loadGrokMeta(settingsPath string) *grokMetaFile {
 	return result
 }
 
-func persistGrokMeta(settingsPath string, meta *grokMetaFile) {
+func persistGrokMeta(settingsPath string, meta *grokMetaFile) error {
 	if meta == nil {
-		return
+		return nil
 	}
 	payload, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
-	path := grokMetaPath(settingsPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return
-	}
-	_ = os.WriteFile(path, payload, 0o600)
+	return writeGrokJSONFile(grokMetaPath(settingsPath), payload)
 }
 
 func (s *AppService) withGrokMeta(mutator func(meta *grokMetaFile) error) error {
@@ -74,8 +133,7 @@ func (s *AppService) withGrokMeta(mutator func(meta *grokMetaFile) error) error 
 	if err := mutator(meta); err != nil {
 		return err
 	}
-	persistGrokMeta(s.settingsPath, meta)
-	return nil
+	return persistGrokMeta(s.settingsPath, meta)
 }
 
 func (s *AppService) isGrokSessionArchived(sessionID string) bool {
@@ -129,20 +187,24 @@ func (s *AppService) RenameGrokSession(backend, sessionID, name string) (GrokSes
 			ID: sessionID, Backend: backend, Name: name, Preview: name,
 			UpdatedAt: time.Now().Unix(),
 		}
-		_ = s.withGrokMeta(func(meta *grokMetaFile) error {
+		if err := s.withGrokMeta(func(meta *grokMetaFile) error {
 			meta.Names[sessionID] = name
 			return nil
-		})
+		}); err != nil {
+			return GrokSessionSummary{}, err
+		}
 		return summary, nil
 	}
 
 	session, err := findGrokNativeSession(sessionID)
 	if err != nil {
 		// Still keep a local override so the sidebar can show the chosen name.
-		_ = s.withGrokMeta(func(meta *grokMetaFile) error {
+		if metaErr := s.withGrokMeta(func(meta *grokMetaFile) error {
 			meta.Names[sessionID] = name
 			return nil
-		})
+		}); metaErr != nil {
+			return GrokSessionSummary{}, metaErr
+		}
 		return GrokSessionSummary{
 			ID: sessionID, Backend: backend, Name: name, UpdatedAt: time.Now().Unix(),
 		}, nil
@@ -151,7 +213,7 @@ func (s *AppService) RenameGrokSession(backend, sessionID, name string) (GrokSes
 	if err := writeGrokSessionTitle(session.Dir, name); err != nil {
 		return GrokSessionSummary{}, err
 	}
-	_ = s.withGrokMeta(func(meta *grokMetaFile) error {
+	if err := s.withGrokMeta(func(meta *grokMetaFile) error {
 		meta.Names[sessionID] = name
 		if archived, ok := meta.Archived[sessionID]; ok {
 			archived.Name = name
@@ -159,7 +221,9 @@ func (s *AppService) RenameGrokSession(backend, sessionID, name string) (GrokSes
 			meta.Archived[sessionID] = archived
 		}
 		return nil
-	})
+	}); err != nil {
+		return GrokSessionSummary{}, err
+	}
 	summary := session.Summary
 	summary.Name = name
 	summary.UpdatedAt = time.Now().Unix()
@@ -187,7 +251,7 @@ func writeGrokSessionTitle(sessionDir, name string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0o600)
+	return writeGrokJSONFile(path, out)
 }
 
 // ArchiveGrokSession hides a session from the main list (local archive index).
@@ -196,6 +260,9 @@ func (s *AppService) ArchiveGrokSession(backend, sessionID string) error {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return errors.New("Grok session id is required")
+	}
+	if s.isGrokSessionRunning(backend, sessionID) {
+		return errors.New("stop the running Grok turn before archiving its session")
 	}
 
 	var summary GrokSessionSummary
@@ -318,9 +385,15 @@ func (s *AppService) renameGrokAPISession(sessionID, name string) (GrokSessionSu
 	if session == nil {
 		return GrokSessionSummary{}, errors.New("Grok API session was not found")
 	}
+	previousName := session.Name
+	previousUpdatedAt := session.UpdatedAt
 	session.Name = name
 	session.UpdatedAt = time.Now().Unix()
-	s.persistGrokAPISessionsLocked()
+	if err := s.persistGrokAPISessionsLocked(); err != nil {
+		session.Name = previousName
+		session.UpdatedAt = previousUpdatedAt
+		return GrokSessionSummary{}, err
+	}
 	return GrokSessionSummary{
 		ID: session.ID, Backend: grokBackendAPI, Workspace: session.Workspace,
 		Name: session.Name, Preview: session.Preview, Model: session.Model, Effort: session.Effort,

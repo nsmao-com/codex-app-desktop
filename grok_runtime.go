@@ -53,10 +53,11 @@ type GrokSessionSummary struct {
 }
 
 type GrokMessage struct {
-	ID       string `json:"id"`
-	Role     string `json:"role"`
-	Text     string `json:"text"`
-	ToolName string `json:"toolName,omitempty"`
+	ID       string   `json:"id"`
+	Role     string   `json:"role"`
+	Text     string   `json:"text"`
+	Images   []string `json:"images,omitempty"`
+	ToolName string   `json:"toolName,omitempty"`
 	// ToolKind classifies Grok Build tools for the workbench timeline:
 	// file | command | search | mcp | tool
 	ToolKind  string `json:"toolKind,omitempty"`
@@ -401,10 +402,15 @@ func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, erro
 	if err != nil {
 		return GrokTurnRef{}, err
 	}
+	images, err := s.validateImageAttachments(request.Images)
+	if err != nil {
+		return GrokTurnRef{}, err
+	}
 	if request.SessionID == "" {
 		request.SessionID = newUUID()
 	}
 	request.Workspace = workspace
+	request.Images = images
 	turnID := "grok-turn-" + newUUID()
 	ctx, cancel := context.WithCancel(context.Background())
 	key := grokRunKey(request.Backend, request.SessionID)
@@ -449,20 +455,51 @@ func (s *AppService) InterruptGrokTurn(ref GrokTurnRef) error {
 	return nil
 }
 
+func (s *AppService) IsGrokTurnRunning(ref GrokTurnRef) bool {
+	backend := normalizeGrokBackend(ref.Backend)
+	sessionID := strings.TrimSpace(ref.SessionID)
+	turnID := strings.TrimSpace(ref.TurnID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if run := s.externalRuns[grokRunKey(backend, sessionID)]; run != nil {
+		return turnID == "" || run.turnID == turnID
+	}
+	if turnID == "" {
+		return false
+	}
+	for _, run := range s.externalRuns {
+		if run != nil && run.turnID == turnID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *AppService) isGrokSessionRunning(backend, sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.externalRuns[grokRunKey(backend, sessionID)] != nil
+}
+
 func (s *AppService) DeleteGrokSession(backend, sessionID string) error {
 	backend = normalizeGrokBackend(backend)
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return errors.New("Grok session id is required")
 	}
-	// Always drop local archive/name entries for this id.
-	defer s.removeGrokArchiveEntry(sessionID)
-
+	if s.isGrokSessionRunning(backend, sessionID) {
+		return errors.New("stop the running Grok turn before deleting its session")
+	}
 	if strings.HasPrefix(sessionID, "pending-grok-") {
+		s.removeGrokArchiveEntry(sessionID)
 		return nil
 	}
 	if backend == grokBackendAPI {
-		return s.deleteGrokAPISession(sessionID)
+		if err := s.deleteGrokAPISession(sessionID); err != nil {
+			return err
+		}
+		s.removeGrokArchiveEntry(sessionID)
+		return nil
 	}
 	executable := findCommand(commandCandidates("grok"))
 	if executable == "" {
@@ -479,6 +516,7 @@ func (s *AppService) DeleteGrokSession(backend, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("delete Grok session: %s", strings.TrimSpace(string(output)))
 	}
+	s.removeGrokArchiveEntry(sessionID)
 	return nil
 }
 
@@ -1280,10 +1318,6 @@ func extractGrokUserFacingText(raw map[string]any) string {
 	}
 	if isGrokSyntheticUserBlob(text) {
 		return ""
-	}
-	// Cap extremely long free-form user payloads (rare outside injections).
-	if len(text) > 12_000 {
-		return text[:12_000] + "\n…"
 	}
 	return text
 }

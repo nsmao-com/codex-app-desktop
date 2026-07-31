@@ -501,7 +501,10 @@ const activeRuntimeSending = computed(() => {
   if (appStore.isClaudeMode) return claudeStore.sending
   return codexStore.sendingMessage
 })
-const stopDisabled = computed(() => appStore.isCodexMode && codexStore.interruptingTurn)
+const stopDisabled = computed(() => {
+  if (appStore.isGrokMode) return grokStore.interrupting
+  return appStore.isCodexMode && codexStore.interruptingTurn
+})
 const sendButtonLabel = computed(() => {
   if (canSteer.value) return t('chat.steer')
   if (willQueueOnSend.value) return t('chat.queueSend')

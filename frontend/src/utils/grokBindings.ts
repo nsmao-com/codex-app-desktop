@@ -81,6 +81,14 @@ export function interruptGrokTurn(ref: GrokTurnRef): Promise<void> {
   )
 }
 
+export function isGrokTurnRunning(ref: GrokTurnRef): Promise<boolean> {
+  return withNameFallback(
+    'IsGrokTurnRunning',
+    () => backend.IsGrokTurnRunning(ref),
+    ref,
+  )
+}
+
 export function deleteGrokSession(backendId: string, sessionID: string): Promise<void> {
   return withNameFallback(
     'DeleteGrokSession',

@@ -204,7 +204,7 @@ function openGitHub(): void {
           </DropdownMenuItem>
           <DropdownMenuItem
             v-else-if="appStore.isGrokMode"
-            :disabled="!grokStore.activeSessionId"
+            :disabled="!grokStore.activeSessionId || grokStore.isTurnRunning"
             @click="void grokStore.archiveActiveSession()"
           >
             {{ t('threadActions.archive') }}
@@ -212,7 +212,7 @@ function openGitHub(): void {
           <DropdownMenuItem
             class="text-destructive focus:text-destructive"
             :disabled="appStore.isGrokMode
-              ? !grokStore.activeSessionId
+              ? (!grokStore.activeSessionId || grokStore.isTurnRunning)
               : appStore.isClaudeMode
                 ? !claudeStore.activeSessionId
                 : (!codexStore.activeThread || Boolean(codexStore.threadMutation) || codexStore.activeThreadBusy)"

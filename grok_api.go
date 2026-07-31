@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,23 +45,19 @@ func grokAPISessionsPath(settingsPath string) string {
 
 func loadGrokAPISessions(settingsPath string) map[string]*GrokAPISession {
 	result := make(map[string]*GrokAPISession)
-	payload, err := os.ReadFile(grokAPISessionsPath(settingsPath))
-	if err != nil {
-		return result
-	}
-	if err := json.Unmarshal(payload, &result); err != nil {
+	if err := readGrokJSONFile(grokAPISessionsPath(settingsPath), &result); err != nil {
 		return make(map[string]*GrokAPISession)
 	}
 	return result
 }
 
-func (s *AppService) persistGrokAPISessionsLocked() {
+func (s *AppService) persistGrokAPISessionsLocked() error {
 	path := grokAPISessionsPath(s.settingsPath)
 	payload, err := json.MarshalIndent(s.grokAPISessions, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
-	_ = os.WriteFile(path, payload, 0o600)
+	return writeGrokJSONFile(path, payload)
 }
 
 func grokAPIKeyConfigured() bool {
@@ -72,12 +70,26 @@ func (s *AppService) grokAPIKeyConfiguredWithSettings() bool {
 }
 
 func envGrokAPIKey() string {
-	for _, key := range []string{"XAI_API_KEY", "GROK_API_KEY", "OPENAI_API_KEY"} {
+	for _, key := range []string{"XAI_API_KEY", "GROK_API_KEY"} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
 		}
 	}
 	return ""
+}
+
+func resolveGrokAPIEndpoint(settings UserSettings) (string, error) {
+	baseURL := resolveGrokAPIBaseURL(settings)
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Hostname() == "" {
+		return "", errors.New("Grok API Base URL is invalid")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	localHTTP := parsed.Scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1")
+	if parsed.Scheme != "https" && !localHTTP {
+		return "", errors.New("Grok API Base URL must use HTTPS (HTTP is only allowed for localhost)")
+	}
+	return strings.TrimRight(baseURL, "/") + "/chat/completions", nil
 }
 
 func resolveGrokAPIKey(settings UserSettings) string {
@@ -164,8 +176,12 @@ func (s *AppService) deleteGrokAPISession(sessionID string) error {
 	if s.grokAPISessions[sessionID] == nil {
 		return errors.New("Grok API session was not found")
 	}
+	previous := s.grokAPISessions[sessionID]
 	delete(s.grokAPISessions, sessionID)
-	s.persistGrokAPISessionsLocked()
+	if err := s.persistGrokAPISessionsLocked(); err != nil {
+		s.grokAPISessions[sessionID] = previous
+		return err
+	}
 	return nil
 }
 
@@ -196,11 +212,53 @@ func (s *AppService) ensureGrokAPISessionLocked(request GrokSendRequest) *GrokAP
 	return session
 }
 
+func grokAPIMessageContent(message GrokMessage) (any, error) {
+	text := strings.TrimSpace(message.Text)
+	if !strings.EqualFold(strings.TrimSpace(message.Role), "user") || len(message.Images) == 0 {
+		if text == "" {
+			return nil, nil
+		}
+		return text, nil
+	}
+	content := make([]map[string]any, 0, len(message.Images)+1)
+	if text != "" {
+		content = append(content, map[string]any{"type": "text", "text": text})
+	}
+	for _, path := range message.Images {
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read Grok image attachment: %w", err)
+		}
+		if len(payload) == 0 || len(payload) > 20*1024*1024 {
+			return nil, errors.New("Grok image attachment must be between 1 byte and 20 MB")
+		}
+		mimeType := http.DetectContentType(payload)
+		switch mimeType {
+		case "image/png", "image/jpeg", "image/gif", "image/webp":
+		default:
+			return nil, errors.New("unsupported Grok image attachment format")
+		}
+		dataURL := "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(payload)
+		content = append(content, map[string]any{
+			"type":      "image_url",
+			"image_url": map[string]any{"url": dataURL},
+		})
+	}
+	if len(content) == 0 {
+		return nil, nil
+	}
+	return content, nil
+}
+
 func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request GrokSendRequest) (map[string]any, error) {
 	settings := s.Settings()
 	apiKey := resolveGrokAPIKey(settings)
 	if apiKey == "" {
 		return nil, errors.New("Grok API key missing — set it in Settings → Grok configuration, or export XAI_API_KEY / GROK_API_KEY")
+	}
+	endpoint, err := resolveGrokAPIEndpoint(settings)
+	if err != nil {
+		return nil, err
 	}
 	model := strings.TrimSpace(request.Model)
 	if model == "" {
@@ -230,6 +288,7 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 		ID:        fmt.Sprintf("%s-user-%d", turnID, time.Now().UnixNano()),
 		Role:      "user",
 		Text:      request.Text,
+		Images:    append([]string(nil), request.Images...),
 		Status:    "completed",
 		CreatedAt: time.Now().Unix(),
 	}
@@ -248,11 +307,11 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 					break
 				}
 			}
-			s.persistGrokAPISessionsLocked()
+			_ = s.persistGrokAPISessionsLocked()
 		}
 		s.mu.Unlock()
 	}()
-	history := make([]map[string]string, 0, len(session.Messages))
+	history := make([]map[string]any, 0, len(session.Messages))
 	for _, message := range session.Messages {
 		if strings.EqualFold(strings.TrimSpace(message.Status), "failed") {
 			continue
@@ -261,13 +320,25 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 		if role != "user" && role != "assistant" && role != "system" {
 			continue
 		}
-		text := strings.TrimSpace(message.Text)
-		if text == "" {
+		apiMessage := message
+		if message.ID != userMsg.ID {
+			apiMessage.Images = nil
+		}
+		content, err := grokAPIMessageContent(apiMessage)
+		if err != nil {
+			_ = s.persistGrokAPISessionsLocked()
+			s.mu.Unlock()
+			return nil, err
+		}
+		if content == nil {
 			continue
 		}
-		history = append(history, map[string]string{"role": role, "content": text})
+		history = append(history, map[string]any{"role": role, "content": content})
 	}
-	s.persistGrokAPISessionsLocked()
+	if err := s.persistGrokAPISessionsLocked(); err != nil {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("persist Grok API session: %w", err)
+	}
 	s.mu.Unlock()
 
 	body := map[string]any{
@@ -277,12 +348,14 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 		// Ask providers that support it to attach a final usage chunk.
 		"stream_options": map[string]any{"include_usage": true},
 	}
+	if effort := normalizeGrokEffort(request.Effort); effort != "" {
+		body["reasoning_effort"] = effort
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 
-	endpoint := resolveGrokAPIBaseURL(settings) + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -369,16 +442,21 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 
 	s.mu.Lock()
 	if session := s.grokAPISessions[request.SessionID]; session != nil {
-		session.Messages = append(session.Messages, GrokMessage{
+		assistantMessage := GrokMessage{
 			ID:        fmt.Sprintf("%s-assistant-%d", turnID, time.Now().UnixNano()),
 			Role:      "assistant",
 			Text:      finalText,
 			Status:    "completed",
 			CreatedAt: time.Now().Unix(),
-		})
+		}
+		session.Messages = append(session.Messages, assistantMessage)
 		session.UpdatedAt = time.Now().Unix()
 		session.Preview = finalText
-		s.persistGrokAPISessionsLocked()
+		if err := s.persistGrokAPISessionsLocked(); err != nil {
+			session.Messages = session.Messages[:len(session.Messages)-1]
+			s.mu.Unlock()
+			return usage, fmt.Errorf("persist Grok API response: %w", err)
+		}
 	}
 	s.mu.Unlock()
 	requestSucceeded = true

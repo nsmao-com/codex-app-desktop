@@ -29,6 +29,7 @@ import {
 import { easeOutQuick } from '@/lib/motion'
 import { useAppStore, useBrowserStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import { Motion } from 'motion-v'
+import { sameWorkspacePath } from '@/utils/workspacePath'
 
 const appStore = useAppStore()
 const codexStore = useCodexStore()
@@ -193,9 +194,36 @@ function commitFromBar(): void {
   })()
 }
 
-watch(() => codexStore.activeThreadId, () => {
-  draft.value = ''
-})
+watch(
+  [
+    () => appStore.activeRuntime,
+    () => (appStore.isGrokMode
+      ? grokStore.activeSessionId
+      : appStore.isClaudeMode
+        ? claudeStore.activeSessionId
+        : codexStore.activeThreadId),
+    () => (appStore.isGrokMode
+      ? grokStore.workspacePath
+      : appStore.isClaudeMode
+        ? claudeStore.workspacePath
+        : appStore.settings.workspace),
+  ],
+  ([runtime, sessionId, workspace], [previousRuntime, previousSessionId, previousWorkspace]) => {
+    const promotedPendingSession = runtime === previousRuntime
+      && previousSessionId.startsWith(`pending-${runtime}-`)
+      && Boolean(sessionId)
+      && (runtime === 'grok'
+        ? grokStore.runningSessionIds.includes(sessionId)
+        : runtime === 'claude' && claudeStore.runningSessionIds.includes(sessionId))
+    if (
+      runtime !== previousRuntime
+      || !sameWorkspacePath(workspace, previousWorkspace)
+      || (sessionId !== previousSessionId && !promotedPendingSession)
+    ) {
+      draft.value = ''
+    }
+  },
+)
 </script>
 
 <template>

@@ -34,18 +34,18 @@ const showOnboarding = computed(() =>
   !appStore.bootstrapping && !appStore.settings.onboardingCompleted,
 )
 
-const anyTurnRunning = computed(() => codexStore.runningThreadIds.length > 0)
-
-watch(anyTurnRunning, (running) => {
-  void backend.SetPreventSleepActive(running).catch(() => undefined)
-})
-
-watch(
-  () => appStore.settings.preventSleepWhileRunning,
-  (enabled) => {
-    void backend.SetPreventSleepActive(Boolean(enabled) && anyTurnRunning.value).catch(() => undefined)
-  },
+const anyTurnRunning = computed(() =>
+  codexStore.runningThreadIds.length > 0
+  || grokStore.runningSessionIds.length > 0
+  || claudeStore.runningSessionIds.length > 0,
 )
+const preventSleepActive = computed(() =>
+  Boolean(appStore.settings.preventSleepWhileRunning) && anyTurnRunning.value,
+)
+
+watch(preventSleepActive, (active) => {
+  void backend.SetPreventSleepActive(active).catch(() => undefined)
+}, { immediate: true })
 
 function openMemoriesDialog(): void {
   memoriesOpen.value = true

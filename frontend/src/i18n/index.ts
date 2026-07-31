@@ -896,6 +896,8 @@ const messages = {
       archived: '对话已归档',
       archivedHint: '可在设置 → 已归档 中恢复该对话。',
       archiveFailed: '归档对话失败',
+      busyActionBlocked: '任务仍在运行',
+      busyActionBlockedHint: '请先停止当前任务，确认停止后再归档或删除对话。',
       compacting: '正在压缩上下文',
       compactingHint: 'Codex 会保留关键内容并释放上下文空间。',
       compactFailed: '压缩上下文失败',
@@ -1189,7 +1191,7 @@ const messages = {
       finish: 'Get started',
     },
     threadActions: {
-      title: 'Conversation actions', fork: 'Fork conversation', compact: 'Compact context', archive: 'Archive conversation', rename: 'Rename conversation', renamePrompt: 'Enter a new conversation name', renamed: 'Conversation renamed', renameFailed: 'Could not rename conversation', delete: 'Delete conversation', deleteConfirm: 'Permanently delete this conversation? This cannot be undone.', deleted: 'Conversation deleted', deletedHint: 'Removed from the local index and Codex thread store.', deleteFailed: 'Could not delete conversation', unarchive: 'Restore conversation', unarchived: 'Conversation restored', unarchivedHint: 'It is back in the task list.', unarchiveFailed: 'Could not restore conversation', review: 'Review changes', reviewThreadName: 'Code review', reviewStarted: 'Review started', reviewStartedHint: 'Codex is reviewing the current changes with the official Review flow.', reviewFailed: 'Could not start review', reviewNeedThread: 'Review unavailable', reviewNeedThreadHint: 'Send at least one message before using /review.', forked: 'Conversation forked', forkFailed: 'Could not fork conversation', archived: 'Conversation archived', archivedHint: 'Restore it from Settings → Archived.', archiveFailed: 'Could not archive conversation', compacting: 'Compacting context', compactingHint: 'Codex will preserve key details and free context space.', compactFailed: 'Could not compact context',
+      title: 'Conversation actions', fork: 'Fork conversation', compact: 'Compact context', archive: 'Archive conversation', rename: 'Rename conversation', renamePrompt: 'Enter a new conversation name', renamed: 'Conversation renamed', renameFailed: 'Could not rename conversation', delete: 'Delete conversation', deleteConfirm: 'Permanently delete this conversation? This cannot be undone.', deleted: 'Conversation deleted', deletedHint: 'Removed from the local index and Codex thread store.', deleteFailed: 'Could not delete conversation', unarchive: 'Restore conversation', unarchived: 'Conversation restored', unarchivedHint: 'It is back in the task list.', unarchiveFailed: 'Could not restore conversation', review: 'Review changes', reviewThreadName: 'Code review', reviewStarted: 'Review started', reviewStartedHint: 'Codex is reviewing the current changes with the official Review flow.', reviewFailed: 'Could not start review', reviewNeedThread: 'Review unavailable', reviewNeedThreadHint: 'Send at least one message before using /review.', forked: 'Conversation forked', forkFailed: 'Could not fork conversation', archived: 'Conversation archived', archivedHint: 'Restore it from Settings → Archived.', archiveFailed: 'Could not archive conversation', busyActionBlocked: 'Task still running', busyActionBlockedHint: 'Stop this task and wait for it to finish stopping before archiving or deleting the conversation.', compacting: 'Compacting context', compactingHint: 'Codex will preserve key details and free context space.', compactFailed: 'Could not compact context',
     },
     palette: {
       title: 'Command palette',

@@ -27,7 +27,7 @@ import {
 } from '@lucide/vue'
 import { Motion } from 'motion-v'
 import { useRouter } from 'vue-router'
-import { computed, nextTick, shallowRef, watch, type Component } from 'vue'
+import { computed, nextTick, onBeforeUnmount, shallowRef, watch, type Component } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
@@ -79,6 +79,11 @@ const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const { locale, t } = useI18n()
+let externalSearchTimer = 0
+
+onBeforeUnmount(() => {
+  if (externalSearchTimer) window.clearTimeout(externalSearchTimer)
+})
 
 const props = defineProps<{
   collapsed?: boolean
@@ -155,12 +160,18 @@ const search = computed({
   set: (value: string) => {
     if (appStore.isGrokMode) {
       grokStore.search = value
-      void grokStore.loadSessions()
+      if (externalSearchTimer) window.clearTimeout(externalSearchTimer)
+      externalSearchTimer = window.setTimeout(() => {
+        if (appStore.isGrokMode) void grokStore.loadSessions()
+      }, 250)
       return
     }
     if (appStore.isClaudeMode) {
       claudeStore.search = value
-      void claudeStore.loadSessions()
+      if (externalSearchTimer) window.clearTimeout(externalSearchTimer)
+      externalSearchTimer = window.setTimeout(() => {
+        if (appStore.isClaudeMode) void claudeStore.loadSessions()
+      }, 250)
       return
     }
     codexStore.setSearch(value)
@@ -858,7 +869,9 @@ function formatGrokUpdated(value?: number | null): string {
                         size="icon-xs"
                         class="absolute right-1.5 top-1.5 size-6 rounded-md text-muted-foreground opacity-0 transition-opacity group-hover/thread:opacity-100 group-focus-within/thread:opacity-100 data-[state=open]:opacity-100 focus-visible:opacity-100"
                         :aria-label="t('threadActions.title')"
-                        :disabled="Boolean(grokStore.sessionMutation) || renamingThreadId === session.id"
+                        :disabled="Boolean(grokStore.sessionMutation)
+                          || renamingThreadId === session.id
+                          || grokStore.runningSessionIds.includes(session.id)"
                         @click.stop
                       >
                         <MoreHorizontal :size="13" />
@@ -870,7 +883,9 @@ function formatGrokUpdated(value?: number | null): string {
                         {{ t('threadActions.rename') }}
                       </DropdownMenuItem>
                       <DropdownMenuItem
-                        :disabled="Boolean(grokStore.sessionMutation) || session.id.startsWith('pending-grok-')"
+                        :disabled="Boolean(grokStore.sessionMutation)
+                          || session.id.startsWith('pending-grok-')
+                          || grokStore.runningSessionIds.includes(session.id)"
                         @click="(event: Event) => archiveGrokSession(session.id, event)"
                       >
                         <Archive :size="14" class="mr-2" />
@@ -879,7 +894,7 @@ function formatGrokUpdated(value?: number | null): string {
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         class="text-destructive focus:text-destructive"
-                        :disabled="Boolean(grokStore.sessionMutation)"
+                        :disabled="Boolean(grokStore.sessionMutation) || grokStore.runningSessionIds.includes(session.id)"
                         @click="(event: Event) => deleteGrokSession(session.id, event)"
                       >
                         <Trash2 :size="14" class="mr-2" />

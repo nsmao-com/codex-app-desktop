@@ -1284,11 +1284,30 @@ func (s *AppService) SteerTurn(request SteerTurnRequest) (map[string]any, error)
 
 func (s *AppService) buildUserInput(text string, images []string) ([]any, error) {
 	text = strings.TrimSpace(text)
+	images, err := s.validateImageAttachments(images)
+	if err != nil {
+		return nil, err
+	}
+
+	input := make([]any, 0, len(images)+1)
+	for _, path := range images {
+		input = append(input, map[string]any{"type": "localImage", "path": path})
+	}
+	if text == "" && len(input) == 0 {
+		return nil, errors.New("message cannot be empty")
+	}
+	if text != "" {
+		input = append(input, map[string]any{"type": "text", "text": text, "text_elements": []any{}})
+	}
+	return input, nil
+}
+
+func (s *AppService) validateImageAttachments(images []string) ([]string, error) {
 	if len(images) > 4 {
 		return nil, errors.New("attach up to 4 images per message")
 	}
 
-	input := make([]any, 0, len(images)+1)
+	validated := make([]string, 0, len(images))
 	seenImages := make(map[string]struct{}, len(images))
 	for _, path := range images {
 		cleanPath, err := validateImageAttachment(path)
@@ -1306,15 +1325,9 @@ func (s *AppService) buildUserInput(text string, images []string) ([]any, error)
 			return nil, errors.New("select image attachments through Nice Codex before sending")
 		}
 		seenImages[key] = struct{}{}
-		input = append(input, map[string]any{"type": "localImage", "path": cleanPath})
+		validated = append(validated, cleanPath)
 	}
-	if text == "" && len(input) == 0 {
-		return nil, errors.New("message cannot be empty")
-	}
-	if text != "" {
-		input = append(input, map[string]any{"type": "text", "text": text, "text_elements": []any{}})
-	}
-	return input, nil
+	return validated, nil
 }
 
 // PreviewImage returns a data-URL for an allow-listed attachment so the UI can show thumbnails.

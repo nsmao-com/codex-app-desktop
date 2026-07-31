@@ -342,6 +342,7 @@ export interface GrokMessage {
     "id": string;
     "role": string;
     "text": string;
+    "images"?: string[] | null;
     "toolName"?: string;
 
     /**

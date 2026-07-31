@@ -805,6 +805,12 @@ func externalCommandArgs(provider, sessionID, workspace string, settings UserSet
 		if isExternalEffort(effort, "low", "medium", "high") {
 			args = append(args, "--reasoning-effort", effort)
 		}
+		if !settings.GrokWebSearch {
+			args = append(args, "--disable-web-search")
+		}
+		if !settings.GrokXSearch {
+			args = append(args, "--disallowed-tools", "x_keyword_search,x_semantic_search")
+		}
 		return append(args, grokPermissionArgs(settings)...), generatedSessionID
 	default:
 		return nil, generatedSessionID
@@ -866,16 +872,20 @@ func geminiPermissionArgs(settings UserSettings) []string {
 }
 
 func grokPermissionArgs(settings UserSettings) []string {
-	// Headless `-p` cannot answer interactive prompts — a tool that would ask is
-	// cancelled and often ends the agentic loop early (looks like a mid-turn disconnect).
-	// Only `bypassPermissions` / `--yolo` actually enable always-approve via CLI flags;
-	// `acceptEdits`/`plan` on --permission-mode are accepted but do not enable those policies.
-	// See ~/.grok/docs/user-guide/14-headless-mode.md and 22-permissions-and-safety.md.
-	if settings.Sandbox == "read-only" {
-		return []string{"--permission-mode", "default"}
+	profile := "workspace"
+	switch settings.Sandbox {
+	case "read-only":
+		profile = "read-only"
+	case "danger-full-access":
+		profile = "off"
 	}
-	// Desktop workbench already scoped the workspace — auto-approve tools unattended.
-	return []string{"--yolo"}
+	args := []string{"--sandbox", profile}
+	if settings.ApprovalPolicy == "never" {
+		return append(args, "--yolo")
+	}
+	// Headless runs cannot display an approval dialog. Default mode safely denies
+	// a tool that would require confirmation instead of silently elevating it.
+	return append(args, "--permission-mode", "default")
 }
 
 func externalPrompt(text string, images []string) string {
