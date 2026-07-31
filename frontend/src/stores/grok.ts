@@ -19,6 +19,7 @@ import {
   listGrokSessions,
   readGrokSession,
   refreshGrokRuntime,
+  refreshGrokRuntimeQuick,
   renameGrokSession as renameGrokSessionApi,
   sendGrokMessage as sendGrokMessageApi,
   unarchiveGrokSession as unarchiveGrokSessionApi,
@@ -222,37 +223,74 @@ function mergeGrokDiskWithCurrent(
 ): GrokMessage[] {
   if (!current.length) return disk
   const result = [...disk]
-  const ids = new Set(disk.map((message) => message.id).filter(Boolean))
-  const diskUserCounts = new Map<string, number>()
-  const currentUserCounts = new Map<string, number>()
-  let latestDiskTime = 0
-  for (const message of disk) {
-    latestDiskTime = Math.max(latestDiskTime, Number(message.createdAt) || 0)
+  const diskById = new Map(
+    disk.filter((message) => message.id).map((message) => [message.id, message]),
+  )
+  const consumedDiskUsers = new Set<GrokMessage>()
+  const diskUsers = disk.filter((message) => {
     const role = (message.role || '').toLowerCase()
-    if (role !== 'user' && role !== 'human') continue
-    const text = (message.text || '').trim()
-    diskUserCounts.set(text, (diskUserCounts.get(text) || 0) + 1)
-  }
+    return role === 'user' || role === 'human'
+  })
+  let latestDiskTime = 0
+  for (const message of disk) latestDiskTime = Math.max(latestDiskTime, Number(message.createdAt) || 0)
 
+  // Provider rows stay authoritative; optimistic rows are inserted after the
+  // last shared message instead of being appended below a completed answer.
+  let lastAnchor: GrokMessage | null = null
   for (const message of current) {
     const role = (message.role || '').toLowerCase()
     const isUser = role === 'user' || role === 'human'
-    const text = isUser ? (message.text || '').trim() : ''
-    const occurrence = isUser ? (currentUserCounts.get(text) || 0) + 1 : 0
-    if (isUser) currentUserCounts.set(text, occurrence)
-    if (message.id && ids.has(message.id)) continue
+    const idMatch = message.id ? diskById.get(message.id) : undefined
+    if (idMatch) {
+      lastAnchor = idMatch
+      if (isUser) consumedDiskUsers.add(idMatch)
+      continue
+    }
     if (isUser) {
-      if (occurrence <= (diskUserCounts.get(text) || 0)) continue
-      result.push(message)
-      if (message.id) ids.add(message.id)
+      const diskMatch = diskUsers.find((candidate) =>
+        !consumedDiskUsers.has(candidate) && sameGrokUserText(candidate.text, message.text),
+      )
+      if (diskMatch) {
+        consumedDiskUsers.add(diskMatch)
+        const diskIndex = result.indexOf(diskMatch)
+        // Keep the complete optimistic text if Grok persisted a shortened variant.
+        if (diskIndex >= 0 && normalizeGrokUserText(diskMatch.text) !== normalizeGrokUserText(message.text)) {
+          const restored = { ...diskMatch, text: message.text, images: message.images ?? diskMatch.images }
+          result[diskIndex] = restored
+          lastAnchor = restored
+        } else {
+          lastAnchor = diskMatch
+        }
+        continue
+      }
+      const anchorIndex = lastAnchor ? result.indexOf(lastAnchor) : -1
+      const insertionIndex = anchorIndex >= 0 ? anchorIndex + 1 : 0
+      result.splice(insertionIndex, 0, message)
+      lastAnchor = message
       continue
     }
     if (preserveLiveMessages && (isActiveGrokStatus(message.status) || (Number(message.createdAt) || 0) >= latestDiskTime)) {
-      result.push(message)
-      if (message.id) ids.add(message.id)
+      const anchorIndex = lastAnchor ? result.indexOf(lastAnchor) : -1
+      const insertionIndex = anchorIndex >= 0 ? anchorIndex + 1 : result.length
+      result.splice(insertionIndex, 0, message)
+      lastAnchor = message
     }
   }
   return result
+}
+
+function normalizeGrokUserText(text = ''): string {
+  return text.trim().replace(/\r\n/g, '\n')
+}
+
+function sameGrokUserText(left = '', right = ''): boolean {
+  const a = normalizeGrokUserText(left)
+  const b = normalizeGrokUserText(right)
+  if (a === b) return true
+  const shorter = a.length <= b.length ? a : b
+  const longer = a.length > b.length ? a : b
+  if (shorter.length < 512 || shorter.length / longer.length < 0.7) return false
+  return longer.startsWith(shorter) || longer.endsWith(shorter)
 }
 
 export interface GrokSessionGroup {
@@ -1231,6 +1269,19 @@ export const useGrokStore = defineStore('grok', () => {
     }
   }
 
+  async function refreshRuntimeQuick(): Promise<void> {
+    try {
+      const status = await refreshGrokRuntimeQuick()
+      runtime.value = {
+        ...status,
+        buildAuthenticated: runtime.value.buildAuthenticated,
+        buildVersion: status.buildVersion || runtime.value.buildVersion,
+      }
+    } catch {
+      runtime.value = emptyRuntime()
+    }
+  }
+
   async function loadSessions(force = false): Promise<void> {
     const requestedBackend = backendId.value
     const requestedWorkspace = workspacePath.value
@@ -1958,8 +2009,8 @@ export const useGrokStore = defineStore('grok', () => {
     // Coalesce concurrent enter calls from sidebar + App.vue watch.
     if (enterInFlight && !force) return enterInFlight
     enterInFlight = (async () => {
-      // Non-blocking load: switch UI first, hydrate sessions in background.
-      void refreshRuntime()
+      // Local-only readiness check: never race a user turn with `grok models`.
+      await refreshRuntimeQuick()
       void appStore.loadLocalUsage().catch(() => undefined)
       await loadSessions(force)
       void loadArchivedSessions()

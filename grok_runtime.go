@@ -235,6 +235,17 @@ func (s *AppService) RefreshGrokRuntime() GrokRuntimeStatus {
 	return status
 }
 
+// RefreshGrokRuntimeQuick checks only local configuration and executable
+// availability. Entering the Grok workspace must not race a live turn with the
+// slower `grok models` authentication probe.
+func (s *AppService) RefreshGrokRuntimeQuick() GrokRuntimeStatus {
+	status := detectGrokRuntimeQuick()
+	if !status.APIConfigured {
+		status.APIConfigured = s.grokAPIKeyConfiguredWithSettings()
+	}
+	return status
+}
+
 func (s *AppService) SetActiveRuntime(runtimeID string) (map[string]any, error) {
 	runtimeID = normalizeRuntime(runtimeID)
 	s.mu.Lock()
@@ -394,6 +405,7 @@ func (s *AppService) clearGrokRun(turnID string) {
 func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, error) {
 	request.Backend = normalizeGrokBackend(request.Backend)
 	request.SessionID = strings.TrimSpace(request.SessionID)
+	newSession := request.SessionID == ""
 	request.Text = strings.TrimSpace(request.Text)
 	if request.Text == "" && len(request.Images) == 0 {
 		return GrokTurnRef{}, errors.New("message is required")
@@ -425,7 +437,7 @@ func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, erro
 	s.externalRuns[key] = &externalRun{turnID: turnID, cancel: cancel}
 	s.mu.Unlock()
 	s.emitGrokEvent("turn.started", request.Backend, request.SessionID, turnID, map[string]any{"text": request.Text})
-	go s.runGrokTurn(ctx, cancel, turnID, request)
+	go s.runGrokTurn(ctx, cancel, turnID, request, newSession)
 	return GrokTurnRef{Backend: request.Backend, SessionID: request.SessionID, TurnID: turnID}, nil
 }
 
@@ -520,7 +532,7 @@ func (s *AppService) DeleteGrokSession(backend, sessionID string) error {
 	return nil
 }
 
-func (s *AppService) runGrokTurn(ctx context.Context, cancel context.CancelFunc, turnID string, request GrokSendRequest) {
+func (s *AppService) runGrokTurn(ctx context.Context, cancel context.CancelFunc, turnID string, request GrokSendRequest, newSession bool) {
 	defer cancel()
 	defer s.clearGrokRun(turnID)
 	var (
@@ -530,7 +542,7 @@ func (s *AppService) runGrokTurn(ctx context.Context, cancel context.CancelFunc,
 	if request.Backend == grokBackendAPI {
 		usage, err = s.runGrokAPITurn(ctx, turnID, request)
 	} else {
-		usage, err = s.runGrokBuildTurn(ctx, turnID, request)
+		usage, err = s.runGrokBuildTurn(ctx, turnID, request, newSession)
 	}
 	payload := grokTurnUsagePayload(usage)
 	if b := breakdownFromUsageMap(usage); b.valid() {
@@ -570,7 +582,7 @@ func grokTurnUsagePayload(usage map[string]any) map[string]any {
 	}
 }
 
-func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, request GrokSendRequest) (map[string]any, error) {
+func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, request GrokSendRequest, newSession bool) (map[string]any, error) {
 	settings := s.Settings()
 	turnSettings := settings
 	turnSettings.Model = strings.TrimSpace(request.Model)
@@ -580,9 +592,11 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 	turnSettings.Effort = normalizeGrokEffort(request.Effort)
 	turnSettings.Sandbox = settings.GrokSandbox
 	turnSettings.ApprovalPolicy = settings.GrokApprovalPolicy
-	resumeID := request.SessionID
-	if _, err := findGrokNativeSession(request.SessionID); err != nil {
-		resumeID = ""
+	resumeID := ""
+	if !newSession {
+		if _, err := findGrokNativeSession(request.SessionID); err == nil {
+			resumeID = request.SessionID
+		}
 	}
 	var streamedText strings.Builder
 	var streamSequence uint64
@@ -689,7 +703,6 @@ func (s *AppService) pollGrokBuildActivity(
 		})
 	}
 
-	emit()
 	for {
 		select {
 		case <-ctx.Done():

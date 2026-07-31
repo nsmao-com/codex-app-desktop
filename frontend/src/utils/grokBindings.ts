@@ -39,6 +39,10 @@ export function refreshGrokRuntime(): Promise<GrokRuntimeStatus> {
   return withNameFallback('RefreshGrokRuntime', () => backend.RefreshGrokRuntime())
 }
 
+export function refreshGrokRuntimeQuick(): Promise<GrokRuntimeStatus> {
+  return withNameFallback('RefreshGrokRuntimeQuick', () => backend.RefreshGrokRuntimeQuick())
+}
+
 export function listGrokSessions(
   backendId: string,
   workspace: string,

@@ -425,6 +425,15 @@ export function RefreshGrokRuntime(): $CancellablePromise<$models.GrokRuntimeSta
     return $Call.ByID(1680332538);
 }
 
+/**
+ * RefreshGrokRuntimeQuick checks only local configuration and executable
+ * availability. Entering the Grok workspace must not race a live turn with the
+ * slower `grok models` authentication probe.
+ */
+export function RefreshGrokRuntimeQuick(): $CancellablePromise<$models.GrokRuntimeStatus> {
+    return $Call.ByID(2885109357);
+}
+
 export function RefreshMCPServers(): $CancellablePromise<void> {
     return $Call.ByID(2777201397);
 }
