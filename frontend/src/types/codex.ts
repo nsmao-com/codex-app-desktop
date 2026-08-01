@@ -47,6 +47,7 @@ export interface QueuedMessage {
   createdAt: number
   localItemId: string
   retryItemId: string
+  blockedByTurnId?: string
   state: QueuedMessageState
   error: string
 }

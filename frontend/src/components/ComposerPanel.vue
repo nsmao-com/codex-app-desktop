@@ -906,7 +906,7 @@ async function applyModelSelection(value: string): Promise<void> {
     return
   }
 
-  let effort = appStore.settings.effort
+  let effort = displayEffort.value
   let serviceTier = appStore.settings.serviceTier
   const model = appStore.models.find((item) => item.model === modelID)
   if (model) {
@@ -922,7 +922,7 @@ async function applyModelSelection(value: string): Promise<void> {
   if (sessionLocked.value && codexStore.activeThread) {
     codexStore.patchActiveSessionPreferences(modelID, effort)
     try {
-      await backend.UpdateSessionPreferences({
+      await codexStore.updateSessionPreferences({
         sessionId: codexStore.activeThread.id,
         model: modelID,
         effort,
@@ -951,7 +951,7 @@ function onEffortChange(value: string): void {
   }
   if (sessionLocked.value && codexStore.activeThread) {
     codexStore.patchActiveSessionPreferences(displayModel.value, value)
-    void backend.UpdateSessionPreferences({
+    void codexStore.updateSessionPreferences({
       sessionId: codexStore.activeThread.id,
       model: displayModel.value,
       effort: value,

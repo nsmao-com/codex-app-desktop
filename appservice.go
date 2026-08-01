@@ -3129,15 +3129,28 @@ func (s *AppService) attachSessionIdentity(result map[string]any, session *Sessi
 	id := sessionID
 	model := ""
 	providerID := ""
+	effort := ""
+	collaborationMode := ""
 	workMode := "code"
 	if session != nil {
 		id = session.ID
 		model = session.Model
 		providerID = session.ProviderID
+		effort = session.Effort
+		collaborationMode = normalizeCollaborationMode(session.CollaborationMode)
+		if collaborationMode == "" {
+			collaborationMode = "default"
+		}
 		workMode = normalizeWorkMode(session.WorkMode)
 	}
 	if model != "" {
 		result["model"] = model
+	}
+	if effort != "" {
+		result["effort"] = effort
+	}
+	if collaborationMode != "" {
+		result["collaborationMode"] = collaborationMode
 	}
 	result["modelProvider"] = providerID
 	result["workMode"] = workMode
@@ -3145,6 +3158,12 @@ func (s *AppService) attachSessionIdentity(result map[string]any, session *Sessi
 		thread["id"] = id
 		if model != "" {
 			thread["model"] = model
+		}
+		if effort != "" {
+			thread["effort"] = effort
+		}
+		if collaborationMode != "" {
+			thread["collaborationMode"] = collaborationMode
 		}
 		thread["modelProvider"] = providerID
 		thread["workMode"] = workMode

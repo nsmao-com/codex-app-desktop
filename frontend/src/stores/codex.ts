@@ -5,6 +5,7 @@ import { computed, shallowRef } from 'vue'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type {
   SendMessageRequest,
+  SessionPreferencesRequest,
   SteerTurnRequest,
 } from '../../bindings/nice_codex_desktop/models'
 import type { Event as CodexEvent, Status as CodexStatus } from '../../bindings/nice_codex_desktop/internal/codex/models'
@@ -132,6 +133,8 @@ export const useCodexStore = defineStore('codex', () => {
   const pendingCollaborationModeByThread = new Map<string, CollaborationMode>()
   /** Exact mode submitted for each live turn; never infer this from mutable thread state. */
   const collaborationModeByTurn = new Map<string, CollaborationMode>()
+  /** Serialize full preference snapshots so a stale model/effort write cannot win. */
+  const sessionPreferenceWrites = new Map<string, Promise<void>>()
   const planOfferRetryTimers = new Map<string, number[]>()
   const idleReconcileTimers = new Map<string, number>()
   const trackedTimeouts = new Set<number>()
@@ -548,6 +551,8 @@ export const useCodexStore = defineStore('codex', () => {
       cliVersion: '',
       model: appStore.settings.model,
       modelProvider: appStore.settings.modelProvider,
+      effort: appStore.settings.effort,
+      collaborationMode: appStore.settings.collaborationMode,
       workMode: appStore.settings.workMode || 'code',
     }
     // Show the empty composer immediately. Real Codex/external session is created
@@ -659,10 +664,23 @@ export const useCodexStore = defineStore('codex', () => {
     const sequence = ++openThreadSequence
     loadingThreadId.value = threadID
     try {
+      await waitForSessionPreferences(threadID)
       const response = await backend.ReadThread(threadID)
       const rawThread = asRecord(asRecord(response).thread)
-      const thread = normalizeRuntimeThread(rawThread, response)
+      let thread = normalizeRuntimeThread(rawThread, response)
       if (!thread) throw new Error(translate('notifications.taskOpenFailed'))
+      const latestPreferences = activeThread.value?.id === thread.id
+        ? activeThread.value
+        : (findThreadSummary(thread.id) ?? summary)
+      if (latestPreferences) {
+        thread = {
+          ...thread,
+          model: latestPreferences.model || thread.model,
+          modelProvider: latestPreferences.modelProvider || thread.modelProvider,
+          effort: latestPreferences.effort || thread.effort,
+          collaborationMode: latestPreferences.collaborationMode || thread.collaborationMode,
+        }
+      }
       const items = timelineFromTurns(rawThread.turns)
       itemsByThread.value = { ...itemsByThread.value, [thread.id]: items }
       setThreadMetrics(thread.id, rawThread.turns)
@@ -1158,6 +1176,9 @@ export const useCodexStore = defineStore('codex', () => {
     // so idle sends drain immediately instead of sitting in the queue UI.
     if (!threadIsRunning(threadID)) clearStaleBusyState(threadID)
 
+    const feedback = turnFeedbackByThread.value[threadID]
+    const blockingTurnId = activeTurnByThread.value[threadID]
+      || ((feedback?.state === 'running' || feedback?.state === 'submitting') ? feedback.turnId : '')
     const queuedMessage: QueuedMessage = {
       id: `queued-${now}-${sequence}`,
       threadId: threadID,
@@ -1167,6 +1188,7 @@ export const useCodexStore = defineStore('codex', () => {
       createdAt: now,
       localItemId: retryItemID || `local-${now}-${sequence}`,
       retryItemId: retryItemID,
+      blockedByTurnId: blockingTurnId && !completedTurns.has(blockingTurnId) ? blockingTurnId : undefined,
       state: 'queued',
       error: '',
     }
@@ -1183,6 +1205,9 @@ export const useCodexStore = defineStore('codex', () => {
     if (!threadID || !isReady.value || threadIsBusy(threadID)) return
     const queuedMessage = queuedMessagesByThread.value[threadID]?.[0]
     if (!queuedMessage || queuedMessage.state === 'failed') return
+    // A transient status/alias update must not release a follow-up before the
+    // exact turn that accepted it as queued has reached a terminal event.
+    if (queuedMessage.blockedByTurnId && !completedTurns.has(queuedMessage.blockedByTurnId)) return
     if (!sameWorkspace(queuedMessage.workspace, appStore.settings.workspace)) return
 
     let resolvedThreadID = threadID
@@ -1217,20 +1242,25 @@ export const useCodexStore = defineStore('codex', () => {
         thread = await createThread(false)
         resolvedThreadID = thread.id
         migratePendingThread(pendingThreadID, thread.id)
-        // Keep draft model on this session only — do not rewrite global preferences
-        // (that would leak model choice into the next new task / other threads).
-        if (draft && (draft.model || draft.modelProvider)) {
+        // Keep all draft preferences on this session. Global preference persistence
+        // is debounced, so CreateThread may still return the previous effort.
+        if (draft) {
+          const draftModel = draft.model || appStore.settings.model
+          const draftEffort = draft.effort || appStore.settings.effort
+          const draftCollaborationMode = resolveThreadCollaborationMode(draft)
           try {
-            await backend.UpdateSessionPreferences({
+            await updateSessionPreferences({
               sessionId: thread.id,
-              model: draft.model || appStore.settings.model,
-              effort: appStore.settings.effort,
-              collaborationMode: resolveThreadCollaborationMode(thread),
+              model: draftModel,
+              effort: draftEffort,
+              collaborationMode: draftCollaborationMode,
             })
             thread = {
               ...thread,
-              model: draft.model || thread.model,
+              model: draftModel || thread.model,
               modelProvider: draft.modelProvider || thread.modelProvider,
+              effort: draftEffort || thread.effort,
+              collaborationMode: draftCollaborationMode,
             }
           } catch {
             // Continue with CreateThread defaults if session patch fails.
@@ -1241,12 +1271,16 @@ export const useCodexStore = defineStore('codex', () => {
             ...thread,
             model: activeThread.value?.model || thread.model,
             modelProvider: activeThread.value?.modelProvider || thread.modelProvider,
+            effort: activeThread.value?.effort || thread.effort,
+            collaborationMode: activeThread.value?.collaborationMode || thread.collaborationMode,
           }
           addOrUpdateThread(activeThread.value)
         }
       } else if (!thread) {
         throw new Error(translate('notifications.taskOpenFailed'))
       } else {
+        const localPreferences = thread
+        await waitForSessionPreferences(thread.id)
         // Always re-bind into app-server memory. After reconnect, status is often
         // still "idle" (not "notLoaded") so a status-only check used to skip resume
         // and turn/start returned 422 "thread not found".
@@ -1255,9 +1289,18 @@ export const useCodexStore = defineStore('codex', () => {
           const responseRecord = asRecord(response)
           const resumed = normalizeRuntimeThread(responseRecord.thread, responseRecord)
           if (resumed) {
-            thread = resumed
-            if (activeThreadId.value === resumed.id) activeThread.value = resumed
-            addOrUpdateThread(resumed)
+            const latestPreferences = activeThread.value?.id === resumed.id
+              ? activeThread.value
+              : (findThreadSummary(resumed.id) ?? localPreferences)
+            thread = {
+              ...resumed,
+              model: latestPreferences.model || resumed.model,
+              modelProvider: latestPreferences.modelProvider || resumed.modelProvider,
+              effort: latestPreferences.effort || resumed.effort,
+              collaborationMode: latestPreferences.collaborationMode || resumed.collaborationMode,
+            }
+            if (activeThreadId.value === resumed.id) activeThread.value = thread
+            addOrUpdateThread(thread)
           }
         } catch {
           // Backend SendMessage also auto-resumes; continue and surface errors there.
@@ -1268,6 +1311,19 @@ export const useCodexStore = defineStore('codex', () => {
         return
       }
 
+      await waitForSessionPreferences(thread.id)
+      const latestPreferences = activeThread.value?.id === thread.id
+        ? activeThread.value
+        : findThreadSummary(thread.id)
+      if (latestPreferences) {
+        thread = {
+          ...thread,
+          model: latestPreferences.model || thread.model,
+          modelProvider: latestPreferences.modelProvider || thread.modelProvider,
+          effort: latestPreferences.effort || thread.effort,
+          collaborationMode: latestPreferences.collaborationMode || thread.collaborationMode,
+        }
+      }
       // Another turn may have started while we were creating/resuming the thread.
       if (threadIsRunning(resolvedThreadID)) {
         const items = (itemsByThread.value[resolvedThreadID] ?? []).filter((item) => item.id !== localItem.id)
@@ -2392,6 +2448,34 @@ export const useCodexStore = defineStore('codex', () => {
     await loadThreads()
   }
 
+  function updateSessionPreferences(request: SessionPreferencesRequest): Promise<void> {
+    const sessionId = request.sessionId.trim()
+    if (!sessionId || sessionId.startsWith('pending-thread-')) return Promise.resolve()
+    const previous = sessionPreferenceWrites.get(sessionId) ?? Promise.resolve()
+    const write = previous
+      .catch(() => undefined)
+      .then(() => backend.UpdateSessionPreferences({ ...request, sessionId }))
+    sessionPreferenceWrites.set(sessionId, write)
+    const cleanup = () => {
+      if (sessionPreferenceWrites.get(sessionId) === write) sessionPreferenceWrites.delete(sessionId)
+    }
+    void write.then(cleanup, cleanup)
+    return write
+  }
+
+  async function waitForSessionPreferences(sessionId: string): Promise<void> {
+    while (sessionId) {
+      const pending = sessionPreferenceWrites.get(sessionId)
+      if (!pending) return
+      try {
+        await pending
+      } catch {
+        // Sending remains available with the last successfully persisted values.
+      }
+      if (sessionPreferenceWrites.get(sessionId) === pending) return
+    }
+  }
+
   function patchActiveSessionPreferences(
     model: string,
     effort = '',
@@ -2438,7 +2522,7 @@ export const useCodexStore = defineStore('codex', () => {
     try {
       // Persisting Default bumps CollabResetNonce so the next turn injects a
       // fresh "Plan Mode is now ended" developer message into Codex context.
-      await backend.UpdateSessionPreferences({
+      await updateSessionPreferences({
         sessionId: thread.id,
         model: thread.model || appStore.settings.model,
         effort: thread.effort || appStore.settings.effort,
@@ -3294,6 +3378,7 @@ export const useCodexStore = defineStore('codex', () => {
     activateProject,
     clearActiveSession,
     switchWorkMode,
+    updateSessionPreferences,
     patchActiveSessionPreferences,
     patchActiveThreadMemories,
     setCollaborationMode,

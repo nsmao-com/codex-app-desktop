@@ -311,6 +311,7 @@ export interface GrokQueuedMessage {
   state: 'queued' | 'sending' | 'failed'
   error: string
   createdAt: number
+  blockedByTurnId?: string
   /** Timeline user row already injected for this queue item. */
   localAppended?: boolean
 }
@@ -478,6 +479,43 @@ export const useGrokStore = defineStore('grok', () => {
     return Object.keys(bucket).find((key) => sameGrokSession(key, id)) || resolved || id
   }
 
+  function relatedSessionKeys<T>(bucket: Record<string, T>, sessionId: string): string[] {
+    const id = sessionId.trim()
+    if (!id) return []
+    return Object.keys(bucket).filter((key) => sameGrokSession(key, id))
+  }
+
+  function mergedSessionMessages(sessionId: string, preserveLiveMessages = true): GrokMessage[] {
+    const keys = relatedSessionKeys(messagesBySession.value, sessionId)
+    if (!keys.length) return []
+    if (keys.length === 1) return messagesBySession.value[keys[0]!] ?? []
+
+    // Prefer the provider-backed history as the merge base, then layer optimistic
+    // user rows from any pending/temporary alias over it.
+    const ranked = keys.map((key) => {
+      const messages = messagesBySession.value[key] ?? []
+      const providerRows = messages.reduce((count, message) =>
+        count + (message.id?.startsWith('grok-user-') ? 0 : 1), 0)
+      return { key, messages, providerRows }
+    }).sort((left, right) =>
+      right.providerRows - left.providerRows || right.messages.length - left.messages.length,
+    )
+    let merged = ranked[0]?.messages ?? []
+    for (const entry of ranked.slice(1)) {
+      merged = mergeGrokDiskWithCurrent(merged, entry.messages, preserveLiveMessages)
+    }
+    return merged
+  }
+
+  function replaceSessionMessages(sessionId: string, messages: GrokMessage[]): void {
+    const id = resolveSessionId(sessionId) || sessionId.trim()
+    if (!id) return
+    const next = { ...messagesBySession.value }
+    for (const key of relatedSessionKeys(next, id)) delete next[key]
+    next[id] = messages
+    messagesBySession.value = next
+  }
+
   function turnForSession(sessionId: string): GrokTurnRef | null {
     const key = sessionStateKey(activeTurnBySession.value, sessionId)
     return (key && activeTurnBySession.value[key]) || null
@@ -503,23 +541,6 @@ export const useGrokStore = defineStore('grok', () => {
     markSessionState(runningSessionIdsState, id, true)
   }
 
-  function remapSessionBucket<T>(
-    bucket: Record<string, T>,
-    fromId: string,
-    toId: string,
-  ): Record<string, T> {
-    if (!fromId || !toId || fromId === toId || bucket[fromId] === undefined) return bucket
-    if (bucket[toId] !== undefined) {
-      const next = { ...bucket }
-      delete next[fromId]
-      return next
-    }
-    const next = { ...bucket }
-    next[toId] = next[fromId]
-    delete next[fromId]
-    return next
-  }
-
   function promoteSessionState(fromId: string, toId: string): string {
     const rawFrom = fromId.trim()
     const from = resolveSessionId(rawFrom) || rawFrom
@@ -527,103 +548,134 @@ export const useGrokStore = defineStore('grok', () => {
     rememberSessionAlias(from, toId)
     rememberSessionAlias(rawFrom, toId)
     const to = resolveSessionId(toId)
-    if (!from || !to || from === to) {
+    if (!from || !to) {
       if (wasActive && to) activeSessionId.value = to
       return to || from
     }
 
-    const fromMessages = messagesBySession.value[from] ?? []
-    const toMessages = messagesBySession.value[to] ?? []
-    if (fromMessages.length || toMessages.length) {
-      const next = { ...messagesBySession.value }
-      delete next[from]
-      next[to] = mergeGrokDiskWithCurrent(toMessages, fromMessages)
-      messagesBySession.value = next
-    }
+    const messageKeys = relatedSessionKeys(messagesBySession.value, to)
+    if (messageKeys.length) replaceSessionMessages(to, mergedSessionMessages(to))
 
     const mergeTextBucket = (bucket: Record<string, string>): Record<string, string> => {
-      const fromText = bucket[from] || ''
-      const toText = bucket[to] || ''
-      if (!fromText && !toText) return remapSessionBucket(bucket, from, to)
+      const keys = relatedSessionKeys(bucket, to)
+      if (!keys.length) return bucket
       const next = { ...bucket }
-      delete next[from]
-      next[to] = fromText.length >= toText.length ? fromText : toText
+      let longest = ''
+      for (const key of keys) {
+        const value = next[key] || ''
+        if (value.length >= longest.length) longest = value
+        delete next[key]
+      }
+      next[to] = longest
       return next
     }
     liveTextBySession.value = mergeTextBucket(liveTextBySession.value)
     liveThoughtBySession.value = mergeTextBucket(liveThoughtBySession.value)
-    const pendingText = pendingLiveText.get(from)
-    if (pendingText !== undefined) {
-      const existing = pendingLiveText.get(to) || ''
-      pendingLiveText.set(to, pendingText.length >= existing.length ? pendingText : existing)
-      pendingLiveText.delete(from)
+    const pendingTextKeys = [...pendingLiveText.keys()].filter((key) => sameGrokSession(key, to))
+    if (pendingTextKeys.length) {
+      let longest = ''
+      for (const key of pendingTextKeys) {
+        const value = pendingLiveText.get(key) || ''
+        if (value.length >= longest.length) longest = value
+        pendingLiveText.delete(key)
+      }
+      pendingLiveText.set(to, longest)
     }
-    if (pendingLiveThought.has(from)) {
-      const thought = pendingLiveThought.get(from)
-      const existing = pendingLiveThought.get(to)
-      if (thought === null || existing === null) pendingLiveThought.set(to, null)
-      else pendingLiveThought.set(to, (thought || '').length >= (existing || '').length ? thought || '' : existing || '')
-      pendingLiveThought.delete(from)
+    const pendingThoughtKeys = [...pendingLiveThought.keys()].filter((key) => sameGrokSession(key, to))
+    if (pendingThoughtKeys.length) {
+      let longest = ''
+      let cleared = false
+      for (const key of pendingThoughtKeys) {
+        const value = pendingLiveThought.get(key)
+        if (value === null) cleared = true
+        else if ((value || '').length >= longest.length) longest = value || ''
+        pendingLiveThought.delete(key)
+      }
+      pendingLiveThought.set(to, cleared ? null : longest)
     }
 
-    const fromActivity = liveActivityBySession.value[from] ?? []
-    const toActivity = liveActivityBySession.value[to] ?? []
-    if (fromActivity.length || toActivity.length) {
-      const ids = new Set(toActivity.map((message) => message.id).filter(Boolean))
+    const activityKeys = relatedSessionKeys(liveActivityBySession.value, to)
+    if (activityKeys.length) {
+      const orderedKeys = [to, ...activityKeys.filter((key) => key !== to)]
+      const merged: GrokMessage[] = []
+      const ids = new Set<string>()
       const next = { ...liveActivityBySession.value }
-      delete next[from]
-      next[to] = [...toActivity, ...fromActivity.filter((message) => !message.id || !ids.has(message.id))]
+      for (const key of orderedKeys) {
+        for (const message of next[key] ?? []) {
+          if (message.id && ids.has(message.id)) continue
+          if (message.id) ids.add(message.id)
+          merged.push(message)
+        }
+        delete next[key]
+      }
+      next[to] = merged
       liveActivityBySession.value = next
     }
 
-    tokenUsageBySession.value = remapSessionBucket(tokenUsageBySession.value, from, to)
-    remapTurnMetricsSession(from, to)
+    const usageKeys = relatedSessionKeys(tokenUsageBySession.value, to)
+    if (usageKeys.length) {
+      const next = { ...tokenUsageBySession.value }
+      const usage = next[to] ?? next[usageKeys[0]!]
+      for (const key of usageKeys) delete next[key]
+      if (usage) next[to] = usage
+      tokenUsageBySession.value = next
+    }
+    for (const alias of sessionAlias.keys()) {
+      if (alias !== to && sameGrokSession(alias, to)) remapTurnMetricsSession(alias, to)
+    }
 
-    const fromQueue = queuedBySession.value[from] ?? []
-    if (fromQueue.length) {
+    const queueKeys = relatedSessionKeys(queuedBySession.value, to)
+    if (queueKeys.length) {
       const next = { ...queuedBySession.value }
-      const existing = next[to] ?? []
-      const ids = new Set(existing.map((item) => item.id))
-      next[to] = [
-        ...existing,
-        ...fromQueue.filter((item) => !ids.has(item.id)).map((item) => ({ ...item, sessionId: to })),
-      ]
-      delete next[from]
+      const merged: GrokQueuedMessage[] = []
+      const ids = new Set<string>()
+      for (const key of [to, ...queueKeys.filter((item) => item !== to)]) {
+        for (const item of next[key] ?? []) {
+          if (ids.has(item.id)) continue
+          ids.add(item.id)
+          merged.push({ ...item, sessionId: to })
+        }
+        delete next[key]
+      }
+      next[to] = merged
       queuedBySession.value = next
     }
 
-    const turn = activeTurnBySession.value[from] || turnForSession(from)
-    if (turn) {
+    const turnKeys = relatedSessionKeys(activeTurnBySession.value, to)
+    if (turnKeys.length) {
       const next = { ...activeTurnBySession.value }
-      for (const key of Object.keys(next)) {
-        if (sameGrokSession(key, from)) delete next[key]
-      }
-      next[to] = { ...turn, sessionId: to }
+      const turns = turnKeys.map((key) => next[key]).filter((turn): turn is GrokTurnRef => Boolean(turn))
+      const turn = turns.find((candidate) => !candidate.turnId.startsWith('grok-turn-pending-'))
+        ?? next[to]
+        ?? turns[0]
+      for (const key of turnKeys) delete next[key]
+      if (turn) next[to] = { ...turn, sessionId: to }
       activeTurnBySession.value = next
     }
-    const wasSending = sendingSessionIds.value.some((id) => sameGrokSession(id, from))
-    const wasRunning = runningSessionIdsState.value.some((id) => sameGrokSession(id, from))
-    const wasInterrupting = interruptingSessionIds.value.some((id) => sameGrokSession(id, from))
-    markSessionState(sendingSessionIds, from, false)
-    markSessionState(runningSessionIdsState, from, false)
-    markSessionState(interruptingSessionIds, from, false)
+    const wasSending = sendingSessionIds.value.some((id) => sameGrokSession(id, to))
+    const wasRunning = runningSessionIdsState.value.some((id) => sameGrokSession(id, to))
+    const wasInterrupting = interruptingSessionIds.value.some((id) => sameGrokSession(id, to))
+    markSessionState(sendingSessionIds, to, false)
+    markSessionState(runningSessionIdsState, to, false)
+    markSessionState(interruptingSessionIds, to, false)
     if (wasSending) markSessionState(sendingSessionIds, to, true)
     if (wasRunning) markSessionState(runningSessionIdsState, to, true)
     if (wasInterrupting) markSessionState(interruptingSessionIds, to, true)
 
     const deduped = new Map<string, GrokSessionSummary>()
     for (const summary of sessions.value) {
-      const patched = summary.id === from ? { ...summary, id: to } : summary
+      const patched = sameGrokSession(summary.id, to) ? { ...summary, id: to } : summary
       const previous = deduped.get(patched.id)
       deduped.set(patched.id, previous ? { ...patched, ...previous } : patched)
     }
     sessions.value = [...deduped.values()]
-    const openSequence = sessionOpenSequence.get(from)
-    if (openSequence !== undefined) {
-      sessionOpenSequence.set(to, Math.max(openSequence, sessionOpenSequence.get(to) || 0))
-      sessionOpenSequence.delete(from)
+    const openSequenceKeys = [...sessionOpenSequence.keys()].filter((key) => sameGrokSession(key, to))
+    if (openSequenceKeys.length) {
+      const openSequence = Math.max(...openSequenceKeys.map((key) => sessionOpenSequence.get(key) || 0))
+      for (const key of openSequenceKeys) sessionOpenSequence.delete(key)
+      sessionOpenSequence.set(to, openSequence)
     }
-    if (loadingSessionId.value === from) loadingSessionId.value = to
+    if (loadingSessionId.value && sameGrokSession(loadingSessionId.value, to)) loadingSessionId.value = to
     if (wasActive) activeSessionId.value = to
     return to
   }
@@ -648,8 +700,7 @@ export const useGrokStore = defineStore('grok', () => {
   }
 
   const activeMessages = computed(() => {
-    const key = sessionStateKey(messagesBySession.value, activeSessionId.value)
-    return key ? (messagesBySession.value[key] ?? []) : []
+    return mergedSessionMessages(activeSessionId.value)
   })
   const activeQueuedMessages = computed(() => {
     const id = activeSessionId.value
@@ -931,9 +982,11 @@ export const useGrokStore = defineStore('grok', () => {
       : {}
 
     if (type === 'turn.started') {
+      // A very fast terminal event may beat this notification across the bridge.
+      // Turn ids are unique, so never resurrect one that is already finalized.
+      if (turnId && finalizedTurnIds.has(turnId)) return
       const key = liveWriteKey(sessionId) || sessionId
       if (turnId) {
-        finalizedTurnIds.delete(turnId)
         streamSequenceByTurn.delete(`${turnId}:text`)
         streamSequenceByTurn.delete(`${turnId}:thought`)
       }
@@ -950,6 +1003,9 @@ export const useGrokStore = defineStore('grok', () => {
         && turnId
         && currentTurn.turnId.startsWith('grok-turn-pending-'),
       )
+      if (upgradingFromPending && currentTurn?.turnId && turnId) {
+        remapQueuedBlockingTurn(sessionId, currentTurn.turnId, turnId)
+      }
       setSessionTurn(key, {
         backend: eventBackend,
         sessionId: key,
@@ -1058,13 +1114,17 @@ export const useGrokStore = defineStore('grok', () => {
       if (turnId && terminalTurn?.turnId && terminalTurn.turnId !== turnId && !terminalTurn.turnId.startsWith('grok-turn-pending-')) {
         return
       }
+      if (turnId && terminalTurn?.turnId.startsWith('grok-turn-pending-') && terminalTurn.turnId !== turnId) {
+        remapQueuedBlockingTurn(sessionId, terminalTurn.turnId, turnId)
+        finalizedTurnIds.add(terminalTurn.turnId)
+      }
       if (turnId) finalizedTurnIds.add(turnId)
       const key = liveWriteKey(sessionId) || sessionId
       // Capture metrics before clearTurnState wipes activeTurn.
       applyTurnUsageMetrics(key, turnId, data)
       // Release the turn lock immediately so a slow openSession cannot race with
       // the next turn (stale finally must not cancel a newer in-flight run).
-      clearTurnState(sessionId, turnId)
+      clearTurnState(sessionId, terminalTurn?.turnId || turnId)
       const targetSession = key || sessionId
       const terminalBackend = terminalTurn?.backend === 'api' ? 'api' : eventBackend
       // Drop live buffers — authoritative order comes from chat_history on disk
@@ -1117,7 +1177,7 @@ export const useGrokStore = defineStore('grok', () => {
   }
 
   function countUserTurns(sessionId: string): number {
-    const messages = messagesBySession.value[sessionId] ?? []
+    const messages = mergedSessionMessages(sessionId)
     let count = 0
     for (const message of messages) {
       const role = (message.role || '').toLowerCase()
@@ -1340,8 +1400,7 @@ export const useGrokStore = defineStore('grok', () => {
     // A newly-created Build session has no native transcript until session.bound.
     // Keep showing its optimistic timeline instead of asking the backend for a fake id.
     if (id.startsWith('pending-grok-')) return
-    const liveCacheKey = sessionStateKey(messagesBySession.value, id)
-    if (isSessionBusy(id) && liveCacheKey && messagesBySession.value[liveCacheKey]?.length) return
+    if (isSessionBusy(id) && mergedSessionMessages(id).length) return
 
     const sequence = (sessionOpenSequence.get(id) || 0) + 1
     sessionOpenSequence.set(id, sequence)
@@ -1355,14 +1414,10 @@ export const useGrokStore = defineStore('grok', () => {
       // Re-read after await: a turn may have started while disk history was loading.
       const busy = isSessionBusy(targetId)
       const terminalStatus = options?.terminalStatus || (!busy ? 'completed' : '')
-      const cachedKey = sessionStateKey(messagesBySession.value, targetId)
-      const cached = cachedKey ? (messagesBySession.value[cachedKey] ?? []) : []
+      const cached = mergedSessionMessages(targetId)
       const merged = mergeGrokDiskWithCurrent(messages, cached, busy)
       const nextMessages = terminalStatus ? finalizeGrokMessages(merged, terminalStatus) : merged
-      messagesBySession.value = {
-        ...messagesBySession.value,
-        [targetId]: nextMessages,
-      }
+      replaceSessionMessages(targetId, nextMessages)
       if (detail.summary?.id) {
         const others = sessions.value.filter((item) => item.id !== detail.summary.id)
         sessions.value = [detail.summary, ...others]
@@ -1472,6 +1527,7 @@ export const useGrokStore = defineStore('grok', () => {
   }
 
   function appendLocalUserMessage(sessionId: string, message: string): string {
+    const id = resolveSessionId(sessionId) || sessionId.trim()
     const userMessage: GrokMessage = {
       id: `grok-user-${Date.now()}-${++queuedSequence}`,
       role: 'user',
@@ -1479,25 +1535,23 @@ export const useGrokStore = defineStore('grok', () => {
       status: 'completed',
       createdAt: Date.now(),
     }
-    messagesBySession.value = {
-      ...messagesBySession.value,
-      [sessionId]: [...(messagesBySession.value[sessionId] ?? []), userMessage],
-    }
+    replaceSessionMessages(id, [...mergedSessionMessages(id), userMessage])
     return userMessage.id
   }
 
   function removeLocalMessage(sessionId: string, messageId: string): void {
     if (!messageId) return
-    const key = sessionStateKey(messagesBySession.value, sessionId)
-    const messages = key ? messagesBySession.value[key] : undefined
-    if (!key || !messages?.some((message) => message.id === messageId)) return
-    messagesBySession.value = {
-      ...messagesBySession.value,
-      [key]: messages.filter((message) => message.id !== messageId),
-    }
+    const messages = mergedSessionMessages(sessionId)
+    if (!messages.some((message) => message.id === messageId)) return
+    replaceSessionMessages(sessionId, messages.filter((message) => message.id !== messageId))
   }
 
-  function enqueueMessage(sessionId: string, text: string, images: string[]): GrokQueuedMessage {
+  function enqueueMessage(
+    sessionId: string,
+    text: string,
+    images: string[],
+    blockedByTurnId = '',
+  ): GrokQueuedMessage {
     const item: GrokQueuedMessage = {
       id: `grok-queued-${Date.now()}-${++queuedSequence}`,
       sessionId,
@@ -1508,6 +1562,7 @@ export const useGrokStore = defineStore('grok', () => {
       state: 'queued',
       error: '',
       createdAt: Date.now(),
+      blockedByTurnId: blockedByTurnId || undefined,
     }
     queuedBySession.value = {
       ...queuedBySession.value,
@@ -1517,28 +1572,46 @@ export const useGrokStore = defineStore('grok', () => {
   }
 
   function patchQueuedMessage(sessionId: string, messageId: string, patch: Partial<GrokQueuedMessage>): void {
-    const list = queuedBySession.value[sessionId]
+    const key = sessionStateKey(queuedBySession.value, sessionId)
+    const list = queuedBySession.value[key]
     if (!list?.length) return
     queuedBySession.value = {
       ...queuedBySession.value,
-      [sessionId]: list.map((item) => (item.id === messageId ? { ...item, ...patch } : item)),
+      [key]: list.map((item) => (item.id === messageId ? { ...item, ...patch, sessionId: key } : item)),
+    }
+  }
+
+  function remapQueuedBlockingTurn(sessionId: string, fromTurnId: string, toTurnId: string): void {
+    if (!sessionId || !fromTurnId || !toTurnId || fromTurnId === toTurnId) return
+    const key = sessionStateKey(queuedBySession.value, sessionId)
+    const list = queuedBySession.value[key]
+    if (!list?.some((item) => item.blockedByTurnId === fromTurnId)) return
+    queuedBySession.value = {
+      ...queuedBySession.value,
+      [key]: list.map((item) =>
+        item.blockedByTurnId === fromTurnId ? { ...item, blockedByTurnId: toTurnId } : item,
+      ),
     }
   }
 
   function removeQueuedMessageFromSession(sessionId: string, messageId: string): void {
-    const list = queuedBySession.value[sessionId]
+    const key = sessionStateKey(queuedBySession.value, sessionId)
+    const list = queuedBySession.value[key]
     if (!list?.length) return
     const next = list.filter((item) => item.id !== messageId)
     const queues = { ...queuedBySession.value }
-    if (next.length) queues[sessionId] = next
-    else delete queues[sessionId]
+    if (next.length) queues[key] = next
+    else delete queues[key]
     queuedBySession.value = queues
   }
 
   function removeQueuedMessage(messageId: string): void {
     for (const [sessionId, list] of Object.entries(queuedBySession.value)) {
-      if (!list.some((item) => item.id === messageId)) continue
+      const message = list.find((item) => item.id === messageId)
+      if (!message) continue
+      if (message.state === 'sending') return
       removeQueuedMessageFromSession(sessionId, messageId)
+      void drainQueue(sessionId)
       return
     }
   }
@@ -1581,7 +1654,7 @@ export const useGrokStore = defineStore('grok', () => {
     const lockedTurn = turnForSession(sessionId)
     const pendingTurnId = options?.alreadyLocked && lockedTurn?.turnId?.startsWith('grok-turn-pending-')
       ? lockedTurn.turnId
-      : `grok-turn-pending-${Date.now()}`
+      : `grok-turn-pending-${Date.now()}-${++queuedSequence}`
     if (!options?.alreadyLocked) {
       resetLiveSessionState(sessionId)
       markSessionState(sendingSessionIds, sessionId, true)
@@ -1610,6 +1683,7 @@ export const useGrokStore = defineStore('grok', () => {
         effort: appStore.settings.grokEffort || 'high',
       })
       const nextTurnId = ref.turnId || pendingTurnId
+      if (nextTurnId !== pendingTurnId) remapQueuedBlockingTurn(sessionId, pendingTurnId, nextTurnId)
       // Preserve start clock across pending → real turn id.
       if (nextTurnId !== pendingTurnId && turnStartedAtById.value[pendingTurnId]) {
         turnStartedAtById.value = {
@@ -1619,18 +1693,30 @@ export const useGrokStore = defineStore('grok', () => {
       }
       // Only adopt the API turn if we still own this pending lock (not interrupted).
       const currentTurn = turnForSession(sessionId)
-      if (currentTurn && (
+      const ownsPendingTurn = Boolean(currentTurn && (
         currentTurn.turnId === pendingTurnId
         || currentTurn.turnId === nextTurnId
         || currentTurn.turnId.startsWith('grok-turn-pending-')
-      )) {
-        const targetSessionId = ref.sessionId && ref.sessionId !== sessionId
-          ? promoteSessionState(sessionId, ref.sessionId)
-          : sessionId
-        if (finalizedTurnIds.has(nextTurnId)) {
-          clearTurnState(targetSessionId)
-          return true
+      ))
+      // A very fast turn can complete before the Wails call Promise resolves.
+      // Still bind its pending UI session so optimistic messages and queued turns
+      // cannot remain stranded under the temporary id.
+      const alreadyFinalized = finalizedTurnIds.has(nextTurnId)
+      const targetSessionId = ref.sessionId && ref.sessionId !== sessionId && (ownsPendingTurn || alreadyFinalized)
+        ? promoteSessionState(sessionId, ref.sessionId)
+        : sessionId
+      if (alreadyFinalized) {
+        const finalizedTurn = turnForSession(targetSessionId)
+        if (finalizedTurn && (
+          finalizedTurn.turnId === pendingTurnId
+          || finalizedTurn.turnId === nextTurnId
+          || finalizedTurn.turnId.startsWith('grok-turn-pending-')
+        )) {
+          clearTurnState(targetSessionId, finalizedTurn.turnId)
         }
+        return true
+      }
+      if (ownsPendingTurn) {
         setSessionTurn(targetSessionId, {
           backend: ref.backend || turnBackend,
           sessionId: targetSessionId,
@@ -1639,6 +1725,7 @@ export const useGrokStore = defineStore('grok', () => {
       }
       return true
     } catch (error) {
+      finalizedTurnIds.add(pendingTurnId)
       clearTurnState(sessionId, pendingTurnId)
       if (options?.localMessageId) removeLocalMessage(sessionId, options.localMessageId)
       notify('error', translate('notifications.messageNotSent'), errorMessage(error))
@@ -1663,29 +1750,35 @@ export const useGrokStore = defineStore('grok', () => {
     }
     const next = list.find((item) => item.state === 'queued')
     if (!next) return
+    if (next.blockedByTurnId && !finalizedTurnIds.has(next.blockedByTurnId)) return
     if (isSessionBusy(id)) return
 
     patchQueuedMessage(queueSessionId, next.id, { state: 'sending', error: '' })
     // Queued follow-ups already show in the queue strip; inject into the timeline once
     // when the item actually starts sending (avoid double-append on retry).
+    let localMessageId = ''
     if (!next.localAppended && (next.text || next.images.length)) {
-      appendLocalUserMessage(resolveSessionId(queueSessionId) || queueSessionId, next.text)
+      localMessageId = appendLocalUserMessage(resolveSessionId(queueSessionId) || queueSessionId, next.text)
       patchQueuedMessage(queueSessionId, next.id, { localAppended: true })
     }
     const ok = await dispatchTurn(
       resolveSessionId(queueSessionId) || queueSessionId,
       next.text,
       next.images,
-      { backend: next.backend, workspace: next.workspace },
+      { backend: next.backend, workspace: next.workspace, localMessageId },
     )
     if (ok) {
       removeQueuedMessageFromSession(queueSessionId, next.id)
+      // Completion may have beaten the send Promise; resume FIFO now that the
+      // sending item has been removed from its (possibly promoted) queue bucket.
+      const targetSessionId = resolveSessionId(queueSessionId) || queueSessionId
+      if (!isSessionBusy(targetSessionId)) await drainQueue(targetSessionId)
       return
     }
     patchQueuedMessage(queueSessionId, next.id, {
       state: 'failed',
       error: translate('notifications.messageNotSent'),
-      localAppended: true,
+      localAppended: localMessageId ? false : next.localAppended,
     })
   }
 
@@ -1748,25 +1841,13 @@ export const useGrokStore = defineStore('grok', () => {
     }
 
     const sessionId = ensureSession(message, workspace)
-    // Synchronous lock BEFORE any await — prevents double-Enter from starting two
-    // CLI processes where the second used to cancel the first mid-run.
-    if (isSessionBusy(sessionId)) {
-      enqueueMessage(sessionId, message, images)
-      return true
-    }
-
-    const pendingTurnId = `grok-turn-pending-${Date.now()}`
-    resetLiveSessionState(sessionId)
-    markSessionState(sendingSessionIds, sessionId, true)
-    setSessionTurn(sessionId, {
-      backend: backendId.value,
-      sessionId,
-      turnId: pendingTurnId,
-    })
-    turnStartedAtById.value = { ...turnStartedAtById.value, [pendingTurnId]: Date.now() }
-    seedTurnStartMetrics(sessionId, pendingTurnId)
-    const localMessageId = appendLocalUserMessage(sessionId, message)
-    return dispatchTurn(sessionId, message, images, { alreadyLocked: true, localMessageId })
+    const busy = isSessionBusy(sessionId)
+    const activeTurnId = turnForSession(sessionId)?.turnId || ''
+    // Queue-first admission preserves FIFO when a terminal event and a new send
+    // land in the same frame; drainQueue remains the only dispatch path.
+    enqueueMessage(sessionId, message, images, activeTurnId)
+    if (!busy) await drainQueue(sessionId)
+    return true
   }
 
   async function interruptTurn(sessionId = activeSessionId.value): Promise<void> {
@@ -1805,6 +1886,7 @@ export const useGrokStore = defineStore('grok', () => {
     if (!current || current.turnId !== ref.turnId) return
     try {
       if (!await isGrokTurnRunningApi(ref)) {
+        if (ref.turnId) finalizedTurnIds.add(ref.turnId)
         clearTurnState(ref.sessionId, ref.turnId)
         await drainQueue(ref.sessionId)
         return

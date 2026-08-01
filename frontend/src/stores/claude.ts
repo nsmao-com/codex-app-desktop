@@ -109,6 +109,7 @@ export interface ClaudeQueuedMessage {
   state: 'queued' | 'sending' | 'failed'
   error: string
   createdAt: number
+  blockedByTurnId?: string
   localAppended?: boolean
 }
 
@@ -189,7 +190,7 @@ export const useClaudeStore = defineStore('claude', () => {
   const activeSessionId = shallowRef('')
   const itemsBySession = shallowRef<Record<string, TimelineItem[]>>({})
   const loadingSessionId = shallowRef('')
-  const sending = shallowRef(false)
+  const sendingSessionIds = shallowRef<string[]>([])
   const search = shallowRef('')
   const runningSessionIds = shallowRef<string[]>([])
   const activeTurnBySession = shallowRef<Record<string, ClaudeTurnRef | undefined>>({})
@@ -219,25 +220,10 @@ export const useClaudeStore = defineStore('claude', () => {
   function resolveEventSessionId(sessionId: string): string {
     const raw = (sessionId || '').trim()
     if (!raw) return activeSessionId.value || ''
-
-    // Always prefer promoting pending → real before reading alias, so the first
-    // stream event cannot create a second timeline under the real UUID alone.
-    if (!raw.startsWith('pending-claude-')) {
-      const pendingActive = activeSessionId.value
-      if (pendingActive.startsWith('pending-claude-')) {
-        promotePendingSession(pendingActive, raw)
-        return raw
-      }
-      for (const id of Object.keys(itemsBySession.value)) {
-        if (!id.startsWith('pending-claude-')) continue
-        if ((itemsBySession.value[id] || []).length === 0) continue
-        promotePendingSession(id, raw)
-        return raw
-      }
-    }
-
+    // Never infer pending ownership from whichever session is active: a stream
+    // from a background project may arrive while another new chat is selected.
+    // The matching send response performs the authoritative pending → real bind.
     if (sessionAlias.has(raw)) return sessionAlias.get(raw) || raw
-    if (itemsBySession.value[raw]?.length) return raw
     return raw
   }
 
@@ -289,6 +275,9 @@ export const useClaudeStore = defineStore('claude', () => {
     }
   }
   const isReady = computed(() => Boolean(runtime.value.available))
+  const sending = computed(() =>
+    Boolean(activeSessionId.value && sendingSessionIds.value.some((id) => sameClaudeSession(id, activeSessionId.value))),
+  )
   const activeItems = computed(() => {
     const sessionId = activeSessionId.value
     const base = [...(itemsBySession.value[sessionId] || [])]
@@ -299,7 +288,7 @@ export const useClaudeStore = defineStore('claude', () => {
     return mergeClaudeLiveActivity(base, activity, turn.turnId)
   })
   const isTurnRunning = computed(() =>
-    Boolean(activeSessionId.value && runningSessionIds.value.includes(activeSessionId.value)),
+    Boolean(activeSessionId.value && runningSessionIds.value.some((id) => sameClaudeSession(id, activeSessionId.value))),
   )
   const activeQueuedMessages = computed(() => queueBySession.value[activeSessionId.value] || [])
   const activeTurn = computed(() => activeTurnBySession.value[activeSessionId.value] || null)
@@ -440,8 +429,10 @@ export const useClaudeStore = defineStore('claude', () => {
     if (!sessionId) return
 
     if (kind === 'turn.started') {
+      // Turn ids are unique; delayed bridge delivery must not revive a turn whose
+      // terminal event was already processed.
+      if (turnId && finalizedTurnIds.has(turnId)) return
       if (turnId) {
-        finalizedTurnIds.delete(turnId)
         streamedAssistantTurns.delete(turnId)
         for (const key of streamSequenceByItem.keys()) {
           if (key.startsWith(`${turnId}:`)) streamSequenceByItem.delete(key)
@@ -727,6 +718,18 @@ export const useClaudeStore = defineStore('claude', () => {
     if (running) set.add(sessionId)
     else set.delete(sessionId)
     runningSessionIds.value = [...set]
+  }
+
+  function markSending(sessionId: string, active: boolean): void {
+    const next = sendingSessionIds.value.filter((id) => !sameClaudeSession(id, sessionId))
+    if (active) next.push(sessionId)
+    sendingSessionIds.value = next
+  }
+
+  function sameClaudeSession(left: string, right: string): boolean {
+    if (!left || !right) return false
+    if (left === right) return true
+    return sessionAlias.get(left) === right || sessionAlias.get(right) === left
   }
 
   async function enterRuntime(refreshSessions = true): Promise<void> {
@@ -1078,18 +1081,9 @@ export const useClaudeStore = defineStore('claude', () => {
 
   function isSessionBusy(sessionId: string): boolean {
     const requested = sessionId.trim()
-    const active = activeSessionId.value.trim()
-    const sameSession = (left: string, right: string): boolean => {
-      if (!left || !right) return false
-      if (left === right) return true
-      return sessionAlias.get(left) === right || sessionAlias.get(right) === left
-    }
-
-    // `sending` only represents the short backend hand-off window. Scope it to
-    // the current session so a different session is not queued accidentally.
-    if (sending.value && sameSession(requested, active)) return true
-    if (runningSessionIds.value.some((id) => sameSession(id, requested))) return true
-    if (Object.keys(activeTurnBySession.value).some((id) => sameSession(id, requested))) return true
+    if (sendingSessionIds.value.some((id) => sameClaudeSession(id, requested))) return true
+    if (runningSessionIds.value.some((id) => sameClaudeSession(id, requested))) return true
+    if (Object.keys(activeTurnBySession.value).some((id) => sameClaudeSession(id, requested))) return true
     return false
   }
 
@@ -1109,17 +1103,19 @@ export const useClaudeStore = defineStore('claude', () => {
     }
 
     const sessionId = ensureActiveSessionId()
-    if (isSessionBusy(sessionId)) {
-      enqueue(sessionId, content, images)
-      return true
-    }
-    return dispatchTurn(sessionId, content, images)
+    const busy = isSessionBusy(sessionId)
+    const blockingTurnId = activeTurnBySession.value[sessionId]?.turnId || ''
+    // Always enter the per-session queue first. This keeps a send from
+    // overtaking an older follow-up while terminal history is being hydrated.
+    enqueue(sessionId, content, images, blockingTurnId)
+    if (!busy) await flushQueue(sessionId)
+    return true
   }
 
   /** Start exactly one CLI turn. Caller must ensure the session is not already busy. */
   async function dispatchTurn(sessionId: string, content: string, images: string[]): Promise<boolean> {
     if (!workspacePath.value) return false
-    sending.value = true
+    markSending(sessionId, true)
     // Mark busy BEFORE await so a second sendMessage cannot also dispatch.
     markRunning(sessionId, true)
     const now = Math.floor(Date.now() / 1000)
@@ -1174,7 +1170,19 @@ export const useClaudeStore = defineStore('claude', () => {
         }
       }
 
-      activeSessionId.value = nextSessionId
+      if (sameClaudeSession(activeSessionId.value, sessionId)) activeSessionId.value = nextSessionId
+      // The CLI can finish before the Wails send Promise resolves. Never let a
+      // late response resurrect a turn that its terminal event already closed.
+      if (ref.turnId && finalizedTurnIds.has(ref.turnId)) {
+        markRunning(nextSessionId, false)
+        const currentTurn = activeTurnBySession.value[nextSessionId]
+        if (currentTurn?.turnId === ref.turnId) {
+          const nextTurns = { ...activeTurnBySession.value }
+          delete nextTurns[nextSessionId]
+          activeTurnBySession.value = nextTurns
+        }
+        return true
+      }
       markRunning(nextSessionId, true)
       activeTurnBySession.value = {
         ...activeTurnBySession.value,
@@ -1215,12 +1223,16 @@ export const useClaudeStore = defineStore('claude', () => {
       notify('error', translate('notifications.sendFailed'), errorMessage(error))
       return false
     } finally {
-      sending.value = false
+      markSending(sessionId, false)
     }
   }
 
   function remapSessionBusy(fromId: string, toId: string): void {
     if (!fromId || !toId || fromId === toId) return
+    if (sendingSessionIds.value.includes(fromId)) {
+      markSending(fromId, false)
+      markSending(toId, true)
+    }
     if (runningSessionIds.value.includes(fromId)) {
       markRunning(fromId, false)
       markRunning(toId, true)
@@ -1280,7 +1292,7 @@ export const useClaudeStore = defineStore('claude', () => {
     return out
   }
 
-  function enqueue(sessionId: string, text: string, images: string[]): void {
+  function enqueue(sessionId: string, text: string, images: string[], blockedByTurnId = ''): void {
     const item: ClaudeQueuedMessage = {
       id: `claude-q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       sessionId,
@@ -1289,6 +1301,7 @@ export const useClaudeStore = defineStore('claude', () => {
       state: 'queued',
       error: '',
       createdAt: Date.now(),
+      blockedByTurnId: blockedByTurnId || undefined,
     }
     const list = [...(queueBySession.value[sessionId] || []), item]
     queueBySession.value = { ...queueBySession.value, [sessionId]: list }
@@ -1318,6 +1331,7 @@ export const useClaudeStore = defineStore('claude', () => {
       }
     }
     if (!item || !sessionId) return
+    if (item.blockedByTurnId && !finalizedTurnIds.has(item.blockedByTurnId)) return
     if (isSessionBusy(sessionId)) return
 
     queueBySession.value = {
@@ -1326,18 +1340,27 @@ export const useClaudeStore = defineStore('claude', () => {
     }
     // Use dispatchTurn — never sendMessage (which would re-enqueue while busy).
     const ok = await dispatchTurn(sessionId, item.text, item.images)
-    const remaining = (queueBySession.value[sessionId] || []).filter((row) => row.id !== messageId)
+    const currentEntry = Object.entries(queueBySession.value).find(([, rows]) =>
+      rows.some((row) => row.id === messageId),
+    )
+    if (!currentEntry) return
+    const [currentSessionId, currentList] = currentEntry
+    const remaining = currentList.filter((row) => row.id !== messageId)
     if (!ok) {
       queueBySession.value = {
         ...queueBySession.value,
-        [sessionId]: [
+        [currentSessionId]: [
           ...remaining,
-          { ...item, state: 'failed', error: translate('notifications.sendFailed') },
+          { ...item, sessionId: currentSessionId, state: 'failed', error: translate('notifications.sendFailed') },
         ],
       }
       return
     }
-    queueBySession.value = { ...queueBySession.value, [sessionId]: remaining }
+    const nextQueues = { ...queueBySession.value }
+    if (remaining.length) nextQueues[currentSessionId] = remaining
+    else delete nextQueues[currentSessionId]
+    queueBySession.value = nextQueues
+    if (!isSessionBusy(currentSessionId)) await flushQueue(currentSessionId)
   }
 
   function reorderQueuedMessage(_messageId?: string, _direction?: 'up' | 'down'): void {
@@ -1347,9 +1370,18 @@ export const useClaudeStore = defineStore('claude', () => {
     void sendQueuedMessageNow(messageId)
   }
   function removeQueuedMessage(messageId: string): void {
-    const sessionId = activeSessionId.value
-    const list = (queueBySession.value[sessionId] || []).filter((row) => row.id !== messageId)
-    queueBySession.value = { ...queueBySession.value, [sessionId]: list }
+    for (const [sessionId, rows] of Object.entries(queueBySession.value)) {
+      const message = rows.find((row) => row.id === messageId)
+      if (!message) continue
+      if (message.state === 'sending') return
+      const remaining = rows.filter((row) => row.id !== messageId)
+      const next = { ...queueBySession.value }
+      if (remaining.length) next[sessionId] = remaining
+      else delete next[sessionId]
+      queueBySession.value = next
+      if (!isSessionBusy(sessionId)) void flushQueue(sessionId)
+      return
+    }
   }
 
   async function interruptActiveTurn(): Promise<void> {
