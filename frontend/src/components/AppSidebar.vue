@@ -9,6 +9,7 @@ import {
   Copy,
   Folder,
   FolderOpen,
+  GripVertical,
   LoaderCircle,
   LogIn,
   LogOut,
@@ -64,6 +65,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import type { WorkspaceRuntime } from '@/stores/app'
 import type { ThreadGroup, ThreadSummary } from '@/types/codex'
 import {
   buildUsageRangeView,
@@ -71,6 +73,7 @@ import {
   formatUsageDateLabel,
   type UsageRangeDays,
 } from '@/utils/accountUsage'
+import { sameWorkspacePath } from '@/utils/workspacePath'
 
 const router = useRouter()
 const appStore = useAppStore()
@@ -80,9 +83,11 @@ const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const { locale, t } = useI18n()
 let externalSearchTimer = 0
+let projectSelectionSequence = 0
 
 onBeforeUnmount(() => {
   if (externalSearchTimer) window.clearTimeout(externalSearchTimer)
+  endProjectDrag()
 })
 
 const props = defineProps<{
@@ -251,17 +256,19 @@ async function setActiveRuntime(runtime: 'codex' | 'claude' | 'grok'): Promise<v
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
 
 const recentWorkspacePaths = computed(() => {
+  let paths: string[]
   if (appStore.isGrokMode) {
-    return appStore.settings.grokRecentWorkspaces?.length
+    paths = (appStore.settings.grokRecentWorkspaces?.length
       ? appStore.settings.grokRecentWorkspaces
-      : appStore.settings.recentWorkspaces
-  }
-  if (appStore.isClaudeMode) {
-    return appStore.settings.claudeRecentWorkspaces?.length
+      : appStore.settings.recentWorkspaces) ?? []
+  } else if (appStore.isClaudeMode) {
+    paths = (appStore.settings.claudeRecentWorkspaces?.length
       ? appStore.settings.claudeRecentWorkspaces
-      : appStore.settings.recentWorkspaces
+      : appStore.settings.recentWorkspaces) ?? []
+  } else {
+    paths = appStore.settings.recentWorkspaces ?? []
   }
-  return appStore.settings.recentWorkspaces
+  return appStore.orderWorkspacePaths(appStore.activeRuntime, paths ?? [], paths ?? [])
 })
 
 function runtimeSlideX(): string {
@@ -284,18 +291,12 @@ function visibleClaudeSessions(group: { path: string; sessions: Array<{
 
 /** Open a session; if it lives under another project folder, switch workspace first (Codex-style). */
 async function openClaudeSession(group: { path: string; active: boolean }, sessionId: string): Promise<void> {
-  if (!group.active && group.path && group.path !== '(unknown)') {
-    if (!await workspaceStore.useWorkspace(group.path)) return
-    await claudeStore.openSession(sessionId, { switchWorkspace: false })
-  } else {
-    await claudeStore.openSession(sessionId)
-  }
+  void group
+  await claudeStore.openSession(sessionId)
 }
 
 async function openGrokSession(group: { path: string; active: boolean }, sessionId: string): Promise<void> {
-  if (!group.active && group.path && group.path !== '(unknown)') {
-    if (!await workspaceStore.useWorkspace(group.path)) return
-  }
+  void group
   await grokStore.openSession(sessionId)
 }
 
@@ -336,37 +337,73 @@ function formatClaudeUpdated(value: number): string {
 }
 
 function openThread(group: ThreadGroup, thread: ThreadSummary): void {
-  if (group.active) {
-    codexStore.openThread(thread.id)
-  } else {
-    codexStore.openProjectThread(group.path, thread.id)
-  }
+  codexStore.openProjectThread(group.path, thread.id)
 }
 
 async function switchWorkspace(path: string): Promise<void> {
-  if (appStore.isGrokMode) {
+  const runtime = appStore.activeRuntime
+  const sequence = ++projectSelectionSequence
+  const selectionIsCurrent = () =>
+    sequence === projectSelectionSequence
+    && appStore.activeRuntime === runtime
+    && sameWorkspacePath(path, appStore.currentWorkspacePath)
+  if (runtime === 'grok') {
     if (!await workspaceStore.useWorkspace(path)) return
+    if (!selectionIsCurrent()) return
     await grokStore.loadSessions(true)
+    if (!selectionIsCurrent()) return
+    const activeGroup = grokStore.sessionGroups.find((group) => group.active)
+    const target = activeGroup?.sessions.find((session) => session.id === grokStore.activeSessionId)
+      ?? activeGroup?.sessions[0]
+    if (target) await grokStore.openSession(target.id, { switchWorkspace: false })
+    else grokStore.newSession()
     return
   }
-  if (appStore.isClaudeMode) {
+  if (runtime === 'claude') {
     if (!await workspaceStore.useWorkspace(path)) return
+    if (!selectionIsCurrent()) return
     await claudeStore.loadSessions()
+    if (!selectionIsCurrent()) return
+    const activeGroup = claudeStore.sessionGroups.find((group) => group.active)
+    const target = activeGroup?.sessions.find((session) => session.id === claudeStore.activeSessionId)
+      ?? activeGroup?.sessions[0]
+    if (target) await claudeStore.openSession(target.id, { switchWorkspace: false })
+    else claudeStore.newSession()
     return
   }
   await codexStore.switchProject(path)
 }
 
 function chooseWorkspace(): void {
-  if (appStore.isGrokMode) {
-    void workspaceStore.selectWorkspace().then((path) => {
-      if (path) void grokStore.loadSessions(true)
+  const runtime = appStore.activeRuntime
+  const sequence = ++projectSelectionSequence
+  const selectionIsCurrent = (path: string) =>
+    sequence === projectSelectionSequence
+    && appStore.activeRuntime === runtime
+    && sameWorkspacePath(path, appStore.currentWorkspacePath)
+  if (runtime === 'grok') {
+    void workspaceStore.selectWorkspace().then(async (path) => {
+      if (!path || !selectionIsCurrent(path)) return
+      await grokStore.loadSessions(true)
+      if (!selectionIsCurrent(path)) return
+      const activeGroup = grokStore.sessionGroups.find((group) => group.active)
+      const target = activeGroup?.sessions.find((session) => session.id === grokStore.activeSessionId)
+        ?? activeGroup?.sessions[0]
+      if (target) await grokStore.openSession(target.id, { switchWorkspace: false })
+      else grokStore.newSession()
     })
     return
   }
-  if (appStore.isClaudeMode) {
-    void workspaceStore.selectWorkspace().then((path) => {
-      if (path) void claudeStore.loadSessions()
+  if (runtime === 'claude') {
+    void workspaceStore.selectWorkspace().then(async (path) => {
+      if (!path || !selectionIsCurrent(path)) return
+      await claudeStore.loadSessions()
+      if (!selectionIsCurrent(path)) return
+      const activeGroup = claudeStore.sessionGroups.find((group) => group.active)
+      const target = activeGroup?.sessions.find((session) => session.id === claudeStore.activeSessionId)
+        ?? activeGroup?.sessions[0]
+      if (target) await claudeStore.openSession(target.id, { switchWorkspace: false })
+      else claudeStore.newSession()
     })
     return
   }
@@ -466,6 +503,119 @@ function providerIcon(thread: ThreadSummary): Component {
 
 const isCollapsed = shallowRef<Record<string, boolean>>({})
 const visibleCounts = shallowRef<Record<string, number>>({})
+const draggingProjectPath = shallowRef('')
+const draggingProjectRuntime = shallowRef<WorkspaceRuntime | ''>('')
+const dragOverProjectPath = shallowRef('')
+const dragOverPosition = shallowRef<'before' | 'after' | ''>('')
+
+watch(
+  () => appStore.activeRuntime,
+  () => {
+    projectSelectionSequence += 1
+    endProjectDrag()
+  },
+)
+
+function currentProjectPaths(runtime: WorkspaceRuntime): string[] {
+  if (runtime === 'grok') return grokStore.sessionGroups.map((group) => group.path)
+  if (runtime === 'claude') return claudeStore.sessionGroups.map((group) => group.path)
+  return codexStore.threadGroups.map((group) => group.path)
+}
+
+function canDragProject(path: string): boolean {
+  return !search.value.trim() && Boolean(path) && path !== '(unknown)'
+}
+
+function startProjectDrag(event: DragEvent, path: string): void {
+  if (!canDragProject(path)) {
+    event.preventDefault()
+    return
+  }
+  draggingProjectPath.value = path
+  draggingProjectRuntime.value = appStore.activeRuntime
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', path)
+  }
+}
+
+function updateProjectDropTarget(event: DragEvent, path: string): void {
+  if (
+    !draggingProjectPath.value
+    || draggingProjectRuntime.value !== appStore.activeRuntime
+    || draggingProjectPath.value === path
+  ) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  const element = event.currentTarget as HTMLElement | null
+  if (!element) return
+  const bounds = element.getBoundingClientRect()
+  dragOverProjectPath.value = path
+  dragOverPosition.value = event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after'
+}
+
+function clearProjectDropTarget(event: DragEvent, path: string): void {
+  if (dragOverProjectPath.value !== path) return
+  const element = event.currentTarget as HTMLElement | null
+  const related = event.relatedTarget
+  if (element && related instanceof Node && element.contains(related)) return
+  dragOverProjectPath.value = ''
+  dragOverPosition.value = ''
+}
+
+function dropProject(event: DragEvent, targetPath: string): void {
+  event.preventDefault()
+  event.stopPropagation()
+  const runtime = draggingProjectRuntime.value
+  const sourcePath = draggingProjectPath.value
+  const position = dragOverPosition.value
+  if (!runtime || runtime !== appStore.activeRuntime || !sourcePath || !position || sourcePath === targetPath) {
+    endProjectDrag()
+    return
+  }
+  const paths = currentProjectPaths(runtime)
+  const sourceIndex = paths.indexOf(sourcePath)
+  if (sourceIndex < 0 || !paths.includes(targetPath)) {
+    endProjectDrag()
+    return
+  }
+  const next = paths.filter((path) => path !== sourcePath)
+  const targetIndex = next.indexOf(targetPath)
+  next.splice(targetIndex + (position === 'after' ? 1 : 0), 0, sourcePath)
+  appStore.setWorkspaceOrder(runtime, next)
+  endProjectDrag()
+}
+
+function endProjectDrag(): void {
+  draggingProjectPath.value = ''
+  draggingProjectRuntime.value = ''
+  dragOverProjectPath.value = ''
+  dragOverPosition.value = ''
+}
+
+function moveProjectByKeyboard(path: string, direction: -1 | 1): void {
+  if (!canDragProject(path)) return
+  const runtime = appStore.activeRuntime
+  const next = [...currentProjectPaths(runtime)]
+  const sourceIndex = next.indexOf(path)
+  const targetIndex = sourceIndex + direction
+  if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= next.length) return
+  const target = next[targetIndex]
+  if (!target) return
+  next[sourceIndex] = target
+  next[targetIndex] = path
+  appStore.setWorkspaceOrder(runtime, next)
+}
+
+function projectDropClass(path: string): string {
+  if (dragOverProjectPath.value === path) return 'ring-1 ring-inset ring-sidebar-border/80'
+  if (draggingProjectPath.value === path) return 'opacity-60'
+  return ''
+}
+
+function showProjectDropIndicator(path: string, position: 'before' | 'after'): boolean {
+  return dragOverProjectPath.value === path && dragOverPosition.value === position
+}
 
 function isGroupCollapsed(group: { path: string, active: boolean }): boolean {
   if (search.value) return false
@@ -743,9 +893,46 @@ function formatGrokUpdated(value?: number | null): string {
             @update:open="(open) => setGroupCollapsed(group, !open)"
           >
             <div
-              class="group/project flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
-              :class="group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25'"
+              class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
+              :class="[
+                group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
+                projectDropClass(group.path),
+              ]"
+              @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
+              @dragleave="(event: DragEvent) => clearProjectDropTarget(event, group.path)"
+              @drop="(event: DragEvent) => dropProject(event, group.path)"
             >
+              <span
+                v-if="showProjectDropIndicator(group.path, 'before')"
+                aria-hidden="true"
+                class="pointer-events-none absolute inset-x-1 top-0 z-10 h-0.5 -translate-y-1/2 rounded-full bg-foreground/70"
+              />
+              <span
+                v-if="showProjectDropIndicator(group.path, 'after')"
+                aria-hidden="true"
+                class="pointer-events-none absolute inset-x-1 bottom-0 z-10 h-0.5 translate-y-1/2 rounded-full bg-foreground/70"
+              />
+              <TooltipProvider v-if="canDragProject(group.path)">
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      draggable="true"
+                      class="size-6 shrink-0 cursor-grab rounded-md text-muted-foreground/70 opacity-50 hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing"
+                      :aria-label="t('sidebar.reorderProject', { name: group.name })"
+                      @click.stop.prevent
+                      @dragstart="(event: DragEvent) => startProjectDrag(event, group.path)"
+                      @dragend="endProjectDrag"
+                      @keydown.up.stop.prevent="moveProjectByKeyboard(group.path, -1)"
+                      @keydown.down.stop.prevent="moveProjectByKeyboard(group.path, 1)"
+                    >
+                      <GripVertical :size="13" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">{{ t('sidebar.reorderProject', { name: group.name }) }}</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
               <CollapsibleTrigger as-child>
                 <button
                   type="button"
@@ -758,7 +945,11 @@ function formatGrokUpdated(value?: number | null): string {
                   />
                   <FolderOpen v-if="group.active" :size="13" class="shrink-0 text-foreground/70" />
                   <Folder v-else :size="13" class="shrink-0 opacity-60" />
-                  <span class="min-w-0 truncate" :class="group.active ? 'text-foreground' : ''">{{ group.name }}</span>
+                  <span
+                    class="min-w-0 truncate"
+                    :class="group.active ? 'text-foreground' : ''"
+                    :title="group.path"
+                  >{{ group.name }}</span>
                 </button>
               </CollapsibleTrigger>
               <span class="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/80">
@@ -938,9 +1129,46 @@ function formatGrokUpdated(value?: number | null): string {
           @update:open="(open) => setGroupCollapsed(group, !open)"
         >
           <div
-            class="group/project flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
-            :class="group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25'"
+            class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
+            :class="[
+              group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
+              projectDropClass(group.path),
+            ]"
+            @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
+            @dragleave="(event: DragEvent) => clearProjectDropTarget(event, group.path)"
+            @drop="(event: DragEvent) => dropProject(event, group.path)"
           >
+            <span
+              v-if="showProjectDropIndicator(group.path, 'before')"
+              aria-hidden="true"
+              class="pointer-events-none absolute inset-x-1 top-0 z-10 h-0.5 -translate-y-1/2 rounded-full bg-foreground/70"
+            />
+            <span
+              v-if="showProjectDropIndicator(group.path, 'after')"
+              aria-hidden="true"
+              class="pointer-events-none absolute inset-x-1 bottom-0 z-10 h-0.5 translate-y-1/2 rounded-full bg-foreground/70"
+            />
+            <TooltipProvider v-if="canDragProject(group.path)">
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    draggable="true"
+                    class="size-6 shrink-0 cursor-grab rounded-md text-muted-foreground/70 opacity-50 hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing"
+                    :aria-label="t('sidebar.reorderProject', { name: group.name })"
+                    @click.stop.prevent
+                    @dragstart="(event: DragEvent) => startProjectDrag(event, group.path)"
+                    @dragend="endProjectDrag"
+                    @keydown.up.stop.prevent="moveProjectByKeyboard(group.path, -1)"
+                    @keydown.down.stop.prevent="moveProjectByKeyboard(group.path, 1)"
+                  >
+                    <GripVertical :size="13" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top">{{ t('sidebar.reorderProject', { name: group.name }) }}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
             <CollapsibleTrigger as-child>
               <button
                 type="button"
@@ -953,7 +1181,11 @@ function formatGrokUpdated(value?: number | null): string {
                 />
                 <FolderOpen v-if="group.active" :size="13" class="shrink-0 text-foreground/70" />
                 <Folder v-else :size="13" class="shrink-0 opacity-60" />
-                <span class="min-w-0 truncate" :class="group.active ? 'text-foreground' : ''">{{ group.name }}</span>
+                <span
+                  class="min-w-0 truncate"
+                  :class="group.active ? 'text-foreground' : ''"
+                  :title="group.path"
+                >{{ group.name }}</span>
               </button>
             </CollapsibleTrigger>
 
@@ -1156,9 +1388,46 @@ function formatGrokUpdated(value?: number | null): string {
             @update:open="(open) => setGroupCollapsed(group, !open)"
           >
             <div
-              class="group/project flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
-              :class="group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25'"
+              class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
+              :class="[
+                group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
+                projectDropClass(group.path),
+              ]"
+              @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
+              @dragleave="(event: DragEvent) => clearProjectDropTarget(event, group.path)"
+              @drop="(event: DragEvent) => dropProject(event, group.path)"
             >
+              <span
+                v-if="showProjectDropIndicator(group.path, 'before')"
+                aria-hidden="true"
+                class="pointer-events-none absolute inset-x-1 top-0 z-10 h-0.5 -translate-y-1/2 rounded-full bg-foreground/70"
+              />
+              <span
+                v-if="showProjectDropIndicator(group.path, 'after')"
+                aria-hidden="true"
+                class="pointer-events-none absolute inset-x-1 bottom-0 z-10 h-0.5 translate-y-1/2 rounded-full bg-foreground/70"
+              />
+              <TooltipProvider v-if="canDragProject(group.path)">
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      draggable="true"
+                      class="size-6 shrink-0 cursor-grab rounded-md text-muted-foreground/70 opacity-50 hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing"
+                      :aria-label="t('sidebar.reorderProject', { name: group.name })"
+                      @click.stop.prevent
+                      @dragstart="(event: DragEvent) => startProjectDrag(event, group.path)"
+                      @dragend="endProjectDrag"
+                      @keydown.up.stop.prevent="moveProjectByKeyboard(group.path, -1)"
+                      @keydown.down.stop.prevent="moveProjectByKeyboard(group.path, 1)"
+                    >
+                      <GripVertical :size="13" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">{{ t('sidebar.reorderProject', { name: group.name }) }}</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
               <CollapsibleTrigger as-child>
                 <button
                   type="button"

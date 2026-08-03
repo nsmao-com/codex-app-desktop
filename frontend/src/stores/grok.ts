@@ -31,6 +31,7 @@ import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
 import { translate } from '@/i18n'
 import { useAppStore } from './app'
 import { useDialogStore } from './dialog'
+import { useWorkspaceStore } from './workspace'
 
 const emptyTurnMetrics = (): TurnMetrics => ({
   tokenUsage: null,
@@ -289,7 +290,9 @@ function sameGrokUserText(left = '', right = ''): boolean {
   if (a === b) return true
   const shorter = a.length <= b.length ? a : b
   const longer = a.length > b.length ? a : b
-  if (shorter.length < 512 || shorter.length / longer.length < 0.7) return false
+  // Grok Build can persist only a small prefix/suffix of very long prompts.
+  // A 70% ratio rejected those rows and produced a duplicate user bubble.
+  if (shorter.length < 256) return false
   return longer.startsWith(shorter) || longer.endsWith(shorter)
 }
 
@@ -306,6 +309,8 @@ export interface GrokQueuedMessage {
   sessionId: string
   backend: 'build' | 'api'
   workspace: string
+  model: string
+  effort: string
   text: string
   images: string[]
   state: 'queued' | 'sending' | 'failed'
@@ -358,6 +363,7 @@ function liveTextTailAfterActivity(fullText: string, activity: GrokMessage[]): s
 export const useGrokStore = defineStore('grok', () => {
   const appStore = useAppStore()
   const dialogStore = useDialogStore()
+  const workspaceStore = useWorkspaceStore()
 
   const runtime = shallowRef<GrokRuntimeStatus>(emptyRuntime())
   const sessions = shallowRef<GrokSessionSummary[]>([])
@@ -382,6 +388,7 @@ export const useGrokStore = defineStore('grok', () => {
   const pendingLiveText = new Map<string, string>()
   const pendingLiveThought = new Map<string, string | null>()
   const finalizedTurnIds = new Set<string>()
+  const latestStartedTurnBySession = new Map<string, string>()
   /** Timeline turnId (`session:tN`) → metrics (tokens + duration). */
   const turnMetricsByKey = shallowRef<Record<string, TurnMetrics>>({})
   /** Backend turnId → wall-clock start for duration when completed. */
@@ -395,6 +402,7 @@ export const useGrokStore = defineStore('grok', () => {
   let sessionsLoadedKey = ''
   let sessionLoadSequence = 0
   const sessionOpenSequence = new Map<string, number>()
+  const loadingSequenceBySession = new Map<string, number>()
   let enterInFlight: Promise<void> | null = null
   let queuedSequence = 0
   /** pending/local session id → native Grok session id (and reverse lookups). */
@@ -411,6 +419,8 @@ export const useGrokStore = defineStore('grok', () => {
 
   watch(workspacePath, (next, previous) => {
     if (!previous || sameWorkspacePath(next, previous) || !activeSessionId.value) return
+    const selected = sessions.value.find((item) => sameGrokSession(item.id, activeSessionId.value))
+    if (selected?.workspace && sameWorkspacePath(selected.workspace, next)) return
     // Running turns continue in the background, but a project switch must not leave
     // another project's conversation wired to this project's composer/stop button.
     activeSessionId.value = ''
@@ -462,12 +472,24 @@ export const useGrokStore = defineStore('grok', () => {
     return Boolean(a && b && a === b)
   }
 
-  function isSessionBusy(sessionId: string): boolean {
+  function isSessionTurnBusy(sessionId: string): boolean {
     const id = resolveSessionId(sessionId)
     if (!id) return false
     return sendingSessionIds.value.some((key) => sameGrokSession(key, id))
       || runningSessionIdsState.value.some((key) => sameGrokSession(key, id))
       || Object.keys(activeTurnBySession.value).some((key) => sameGrokSession(key, id))
+  }
+
+  function isSessionLoading(sessionId: string): boolean {
+    const id = resolveSessionId(sessionId)
+    if (!id) return false
+    return Array.from(loadingSequenceBySession.keys()).some((key) => sameGrokSession(key, id))
+  }
+
+  function isSessionBusy(sessionId: string): boolean {
+    const id = resolveSessionId(sessionId)
+    if (!id) return false
+    return isSessionLoading(id) || isSessionTurnBusy(id)
   }
 
   function sessionStateKey<T>(bucket: Record<string, T>, sessionId: string): string {
@@ -519,6 +541,14 @@ export const useGrokStore = defineStore('grok', () => {
   function turnForSession(sessionId: string): GrokTurnRef | null {
     const key = sessionStateKey(activeTurnBySession.value, sessionId)
     return (key && activeTurnBySession.value[key]) || null
+  }
+
+  function latestStartedTurnForSession(sessionId: string): string {
+    let latest = ''
+    for (const [id, turnId] of latestStartedTurnBySession) {
+      if (sameGrokSession(id, sessionId)) latest = turnId
+    }
+    return latest
   }
 
   function markSessionState(target: typeof sendingSessionIds, sessionId: string, active: boolean): void {
@@ -637,6 +667,12 @@ export const useGrokStore = defineStore('grok', () => {
         }
         delete next[key]
       }
+      merged.sort((left, right) => {
+        if ((left.state === 'sending') !== (right.state === 'sending')) {
+          return left.state === 'sending' ? -1 : 1
+        }
+        return left.createdAt - right.createdAt
+      })
       next[to] = merged
       queuedBySession.value = next
     }
@@ -674,6 +710,12 @@ export const useGrokStore = defineStore('grok', () => {
       const openSequence = Math.max(...openSequenceKeys.map((key) => sessionOpenSequence.get(key) || 0))
       for (const key of openSequenceKeys) sessionOpenSequence.delete(key)
       sessionOpenSequence.set(to, openSequence)
+    }
+    const loadingSequenceKeys = [...loadingSequenceBySession.keys()].filter((key) => sameGrokSession(key, to))
+    if (loadingSequenceKeys.length) {
+      const loadingSequence = Math.max(...loadingSequenceKeys.map((key) => loadingSequenceBySession.get(key) || 0))
+      for (const key of loadingSequenceKeys) loadingSequenceBySession.delete(key)
+      loadingSequenceBySession.set(to, loadingSequence)
     }
     if (loadingSessionId.value && sameGrokSession(loadingSessionId.value, to)) loadingSessionId.value = to
     if (wasActive) activeSessionId.value = to
@@ -855,29 +897,37 @@ export const useGrokStore = defineStore('grok', () => {
   /** Group sessions by workspace so the sidebar matches Codex project folders. */
   const sessionGroups = computed<GrokSessionGroup[]>(() => {
     const activePath = workspacePath.value
-    const buckets = new Map<string, GrokSessionSummary[]>()
+    const buckets = new Map<string, { path: string; sessions: GrokSessionSummary[] }>()
     for (const session of sessions.value) {
       const path = (session.workspace || '').trim() || '(unknown)'
-      const list = buckets.get(path) ?? []
-      list.push(session)
-      buckets.set(path, list)
+      const key = workspaceKey(path)
+      const bucket = buckets.get(key)
+      if (bucket) {
+        bucket.sessions.push(session)
+      } else {
+        buckets.set(key, { path, sessions: [session] })
+      }
     }
     // Always surface the active Grok workspace, even when it has no sessions yet.
-    if (activePath && ![...buckets.keys()].some((path) => sameWorkspacePath(path, activePath))) {
-      buckets.set(activePath, [])
+    if (activePath && !buckets.has(workspaceKey(activePath))) {
+      buckets.set(workspaceKey(activePath), { path: activePath, sessions: [] })
     }
-    const groups = [...buckets.entries()].map(([path, list]) => ({
+    const groups = [...buckets.values()].map(({ path, sessions: list }) => ({
       path,
       name: workspaceLeafName(path),
       active: activePath ? sameWorkspacePath(path, activePath) : false,
       sessions: [...list].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)),
     }))
-    groups.sort((a, b) => {
-      if (a.active !== b.active) return a.active ? -1 : 1
-      const aTime = a.sessions[0]?.updatedAt || 0
-      const bTime = b.sessions[0]?.updatedAt || 0
-      return bTime - aTime
-    })
+    const orderedPaths = appStore.orderWorkspacePaths(
+      'grok',
+      groups.map((group) => group.path),
+      appStore.settings.grokRecentWorkspaces ?? [],
+    )
+    const order = new Map(orderedPaths.map((path, index) => [workspaceKey(path), index]))
+    groups.sort((left, right) =>
+      (order.get(workspaceKey(left.path)) ?? Number.MAX_SAFE_INTEGER)
+      - (order.get(workspaceKey(right.path)) ?? Number.MAX_SAFE_INTEGER),
+    )
     return groups
   })
 
@@ -982,10 +1032,28 @@ export const useGrokStore = defineStore('grok', () => {
       : {}
 
     if (type === 'turn.started') {
+      const clientSessionId = String(data.clientSessionId || '')
+      if (
+        clientSessionId.startsWith('pending-grok-')
+        && sessionId
+        && sessionId !== clientSessionId
+      ) {
+        promoteSessionState(clientSessionId, sessionId)
+      }
+      const startedSessionId = liveWriteKey(sessionId) || sessionId
+      if (startedSessionId && turnId) latestStartedTurnBySession.set(startedSessionId, turnId)
       // A very fast terminal event may beat this notification across the bridge.
       // Turn ids are unique, so never resurrect one that is already finalized.
-      if (turnId && finalizedTurnIds.has(turnId)) return
-      const key = liveWriteKey(sessionId) || sessionId
+      if (turnId && finalizedTurnIds.has(turnId)) {
+        const pendingTurn = turnForSession(sessionId)
+        if (pendingTurn?.turnId.startsWith('grok-turn-pending-')) {
+          remapQueuedBlockingTurn(sessionId, pendingTurn.turnId, turnId)
+          finalizedTurnIds.add(pendingTurn.turnId)
+          clearTurnState(sessionId, pendingTurn.turnId)
+        }
+        return
+      }
+      const key = startedSessionId
       if (turnId) {
         streamSequenceByTurn.delete(`${turnId}:text`)
         streamSequenceByTurn.delete(`${turnId}:thought`)
@@ -1362,7 +1430,14 @@ export const useGrokStore = defineStore('grok', () => {
         || requestedSearch !== search.value.trim()
       ) return
       const pending = sessions.value.filter((item) =>
-        item.backend === requestedBackend && item.id.startsWith('pending-grok-') && isSessionBusy(item.id),
+        item.backend === requestedBackend
+        && item.id.startsWith('pending-grok-')
+        && (
+          sameGrokSession(activeSessionId.value, item.id)
+          || isSessionBusy(item.id)
+          || relatedSessionKeys(queuedBySession.value, item.id)
+            .some((key) => (queuedBySession.value[key] || []).length > 0)
+        ),
       )
       const pendingIds = new Set(pending.map((item) => resolveSessionId(item.id)))
       sessions.value = [
@@ -1389,35 +1464,69 @@ export const useGrokStore = defineStore('grok', () => {
 
   async function openSession(
     sessionID: string,
-    options?: { terminalStatus?: string; activate?: boolean },
+    options?: { terminalStatus?: string; activate?: boolean; switchWorkspace?: boolean },
   ): Promise<void> {
     const requestedId = sessionID.trim()
     if (!requestedId) return
     const id = resolveSessionId(requestedId) || requestedId
     const activate = options?.activate !== false
+    const previousSessionId = activeSessionId.value
     if (activate) activeSessionId.value = id
-
-    // A newly-created Build session has no native transcript until session.bound.
-    // Keep showing its optimistic timeline instead of asking the backend for a fake id.
-    if (id.startsWith('pending-grok-')) return
-    if (isSessionBusy(id) && mergedSessionMessages(id).length) return
 
     const sequence = (sessionOpenSequence.get(id) || 0) + 1
     sessionOpenSequence.set(id, sequence)
-    const requestedBackend = backendId.value
+    loadingSequenceBySession.set(id, sequence)
+    const known = sessions.value.find((item) => sameGrokSession(item.id, id))
+    const requestedBackend = known?.backend === 'api' ? 'api' : backendId.value
+    const targetWorkspace = known?.workspace || ''
     if (activate) loadingSessionId.value = id
+    let loadedSessionId = ''
     try {
+      if (
+        activate
+        && options?.switchWorkspace !== false
+        && targetWorkspace
+        && targetWorkspace !== '(unknown)'
+        && (
+          workspaceStore.switchingWorkspace
+          || !sameWorkspacePath(targetWorkspace, workspacePath.value)
+        )
+      ) {
+        const switched = await workspaceStore.useWorkspace(targetWorkspace)
+        if (sessionOpenSequence.get(id) !== sequence) return
+        if (!switched && !sameWorkspacePath(targetWorkspace, workspacePath.value)) {
+          const hasQueue = relatedSessionKeys(queuedBySession.value, id)
+            .some((key) => (queuedBySession.value[key] || []).length > 0)
+          if (sameGrokSession(activeSessionId.value, id) && !hasQueue) {
+            activeSessionId.value = previousSessionId
+          }
+          return
+        }
+      }
+
+      // A newly-created Build session has no native transcript until session.bound.
+      // Keep showing its optimistic timeline instead of asking the backend for a fake id.
+      if (id.startsWith('pending-grok-')) {
+        loadedSessionId = id
+        return
+      }
+      if (isSessionTurnBusy(id) && mergedSessionMessages(id).length) {
+        loadedSessionId = id
+        return
+      }
+
       const detail = await readGrokSession(requestedBackend, id)
       if (sessionOpenSequence.get(id) !== sequence || requestedBackend !== backendId.value) return
       const targetId = resolveSessionId(id) || id
       const messages = detail.messages ?? []
       // Re-read after await: a turn may have started while disk history was loading.
-      const busy = isSessionBusy(targetId)
+      const busy = isSessionTurnBusy(targetId)
       const terminalStatus = options?.terminalStatus || (!busy ? 'completed' : '')
       const cached = mergedSessionMessages(targetId)
       const merged = mergeGrokDiskWithCurrent(messages, cached, busy)
       const nextMessages = terminalStatus ? finalizeGrokMessages(merged, terminalStatus) : merged
       replaceSessionMessages(targetId, nextMessages)
+      loadedSessionId = targetId
       if (detail.summary?.id) {
         const others = sessions.value.filter((item) => item.id !== detail.summary.id)
         sessions.value = [detail.summary, ...others]
@@ -1428,7 +1537,7 @@ export const useGrokStore = defineStore('grok', () => {
       if (sessionOpenSequence.get(id) !== sequence || requestedBackend !== backendId.value) return
       const message = errorMessage(error)
       // A native session can be announced before its transcript is visible on disk.
-      if (isSessionBusy(id) && /not found|does not exist|no such file/i.test(message)) return
+      if (isSessionTurnBusy(id) && /not found|does not exist|no such file/i.test(message)) return
       if (!activate || !sameGrokSession(activeSessionId.value, id)) return
       if (/unknown bound method|binding call failed/i.test(message)) {
         notify('warning', translate('notifications.taskOpenFailed'), translate('sidebar.grokBindingsStale'))
@@ -1436,12 +1545,22 @@ export const useGrokStore = defineStore('grok', () => {
         notify('error', translate('notifications.taskOpenFailed'), message)
       }
     } finally {
-      const latestSequence = sessionOpenSequence.get(resolveSessionId(id)) ?? sessionOpenSequence.get(id)
+      const loadingKey = [...loadingSequenceBySession.keys()].find((key) =>
+        loadingSequenceBySession.get(key) === sequence && sameGrokSession(key, id),
+      )
+      const ownsLoadingBarrier = Boolean(loadingKey)
+      if (loadingKey) loadingSequenceBySession.delete(loadingKey)
       if (
-        latestSequence === sequence
+        ownsLoadingBarrier
+        && !isSessionLoading(id)
         && (loadingSessionId.value === id || sameGrokSession(loadingSessionId.value, id))
       ) {
         loadingSessionId.value = ''
+      }
+      if (ownsLoadingBarrier) {
+        // A transient native-history miss must not strand a prompt admitted while
+        // this barrier was active; the queued row already owns backend/workspace.
+        void drainQueue(loadedSessionId || resolveSessionId(id) || id)
       }
     }
   }
@@ -1504,13 +1623,14 @@ export const useGrokStore = defineStore('grok', () => {
   }
 
   function newSession(): void {
+    if (workspaceStore.switchingWorkspace) return
     activeSessionId.value = ''
   }
 
   function ensureSession(message: string, workspace: string): string {
     let sessionId = activeSessionId.value
     if (sessionId) return sessionId
-    sessionId = `pending-grok-${Date.now()}`
+    sessionId = `pending-grok-${Date.now()}-${++queuedSequence}`
     activeSessionId.value = sessionId
     sessions.value = [{
       id: sessionId,
@@ -1526,12 +1646,13 @@ export const useGrokStore = defineStore('grok', () => {
     return sessionId
   }
 
-  function appendLocalUserMessage(sessionId: string, message: string): string {
+  function appendLocalUserMessage(sessionId: string, message: string, images: string[] = []): string {
     const id = resolveSessionId(sessionId) || sessionId.trim()
     const userMessage: GrokMessage = {
       id: `grok-user-${Date.now()}-${++queuedSequence}`,
       role: 'user',
       text: message,
+      images: [...images],
       status: 'completed',
       createdAt: Date.now(),
     }
@@ -1550,13 +1671,16 @@ export const useGrokStore = defineStore('grok', () => {
     sessionId: string,
     text: string,
     images: string[],
+    options: { backend: 'build' | 'api'; workspace: string; model: string; effort: string },
     blockedByTurnId = '',
   ): GrokQueuedMessage {
     const item: GrokQueuedMessage = {
       id: `grok-queued-${Date.now()}-${++queuedSequence}`,
       sessionId,
-      backend: backendId.value,
-      workspace: workspacePath.value,
+      backend: options.backend,
+      workspace: options.workspace,
+      model: options.model,
+      effort: options.effort,
       text,
       images: [...images],
       state: 'queued',
@@ -1643,6 +1767,8 @@ export const useGrokStore = defineStore('grok', () => {
       localMessageId?: string
       backend?: 'build' | 'api'
       workspace?: string
+      model?: string
+      effort?: string
     },
   ): Promise<boolean> {
     const turnBackend = options?.backend || backendId.value
@@ -1669,18 +1795,20 @@ export const useGrokStore = defineStore('grok', () => {
       turnStartedAtById.value = { ...turnStartedAtById.value, [pendingTurnId]: Date.now() }
       seedTurnStartMetrics(sessionId, pendingTurnId)
     }
+    const startedTurnBeforeSend = latestStartedTurnForSession(sessionId)
     try {
       const ref = await sendGrokMessageApi({
         backend: turnBackend,
-        // Let the backend allocate a real id; pending-grok-* only exists in UI state.
-        sessionId: sessionId.startsWith('pending-grok-') ? '' : resolveSessionId(sessionId),
+        // The backend allocates a real id and echoes this pending id on turn.started
+        // so the event can bind the optimistic timeline before the RPC resolves.
+        sessionId: sessionId.startsWith('pending-grok-') ? sessionId : resolveSessionId(sessionId),
         workspace,
         text: message,
         images,
-        model: turnBackend === 'api'
+        model: options?.model ?? (turnBackend === 'api'
           ? (appStore.settings.grokAPIModel || '')
-          : (appStore.settings.grokBuildModel || ''),
-        effort: appStore.settings.grokEffort || 'high',
+          : (appStore.settings.grokBuildModel || '')),
+        effort: options?.effort || appStore.settings.grokEffort || 'high',
       })
       const nextTurnId = ref.turnId || pendingTurnId
       if (nextTurnId !== pendingTurnId) remapQueuedBlockingTurn(sessionId, pendingTurnId, nextTurnId)
@@ -1725,6 +1853,22 @@ export const useGrokStore = defineStore('grok', () => {
       }
       return true
     } catch (error) {
+      const acceptedTurn = turnForSession(sessionId)
+      const latestStartedTurnId = latestStartedTurnForSession(sessionId)
+      const acceptedDuringSend = Boolean(
+        latestStartedTurnId && latestStartedTurnId !== startedTurnBeforeSend,
+      )
+      if (
+        acceptedDuringSend
+        || finalizedTurnIds.has(pendingTurnId)
+        || (acceptedTurn?.turnId && acceptedTurn.turnId !== pendingTurnId)
+      ) {
+        // turn.started/terminal crossed the bridge before the RPC error. Those
+        // events prove the prompt was accepted; removing it here causes the
+        // "message vanished while thinking, then reappeared" flicker and a retry
+        // would duplicate the task.
+        return true
+      }
       finalizedTurnIds.add(pendingTurnId)
       clearTurnState(sessionId, pendingTurnId)
       if (options?.localMessageId) removeLocalMessage(sessionId, options.localMessageId)
@@ -1748,8 +1892,10 @@ export const useGrokStore = defineStore('grok', () => {
         }
       }
     }
-    const next = list.find((item) => item.state === 'queued')
-    if (!next) return
+    const next = list[0]
+    // Preserve FIFO across failures. A later prompt must not leap over the
+    // failed head until the user retries, removes, or explicitly sends it now.
+    if (!next || next.state !== 'queued') return
     if (next.blockedByTurnId && !finalizedTurnIds.has(next.blockedByTurnId)) return
     if (isSessionBusy(id)) return
 
@@ -1758,14 +1904,24 @@ export const useGrokStore = defineStore('grok', () => {
     // when the item actually starts sending (avoid double-append on retry).
     let localMessageId = ''
     if (!next.localAppended && (next.text || next.images.length)) {
-      localMessageId = appendLocalUserMessage(resolveSessionId(queueSessionId) || queueSessionId, next.text)
+      localMessageId = appendLocalUserMessage(
+        resolveSessionId(queueSessionId) || queueSessionId,
+        next.text,
+        next.images,
+      )
       patchQueuedMessage(queueSessionId, next.id, { localAppended: true })
     }
     const ok = await dispatchTurn(
       resolveSessionId(queueSessionId) || queueSessionId,
       next.text,
       next.images,
-      { backend: next.backend, workspace: next.workspace, localMessageId },
+      {
+        backend: next.backend,
+        workspace: next.workspace,
+        model: next.model,
+        effort: next.effort,
+        localMessageId,
+      },
     )
     if (ok) {
       removeQueuedMessageFromSession(queueSessionId, next.id)
@@ -1798,9 +1954,12 @@ export const useGrokStore = defineStore('grok', () => {
     // Promote to front.
     const list = [...(queuedBySession.value[sessionId] ?? [])]
     const index = list.findIndex((item) => item.id === messageId)
-    if (index > 0) {
+    let floor = 0
+    while (floor < list.length && list[floor]?.state === 'sending') floor += 1
+    if (index >= 0 && index !== floor) {
       const [item] = list.splice(index, 1)
-      list.unshift(item)
+      if (!item) return
+      list.splice(floor, 0, item)
       queuedBySession.value = { ...queuedBySession.value, [sessionId]: list }
     }
     patchQueuedMessage(sessionId, messageId, { state: 'queued', error: '' })
@@ -1809,6 +1968,10 @@ export const useGrokStore = defineStore('grok', () => {
       await interruptTurn(sessionId)
       // turn.interrupted / completed will drain the queue.
       return
+    }
+    if (message.blockedByTurnId && !finalizedTurnIds.has(message.blockedByTurnId)) {
+      // No live owner remains, so an explicit "send now" may release an orphaned blocker.
+      patchQueuedMessage(sessionId, messageId, { blockedByTurnId: undefined })
     }
     await drainQueue(sessionId)
   }
@@ -1841,11 +2004,23 @@ export const useGrokStore = defineStore('grok', () => {
     }
 
     const sessionId = ensureSession(message, workspace)
+    const summary = sessions.value.find((item) => sameGrokSession(item.id, sessionId))
+    const turnBackend = summary?.backend === 'api' ? 'api' : backendId.value
+    const turnWorkspace = summary?.workspace || workspace
+    const turnModel = turnBackend === 'api'
+      ? (appStore.settings.grokAPIModel || '')
+      : (appStore.settings.grokBuildModel || '')
+    const turnEffort = appStore.settings.grokEffort || 'high'
     const busy = isSessionBusy(sessionId)
     const activeTurnId = turnForSession(sessionId)?.turnId || ''
     // Queue-first admission preserves FIFO when a terminal event and a new send
     // land in the same frame; drainQueue remains the only dispatch path.
-    enqueueMessage(sessionId, message, images, activeTurnId)
+    enqueueMessage(sessionId, message, images, {
+      backend: turnBackend,
+      workspace: turnWorkspace,
+      model: turnModel,
+      effort: turnEffort,
+    }, activeTurnId)
     if (!busy) await drainQueue(sessionId)
     return true
   }
@@ -1875,6 +2050,15 @@ export const useGrokStore = defineStore('grok', () => {
       if (!ok) throw lastError || new Error('Grok turn is not running')
       void reconcileInterruptedTurn(ref)
     } catch (error) {
+      if (/not running/i.test(errorMessage(error))) {
+        // The backend has no owner for this turn, so keeping the local lock would
+        // park every follow-up forever after a missed terminal bridge event.
+        if (ref.turnId) finalizedTurnIds.add(ref.turnId)
+        clearTurnState(ref.sessionId, ref.turnId)
+        markSessionState(interruptingSessionIds, ref.sessionId, false)
+        await drainQueue(ref.sessionId)
+        return
+      }
       markSessionState(interruptingSessionIds, ref.sessionId, false)
       notify('error', translate('notifications.turnStopFailed'), errorMessage(error))
     }
@@ -1905,19 +2089,52 @@ export const useGrokStore = defineStore('grok', () => {
   }
 
   function discardLocalSession(sessionID: string): void {
-    sessions.value = sessions.value.filter((item) => item.id !== sessionID)
-    archivedSessions.value = archivedSessions.value.filter((item) => item.id !== sessionID)
-    if (activeSessionId.value === sessionID || sameGrokSession(activeSessionId.value, sessionID)) {
-      activeSessionId.value = ''
-      const next = { ...messagesBySession.value }
-      delete next[sessionID]
-      messagesBySession.value = next
+    const candidates = new Set<string>([
+      sessionID,
+      ...sessionAlias.keys(),
+      ...sessionAlias.values(),
+      ...Object.keys(messagesBySession.value),
+      ...Object.keys(queuedBySession.value),
+      ...Object.keys(activeTurnBySession.value),
+    ])
+    const related = [...candidates].filter((id) => id && sameGrokSession(id, sessionID))
+    if (!related.includes(sessionID)) related.push(sessionID)
+    const relatedSet = new Set(related)
+    const matches = (id: string) => related.some((key) => sameGrokSession(id, key))
+
+    sessions.value = sessions.value.filter((item) => !matches(item.id))
+    archivedSessions.value = archivedSessions.value.filter((item) => !matches(item.id))
+    if (matches(activeSessionId.value)) activeSessionId.value = ''
+    if (matches(loadingSessionId.value)) loadingSessionId.value = ''
+    sendingSessionIds.value = sendingSessionIds.value.filter((id) => !matches(id))
+    runningSessionIdsState.value = runningSessionIdsState.value.filter((id) => !matches(id))
+    interruptingSessionIds.value = interruptingSessionIds.value.filter((id) => !matches(id))
+
+    const withoutRelated = <T>(bucket: Record<string, T>): Record<string, T> =>
+      Object.fromEntries(Object.entries(bucket).filter(([id]) => !matches(id)))
+    messagesBySession.value = withoutRelated(messagesBySession.value)
+    queuedBySession.value = withoutRelated(queuedBySession.value)
+    activeTurnBySession.value = withoutRelated(activeTurnBySession.value)
+    liveTextBySession.value = withoutRelated(liveTextBySession.value)
+    liveThoughtBySession.value = withoutRelated(liveThoughtBySession.value)
+    liveActivityBySession.value = withoutRelated(liveActivityBySession.value)
+    tokenUsageBySession.value = withoutRelated(tokenUsageBySession.value)
+
+    for (const id of [...pendingLiveText.keys()]) if (matches(id)) pendingLiveText.delete(id)
+    for (const id of [...pendingLiveThought.keys()]) if (matches(id)) pendingLiveThought.delete(id)
+    for (const id of [...sessionOpenSequence.keys()]) if (matches(id)) sessionOpenSequence.delete(id)
+    for (const id of [...loadingSequenceBySession.keys()]) if (matches(id)) loadingSequenceBySession.delete(id)
+    for (const id of [...latestStartedTurnBySession.keys()]) if (matches(id)) latestStartedTurnBySession.delete(id)
+
+    const nextMetrics = { ...turnMetricsByKey.value }
+    for (const key of Object.keys(nextMetrics)) {
+      if (related.some((id) => key.startsWith(`${id}:`))) delete nextMetrics[key]
     }
-    const queues = { ...queuedBySession.value }
-    delete queues[sessionID]
-    queuedBySession.value = queues
-    if (turnForSession(sessionID)) {
-      clearTurnState(sessionID)
+    turnMetricsByKey.value = nextMetrics
+
+    for (const id of [...sessionAlias.keys()]) {
+      const target = sessionAlias.get(id) || ''
+      if (relatedSet.has(id) || relatedSet.has(target)) sessionAlias.delete(id)
     }
   }
 
@@ -1997,15 +2214,9 @@ export const useGrokStore = defineStore('grok', () => {
       if (!id.startsWith('pending-grok-')) {
         await archiveGrokSessionApi(sessionBackend, id)
       }
+      discardLocalSession(id)
       if (current) {
         archivedSessions.value = [current, ...archivedSessions.value.filter((item) => item.id !== id)]
-      }
-      sessions.value = sessions.value.filter((item) => item.id !== id)
-      if (activeSessionId.value === id || sameGrokSession(activeSessionId.value, id)) {
-        activeSessionId.value = ''
-        const next = { ...messagesBySession.value }
-        delete next[id]
-        messagesBySession.value = next
       }
       notify('success', translate('threadActions.archived'), translate('threadActions.archivedHint'))
       void loadArchivedSessions()
@@ -2126,6 +2337,7 @@ export const useGrokStore = defineStore('grok', () => {
     isTurnRunning,
     interrupting,
     runningSessionIds,
+    sameSession: sameGrokSession,
     isReady,
     bootstrapEvents,
     dispose,

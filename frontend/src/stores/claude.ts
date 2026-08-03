@@ -1,6 +1,6 @@
 import { Events } from '@wailsio/runtime'
 import { defineStore } from 'pinia'
-import { computed, shallowRef } from 'vue'
+import { computed, shallowRef, watch } from 'vue'
 
 import type { TimelineItem, TokenUsageBreakdown, TurnMetrics } from '@/types/codex'
 import {
@@ -36,6 +36,10 @@ function workspaceLeafName(path: string): string {
 
 function looksLikeFilesystemPath(path: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith('/') || path.startsWith('~/')
+}
+
+function attachmentName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path
 }
 
 const emptyTurnMetrics = (): TurnMetrics => ({
@@ -94,6 +98,23 @@ function messageToItem(message: ClaudeMessage, turnId: string): TimelineItem {
   return { ...base, type: 'agentMessage', text }
 }
 
+function sameClaudeUserRow(left: TimelineItem, right: TimelineItem): boolean {
+  if (left.type !== 'userMessage' || right.type !== 'userMessage') return false
+  if (left.id && right.id && left.id === right.id) return true
+  if (left.turnId && right.turnId && left.turnId === right.turnId) return true
+  if ((left.text || '').trim() !== (right.text || '').trim()) return false
+
+  // Repeated prompts are valid. Text alone may only bridge a provisional local
+  // turn to its native row when both timestamps describe the same send.
+  const leftReal = left.turnId?.startsWith('claude-turn-')
+  const rightReal = right.turnId?.startsWith('claude-turn-')
+  if (leftReal && rightReal) return false
+  const toSeconds = (value?: number) => value && value > 1_000_000_000_000 ? value / 1000 : (value || 0)
+  const leftTime = toSeconds(left.startedAt || left.completedAt)
+  const rightTime = toSeconds(right.startedAt || right.completedAt)
+  return leftTime > 0 && rightTime > 0 && Math.abs(leftTime - rightTime) <= 5
+}
+
 export interface ClaudeSessionGroup {
   path: string
   name: string
@@ -104,6 +125,9 @@ export interface ClaudeSessionGroup {
 export interface ClaudeQueuedMessage {
   id: string
   sessionId: string
+  workspace: string
+  model: string
+  effort: string
   text: string
   images: string[]
   state: 'queued' | 'sending' | 'failed'
@@ -203,18 +227,34 @@ export const useClaudeStore = defineStore('claude', () => {
   const queueBySession = shallowRef<Record<string, ClaudeQueuedMessage[]>>({})
   /** real session id → pending id (and reverse) while a create is in flight */
   const sessionAlias = new Map<string, string>()
+  /** Latest history request and active loading barrier for each session. */
+  const sessionOpenSequence = new Map<string, number>()
+  const loadingSequenceBySession = new Map<string, number>()
   /** Per-item bridge sequence; cumulative snapshots make out-of-order delivery harmless. */
   const streamSequenceByItem = new Map<string, number>()
   const pendingStreamPatches = new Map<string, ClaudeStreamPatch>()
   const streamedAssistantTurns = new Set<string>()
   const finalizedTurnIds = new Set<string>()
+  const latestStartedTurnBySession = new Map<string, string>()
+  const discardedSessionIds = new Set<string>()
   let eventUnsub: (() => void) | null = null
   let streamFlushTimer = 0
   let sessionLoadSequence = 0
+  let queuedSequence = 0
 
   const workspacePath = computed(() =>
     appStore.settings.claudeWorkspace || appStore.settings.workspace || '',
   )
+
+  watch(workspacePath, (next, previous) => {
+    if (!previous || sameWorkspacePath(next, previous) || !activeSessionId.value) return
+    const selected = sessions.value.find((item) => sameClaudeSession(item.id, activeSessionId.value))
+    if (selected?.workspace && sameWorkspacePath(selected.workspace, next)) return
+    // A project-only switch has no target session yet. Detach the old session so
+    // typing during the following list load can only create a chat in the new project.
+    activeSessionId.value = ''
+    loadingSessionId.value = ''
+  }, { flush: 'sync' })
 
   /** Route stream events to the timeline bucket that actually has the turn. */
   function resolveEventSessionId(sessionId: string): string {
@@ -270,7 +310,16 @@ export const useClaudeStore = defineStore('claude', () => {
     if (q?.length) {
       const nextQ = { ...queueBySession.value }
       delete nextQ[pendingId]
-      nextQ[realId] = q.map((row) => ({ ...row, sessionId: realId }))
+      const existingIds = new Set((nextQ[realId] || []).map((row) => row.id))
+      nextQ[realId] = [
+        ...(nextQ[realId] || []),
+        ...q.filter((row) => !existingIds.has(row.id)).map((row) => ({ ...row, sessionId: realId })),
+      ].sort((left, right) => {
+        if ((left.state === 'sending') !== (right.state === 'sending')) {
+          return left.state === 'sending' ? -1 : 1
+        }
+        return left.createdAt - right.createdAt
+      })
       queueBySession.value = nextQ
     }
   }
@@ -335,12 +384,16 @@ export const useClaudeStore = defineStore('claude', () => {
       active: activePath ? sameWorkspacePath(path, activePath) : false,
       sessions: [...list].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)),
     }))
-    groups.sort((a, b) => {
-      if (a.active !== b.active) return a.active ? -1 : 1
-      const aTime = a.sessions[0]?.updatedAt || 0
-      const bTime = b.sessions[0]?.updatedAt || 0
-      return bTime - aTime
-    })
+    const orderedPaths = appStore.orderWorkspacePaths(
+      'claude',
+      groups.map((group) => group.path),
+      appStore.settings.claudeRecentWorkspaces ?? [],
+    )
+    const order = new Map(orderedPaths.map((path, index) => [workspaceKey(path), index]))
+    groups.sort((left, right) =>
+      (order.get(workspaceKey(left.path)) ?? Number.MAX_SAFE_INTEGER)
+      - (order.get(workspaceKey(right.path)) ?? Number.MAX_SAFE_INTEGER),
+    )
     return groups
   })
 
@@ -424,14 +477,29 @@ export const useClaudeStore = defineStore('claude', () => {
     const kind = String(data.kind || '')
     const rawSessionId = String(data.sessionId || '')
     const turnId = String(data.turnId || '')
+    if (rawSessionId && discardedSessionIds.has(rawSessionId)) return
     if (!rawSessionId && !activeSessionId.value) return
-    const sessionId = resolveEventSessionId(rawSessionId || activeSessionId.value)
+    let sessionId = resolveEventSessionId(rawSessionId || activeSessionId.value)
     if (!sessionId) return
 
     if (kind === 'turn.started') {
+      const clientSessionId = String(data.clientSessionId || '')
+      if (
+        clientSessionId.startsWith('pending-claude-')
+        && rawSessionId
+        && rawSessionId !== clientSessionId
+      ) {
+        promotePendingSession(clientSessionId, rawSessionId)
+        sessionId = resolveEventSessionId(rawSessionId)
+      }
+      if (turnId) latestStartedTurnBySession.set(sessionId, turnId)
       // Turn ids are unique; delayed bridge delivery must not revive a turn whose
       // terminal event was already processed.
-      if (turnId && finalizedTurnIds.has(turnId)) return
+      if (turnId && finalizedTurnIds.has(turnId)) {
+        markRunning(sessionId, false)
+        markSending(sessionId, false)
+        return
+      }
       if (turnId) {
         streamedAssistantTurns.delete(turnId)
         for (const key of streamSequenceByItem.keys()) {
@@ -467,11 +535,11 @@ export const useClaudeStore = defineStore('claude', () => {
       const role = (msg.role || '').toLowerCase()
       // Skip duplicate user rows (optimistic UI already showed this text).
       if (role === 'user' || role === 'human') {
-        const text = (msg.text || '').trim()
         const list = itemsBySession.value[sessionId] || []
+        const incoming = messageToItem(msg, turnId || sessionId)
         for (let i = list.length - 1; i >= Math.max(0, list.length - 8); i -= 1) {
           const row = list[i]
-          if (row?.type === 'userMessage' && (row.text || '').trim() === text) {
+          if (row && sameClaudeUserRow(row, incoming)) {
             const next = [...list]
             next[i] = {
               ...row,
@@ -626,6 +694,7 @@ export const useClaudeStore = defineStore('claude', () => {
             await openSession(sessionId, {
               switchWorkspace: false,
               terminalStatus: String(data.status || (data.error ? 'failed' : 'completed')),
+              activate: false,
             })
           } else {
             await loadSessions()
@@ -775,7 +844,19 @@ export const useClaudeStore = defineStore('claude', () => {
         || !sameWorkspacePath(requestedWorkspace, workspacePath.value)
         || requestedSearch !== search.value
       ) return
-      sessions.value = list || []
+      const pending = sessions.value.filter((item) =>
+        item.id.startsWith('pending-claude-')
+        && (
+          sameClaudeSession(activeSessionId.value, item.id)
+          || isSessionBusy(item.id)
+          || (queueBySession.value[item.id] || []).length > 0
+        ),
+      )
+      const pendingIds = new Set(pending.map((item) => item.id))
+      sessions.value = [
+        ...pending,
+        ...(list || []).filter((item) => !pendingIds.has(item.id)),
+      ]
     } catch (error) {
       if (
         sequence !== sessionLoadSequence
@@ -796,35 +877,57 @@ export const useClaudeStore = defineStore('claude', () => {
 
   async function openSession(
     sessionId: string,
-    options?: { switchWorkspace?: boolean; terminalStatus?: string },
+    options?: { switchWorkspace?: boolean; terminalStatus?: string; activate?: boolean },
   ): Promise<void> {
-    if (!sessionId) return
-    activeSessionId.value = sessionId
-    loadingSessionId.value = sessionId
+    const requestedId = sessionId.trim()
+    if (!requestedId) return
+    const activate = options?.activate !== false
+    const previousSessionId = activeSessionId.value
+    if (activate) activeSessionId.value = requestedId
+    const sequence = (sessionOpenSequence.get(requestedId) || 0) + 1
+    sessionOpenSequence.set(requestedId, sequence)
+    loadingSequenceBySession.set(requestedId, sequence)
+    if (activate) loadingSessionId.value = requestedId
     try {
       // If the session belongs to another project, switch Claude workspace first
       // so the active group highlights like Codex / Grok.
-      const known = sessions.value.find((item) => item.id === sessionId)
+      const known = sessions.value.find((item) => sameClaudeSession(item.id, requestedId))
       const targetWorkspace = known?.workspace || ''
       if (
-        options?.switchWorkspace !== false
+        activate && options?.switchWorkspace !== false
         && targetWorkspace
         && looksLikeFilesystemPath(targetWorkspace)
-        && !sameWorkspacePath(targetWorkspace, workspacePath.value)
+        && (
+          workspaceStore.switchingWorkspace
+          || !sameWorkspacePath(targetWorkspace, workspacePath.value)
+        )
       ) {
-        await workspaceStore.useWorkspace(targetWorkspace)
+        const switched = await workspaceStore.useWorkspace(targetWorkspace)
+        if (sessionOpenSequence.get(requestedId) !== sequence) return
+        if (!switched && !sameWorkspacePath(targetWorkspace, workspacePath.value)) {
+          if (
+            sameClaudeSession(activeSessionId.value, requestedId)
+            && !(queueBySession.value[requestedId] || []).length
+          ) activeSessionId.value = previousSessionId
+          return
+        }
       }
 
-      const detail = await readClaudeSession(sessionId)
+      // A local draft has no native transcript until its first send binds a real
+      // Claude session id. Keep its empty/optimistic timeline without a false error.
+      if (requestedId.startsWith('pending-claude-')) return
+
+      const detail = await readClaudeSession(requestedId)
+      if (sessionOpenSequence.get(requestedId) !== sequence) return
       const messages = detail.messages || []
-      const fromDisk = buildTimelineFromMessages(sessionId, messages)
+      const fromDisk = buildTimelineFromMessages(requestedId, messages)
 
       // Re-read live state after the await. A new turn can start while the native
       // transcript is loading; using the pre-request snapshot would overwrite its
       // optimistic user row with stale disk history.
-      const cached = itemsBySession.value[sessionId] || []
-      const liveTurn = activeTurnBySession.value[sessionId]
-      const isLive = runningSessionIds.value.includes(sessionId) || Boolean(liveTurn)
+      const cached = itemsBySession.value[requestedId] || []
+      const liveTurn = activeTurnBySession.value[requestedId]
+      const isLive = runningSessionIds.value.some((id) => sameClaudeSession(id, requestedId)) || Boolean(liveTurn)
 
       let nextItems: TimelineItem[]
       if (isLive && cached.length > 0) {
@@ -843,17 +946,27 @@ export const useClaudeStore = defineStore('claude', () => {
           options?.terminalStatus || 'completed',
         )
       }
-      itemsBySession.value = { ...itemsBySession.value, [sessionId]: nextItems }
+      itemsBySession.value = { ...itemsBySession.value, [requestedId]: nextItems }
       // Ensure summary is present / refreshed at top of list.
       if (detail.summary?.id) {
         const others = sessions.value.filter((item) => item.id !== detail.summary.id)
         sessions.value = [detail.summary, ...others]
       }
-      void hydrateSessionTokenUsage(sessionId)
+      void hydrateSessionTokenUsage(requestedId)
     } catch (error) {
+      if (sessionOpenSequence.get(requestedId) !== sequence) return
+      if (!activate || !sameClaudeSession(activeSessionId.value, requestedId)) return
       notify('error', translate('sidebar.claudeEmpty'), errorMessage(error))
     } finally {
-      if (loadingSessionId.value === sessionId) loadingSessionId.value = ''
+      if (loadingSequenceBySession.get(requestedId) === sequence) {
+        loadingSequenceBySession.delete(requestedId)
+        if (!isSessionLoading(requestedId) && sameClaudeSession(loadingSessionId.value, requestedId)) {
+          loadingSessionId.value = ''
+        }
+        // Read failures must not strand a message admitted while the selection
+        // was loading. dispatchTurn still owns the fixed session/workspace target.
+        void flushQueue(requestedId)
+      }
     }
   }
 
@@ -960,10 +1073,10 @@ export const useClaudeStore = defineStore('claude', () => {
     for (const item of live) {
       if (used.has(item.id)) continue
       if (out.some((row) => row.id === item.id)) continue
-      // Dedupe optimistic user vs disk user by text near the end.
+      // Dedupe the optimistic row for this turn without collapsing a valid
+      // repeated prompt from a newer turn.
       if (item.type === 'userMessage') {
-        const text = (item.text || '').trim()
-        if (out.some((row) => row.type === 'userMessage' && (row.text || '').trim() === text)) {
+        if (out.some((row) => sameClaudeUserRow(row, item))) {
           continue
         }
       }
@@ -994,8 +1107,7 @@ export const useClaudeStore = defineStore('claude', () => {
     for (const item of cached) {
       if (item.id && diskIds.has(item.id)) continue
       if (item.type === 'userMessage') {
-        const text = (item.text || '').trim()
-        if (out.some((row) => row.type === 'userMessage' && (row.text || '').trim() === text)) {
+        if (out.some((row) => sameClaudeUserRow(row, item))) {
           continue
         }
       }
@@ -1037,12 +1149,19 @@ export const useClaudeStore = defineStore('claude', () => {
     return changed ? next : items
   }
 
+  function keepPendingSession(sessionId: string): boolean {
+    return isSessionBusy(sessionId)
+      || (queueBySession.value[sessionId] || []).length > 0
+      || (itemsBySession.value[sessionId] || []).length > 0
+  }
+
   function newSession(): void {
+    if (workspaceStore.switchingWorkspace) return
     if (!workspacePath.value) {
       notify('error', translate('sidebar.claudeEmpty'), translate('app.needWorkspaceHintReady'))
       return
     }
-    const id = `pending-claude-${Date.now()}`
+    const id = `pending-claude-${Date.now()}-${++queuedSequence}`
     const now = Math.floor(Date.now() / 1000)
     const summary: ClaudeSessionSummary = {
       id,
@@ -1054,7 +1173,9 @@ export const useClaudeStore = defineStore('claude', () => {
       createdAt: now,
       updatedAt: now,
     }
-    sessions.value = [summary, ...sessions.value.filter((item) => !item.id.startsWith('pending-claude-'))]
+    sessions.value = [summary, ...sessions.value.filter((item) =>
+      !item.id.startsWith('pending-claude-') || keepPendingSession(item.id),
+    )]
     activeSessionId.value = id
     itemsBySession.value = { ...itemsBySession.value, [id]: [] }
   }
@@ -1062,7 +1183,7 @@ export const useClaudeStore = defineStore('claude', () => {
   function ensureActiveSessionId(): string {
     let sessionId = activeSessionId.value
     if (sessionId) return sessionId
-    sessionId = `pending-claude-${Date.now()}`
+    sessionId = `pending-claude-${Date.now()}-${++queuedSequence}`
     activeSessionId.value = sessionId
     const now = Math.floor(Date.now() / 1000)
     sessions.value = [{
@@ -1074,17 +1195,28 @@ export const useClaudeStore = defineStore('claude', () => {
       effort: appStore.settings.claudeEffort || 'high',
       createdAt: now,
       updatedAt: now,
-    }, ...sessions.value.filter((item) => !item.id.startsWith('pending-claude-'))]
+    }, ...sessions.value.filter((item) =>
+      !item.id.startsWith('pending-claude-') || keepPendingSession(item.id),
+    )]
     itemsBySession.value = { ...itemsBySession.value, [sessionId]: [] }
     return sessionId
   }
 
-  function isSessionBusy(sessionId: string): boolean {
+  function isSessionLoading(sessionId: string): boolean {
+    const requested = sessionId.trim()
+    return Array.from(loadingSequenceBySession.keys()).some((id) => sameClaudeSession(id, requested))
+  }
+
+  function isSessionTurnBusy(sessionId: string): boolean {
     const requested = sessionId.trim()
     if (sendingSessionIds.value.some((id) => sameClaudeSession(id, requested))) return true
     if (runningSessionIds.value.some((id) => sameClaudeSession(id, requested))) return true
     if (Object.keys(activeTurnBySession.value).some((id) => sameClaudeSession(id, requested))) return true
     return false
+  }
+
+  function isSessionBusy(sessionId: string): boolean {
+    return isSessionLoading(sessionId) || isSessionTurnBusy(sessionId)
   }
 
   /**
@@ -1107,40 +1239,61 @@ export const useClaudeStore = defineStore('claude', () => {
     const blockingTurnId = activeTurnBySession.value[sessionId]?.turnId || ''
     // Always enter the per-session queue first. This keeps a send from
     // overtaking an older follow-up while terminal history is being hydrated.
-    enqueue(sessionId, content, images, blockingTurnId)
+    const sessionWorkspace = sessions.value.find((item) => sameClaudeSession(item.id, sessionId))?.workspace
+      || workspacePath.value
+    enqueue(
+      sessionId,
+      content,
+      images,
+      sessionWorkspace,
+      appStore.settings.claudeModel || 'sonnet',
+      appStore.settings.claudeEffort || 'high',
+      blockingTurnId,
+    )
     if (!busy) await flushQueue(sessionId)
     return true
   }
 
   /** Start exactly one CLI turn. Caller must ensure the session is not already busy. */
-  async function dispatchTurn(sessionId: string, content: string, images: string[]): Promise<boolean> {
-    if (!workspacePath.value) return false
+  async function dispatchTurn(
+    sessionId: string,
+    content: string,
+    images: string[],
+    options?: { workspace?: string; model?: string; effort?: string },
+  ): Promise<boolean> {
+    const workspace = options?.workspace || workspacePath.value
+    if (!workspace) return false
     markSending(sessionId, true)
     // Mark busy BEFORE await so a second sendMessage cannot also dispatch.
     markRunning(sessionId, true)
     const now = Math.floor(Date.now() / 1000)
-    const localTurnId = `claude-local-${now}`
-    const userItem = messageToItem({
-      id: `${sessionId}:local-user-${now}`,
+    const localSequence = ++queuedSequence
+    const localTurnId = `claude-local-${Date.now()}-${localSequence}`
+    const userItem: TimelineItem = {
+      ...messageToItem({
+      id: `${sessionId}:local-user-${Date.now()}-${localSequence}`,
       role: 'user',
       text: content,
       status: 'completed',
       createdAt: now,
-    }, localTurnId)
+      }, localTurnId),
+      attachments: images.map((source) => ({ kind: 'local', source, name: attachmentName(source) })),
+    }
     itemsBySession.value = {
       ...itemsBySession.value,
       [sessionId]: [...(itemsBySession.value[sessionId] || []), userItem],
     }
 
+    const startedTurnBeforeSend = latestStartedTurnForSession(sessionId)
     let attachedTurn = false
     try {
       const ref = await sendClaudeMessageApi({
-        sessionId: sessionId.startsWith('pending-claude-') ? '' : sessionId,
-        workspace: workspacePath.value,
+        sessionId,
+        workspace,
         text: content,
         images,
-        model: appStore.settings.claudeModel || '',
-        effort: appStore.settings.claudeEffort || 'high',
+        model: options?.model ?? appStore.settings.claudeModel ?? '',
+        effort: options?.effort || appStore.settings.claudeEffort || 'high',
       })
       attachedTurn = true
 
@@ -1202,7 +1355,7 @@ export const useClaudeStore = defineStore('claude', () => {
         itemsBySession.value = {
           ...itemsBySession.value,
           [nextSessionId]: list.map((item) =>
-            item.turnId === localTurnId || item.id.endsWith(`local-user-${now}`)
+            item.turnId === localTurnId
               ? { ...item, turnId: ref.turnId }
               : item,
           ),
@@ -1211,6 +1364,21 @@ export const useClaudeStore = defineStore('claude', () => {
       void loadSessions()
       return true
     } catch (error) {
+      const acceptedRef = turnRefForSession(sessionId)
+      const latestStartedTurnId = latestStartedTurnForSession(sessionId)
+      const acceptedDuringSend = Boolean(
+        latestStartedTurnId && latestStartedTurnId !== startedTurnBeforeSend,
+      )
+      if (
+        acceptedDuringSend
+        || (acceptedRef && (!acceptedRef.turnId || !finalizedTurnIds.has(acceptedRef.turnId)))
+      ) {
+        // The bridge can deliver turn.started before the RPC rejection reaches
+        // JavaScript. The event is proof that this prompt was accepted; retrying
+        // it would duplicate the turn.
+        attachedTurn = true
+        return true
+      }
       if (!attachedTurn) {
         markRunning(sessionId, false)
         // Drop optimistic user row for this failed attempt.
@@ -1251,9 +1419,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const out = [...existing]
     for (const item of incoming) {
       if (item.type === 'userMessage') {
-        const idx = out.findIndex((row) =>
-          row.type === 'userMessage' && (row.text || '').trim() === (item.text || '').trim(),
-        )
+        const idx = out.findIndex((row) => sameClaudeUserRow(row, item))
         if (idx >= 0) {
           const dup = out[idx]
           // Prefer real backend turn ids over local provisional ones.
@@ -1292,10 +1458,21 @@ export const useClaudeStore = defineStore('claude', () => {
     return out
   }
 
-  function enqueue(sessionId: string, text: string, images: string[], blockedByTurnId = ''): void {
+  function enqueue(
+    sessionId: string,
+    text: string,
+    images: string[],
+    workspace: string,
+    model: string,
+    effort: string,
+    blockedByTurnId = '',
+  ): void {
     const item: ClaudeQueuedMessage = {
-      id: `claude-q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `claude-q-${Date.now()}-${++queuedSequence}`,
       sessionId,
+      workspace,
+      model,
+      effort,
       text,
       images,
       state: 'queued',
@@ -1309,12 +1486,18 @@ export const useClaudeStore = defineStore('claude', () => {
 
   async function flushQueue(sessionId: string): Promise<void> {
     const list = queueBySession.value[sessionId] || []
-    const next = list.find((item) => item.state === 'queued')
-    if (!next) return
-    await sendQueuedMessageNow(next.id)
+    const next = list[0]
+    // A failed head stays in place until retry/remove/send-now. Skipping it would
+    // silently send later prompts out of order.
+    if (!next || next.state !== 'queued') return
+    await dispatchQueuedMessage(next.id, false)
   }
 
-  async function sendQueuedMessageNow(messageId: string): Promise<void> {
+  function findQueuedMessage(messageId: string): {
+    sessionId: string
+    list: ClaudeQueuedMessage[]
+    item: ClaudeQueuedMessage
+  } | null {
     // Find the queue row across buckets (pending id may have remapped).
     let sessionId = activeSessionId.value
     let list = queueBySession.value[sessionId] || []
@@ -1330,16 +1513,149 @@ export const useClaudeStore = defineStore('claude', () => {
         }
       }
     }
-    if (!item || !sessionId) return
-    if (item.blockedByTurnId && !finalizedTurnIds.has(item.blockedByTurnId)) return
-    if (isSessionBusy(sessionId)) return
+    return item && sessionId ? { sessionId, list, item } : null
+  }
+
+  function moveQueuedMessage(messageId: string, action: 'up' | 'down' | 'top'): void {
+    const found = findQueuedMessage(messageId)
+    if (!found || found.item.state === 'sending') return
+    const list = [...found.list]
+    const index = list.findIndex((row) => row.id === messageId)
+    if (index < 0) return
+    let floor = 0
+    while (floor < list.length && list[floor]?.state === 'sending') floor += 1
+    const target = action === 'top'
+      ? floor
+      : action === 'up'
+        ? Math.max(floor, index - 1)
+        : Math.min(list.length - 1, index + 1)
+    if (target === index) return
+    const [item] = list.splice(index, 1)
+    if (!item) return
+    list.splice(target, 0, item)
+    queueBySession.value = { ...queueBySession.value, [found.sessionId]: list }
+  }
+
+  function turnRefForSession(sessionId: string): ClaudeTurnRef | null {
+    for (const [id, ref] of Object.entries(activeTurnBySession.value)) {
+      if (ref && sameClaudeSession(id, sessionId)) return ref
+    }
+    return null
+  }
+
+  function latestStartedTurnForSession(sessionId: string): string {
+    let latest = ''
+    for (const [id, turnId] of latestStartedTurnBySession) {
+      if (sameClaudeSession(id, sessionId)) latest = turnId
+    }
+    return latest
+  }
+
+  async function recoverMissingClaudeTurn(ref: ClaudeTurnRef, error: unknown): Promise<boolean> {
+    if (!/not running/i.test(errorMessage(error))) return false
+    const current = turnRefForSession(ref.sessionId)
+    if (current?.turnId && ref.turnId && current.turnId !== ref.turnId) return false
+
+    if (ref.turnId) finalizedTurnIds.add(ref.turnId)
+    flushStreamPatches()
+    runningSessionIds.value = runningSessionIds.value.filter((id) => !sameClaudeSession(id, ref.sessionId))
+    markSending(ref.sessionId, false)
+
+    const nextTurns = { ...activeTurnBySession.value }
+    for (const [id, turn] of Object.entries(nextTurns)) {
+      if (!sameClaudeSession(id, ref.sessionId)) continue
+      if (ref.turnId && turn?.turnId && turn.turnId !== ref.turnId) continue
+      delete nextTurns[id]
+    }
+    activeTurnBySession.value = nextTurns
+
+    const nextActivity = { ...liveActivityBySession.value }
+    for (const id of Object.keys(nextActivity)) {
+      if (sameClaudeSession(id, ref.sessionId)) delete nextActivity[id]
+    }
+    liveActivityBySession.value = nextActivity
+
+    const nextItems = { ...itemsBySession.value }
+    for (const [id, items] of Object.entries(nextItems)) {
+      if (sameClaudeSession(id, ref.sessionId)) {
+        nextItems[id] = finalizeTimelineItemStatuses(items, 'interrupted')
+      }
+    }
+    itemsBySession.value = nextItems
+
+    const canonicalId = sessionAlias.get(ref.sessionId) || ref.sessionId
+    if (canonicalId && !canonicalId.startsWith('pending-claude-')) {
+      await openSession(canonicalId, {
+        switchWorkspace: false,
+        terminalStatus: 'interrupted',
+        activate: false,
+      }).catch(() => undefined)
+    }
+    const queueId = Object.keys(queueBySession.value).find((id) => sameClaudeSession(id, canonicalId)) || canonicalId
+    await flushQueue(queueId)
+    return true
+  }
+
+  async function dispatchQueuedMessage(messageId: string, forceNow: boolean): Promise<void> {
+    let found = findQueuedMessage(messageId)
+    if (!found) return
+    if (found.item.state === 'sending') {
+      if (isSessionTurnBusy(found.sessionId)) return
+      queueBySession.value = {
+        ...queueBySession.value,
+        [found.sessionId]: found.list.map((row) =>
+          row.id === messageId ? { ...row, state: 'queued', error: '' } : row,
+        ),
+      }
+    } else if (found.item.state === 'failed') {
+      queueBySession.value = {
+        ...queueBySession.value,
+        [found.sessionId]: found.list.map((row) =>
+          row.id === messageId ? { ...row, state: 'queued', error: '' } : row,
+        ),
+      }
+    }
+    if (forceNow) moveQueuedMessage(messageId, 'top')
+    found = findQueuedMessage(messageId)
+    if (!found) return
+
+    if (isSessionLoading(found.sessionId)) return
+    const activeRef = turnRefForSession(found.sessionId)
+    if (forceNow && activeRef) {
+      try {
+        await interruptClaudeTurnApi(activeRef)
+      } catch (error) {
+        if (!await recoverMissingClaudeTurn(activeRef, error)) {
+          notify('error', translate('notifications.interruptFailed'), errorMessage(error))
+        }
+      }
+      return
+    }
+    if (isSessionTurnBusy(found.sessionId)) return
+    if (found.item.blockedByTurnId && !finalizedTurnIds.has(found.item.blockedByTurnId)) {
+      if (!forceNow) return
+      queueBySession.value = {
+        ...queueBySession.value,
+        [found.sessionId]: found.list.map((row) =>
+          row.id === messageId ? { ...row, blockedByTurnId: undefined } : row,
+        ),
+      }
+      found = findQueuedMessage(messageId)
+      if (!found) return
+    }
 
     queueBySession.value = {
       ...queueBySession.value,
-      [sessionId]: list.map((row) => (row.id === messageId ? { ...row, state: 'sending' } : row)),
+      [found.sessionId]: found.list.map((row) =>
+        row.id === messageId ? { ...row, state: 'sending', error: '' } : row,
+      ),
     }
     // Use dispatchTurn — never sendMessage (which would re-enqueue while busy).
-    const ok = await dispatchTurn(sessionId, item.text, item.images)
+    const ok = await dispatchTurn(found.sessionId, found.item.text, found.item.images, {
+      workspace: found.item.workspace,
+      model: found.item.model,
+      effort: found.item.effort,
+    })
     const currentEntry = Object.entries(queueBySession.value).find(([, rows]) =>
       rows.some((row) => row.id === messageId),
     )
@@ -1349,10 +1665,9 @@ export const useClaudeStore = defineStore('claude', () => {
     if (!ok) {
       queueBySession.value = {
         ...queueBySession.value,
-        [currentSessionId]: [
-          ...remaining,
-          { ...item, sessionId: currentSessionId, state: 'failed', error: translate('notifications.sendFailed') },
-        ],
+        [currentSessionId]: currentList.map((row) => row.id === messageId
+          ? { ...row, sessionId: currentSessionId, state: 'failed', error: translate('notifications.sendFailed') }
+          : row),
       }
       return
     }
@@ -1363,11 +1678,24 @@ export const useClaudeStore = defineStore('claude', () => {
     if (!isSessionBusy(currentSessionId)) await flushQueue(currentSessionId)
   }
 
-  function reorderQueuedMessage(_messageId?: string, _direction?: 'up' | 'down'): void {
-    // Queue reorder not implemented for Claude yet; accept args for Composer parity.
+  async function sendQueuedMessageNow(messageId: string): Promise<void> {
+    await dispatchQueuedMessage(messageId, true)
   }
+
+  function reorderQueuedMessage(messageId: string, direction: 'up' | 'down'): void {
+    moveQueuedMessage(messageId, direction)
+  }
+
   function retryQueuedMessage(messageId: string): void {
-    void sendQueuedMessageNow(messageId)
+    const found = findQueuedMessage(messageId)
+    if (!found || found.item.state !== 'failed') return
+    queueBySession.value = {
+      ...queueBySession.value,
+      [found.sessionId]: found.list.map((row) =>
+        row.id === messageId ? { ...row, state: 'queued', error: '' } : row,
+      ),
+    }
+    if (!isSessionBusy(found.sessionId)) void flushQueue(found.sessionId)
   }
   function removeQueuedMessage(messageId: string): void {
     for (const [sessionId, rows] of Object.entries(queueBySession.value)) {
@@ -1385,29 +1713,80 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function interruptActiveTurn(): Promise<void> {
-    const ref = activeTurn.value
+    const ref = turnRefForSession(activeSessionId.value)
     if (!ref) return
     try {
       await interruptClaudeTurnApi(ref)
     } catch (error) {
-      notify('error', translate('notifications.interruptFailed'), errorMessage(error))
+      if (!await recoverMissingClaudeTurn(ref, error)) {
+        notify('error', translate('notifications.interruptFailed'), errorMessage(error))
+      }
     }
   }
 
+  function discardClaudeSessionState(sessionId: string): void {
+    const candidates = new Set<string>([
+      sessionId,
+      ...sessionAlias.keys(),
+      ...sessionAlias.values(),
+      ...Object.keys(itemsBySession.value),
+      ...Object.keys(queueBySession.value),
+      ...Object.keys(activeTurnBySession.value),
+    ])
+    const related = [...candidates].filter((id) => id && sameClaudeSession(id, sessionId))
+    if (!related.includes(sessionId)) related.push(sessionId)
+    const relatedSet = new Set(related)
+    related.forEach((id) => discardedSessionIds.add(id))
+
+    if (related.some((id) => sameClaudeSession(activeSessionId.value, id))) activeSessionId.value = ''
+    if (related.some((id) => sameClaudeSession(loadingSessionId.value, id))) loadingSessionId.value = ''
+    sendingSessionIds.value = sendingSessionIds.value.filter((id) => !related.some((key) => sameClaudeSession(id, key)))
+    runningSessionIds.value = runningSessionIds.value.filter((id) => !related.some((key) => sameClaudeSession(id, key)))
+
+    const withoutRelated = <T>(bucket: Record<string, T>): Record<string, T> =>
+      Object.fromEntries(Object.entries(bucket).filter(([id]) =>
+        !related.some((key) => sameClaudeSession(id, key)),
+      ))
+    itemsBySession.value = withoutRelated(itemsBySession.value)
+    queueBySession.value = withoutRelated(queueBySession.value)
+    activeTurnBySession.value = withoutRelated(activeTurnBySession.value)
+    liveActivityBySession.value = withoutRelated(liveActivityBySession.value)
+    tokenUsageBySession.value = withoutRelated(tokenUsageBySession.value)
+
+    for (const id of [...sessionOpenSequence.keys()]) {
+      if (related.some((key) => sameClaudeSession(id, key))) sessionOpenSequence.delete(id)
+    }
+    for (const id of [...loadingSequenceBySession.keys()]) {
+      if (related.some((key) => sameClaudeSession(id, key))) loadingSequenceBySession.delete(id)
+    }
+    for (const id of [...latestStartedTurnBySession.keys()]) {
+      if (related.some((key) => sameClaudeSession(id, key))) latestStartedTurnBySession.delete(id)
+    }
+    for (const id of [...sessionAlias.keys()]) {
+      const target = sessionAlias.get(id) || ''
+      if (relatedSet.has(id) || relatedSet.has(target)) sessionAlias.delete(id)
+    }
+  }
+
+  function canMutateClaudeSession(sessionId: string): boolean {
+    if (!isSessionTurnBusy(sessionId)) return true
+    notify(
+      'warning',
+      translate('threadActions.busyActionBlocked'),
+      translate('threadActions.busyActionBlockedHint'),
+    )
+    return false
+  }
+
   async function deleteSession(sessionId: string): Promise<void> {
-    if (!sessionId) return
+    if (!sessionId || !canMutateClaudeSession(sessionId)) return
     try {
       if (!sessionId.startsWith('pending-claude-')) {
         await deleteClaudeSessionApi(sessionId)
       }
       sessions.value = sessions.value.filter((item) => item.id !== sessionId)
       archivedSessions.value = archivedSessions.value.filter((item) => item.id !== sessionId)
-      if (activeSessionId.value === sessionId) {
-        activeSessionId.value = ''
-      }
-      const next = { ...itemsBySession.value }
-      delete next[sessionId]
-      itemsBySession.value = next
+      discardClaudeSessionState(sessionId)
     } catch (error) {
       notify('error', translate('threadActions.deleteFailed'), errorMessage(error))
     }
@@ -1454,15 +1833,16 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function archiveSession(sessionId: string): Promise<void> {
+    if (!sessionId || !canMutateClaudeSession(sessionId)) return
     try {
       if (sessionId.startsWith('pending-claude-')) {
         sessions.value = sessions.value.filter((item) => item.id !== sessionId)
-        if (activeSessionId.value === sessionId) activeSessionId.value = ''
+        discardClaudeSessionState(sessionId)
         return
       }
       await archiveClaudeSessionApi(sessionId)
       sessions.value = sessions.value.filter((item) => item.id !== sessionId)
-      if (activeSessionId.value === sessionId) activeSessionId.value = ''
+      discardClaudeSessionState(sessionId)
       notify('success', translate('threadActions.archived'), translate('threadActions.archivedHint'))
     } catch (error) {
       notify('error', translate('threadActions.archiveFailed'), errorMessage(error))
@@ -1477,6 +1857,7 @@ export const useClaudeStore = defineStore('claude', () => {
   async function unarchiveSession(sessionId: string): Promise<void> {
     try {
       await unarchiveClaudeSessionApi(sessionId)
+      discardedSessionIds.delete(sessionId)
       await loadSessions()
       await loadArchivedSessions()
       notify('success', translate('threadActions.unarchived'), translate('threadActions.unarchivedHint'))
@@ -1505,6 +1886,7 @@ export const useClaudeStore = defineStore('claude', () => {
     activeQueuedMessages,
     activeTurn,
     sessionGroups,
+    sameSession: sameClaudeSession,
     bootstrapEvents,
     dispose,
     enterRuntime,

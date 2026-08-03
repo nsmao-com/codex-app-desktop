@@ -306,7 +306,7 @@ func (s *AppService) UseGrokWorkspace(path string) (WorkspaceInfo, error) {
 	s.mu.Lock()
 	settings := cloneSettings(s.settings)
 	settings.GrokWorkspace = cleanPath
-	settings.GrokRecentWorkspaces = prependWorkspace(settings.GrokRecentWorkspaces, cleanPath)
+	settings.GrokRecentWorkspaces = rememberWorkspace(settings.GrokRecentWorkspaces, cleanPath)
 	err = writeSettings(s.settingsPath, settings)
 	if err == nil {
 		s.settings = settings
@@ -405,7 +405,8 @@ func (s *AppService) clearGrokRun(turnID string) {
 func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, error) {
 	request.Backend = normalizeGrokBackend(request.Backend)
 	request.SessionID = strings.TrimSpace(request.SessionID)
-	newSession := request.SessionID == ""
+	clientSessionID := request.SessionID
+	newSession := request.SessionID == "" || strings.HasPrefix(request.SessionID, "pending-grok-")
 	request.Text = strings.TrimSpace(request.Text)
 	if request.Text == "" && len(request.Images) == 0 {
 		return GrokTurnRef{}, errors.New("message is required")
@@ -418,7 +419,7 @@ func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, erro
 	if err != nil {
 		return GrokTurnRef{}, err
 	}
-	if request.SessionID == "" {
+	if newSession {
 		request.SessionID = newUUID()
 	}
 	request.Workspace = workspace
@@ -436,7 +437,11 @@ func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, erro
 	}
 	s.externalRuns[key] = &externalRun{turnID: turnID, cancel: cancel}
 	s.mu.Unlock()
-	s.emitGrokEvent("turn.started", request.Backend, request.SessionID, turnID, map[string]any{"text": request.Text})
+	startedPayload := map[string]any{"text": request.Text}
+	if clientSessionID != "" && clientSessionID != request.SessionID {
+		startedPayload["clientSessionId"] = clientSessionID
+	}
+	s.emitGrokEvent("turn.started", request.Backend, request.SessionID, turnID, startedPayload)
 	go s.runGrokTurn(ctx, cancel, turnID, request, newSession)
 	return GrokTurnRef{Backend: request.Backend, SessionID: request.SessionID, TurnID: turnID}, nil
 }

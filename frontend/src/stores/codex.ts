@@ -108,6 +108,9 @@ export const useCodexStore = defineStore('codex', () => {
   const turnFeedbackByThread = shallowRef<Record<string, TurnFeedback>>({})
   const queuedMessagesByThread = shallowRef<Record<string, QueuedMessage[]>>({})
   const loadingThreadId = shallowRef('')
+  const loadingSequenceByThread = new Map<string, number>()
+  const workspaceSelectionSequenceByThread = new Map<string, number>()
+  const threadAlias = new Map<string, string>()
   const creatingThread = shallowRef(false)
   const itemsByThread = shallowRef<Record<string, TimelineItem[]>>({})
   const diffsByTurn = shallowRef<Record<string, string>>({})
@@ -117,6 +120,7 @@ export const useCodexStore = defineStore('codex', () => {
   const pendingRequests = shallowRef<PendingServerRequest[]>([])
   const completedTurns = new Set<string>()
   const completedTurnStatus = new Map<string, string>()
+  const latestStartedTurnByThread = new Map<string, string>()
   const loadedThreadIDs = new Set<string>()
   const lastThreadByWorkspace = shallowRef<Record<string, string>>(loadLastThreadByWorkspace())
   const pinnedThreadIds = shallowRef<string[]>(loadPinnedThreadIds())
@@ -168,7 +172,12 @@ export const useCodexStore = defineStore('codex', () => {
   const pendingRequest = computed(() => pendingRequests.value[0] ?? null)
 
   const threadGroups = computed<ThreadGroup[]>(() => {
-    const paths = uniqueWorkspacePaths(appStore.settings.workspace, appStore.settings.recentWorkspaces ?? [])
+    const recent = appStore.settings.recentWorkspaces ?? []
+    const paths = appStore.orderWorkspacePaths(
+      'codex',
+      uniqueWorkspacePaths(appStore.settings.workspace, recent),
+      recent,
+    )
     return paths.map((path) => ({
       path,
       name: workspaceName(path),
@@ -356,7 +365,8 @@ export const useCodexStore = defineStore('codex', () => {
   async function loadRecentProjectThreads(): Promise<void> {
     const sequence = ++projectLoadSequence
     const current = appStore.settings.workspace
-    const paths = uniqueWorkspacePaths(current, appStore.settings.recentWorkspaces ?? [])
+    const recent = appStore.settings.recentWorkspaces ?? []
+    const paths = appStore.orderWorkspacePaths('codex', uniqueWorkspacePaths(current, recent), recent)
       .filter((path) => !sameWorkspace(path, current))
     loadingProjects.value = paths
     const results = await mapWithConcurrency(paths, 3, async (path) => {
@@ -524,7 +534,7 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function newThread(): Promise<ThreadSummary | null> {
-    if (!isReady.value || !appStore.settings.workspace) return null
+    if (workspaceStore.switchingWorkspace || !isReady.value || !appStore.settings.workspace) return null
     const currentDraft = activeThread.value
     if (
       currentDraft?.id.startsWith('pending-thread-')
@@ -570,6 +580,7 @@ export const useCodexStore = defineStore('codex', () => {
     if (!sameWorkspace(path, appStore.settings.workspace)) {
       await switchProject(path)
     }
+    if (!sameWorkspace(path, appStore.settings.workspace)) return null
     if (!isReady.value) {
       const connected = await connect(path)
       if (!connected) return null
@@ -626,17 +637,24 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function openThread(threadID: string): Promise<void> {
-    if (!threadID || loadingThreadId.value === threadID) return
+    if (!threadID) return
+    const hasWorkspaceSelection = workspaceSelectionSequenceByThread.has(threadID)
+    if (loadingSequenceByThread.has(threadID) && activeThreadId.value === threadID && !hasWorkspaceSelection) return
+    workspaceSelectionSequenceByThread.delete(threadID)
     createThreadSequence += 1
     creatingThread.value = false
     const previousThread = activeThread.value
     const previousThreadID = activeThreadId.value
     const summary = findThreadSummary(threadID)
+    // Bind the selection before the history request starts. The composer may be
+    // used while ReadThread is in flight and must never fall back to the old thread.
+    activeThreadId.value = threadID
     if (summary) {
       activeThread.value = summary
-      activeThreadId.value = threadID
-      rememberProjectThread(appStore.settings.workspace, threadID)
+    } else if (activeThread.value?.id !== threadID) {
+      activeThread.value = null
     }
+    rememberProjectThread(appStore.settings.workspace, threadID)
     if (loadedThreadIDs.has(threadID)) {
       rememberLoadedThread(threadID)
       // Cache hit used to skip running-turn reconcile — switching Code/Cowork
@@ -662,6 +680,7 @@ export const useCodexStore = defineStore('codex', () => {
     }
 
     const sequence = ++openThreadSequence
+    loadingSequenceByThread.set(threadID, sequence)
     loadingThreadId.value = threadID
     try {
       await waitForSessionPreferences(threadID)
@@ -669,6 +688,9 @@ export const useCodexStore = defineStore('codex', () => {
       const rawThread = asRecord(asRecord(response).thread)
       let thread = normalizeRuntimeThread(rawThread, response)
       if (!thread) throw new Error(translate('notifications.taskOpenFailed'))
+      // A newer read for this same thread owns the timeline. Letting an older
+      // response write here can erase a user row or live delta added meanwhile.
+      if (loadingSequenceByThread.get(threadID) !== sequence) return
       const latestPreferences = activeThread.value?.id === thread.id
         ? activeThread.value
         : (findThreadSummary(thread.id) ?? summary)
@@ -681,11 +703,6 @@ export const useCodexStore = defineStore('codex', () => {
           collaborationMode: latestPreferences.collaborationMode || thread.collaborationMode,
         }
       }
-      const items = timelineFromTurns(rawThread.turns)
-      itemsByThread.value = { ...itemsByThread.value, [thread.id]: items }
-      setThreadMetrics(thread.id, rawThread.turns)
-      rememberLoadedThread(thread.id)
-      if (threadID !== thread.id) loadedThreadIDs.delete(threadID)
       let runningTurnID = ''
       // Persisted turns can retain inProgress after Codex was interrupted or the
       // app exited. Only restore one as live when thread/read also confirms the
@@ -699,6 +716,17 @@ export const useCodexStore = defineStore('codex', () => {
           }
         }
       }
+      const snapshotItems = timelineFromTurns(rawThread.turns)
+      const cachedItems = itemsByThread.value[thread.id] ?? itemsByThread.value[threadID] ?? []
+      const knownTurnID = activeTurnByThread.value[thread.id] ?? activeTurnByThread.value[threadID] ?? ''
+      const liveTurnID = runningTurnID || (knownTurnID && !completedTurns.has(knownTurnID) ? knownTurnID : '')
+      const items = liveTurnID && cachedItems.length
+        ? mergeThreadSnapshotWithLive(snapshotItems, cachedItems, liveTurnID)
+        : snapshotItems
+      itemsByThread.value = { ...itemsByThread.value, [thread.id]: items }
+      setThreadMetrics(thread.id, rawThread.turns)
+      rememberLoadedThread(thread.id)
+      if (threadID !== thread.id) loadedThreadIDs.delete(threadID)
       if (sequence === openThreadSequence && (activeThreadId.value === threadID || activeThreadId.value === thread.id)) {
         activeThread.value = thread
         // Keep activeThreadId aligned with the remapped session id from the backend.
@@ -726,33 +754,92 @@ export const useCodexStore = defineStore('codex', () => {
       scheduleThreadQueueDrain(thread.id)
     } catch (error) {
       if (sequence !== openThreadSequence) return
-      activeThread.value = previousThread
-      activeThreadId.value = previousThreadID
+      // Keep a message admitted during loading attached to this thread and visible
+      // in its queue. A retry can hydrate it; restoring the old thread made it look
+      // as if the message vanished and risked a later send using the wrong owner.
+      if ((queuedMessagesByThread.value[threadID] ?? []).length === 0) {
+        activeThread.value = previousThread
+        activeThreadId.value = previousThreadID
+      }
       notify('error', translate('notifications.taskOpenFailed'), errorMessage(error), {
         label: translate('common.retry'),
         onClick: () => openThread(threadID),
       })
     } finally {
+      if (loadingSequenceByThread.get(threadID) === sequence) {
+        loadingSequenceByThread.delete(threadID)
+        // ReadThread is hydration, not ownership of the queued prompt. Once its
+        // barrier is gone, let the normal send path resume or surface a send error.
+        scheduleThreadQueueDrain(threadID)
+      }
       if (sequence === openThreadSequence) loadingThreadId.value = ''
     }
   }
 
   async function openProjectThread(path: string, threadID: string): Promise<void> {
     if (!path || !threadID) return
-    if (sameWorkspace(path, appStore.settings.workspace)) {
+    if (
+      sameWorkspace(path, appStore.settings.workspace)
+      && !workspaceStore.switchingWorkspace
+    ) {
       await openThread(threadID)
       return
     }
-    await switchProject(path, threadID)
+
+    const previousThread = activeThread.value
+    const previousThreadID = activeThreadId.value
+    const summary = findThreadSummary(threadID)
+    const sequence = ++openThreadSequence
+    activeThreadId.value = threadID
+    activeThread.value = summary ?? null
+    rememberProjectThread(path, threadID)
+    workspaceSelectionSequenceByThread.set(threadID, sequence)
+    loadingThreadId.value = threadID
+    let handedOff = false
+    try {
+      const switched = await workspaceStore.useWorkspace(path)
+      if (
+        !switched
+        || openThreadSequence !== sequence
+        || activeThreadId.value !== threadID
+      ) return
+      handedOff = true
+      await activateProject(path, threadID)
+    } finally {
+      if (workspaceSelectionSequenceByThread.get(threadID) === sequence) {
+        workspaceSelectionSequenceByThread.delete(threadID)
+        if (loadingThreadId.value === threadID) loadingThreadId.value = ''
+        if (
+          !handedOff
+          && activeThreadId.value === threadID
+          && !(queuedMessagesByThread.value[threadID] ?? []).length
+        ) {
+          activeThread.value = previousThread
+          activeThreadId.value = previousThreadID
+        }
+      }
+    }
   }
 
   async function switchProject(path: string, preferredThreadID = ''): Promise<void> {
     if (!path) return
     const currentPath = appStore.settings.workspace
     if (activeThreadId.value && currentPath) rememberProjectThread(currentPath, activeThreadId.value)
+    const knownTarget = preferredThreadID
+      || projectThreadForPath(path)
+      || projectThreadsForPath(path)?.[0]?.id
+      || ''
+    if (knownTarget) {
+      await openProjectThread(path, knownTarget)
+      return
+    }
     const switched = await workspaceStore.useWorkspace(path)
     if (!switched) return
 
+    // No target is known yet. Detach the previous project's thread before the
+    // project listing await, so a send can never be admitted to the old owner.
+    activeThread.value = null
+    activeThreadId.value = ''
     await activateProject(path, preferredThreadID)
   }
 
@@ -772,7 +859,12 @@ export const useCodexStore = defineStore('codex', () => {
       await reloadProject(path)
       threads.value = [...(projectThreadsForPath(path) ?? [])]
     }
+    const locallySelectedThreadID = activeThread.value?.cwd
+      && sameWorkspace(activeThread.value.cwd, path)
+      ? activeThread.value.id
+      : ''
     const targetThreadID = preferredThreadID
+      || locallySelectedThreadID
       || projectThreadForPath(path)
       || threads.value[0]?.id
       || ''
@@ -1006,6 +1098,8 @@ export const useCodexStore = defineStore('codex', () => {
     tokenUsageByThread.value = nextToken
 
     loadedThreadIDs.delete(threadID)
+    latestStartedTurnByThread.delete(threadID)
+    clearThreadAliases(threadID)
     if (pinnedThreadIds.value.includes(threadID)) {
       const nextPinned = pinnedThreadIds.value.filter((id) => id !== threadID)
       pinnedThreadIds.value = nextPinned
@@ -1129,6 +1223,8 @@ export const useCodexStore = defineStore('codex', () => {
       followUp === 'steer'
       && busy
       && turnID
+      && !loadingSequenceByThread.has(threadID)
+      && !workspaceSelectionSequenceByThread.has(threadID)
       && !activeThreadUsesExternalProvider.value
       && !threadID.startsWith('pending-thread-')
     ) {
@@ -1164,11 +1260,12 @@ export const useCodexStore = defineStore('codex', () => {
     if ((!message && !imagePaths.length) || !isReady.value || creatingThread.value) return false
     const now = Date.now()
     const sequence = ++queuedMessageSequence
-    const threadID = activeThread.value?.id
-      ?? (activeThreadId.value.startsWith('pending-thread-') ? activeThreadId.value : `pending-thread-${now}-${sequence}`)
-    const workspace = activeThread.value?.cwd || appStore.settings.workspace
+    const selectedThreadID = activeThreadId.value
+    const selectedThread = activeThread.value?.id === selectedThreadID ? activeThread.value : null
+    const threadID = selectedThreadID || `pending-thread-${now}-${sequence}`
+    const workspace = selectedThread?.cwd || findThreadSummary(threadID)?.cwd || appStore.settings.workspace
     if (!threadID || !workspace) return false
-    if (!activeThread.value) activeThreadId.value = threadID
+    if (!selectedThreadID) activeThreadId.value = threadID
     // User continued chatting — dismiss implement prompt (official dismisses on follow-up).
     if (planImplementPrompt.value?.threadId === threadID) planImplementPrompt.value = null
 
@@ -1204,7 +1301,9 @@ export const useCodexStore = defineStore('codex', () => {
   async function drainThreadQueue(threadID: string): Promise<void> {
     if (!threadID || !isReady.value || threadIsBusy(threadID)) return
     const queuedMessage = queuedMessagesByThread.value[threadID]?.[0]
-    if (!queuedMessage || queuedMessage.state === 'failed') return
+    // Only the queued head may start. A sending/failed head must be recovered or
+    // retried explicitly; dispatching it again can duplicate an accepted turn.
+    if (!queuedMessage || queuedMessage.state !== 'queued') return
     // A transient status/alias update must not release a follow-up before the
     // exact turn that accepted it as queued has reached a terminal event.
     if (queuedMessage.blockedByTurnId && !completedTurns.has(queuedMessage.blockedByTurnId)) return
@@ -1212,6 +1311,7 @@ export const useCodexStore = defineStore('codex', () => {
 
     let resolvedThreadID = threadID
     let continueDraining = false
+    let startedTurnBeforeSend = ''
     setThreadSubmitting(threadID, true)
     patchQueuedMessage(threadID, queuedMessage.id, { state: 'sending', error: '' })
 
@@ -1308,6 +1408,7 @@ export const useCodexStore = defineStore('codex', () => {
       }
       if (!sameWorkspace(queuedMessage.workspace, appStore.settings.workspace)) {
         patchQueuedMessage(resolvedThreadID, queuedMessage.id, { state: 'queued', error: '' })
+        clearTurnFeedback(resolvedThreadID)
         return
       }
 
@@ -1362,6 +1463,7 @@ export const useCodexStore = defineStore('codex', () => {
 
       const collaborationMode = resolveThreadCollaborationMode(thread)
       pendingCollaborationModeByThread.set(thread.id, collaborationMode)
+      startedTurnBeforeSend = latestStartedTurnByThread.get(thread.id) || ''
       const response = await backend.SendMessage({
         threadId: thread.id,
         text: queuedMessage.text,
@@ -1421,14 +1523,23 @@ export const useCodexStore = defineStore('codex', () => {
       const liveTurnID = activeTurnByThread.value[resolvedThreadID]
         ?? activeTurnByThread.value[threadID]
         ?? ''
-      if (liveTurnID) {
+      const latestStartedTurnID = latestStartedTurnByThread.get(resolvedThreadID)
+        ?? latestStartedTurnByThread.get(threadID)
+        ?? ''
+      const acceptedDuringSend = Boolean(
+        latestStartedTurnID && latestStartedTurnID !== startedTurnBeforeSend,
+      )
+      if (liveTurnID || acceptedDuringSend) {
         // turn/started proves the server accepted this request even if the RPC
-        // response was lost. Keeping it queued would send the same prompt twice.
+        // response was lost. Keep that proof after a very fast turn/completed too;
+        // otherwise retrying the failed-looking row would duplicate the task.
         removeQueuedMessageFromThread(resolvedThreadID, queuedMessage.id)
         if (resolvedThreadID !== threadID) {
           removeQueuedMessageFromThread(threadID, queuedMessage.id)
         }
-        setTurnFeedback(resolvedThreadID, { state: 'running', message: '', turnId: liveTurnID })
+        if (liveTurnID) {
+          setTurnFeedback(resolvedThreadID, { state: 'running', message: '', turnId: liveTurnID })
+        }
         return
       }
       markItemFailed(resolvedThreadID, queuedMessage.localItemId)
@@ -1509,6 +1620,13 @@ export const useCodexStore = defineStore('codex', () => {
     }
     // Without a live turn, clear stale busy flags and drain immediately.
     clearStaleBusyState(threadID)
+    if (
+      message.blockedByTurnId
+      && !completedTurns.has(message.blockedByTurnId)
+      && !threadIsBusy(threadID)
+    ) {
+      patchQueuedMessage(threadID, messageID, { blockedByTurnId: undefined })
+    }
     if (!isReady.value) {
       notify('warning', translate('notifications.connectionFailed'), translate('app.connecting'))
       return
@@ -1818,6 +1936,8 @@ export const useCodexStore = defineStore('codex', () => {
         }
         projectThreads.value = nextProjects
         clearThreadQueue(threadID)
+        latestStartedTurnByThread.delete(threadID)
+        clearThreadAliases(threadID)
         if ((method === 'thread/deleted' || method === 'thread/closed') && activeThreadId.value === threadID) {
           activeThread.value = null
           activeThreadId.value = ''
@@ -1843,6 +1963,7 @@ export const useCodexStore = defineStore('codex', () => {
           }
           completedTurns.delete(turnID)
           completedTurnStatus.delete(turnID)
+          if (threadID && turnID) latestStartedTurnByThread.set(threadID, turnID)
           setThreadTurn(threadID, turnID)
           const startedAt = typeof turn.startedAt === 'number' ? turn.startedAt * 1000 : Date.now()
           patchTurnMetrics(threadID, turnID, { startedAt, completedAt: null, durationMs: null })
@@ -2856,6 +2977,9 @@ export const useCodexStore = defineStore('codex', () => {
   /** True while a turn is live OR a send/steer is in flight — used to keep follow-ups queued. */
   function threadIsBusy(threadID: string): boolean {
     if (!threadID) return false
+    // Reading history is a dispatch barrier: queue now, then drain after
+    // openThread finishes so the disk snapshot cannot overwrite the new turn.
+    if (loadingSequenceByThread.has(threadID) || workspaceSelectionSequenceByThread.has(threadID)) return true
     if (threadIsRunning(threadID) || isThreadSubmitting(threadID)) return true
     const feedback = turnFeedbackByThread.value[threadID]
     if (feedback?.state === 'submitting' || feedback?.state === 'running') {
@@ -3078,9 +3202,39 @@ export const useCodexStore = defineStore('codex', () => {
     if (projectTouched) projectThreads.value = nextProjects
   }
 
+  function rememberThreadAlias(fromID: string, toID: string): void {
+    const from = fromID.trim()
+    const to = toID.trim()
+    if (!from || !to || from === to) return
+    threadAlias.set(from, to)
+    threadAlias.set(to, to)
+  }
+
+  function sameThreadSession(left: string, right: string): boolean {
+    if (!left || !right) return false
+    const resolve = (id: string) => {
+      const seen = new Set<string>()
+      let current = id
+      while (!seen.has(current)) {
+        seen.add(current)
+        const next = threadAlias.get(current)
+        if (!next || next === current) break
+        current = next
+      }
+      return current
+    }
+    return resolve(left) === resolve(right)
+  }
+
+  function clearThreadAliases(threadID: string): void {
+    const related = [...threadAlias.keys()].filter((id) => sameThreadSession(id, threadID))
+    for (const id of related) threadAlias.delete(id)
+  }
+
   /** Move queued messages when ReadThread remaps a thread/session id. */
   function migrateQueueThreadKey(fromID: string, toID: string): void {
     if (!fromID || !toID || fromID === toID) return
+    rememberThreadAlias(fromID, toID)
     const pending = queuedMessagesByThread.value[fromID]
     if (pending?.length) {
       const nextQueues = { ...queuedMessagesByThread.value }
@@ -3167,6 +3321,7 @@ export const useCodexStore = defineStore('codex', () => {
 
   function migratePendingThread(pendingThreadID: string, threadID: string): void {
     if (!pendingThreadID || pendingThreadID === threadID) return
+    rememberThreadAlias(pendingThreadID, threadID)
     const nextItems = { ...itemsByThread.value, [threadID]: itemsByThread.value[pendingThreadID] ?? [] }
     delete nextItems[pendingThreadID]
     itemsByThread.value = nextItems
@@ -3287,6 +3442,9 @@ export const useCodexStore = defineStore('codex', () => {
     queuedMessagesByThread.value = {}
     sendingThreadIds.value = []
     loadingThreadId.value = ''
+    loadingSequenceByThread.clear()
+    workspaceSelectionSequenceByThread.clear()
+    threadAlias.clear()
     threads.value = []
     archivedThreads.value = []
     itemsByThread.value = {}
@@ -3301,6 +3459,7 @@ export const useCodexStore = defineStore('codex', () => {
     pendingTokenUsage.clear()
     completedTurns.clear()
     completedTurnStatus.clear()
+    latestStartedTurnByThread.clear()
     pendingPlanByThread.clear()
     sawPlanUpdateByTurn.clear()
     pendingCollaborationModeByThread.clear()
@@ -3356,6 +3515,7 @@ export const useCodexStore = defineStore('codex', () => {
     threadGroups,
     filteredThreadGroups,
     runningThreadIds,
+    sameThread: sameThreadSession,
     bootstrapEvents,
     dispose,
     connect,
@@ -3505,7 +3665,7 @@ function persistThreadModelIdentity(value: Record<string, ThreadModelIdentity>):
 function uniqueWorkspacePaths(current: string, recent: string[]): string[] {
   const result: string[] = []
   const seen = new Set<string>()
-  for (const path of [current, ...recent]) {
+  for (const path of [...recent, current]) {
     const value = path.trim()
     const key = workspaceKey(value)
     if (!value || seen.has(key)) continue
@@ -3589,6 +3749,54 @@ function mergeStreamText(incoming: string | undefined, current: string | undefin
   if (next.startsWith(prev)) return next
   // Divergent payloads: keep the longer body to avoid occasional 漏字.
   return prev.length > next.length ? prev : next
+}
+
+function mergeThreadSnapshotWithLive(
+  snapshot: TimelineItem[],
+  cached: TimelineItem[],
+  liveTurnID: string,
+): TimelineItem[] {
+  const result = [...snapshot]
+  for (const item of cached) {
+    const live = item.local || item.turnId === liveTurnID || isActiveStatus(item.status)
+    let index = item.id ? result.findIndex((candidate) => candidate.id === item.id) : -1
+    if (index < 0 && item.type === 'userMessage' && item.text && item.turnId) {
+      for (let cursor = result.length - 1; cursor >= 0; cursor -= 1) {
+        const candidate = result[cursor]
+        if (
+          candidate?.type === 'userMessage'
+          && candidate.turnId === item.turnId
+          && candidate.text === item.text
+        ) {
+          index = cursor
+          break
+        }
+      }
+    }
+    if (index < 0 && item.turnId && item.turnId === liveTurnID) {
+      index = result.findIndex((candidate) =>
+        candidate.turnId === item.turnId && candidate.type === item.type,
+      )
+    }
+    if (index < 0) {
+      if (live) result.push(item)
+      continue
+    }
+    if (!live) continue
+    const current = result[index]!
+    result[index] = {
+      ...item,
+      ...current,
+      text: mergeStreamText(item.text, current.text),
+      reasoningSummary: mergeStreamText(item.reasoningSummary, current.reasoningSummary),
+      reasoningContent: mergeStreamText(item.reasoningContent, current.reasoningContent),
+      output: mergeStreamText(item.output, current.output),
+      attachments: item.attachments.length ? item.attachments : current.attachments,
+      status: item.status,
+      failed: item.failed || current.failed,
+    }
+  }
+  return result
 }
 
 function loadLastThreadByWorkspace(): Record<string, string> {

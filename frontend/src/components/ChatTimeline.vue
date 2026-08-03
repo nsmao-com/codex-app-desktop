@@ -16,6 +16,10 @@ import { useAppStore, useClaudeStore, useCodexStore, useGrokStore } from '@/stor
 import type { TimelineItem } from '@/types/codex'
 import ChatMessageGroup from './ChatMessageGroup.vue'
 
+const props = defineProps<{
+  sentEpoch: number
+}>()
+
 const appStore = useAppStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
@@ -663,6 +667,17 @@ function onKeyDown(event: KeyboardEvent): void {
   }
 }
 
+watch(
+  () => props.sentEpoch,
+  () => {
+    // An explicit send always returns the user to the latest context. Subsequent
+    // background streaming still respects a manual scroll away from the bottom.
+    stickToBottom.value = true
+    resetRenderWindowToLatest()
+    void settleToBottom({ maxFrames: 20, followUp: true })
+  },
+  { flush: 'post' },
+)
 watch(() => timelineItems.value.length, () => {
   if (stickToBottom.value) scheduleScroll(true)
 })

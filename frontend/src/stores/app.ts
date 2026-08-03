@@ -22,8 +22,13 @@ import {
   normalizeAccountUsage,
 } from '../utils/protocol'
 import { translate } from '../i18n'
+import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.1.0'
+const AppVersionFallback = '1.1.1'
+const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
+
+export type WorkspaceRuntime = 'codex' | 'claude' | 'grok'
+type WorkspaceOrderByRuntime = Record<WorkspaceRuntime, string[]>
 
 const defaultSettings: UserSettings = {
   activeRuntime: 'codex',
@@ -116,10 +121,11 @@ export const useAppStore = defineStore('app', () => {
 
   const bootstrapping = shallowRef(true)
   const settings = shallowRef<UserSettings>({ ...defaultSettings })
+  const workspaceOrderByRuntime = shallowRef<WorkspaceOrderByRuntime>(loadWorkspaceOrder())
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.1.0')
+  const appVersion = shallowRef('1.1.1')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -162,6 +168,44 @@ export const useAppStore = defineStore('app', () => {
   const isGrokMode = computed(() => activeRuntime.value === 'grok')
   const isClaudeMode = computed(() => activeRuntime.value === 'claude')
   const isCodexMode = computed(() => activeRuntime.value === 'codex')
+
+  function orderWorkspacePaths(
+    runtime: WorkspaceRuntime,
+    availablePaths: string[],
+    preferredPaths: string[] = [],
+  ): string[] {
+    const available = sanitizeWorkspaceOrder(availablePaths)
+    const availableByKey = new Map(available.map((path) => [workspaceKey(path), path]))
+    const result: string[] = []
+    const seen = new Set<string>()
+    const appendAvailable = (path: string): void => {
+      const key = workspaceKey(path)
+      const availablePath = availableByKey.get(key)
+      if (!availablePath || seen.has(key)) return
+      seen.add(key)
+      result.push(availablePath)
+    }
+
+    workspaceOrderByRuntime.value[runtime].forEach(appendAvailable)
+    preferredPaths.forEach(appendAvailable)
+    available
+      .filter((path) => !seen.has(workspaceKey(path)))
+      .sort((left, right) => {
+        const leftKey = workspaceKey(left)
+        const rightKey = workspaceKey(right)
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0
+      })
+      .forEach(appendAvailable)
+    return result
+  }
+
+  function setWorkspaceOrder(runtime: WorkspaceRuntime, orderedPaths: string[]): void {
+    workspaceOrderByRuntime.value = {
+      ...workspaceOrderByRuntime.value,
+      [runtime]: sanitizeWorkspaceOrder(orderedPaths),
+    }
+    persistWorkspaceOrder(workspaceOrderByRuntime.value)
+  }
 
   let preferenceTimer = 0
   let preferenceVersion = 0
@@ -736,6 +780,7 @@ export const useAppStore = defineStore('app', () => {
   return {
     bootstrapping,
     settings,
+    workspaceOrderByRuntime,
     workspace,
     codexAvailable,
     codexVersion,
@@ -761,6 +806,8 @@ export const useAppStore = defineStore('app', () => {
     isGrokMode,
     isClaudeMode,
     isCodexMode,
+    orderWorkspacePaths,
+    setWorkspaceOrder,
     bootstrap,
     refreshRuntimes,
     setActiveRuntime,
@@ -790,11 +837,51 @@ export const useAppStore = defineStore('app', () => {
   }
 })
 
-function normalizeRuntimeID(value: string | undefined | null): 'codex' | 'claude' | 'grok' {
+function normalizeRuntimeID(value: string | undefined | null): WorkspaceRuntime {
   const id = String(value || '').trim().toLowerCase()
   if (id === 'grok') return 'grok'
   if (id === 'claude') return 'claude'
   return 'codex'
+}
+
+function loadWorkspaceOrder(): WorkspaceOrderByRuntime {
+  const fallback: WorkspaceOrderByRuntime = { codex: [], claude: [], grok: [] }
+  if (typeof window === 'undefined') return fallback
+  try {
+    const value = asRecord(JSON.parse(window.localStorage.getItem(workspaceOrderStorageKey) || '{}'))
+    return {
+      codex: sanitizeWorkspaceOrder(value.codex),
+      claude: sanitizeWorkspaceOrder(value.claude),
+      grok: sanitizeWorkspaceOrder(value.grok),
+    }
+  } catch {
+    return fallback
+  }
+}
+
+function sanitizeWorkspaceOrder(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const result: string[] = []
+  const seen = new Set<string>()
+  for (const item of value) {
+    if (typeof item !== 'string') continue
+    const path = item.trim()
+    const key = workspaceKey(path)
+    if (!path || path.length > 1024 || seen.has(key)) continue
+    seen.add(key)
+    result.push(path)
+    if (result.length === 200) break
+  }
+  return result
+}
+
+function persistWorkspaceOrder(value: WorkspaceOrderByRuntime): void {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(workspaceOrderStorageKey, JSON.stringify(value))
+  } catch {
+    // Ordering remains reactive for this run when local storage is unavailable.
+  }
 }
 
 function errorMessage(error: unknown): string {

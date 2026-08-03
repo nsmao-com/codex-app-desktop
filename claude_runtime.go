@@ -207,7 +207,7 @@ func (s *AppService) UseClaudeWorkspace(path string) (WorkspaceInfo, error) {
 	s.mu.Lock()
 	settings := cloneSettings(s.settings)
 	settings.ClaudeWorkspace = cleanPath
-	settings.ClaudeRecentWorkspaces = prependWorkspace(settings.ClaudeRecentWorkspaces, cleanPath)
+	settings.ClaudeRecentWorkspaces = rememberWorkspace(settings.ClaudeRecentWorkspaces, cleanPath)
 	err = writeSettings(s.settingsPath, settings)
 	if err == nil {
 		s.settings = settings
@@ -527,6 +527,7 @@ func (s *AppService) DeleteClaudeSession(sessionID string) error {
 
 func (s *AppService) SendClaudeMessage(request ClaudeSendRequest) (ClaudeTurnRef, error) {
 	request.SessionID = strings.TrimSpace(request.SessionID)
+	clientSessionID := request.SessionID
 	request.Text = strings.TrimSpace(request.Text)
 	if request.Text == "" && len(request.Images) == 0 {
 		return ClaudeTurnRef{}, errors.New("message is required")
@@ -552,7 +553,11 @@ func (s *AppService) SendClaudeMessage(request ClaudeSendRequest) (ClaudeTurnRef
 	}
 	s.externalRuns[key] = &externalRun{turnID: turnID, cancel: cancel}
 	s.mu.Unlock()
-	s.emitClaudeEvent("turn.started", request.SessionID, turnID, map[string]any{"text": request.Text})
+	startedPayload := map[string]any{"text": request.Text}
+	if clientSessionID != "" && clientSessionID != request.SessionID {
+		startedPayload["clientSessionId"] = clientSessionID
+	}
+	s.emitClaudeEvent("turn.started", request.SessionID, turnID, startedPayload)
 	go s.runClaudeTurn(ctx, cancel, turnID, request)
 	return ClaudeTurnRef{SessionID: request.SessionID, TurnID: turnID}, nil
 }

@@ -541,7 +541,7 @@ func (s *AppService) UseWorkspace(path string) (WorkspaceInfo, error) {
 	s.mu.Lock()
 	updated := cloneSettings(s.settings)
 	updated.Workspace = cleanPath
-	updated.RecentWorkspaces = prependWorkspace(updated.RecentWorkspaces, cleanPath)
+	updated.RecentWorkspaces = rememberWorkspace(updated.RecentWorkspaces, cleanPath)
 	err = writeSettings(s.settingsPath, updated)
 	if err == nil {
 		s.settings = updated
@@ -2843,17 +2843,17 @@ func sanitizeCustomModels(items []string) []string {
 	return result
 }
 
-func prependWorkspace(items []string, workspace string) []string {
-	result := []string{workspace}
-	for _, item := range items {
-		if !strings.EqualFold(filepath.Clean(item), workspace) {
-			result = append(result, item)
-		}
-		if len(result) == 8 {
-			break
+func rememberWorkspace(items []string, workspace string) []string {
+	result := append([]string(nil), items...)
+	for _, item := range result {
+		if strings.EqualFold(filepath.Clean(item), workspace) {
+			return result
 		}
 	}
-	return result
+	if len(result) >= 8 {
+		result = result[:7]
+	}
+	return append(result, workspace)
 }
 
 func sanitizeRecentWorkspaces(items []string) []string {

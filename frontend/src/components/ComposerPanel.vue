@@ -47,7 +47,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
-import { useAppStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useGrokStore } from '@/stores'
+import { useAppStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import {
   buildContextUsageView,
   CODEX_CONTEXT_BASELINE_TOKENS,
@@ -67,12 +67,16 @@ const appStore = useAppStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
+const workspaceStore = useWorkspaceStore()
 const capabilitiesStore = useCapabilitiesStore()
 // claudeStore used for Claude Code runtime composer path
 const router = useRouter()
 const { t } = useI18n()
 
 const modelValue = defineModel<string>({ required: true })
+const emit = defineEmits<{
+  sent: []
+}>()
 const composer = useTemplateRef<HTMLElement>('composer')
 const composing = shallowRef(false)
 const attachedImages = shallowRef<string[]>([])
@@ -425,12 +429,22 @@ const activeQueuedMessages = computed(() => {
 const showQueueStrip = computed(() =>
   activeQueuedMessages.value.some((message) => message.state === 'queued' || message.state === 'failed'),
 )
+const activeSelectionLoading = computed(() => {
+  if (appStore.isGrokMode) {
+    return Boolean(grokStore.activeSessionId && grokStore.loadingSessionId === grokStore.activeSessionId)
+  }
+  if (appStore.isClaudeMode) {
+    return Boolean(claudeStore.activeSessionId && claudeStore.loadingSessionId === claudeStore.activeSessionId)
+  }
+  return Boolean(codexStore.activeThreadId && codexStore.loadingThreadId === codexStore.activeThreadId)
+})
 /**
  * Follow-ups must stay sendable while a turn runs (queue or steer).
  * Never gate this on isTurnRunning / sendingMessage — Grok uses the same queue path.
  */
 const canSend = computed(() => {
   const hasContent = Boolean(modelValue.value.trim()) || attachedImages.value.length > 0
+  if (workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return false
   if (appStore.isGrokMode) {
     return hasContent && grokStore.isReady
   }
@@ -479,17 +493,28 @@ const canSteer = computed(() =>
   && (appStore.settings.followUpBehavior || 'queue') === 'steer'
   && codexStore.isTurnRunning
   && Boolean(codexStore.activeTurnId)
+  && !workspaceStore.switchingWorkspace
+  && codexStore.loadingThreadId !== codexStore.activeThreadId
   && !codexStore.activeThreadId.startsWith('pending-thread-'),
 )
 const willQueueOnSend = computed(() => {
   if (canSteer.value) return false
   if (appStore.isGrokMode) {
-    return grokStore.isTurnRunning || grokStore.sending || showQueueStrip.value
+    const loadingActiveSession = Boolean(
+      grokStore.activeSessionId && grokStore.loadingSessionId === grokStore.activeSessionId,
+    )
+    return loadingActiveSession || grokStore.isTurnRunning || grokStore.sending || showQueueStrip.value
   }
   if (appStore.isClaudeMode) {
-    return claudeStore.isTurnRunning || claudeStore.sending || showQueueStrip.value
+    const loadingActiveSession = Boolean(
+      claudeStore.activeSessionId && claudeStore.loadingSessionId === claudeStore.activeSessionId,
+    )
+    return loadingActiveSession || claudeStore.isTurnRunning || claudeStore.sending || showQueueStrip.value
   }
-  return codexStore.isTurnRunning || codexStore.sendingMessage || showQueueStrip.value
+  const loadingActiveThread = Boolean(
+    codexStore.activeThreadId && codexStore.loadingThreadId === codexStore.activeThreadId,
+  )
+  return loadingActiveThread || codexStore.isTurnRunning || codexStore.sendingMessage || showQueueStrip.value
 })
 const activeRuntimeTurnRunning = computed(() => {
   if (appStore.isGrokMode) return grokStore.isTurnRunning
@@ -502,6 +527,7 @@ const activeRuntimeSending = computed(() => {
   return codexStore.sendingMessage
 })
 const stopDisabled = computed(() => {
+  if (workspaceStore.switchingWorkspace) return true
   if (appStore.isGrokMode) return grokStore.interrupting
   return appStore.isCodexMode && codexStore.interruptingTurn
 })
@@ -689,12 +715,15 @@ async function send(): Promise<void> {
   const message = modelValue.value.trim()
   const images = [...attachedImages.value]
   if (!message && !images.length) return
+  if (workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return
   if (appStore.isGrokMode) {
     // Do not gate on sending — busy turns enqueue like Codex.
     if (!grokStore.isReady) return
     modelValue.value = ''
     attachedImages.value = []
-    const ok = await grokStore.sendMessage(message, images)
+    const sendPromise = grokStore.sendMessage(message, images)
+    emit('sent')
+    const ok = await sendPromise
     if (!ok) {
       modelValue.value = message
       attachedImages.value = images
@@ -709,7 +738,9 @@ async function send(): Promise<void> {
     // Capture then clear immediately so a second Enter cannot re-send the same text.
     modelValue.value = ''
     attachedImages.value = []
-    const ok = await claudeStore.sendMessage(message, images)
+    const sendPromise = claudeStore.sendMessage(message, images)
+    emit('sent')
+    const ok = await sendPromise
     if (!ok) {
       // Only restore when the send truly failed (not when it was queued).
       modelValue.value = message
@@ -723,7 +754,9 @@ async function send(): Promise<void> {
   if (!codexStore.isReady) return
   modelValue.value = ''
   attachedImages.value = []
-  const ok = await codexStore.sendMessage(message, images)
+  const sendPromise = codexStore.sendMessage(message, images)
+  emit('sent')
+  const ok = await sendPromise
   if (!ok) {
     modelValue.value = message
     attachedImages.value = images
@@ -734,6 +767,7 @@ async function send(): Promise<void> {
 }
 
 function onStop(): void {
+  if (workspaceStore.switchingWorkspace) return
   if (appStore.isGrokMode) {
     void grokStore.interruptTurn()
     return

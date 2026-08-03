@@ -46,6 +46,7 @@ const emit = defineEmits<{
 
 const draft = shallowRef('')
 const welcomeEpoch = shallowRef(0)
+const messageSentEpoch = shallowRef(0)
 const hasConversation = computed(() => {
   if (appStore.isClaudeMode) return claudeStore.activeItems.length > 0 || Boolean(claudeStore.activeSessionId)
   if (appStore.isGrokMode) return grokStore.activeItems.length > 0 || Boolean(grokStore.activeSessionId)
@@ -69,6 +70,10 @@ const changesCount = computed(() => workspaceStore.changes.length)
 
 function useSuggestion(prompt: string): void {
   draft.value = prompt
+}
+
+function onMessageSent(): void {
+  messageSentEpoch.value += 1
 }
 
 function onRetry(itemID: string): void {
@@ -209,15 +214,37 @@ watch(
         : appStore.settings.workspace),
   ],
   ([runtime, sessionId, workspace], [previousRuntime, previousSessionId, previousWorkspace]) => {
+    const previousWasPending = previousRuntime === 'codex'
+      ? previousSessionId.startsWith('pending-thread-')
+      : previousSessionId.startsWith(`pending-${previousRuntime}-`)
+    const previousPendingStillExists = previousRuntime === 'grok'
+      ? grokStore.sessions.some((session) => session.id === previousSessionId)
+      : previousRuntime === 'claude'
+        ? claudeStore.sessions.some((session) => session.id === previousSessionId)
+        : codexStore.threadGroups.some((group) =>
+            group.threads.some((thread) => thread.id === previousSessionId),
+          )
     const promotedPendingSession = runtime === previousRuntime
-      && previousSessionId.startsWith(`pending-${runtime}-`)
+      && previousWasPending
+      && !previousPendingStillExists
       && Boolean(sessionId)
       && (runtime === 'grok'
-        ? grokStore.runningSessionIds.includes(sessionId)
-        : runtime === 'claude' && claudeStore.runningSessionIds.includes(sessionId))
+        ? grokStore.sameSession(previousSessionId, sessionId)
+        : runtime === 'claude'
+          ? claudeStore.sameSession(previousSessionId, sessionId)
+          : codexStore.sameThread(previousSessionId, sessionId))
+    const activeWorkspace = runtime === 'grok'
+      ? grokStore.sessions.find((session) => session.id === sessionId)?.workspace || ''
+      : runtime === 'claude'
+        ? claudeStore.sessions.find((session) => session.id === sessionId)?.workspace || ''
+        : codexStore.activeThread?.cwd || ''
+    const workspaceReboundToSelectedSession = runtime === previousRuntime
+      && sessionId === previousSessionId
+      && !sameWorkspacePath(workspace, previousWorkspace)
+      && sameWorkspacePath(activeWorkspace, workspace)
     if (
       runtime !== previousRuntime
-      || !sameWorkspacePath(workspace, previousWorkspace)
+      || (!sameWorkspacePath(workspace, previousWorkspace) && !workspaceReboundToSelectedSession)
       || (sessionId !== previousSessionId && !promotedPendingSession)
     ) {
       draft.value = ''
@@ -371,6 +398,7 @@ watch(
         />
         <ChatTimeline
           v-else
+          :sent-epoch="messageSentEpoch"
           @retry="onRetry"
           @rollback="onRollback"
           @inspect-diff="onInspectDiff"
@@ -455,7 +483,7 @@ watch(
       </div>
     </div>
 
-    <ComposerPanel v-model="draft" />
+    <ComposerPanel v-model="draft" @sent="onMessageSent" />
 
     <ApprovalDialog
       :request="codexStore.pendingRequest"

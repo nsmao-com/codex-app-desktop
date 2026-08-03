@@ -26,6 +26,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const diffSource = shallowRef<'file' | 'turn'>('file')
   let workspaceSwitchSequence = 0
   let workspaceRefreshSequence = 0
+  let workspaceSwitchSync: Promise<void> = Promise.resolve()
 
   const currentPath = computed(() => workspace.value?.path ?? '')
   const changes = computed(() => workspace.value?.changes ?? [])
@@ -36,44 +37,65 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const runtime = appStore.activeRuntime
     const sequence = ++workspaceSwitchSequence
     workspaceRefreshSequence += 1
+    switchingWorkspace.value = true
+    const request = workspaceSwitchSync
+      .catch(() => undefined)
+      .then(async () => {
+        if (sequence !== workspaceSwitchSequence || appStore.activeRuntime !== runtime) return null
+        return runtime === 'grok'
+          ? await backend.SelectGrokWorkspace()
+          : runtime === 'claude'
+            ? await selectClaudeWorkspace() as WorkspaceInfo
+            : await backend.SelectWorkspace()
+      })
+    workspaceSwitchSync = request.then(() => undefined, () => undefined)
     try {
-      const selected = runtime === 'grok'
-        ? await backend.SelectGrokWorkspace()
-        : runtime === 'claude'
-          ? await selectClaudeWorkspace() as WorkspaceInfo
-          : await backend.SelectWorkspace()
-      if (sequence !== workspaceSwitchSequence || appStore.activeRuntime !== runtime || !selected.path) return ''
+      const selected = await request
+      if (!selected?.path || sequence !== workspaceSwitchSequence || appStore.activeRuntime !== runtime) return ''
       await activateWorkspace(selected, runtime)
       return selected.path
     } catch (error) {
-      notify('error', translate('notifications.workspaceNotOpened'), errorMessage(error))
+      if (sequence === workspaceSwitchSequence && appStore.activeRuntime === runtime) {
+        notify('error', translate('notifications.workspaceNotOpened'), errorMessage(error))
+      }
       return ''
+    } finally {
+      if (sequence === workspaceSwitchSequence) switchingWorkspace.value = false
     }
   }
 
   async function useWorkspace(path: string): Promise<boolean> {
-    if (!path || switchingWorkspace.value) return false
-    if (sameWorkspace(path, appStore.currentWorkspacePath)) {
+    if (!path) return false
+    if (!switchingWorkspace.value && sameWorkspace(path, appStore.currentWorkspacePath)) {
       return true
     }
     const runtime = appStore.activeRuntime
     const sequence = ++workspaceSwitchSequence
     workspaceRefreshSequence += 1
     switchingWorkspace.value = true
+    const request = workspaceSwitchSync
+      .catch(() => undefined)
+      .then(async () => {
+        if (sequence !== workspaceSwitchSequence || appStore.activeRuntime !== runtime) return null
+        return runtime === 'grok'
+          ? await backend.UseGrokWorkspace(path)
+          : runtime === 'claude'
+            ? await useClaudeWorkspace(path) as WorkspaceInfo
+            : await backend.UseWorkspace(path)
+      })
+    workspaceSwitchSync = request.then(() => undefined, () => undefined)
     try {
-      const selected = runtime === 'grok'
-        ? await backend.UseGrokWorkspace(path)
-        : runtime === 'claude'
-          ? await useClaudeWorkspace(path) as WorkspaceInfo
-          : await backend.UseWorkspace(path)
-      if (sequence !== workspaceSwitchSequence || appStore.activeRuntime !== runtime) return false
+      const selected = await request
+      if (!selected || sequence !== workspaceSwitchSequence || appStore.activeRuntime !== runtime) return false
       await activateWorkspace(selected, runtime)
       return true
     } catch (error) {
-      notify('error', translate('notifications.workspaceNotOpened'), errorMessage(error))
+      if (sequence === workspaceSwitchSequence && appStore.activeRuntime === runtime) {
+        notify('error', translate('notifications.workspaceNotOpened'), errorMessage(error))
+      }
       return false
     } finally {
-      switchingWorkspace.value = false
+      if (sequence === workspaceSwitchSequence) switchingWorkspace.value = false
     }
   }
 
@@ -84,10 +106,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       appStore.settings = {
         ...appStore.settings,
         grokWorkspace: selected.path,
-        grokRecentWorkspaces: uniqueWorkspacePaths(
-          selected.path,
+        grokRecentWorkspaces: rememberWorkspacePath(
           appStore.settings.grokRecentWorkspaces ?? [],
-        ).slice(0, 8),
+          selected.path,
+        ),
       }
       return
     }
@@ -95,17 +117,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       appStore.settings = {
         ...appStore.settings,
         claudeWorkspace: selected.path,
-        claudeRecentWorkspaces: uniqueWorkspacePaths(
-          selected.path,
+        claudeRecentWorkspaces: rememberWorkspacePath(
           appStore.settings.claudeRecentWorkspaces ?? [],
-        ).slice(0, 8),
+          selected.path,
+        ),
       }
       return
     }
     const settings = {
       ...appStore.settings,
       workspace: selected.path,
-      recentWorkspaces: uniqueWorkspacePaths(selected.path, appStore.settings.recentWorkspaces ?? []).slice(0, 8),
+      recentWorkspaces: rememberWorkspacePath(appStore.settings.recentWorkspaces ?? [], selected.path),
     }
     appStore.settings = settings
     await appStore.savePreferences(settings, { silent: true })
@@ -287,16 +309,22 @@ function normalizeWorkspace(value: WorkspaceInfo): WorkspaceInfo {
   return { ...value, changes: value.changes ?? [] }
 }
 
-function uniqueWorkspacePaths(current: string, recent: string[]): string[] {
+function rememberWorkspacePath(recent: string[], current: string): string[] {
   const result: string[] = []
   const seen = new Set<string>()
-  for (const path of [current, ...recent]) {
+  for (const path of recent) {
     const value = path.trim()
     const key = workspaceKey(value)
     if (!value || seen.has(key)) continue
     seen.add(key)
     result.push(value)
+    if (result.length === 8) break
   }
+  const currentValue = current.trim()
+  const currentKey = workspaceKey(currentValue)
+  if (!currentValue || seen.has(currentKey)) return result
+  if (result.length === 8) result.pop()
+  result.push(currentValue)
   return result
 }
 
