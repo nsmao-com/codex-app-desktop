@@ -170,14 +170,14 @@ export const useCodexStore = defineStore('codex', () => {
   const threadModelIdentity: Record<string, ThreadModelIdentity> = loadThreadModelIdentity()
 
   const isReady = computed(() => connection.value.state === 'ready')
-  const activeTurnId = computed(() => activeTurnByThread.value[activeThreadId.value] ?? '')
+  const activeTurnId = computed(() => threadTurnID(activeThreadId.value))
   const isTurnRunning = computed(() => threadIsRunning(activeThreadId.value))
   const sendingMessage = computed(() => isThreadSubmitting(activeThreadId.value))
   const activeItems = computed(() => itemsByThread.value[activeThreadId.value] ?? [])
   const activeQueuedMessages = computed(() => queuedMessagesByThread.value[activeThreadId.value] ?? [])
-  const activeThreadBusy = computed(() => isTurnRunning.value || sendingMessage.value || activeQueuedMessages.value.length > 0)
+  const activeThreadBusy = computed(() => threadIsBusy(activeThreadId.value) || activeQueuedMessages.value.length > 0)
   const activeThreadUsesExternalProvider = computed(() => false)
-  const activeTurnFeedback = computed(() => turnFeedbackByThread.value[activeThreadId.value] ?? null)
+  const activeTurnFeedback = computed(() => threadFeedback(activeThreadId.value))
   const activeTokenUsage = computed(() => tokenUsageByThread.value[activeThreadId.value] ?? null)
   const activeTurnMetrics = computed(() => turnMetricsByThread.value[activeThreadId.value] ?? {})
   const pendingRequest = computed(() => pendingRequests.value[0] ?? null)
@@ -343,9 +343,7 @@ export const useCodexStore = defineStore('codex', () => {
   async function disconnect(): Promise<void> {
     try {
       await backend.StopCodex()
-      activeTurnByThread.value = {}
-      interruptingTurn.value = false
-      resetOrphanedInFlightSends()
+      releaseDisconnectedTurns()
     } catch (error) {
       notify('error', translate('notifications.unableStop'), errorMessage(error))
     }
@@ -670,13 +668,17 @@ export const useCodexStore = defineStore('codex', () => {
       rememberLoadedThread(threadID)
       // Cache hit used to skip running-turn reconcile — switching Code/Cowork
       // (or reopening a background turn) left composer thinking the thread was idle.
-      const knownTurnID = activeTurnByThread.value[threadID] ?? ''
+      const knownFeedback = threadFeedback(threadID)
+      const knownTurnID = threadTurnID(threadID)
+        || liveFeedbackTurnID(knownFeedback)
+        || ''
       const summaryStatus = summary?.status || activeThread.value?.status || ''
       if (knownTurnID) {
         setThreadTurn(threadID, knownTurnID)
-        if (!turnFeedbackByThread.value[threadID]) {
+        if (!knownFeedback) {
           setTurnFeedback(threadID, { state: 'running', message: '', turnId: knownTurnID })
         }
+        if (!isActiveStatus(summaryStatus)) scheduleIdleThreadReconcile(threadID, knownTurnID)
       } else if (isActiveStatus(summaryStatus)) {
         // Soft revalidate: thread still marked active on server but local turn was wiped.
         loadedThreadIDs.delete(threadID)
@@ -718,18 +720,10 @@ export const useCodexStore = defineStore('codex', () => {
       // Persisted turns can retain inProgress after Codex was interrupted or the
       // app exited. Only restore one as live when thread/read also confirms the
       // thread is currently active; otherwise it would block this queue forever.
-      if (isActiveStatus(thread.status)) {
-        for (const turnValue of [...asArray(rawThread.turns)].reverse()) {
-          const turn = asRecord(turnValue)
-          if (isActiveStatus(turn.status)) {
-            runningTurnID = asString(turn.id)
-            break
-          }
-        }
-      }
+      if (isActiveStatus(thread.status)) runningTurnID = activeTurnIDFromSnapshot(rawThread)
       const snapshotItems = timelineFromTurns(rawThread.turns)
       const cachedItems = itemsByThread.value[thread.id] ?? itemsByThread.value[threadID] ?? []
-      const knownTurnID = activeTurnByThread.value[thread.id] ?? activeTurnByThread.value[threadID] ?? ''
+      const knownTurnID = threadTurnID(thread.id) || threadTurnID(threadID)
       const liveTurnID = runningTurnID || (knownTurnID && !completedTurns.has(knownTurnID) ? knownTurnID : '')
       const preserveInFlightItems = Boolean(
         liveTurnID
@@ -755,7 +749,11 @@ export const useCodexStore = defineStore('codex', () => {
           activeThreadId.value = thread.id
         }
         const openedID = activeThreadId.value
-        const previousTurnID = activeTurnByThread.value[openedID] ?? activeTurnByThread.value[threadID] ?? ''
+        const previousFeedback = threadFeedback(openedID) || threadFeedback(threadID)
+        const previousTurnID = threadTurnID(openedID)
+          || threadTurnID(threadID)
+          || liveFeedbackTurnID(previousFeedback)
+          || ''
         if (runningTurnID) {
           setThreadTurn(openedID, runningTurnID)
           setTurnFeedback(openedID, { state: 'running', message: '', turnId: runningTurnID })
@@ -763,9 +761,10 @@ export const useCodexStore = defineStore('codex', () => {
           // ReadThread snapshots can lag live turn events (especially after a
           // quick switch away/back). Do not wipe the local turn or the queue will drain.
           setThreadTurn(openedID, previousTurnID)
-          if (!turnFeedbackByThread.value[openedID]) {
+          if (!threadFeedback(openedID)) {
             setTurnFeedback(openedID, { state: 'running', message: '', turnId: previousTurnID })
           }
+          if (!isActiveStatus(thread.status)) scheduleIdleThreadReconcile(openedID, previousTurnID)
         } else {
           setThreadTurn(openedID, '')
         }
@@ -1291,16 +1290,12 @@ export const useCodexStore = defineStore('codex', () => {
     // User continued chatting — dismiss implement prompt (official dismisses on follow-up).
     if (planImplementPrompt.value?.threadId === threadID) planImplementPrompt.value = null
 
-    // If the previous turn already finished, drop stale busy flags before queueing
-    // so idle sends drain immediately instead of sitting in the queue UI.
-    if (!threadIsRunning(threadID)) clearStaleBusyState(threadID)
-
-    const feedback = turnFeedbackByThread.value[threadID]
+    const feedback = threadFeedback(threadID)
     const pendingSubmission = pendingThreadSubmission(threadID)?.submission
-    const blockingTurnId = activeTurnByThread.value[threadID]
+    const blockingTurnId = threadTurnID(threadID)
       || pendingSubmission?.turnId
       || pendingSubmission?.blockerId
-      || ((feedback?.state === 'running' || feedback?.state === 'submitting') ? feedback.turnId : '')
+      || liveFeedbackTurnID(feedback)
     const queuedMessage: QueuedMessage = {
       id: `queued-${now}-${sequence}`,
       threadId: threadID,
@@ -1318,8 +1313,9 @@ export const useCodexStore = defineStore('codex', () => {
       ...queuedMessagesByThread.value,
       [threadID]: [...(queuedMessagesByThread.value[threadID] ?? []), queuedMessage],
     }
-    // While a turn is live, keep the message parked — turn/completed schedules drain.
-    if (!threadIsBusy(threadID)) scheduleThreadQueueDrain(threadID)
+    // Drain re-checks every ownership signal. Scheduling here also reclaims a
+    // genuinely stale feedback marker without weakening a live turn's blocker.
+    scheduleThreadQueueDrain(threadID)
     return true
   }
 
@@ -1359,14 +1355,21 @@ export const useCodexStore = defineStore('codex', () => {
     setTurnFeedback(threadID, { state: 'submitting', message: translate('chat.thinking'), turnId: '' })
 
     try {
-      // Re-check after UI work — a turn/started event may have arrived.
-      if (threadIsRunning(threadID)) {
+      // Re-check after UI work — a turn/started or status event may have arrived.
+      const earlyLiveTurnID = threadTurnID(threadID)
+      if (earlyLiveTurnID || threadReportsActive(threadID)) {
         // Put the message back to queued and wait for turn/completed.
         const items = (itemsByThread.value[threadID] ?? []).filter((item) => item.id !== localItem.id)
         itemsByThread.value = { ...itemsByThread.value, [threadID]: items }
-        patchQueuedMessage(threadID, queuedMessage.id, { state: 'queued', error: '' })
-        const liveTurnID = activeTurnByThread.value[threadID] ?? ''
-        setTurnFeedback(threadID, { state: 'running', message: '', turnId: liveTurnID })
+        patchQueuedMessage(threadID, queuedMessage.id, {
+          state: 'queued',
+          error: '',
+          blockedByTurnId: earlyLiveTurnID || undefined,
+        })
+        if (earlyLiveTurnID) {
+          replaceQueuedBlockingTurn(threadID, submission.blockerId, earlyLiveTurnID)
+        }
+        setTurnFeedback(threadID, { state: 'running', message: '', turnId: earlyLiveTurnID })
         return
       }
 
@@ -1427,7 +1430,8 @@ export const useCodexStore = defineStore('codex', () => {
           const response = await backend.ResumeThread(thread.id)
           if (!submissionStillOwnsThread(resolvedThreadID)) return
           const responseRecord = asRecord(response)
-          const resumed = normalizeRuntimeThread(responseRecord.thread, responseRecord)
+          const rawResumedThread = asRecord(responseRecord.thread)
+          const resumed = normalizeRuntimeThread(rawResumedThread, responseRecord)
           if (resumed) {
             const latestPreferences = activeThread.value?.id === resumed.id
               ? activeThread.value
@@ -1441,6 +1445,15 @@ export const useCodexStore = defineStore('codex', () => {
             }
             if (activeThreadId.value === resumed.id) activeThread.value = thread
             addOrUpdateThread(thread)
+            if (isActiveStatus(resumed.status)) {
+              const resumedTurnID = activeTurnIDFromSnapshot(rawResumedThread)
+              if (resumedTurnID) setThreadTurn(resolvedThreadID, resumedTurnID)
+              setTurnFeedback(resolvedThreadID, {
+                state: 'running',
+                message: '',
+                turnId: resumedTurnID,
+              })
+            }
           }
         } catch {
           // Backend SendMessage also auto-resumes; continue and surface errors there.
@@ -1468,14 +1481,23 @@ export const useCodexStore = defineStore('codex', () => {
         }
       }
       // Another turn may have started while we were creating/resuming the thread.
-      if (threadIsRunning(resolvedThreadID)) {
+      // ResumeThread can also reveal a server-active turn whose event was missed.
+      const liveTurnID = threadTurnID(resolvedThreadID) || threadTurnID(thread.id)
+      if (liveTurnID || threadReportsActive(resolvedThreadID) || threadReportsActive(thread.id)) {
         const items = (itemsByThread.value[resolvedThreadID] ?? []).filter((item) => item.id !== localItem.id)
         itemsByThread.value = { ...itemsByThread.value, [resolvedThreadID]: items }
+        if (liveTurnID) {
+          replaceQueuedBlockingTurn(resolvedThreadID, submission.blockerId, liveTurnID)
+        }
         // Queue may have migrated from pending → real id.
         if (resolvedThreadID !== threadID) {
           removeQueuedMessageFromThread(threadID, queuedMessage.id)
           if ((queuedMessagesByThread.value[resolvedThreadID] ?? []).some((message) => message.id === queuedMessage.id)) {
-            patchQueuedMessage(resolvedThreadID, queuedMessage.id, { state: 'queued', error: '' })
+            patchQueuedMessage(resolvedThreadID, queuedMessage.id, {
+              state: 'queued',
+              error: '',
+              blockedByTurnId: liveTurnID || undefined,
+            })
           } else {
             queuedMessagesByThread.value = {
               ...queuedMessagesByThread.value,
@@ -1484,18 +1506,18 @@ export const useCodexStore = defineStore('codex', () => {
                 threadId: resolvedThreadID,
                 state: 'queued',
                 error: '',
+                blockedByTurnId: liveTurnID || undefined,
               }],
             }
           }
         } else {
-          patchQueuedMessage(resolvedThreadID, queuedMessage.id, { state: 'queued', error: '' })
+          patchQueuedMessage(resolvedThreadID, queuedMessage.id, {
+            state: 'queued',
+            error: '',
+            blockedByTurnId: liveTurnID || undefined,
+          })
         }
-        const liveTurnID = activeTurnByThread.value[resolvedThreadID] ?? ''
-        if (liveTurnID) {
-          setTurnFeedback(resolvedThreadID, { state: 'running', message: '', turnId: liveTurnID })
-        } else {
-          clearTurnFeedback(resolvedThreadID)
-        }
+        setTurnFeedback(resolvedThreadID, { state: 'running', message: '', turnId: liveTurnID })
         return
       }
 
@@ -1527,7 +1549,7 @@ export const useCodexStore = defineStore('codex', () => {
       const turnID = responseTurnID || submission.turnId
       submissionAccepted = Boolean(turnID)
       const newerSubmission = pendingThreadSubmission(thread.id)
-      const currentTurnID = activeTurnByThread.value[thread.id] ?? ''
+      const currentTurnID = threadTurnID(thread.id)
       const updateThreadPreview = () => {
         if (thread.preview || (activeThread.value?.id !== thread.id && !findThreadSummary(thread.id))) return
         const updated = { ...thread, name: queuedMessage.text.slice(0, 56), preview: queuedMessage.text }
@@ -1570,7 +1592,9 @@ export const useCodexStore = defineStore('codex', () => {
       const durationMs = typeof turn.durationMs === 'number' ? turn.durationMs : null
       patchTurnMetrics(thread.id, turnID, { startedAt, completedAt, durationMs })
       if (turnID) setThreadTurn(thread.id, running ? turnID : '')
+      if (finished) setLocalThreadStatus(thread.id, 'idle')
       if (running) {
+        setLocalThreadStatus(thread.id, 'active')
         setTurnFeedback(thread.id, { state: 'running', message: translate('chat.thinking'), turnId: turnID })
       } else if (!turnID) {
         // Response omitted turn id — keep submitting until turn/started arrives.
@@ -1603,9 +1627,7 @@ export const useCodexStore = defineStore('codex', () => {
       if (!currentSubmission && !submission.turnId) return
       // Only a turn bound to this submission proves acceptance. A different live
       // turn must never consume this queued row.
-      const liveTurnID = activeTurnByThread.value[resolvedThreadID]
-        ?? activeTurnByThread.value[threadID]
-        ?? ''
+      const liveTurnID = threadTurnID(resolvedThreadID) || threadTurnID(threadID)
       const latestStartedTurnID = latestStartedTurnByThread.get(resolvedThreadID)
         ?? latestStartedTurnByThread.get(threadID)
         ?? ''
@@ -1778,7 +1800,7 @@ export const useCodexStore = defineStore('codex', () => {
       notify('error', translate('notifications.steerFailed'), message)
       // Restore running indicator shortly after — the turn itself is still live.
       trackedTimeout(() => {
-        if (activeTurnByThread.value[threadID] === turnID) {
+        if (threadTurnID(threadID) === turnID) {
           setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
         }
       }, 1800)
@@ -1810,7 +1832,7 @@ export const useCodexStore = defineStore('codex', () => {
       await backend.InterruptTurn(threadID, turnID)
       // Keep "正在停止…" until turn/completed; force-clear if Codex stalls.
       trackedTimeout(() => {
-        if (activeTurnByThread.value[threadID] !== turnID) {
+        if (threadTurnID(threadID) !== turnID) {
           interruptingTurn.value = false
           return
         }
@@ -1818,6 +1840,7 @@ export const useCodexStore = defineStore('codex', () => {
         setThreadTurn(threadID, '')
         finalizeActiveItemsForCompletedTurns(threadID, turnID)
         finalizeOrphanedActiveItems(threadID)
+        setLocalThreadStatus(threadID, 'idle')
         setTurnFeedback(threadID, {
           state: 'interrupted',
           message: translate('chat.interrupted'),
@@ -1830,7 +1853,7 @@ export const useCodexStore = defineStore('codex', () => {
     } catch (error) {
       interruptingTurn.value = false
       notify('error', translate('notifications.turnStopFailed'), errorMessage(error))
-      if (activeTurnByThread.value[threadID] === turnID) {
+      if (threadTurnID(threadID) === turnID) {
         setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
       }
     }
@@ -2028,15 +2051,15 @@ export const useCodexStore = defineStore('codex', () => {
         // Missing/unknown status must not be interpreted as idle: older/newer
         // app-server versions use different payload shapes.
         if (!threadID || !status) break
-        threads.value = threads.value.map((thread) => thread.id === threadID ? { ...thread, status } : thread)
-        const nextProjects = { ...projectThreads.value }
-        for (const [path, projectItems] of Object.entries(nextProjects)) {
-          nextProjects[path] = projectItems.map((thread) => thread.id === threadID ? { ...thread, status } : thread)
-        }
-        projectThreads.value = nextProjects
-        if (activeThread.value?.id === threadID) activeThread.value = { ...activeThread.value, status }
-        if (status !== 'active') {
-          const finishingTurnID = activeTurnByThread.value[threadID] ?? ''
+        setReportedThreadStatus(threadID, status)
+        if (isActiveStatus(status)) {
+          const reportedTurnID = asString(payload.turnId, asString(asRecord(payload.turn).id))
+          if (reportedTurnID) {
+            setThreadTurn(threadID, reportedTurnID)
+            setTurnFeedback(threadID, { state: 'running', message: '', turnId: reportedTurnID })
+          }
+        } else {
+          const finishingTurnID = threadTurnID(threadID) || liveFeedbackTurnID(threadFeedback(threadID))
           scheduleIdleThreadReconcile(threadID, finishingTurnID)
         }
         break
@@ -2090,6 +2113,7 @@ export const useCodexStore = defineStore('codex', () => {
           completedTurnStatus.delete(turnID)
           if (threadID && turnID) latestStartedTurnByThread.set(threadID, turnID)
           setThreadTurn(threadID, turnID)
+          setLocalThreadStatus(threadID, 'active')
           const startedAt = typeof turn.startedAt === 'number' ? turn.startedAt * 1000 : Date.now()
           patchTurnMetrics(threadID, turnID, { startedAt, completedAt: null, durationMs: null })
           setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
@@ -2115,7 +2139,7 @@ export const useCodexStore = defineStore('codex', () => {
         rememberPlanCandidatesFromTurn(threadID, turnID)
         patchTurnMetrics(threadID, turnID, { startedAt, completedAt, durationMs })
         rememberCompletedTurn(turnID, status)
-        const currentTurnID = activeTurnByThread.value[threadID] ?? ''
+        const currentTurnID = threadTurnID(threadID)
         const pendingSubmission = pendingThreadSubmission(threadID)?.submission
         const pendingDifferentTurn = Boolean(
           pendingSubmission && (!turnID || pendingSubmission.turnId !== turnID),
@@ -2153,7 +2177,7 @@ export const useCodexStore = defineStore('codex', () => {
           notifyTurnCompleted(threadID, status)
         } else {
           // Mismatched turn id still means something finished — clear stale "running".
-          const feedback = turnFeedbackByThread.value[threadID]
+          const feedback = threadFeedback(threadID)
           if (
             !pendingDifferentTurn
             && (
@@ -2386,31 +2410,43 @@ export const useCodexStore = defineStore('codex', () => {
       case 'error':
       case 'turn/error': {
         const threadID = asString(payload.threadId)
-        const turnID = asString(payload.turnId)
-        const message = asString(asRecord(payload.error).message, translate('notifications.turnFailedFallback'))
+        const reportedTurnID = asString(payload.turnId, asString(asRecord(payload.turn).id))
+        const knownTurnID = threadTurnID(threadID) || liveFeedbackTurnID(threadFeedback(threadID))
+        const turnID = reportedTurnID || (method === 'turn/error' ? knownTurnID : '')
+        const message = asString(
+          asRecord(payload.error).message,
+          asString(payload.message, translate('notifications.turnFailedFallback')),
+        )
         if (turnID && completedTurns.has(turnID)) break
         bindPendingCollaborationMode(threadID, turnID)
         settleAcceptedPendingThreadSubmission(threadID, turnID)
         const unresolvedSubmission = pendingThreadSubmission(threadID)
         if (unresolvedSubmission) break
+        // A generic transport/protocol error without turn ownership is not proof
+        // that the currently running turn ended.
+        if (!turnID) {
+          notify('error', translate('notifications.turnFailed'), message)
+          break
+        }
         if (payload.willRetry === true) {
-          if (turnID) setThreadTurn(threadID, turnID)
+          setThreadTurn(threadID, turnID)
+          setLocalThreadStatus(threadID, 'active')
           setTurnFeedback(threadID, {
             state: 'retrying',
             message: `${translate('chat.retrying')} ${message}`,
             turnId: turnID,
           })
         } else {
-          if (turnID) rememberCompletedTurn(turnID, 'failed')
-          const currentTurnID = activeTurnByThread.value[threadID] ?? ''
+          rememberCompletedTurn(turnID, 'failed')
+          const currentTurnID = threadTurnID(threadID)
           const failedCurrentTurn = currentTurnID === turnID
             || (!currentTurnID && !isThreadSubmitting(threadID))
-            || !turnID
-          if (!turnID || currentTurnID === turnID) setThreadTurn(threadID, '')
+          if (!currentTurnID || currentTurnID === turnID) setThreadTurn(threadID, '')
           finalizeActiveItemsForCompletedTurns(threadID, turnID)
           if (!threadIsRunning(threadID)) finalizeOrphanedActiveItems(threadID)
           if (failedCurrentTurn) {
             interruptingTurn.value = false
+            setLocalThreadStatus(threadID, 'idle')
             setTurnFeedback(threadID, { state: 'failed', message, turnId: turnID })
           }
           notify('error', translate('notifications.turnFailed'), message)
@@ -3286,8 +3322,84 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
+  function activeTurnIDFromSnapshot(threadValue: unknown): string {
+    const rawThread = asRecord(threadValue)
+    for (const turnValue of [...asArray(rawThread.turns)].reverse()) {
+      const turn = asRecord(turnValue)
+      const turnID = asString(turn.id)
+      if (turnID && isActiveStatus(turn.status)) return turnID
+    }
+    return ''
+  }
+
+  function feedbackIsBusy(feedback: TurnFeedback | null | undefined): boolean {
+    return feedback?.state === 'submitting'
+      || feedback?.state === 'running'
+      || feedback?.state === 'retrying'
+  }
+
+  function liveFeedbackTurnID(feedback: TurnFeedback | null | undefined): string {
+    return feedbackIsBusy(feedback)
+      && feedback?.turnId
+      && !completedTurns.has(feedback.turnId)
+      ? feedback.turnId
+      : ''
+  }
+
+  /** Read live state through local/backend thread aliases created by resume/read. */
+  function trackedThreadTurnIDs(threadID: string): string[] {
+    if (!threadID) return []
+    const direct = activeTurnByThread.value[threadID] ?? ''
+    const aliases = Object.entries(activeTurnByThread.value)
+      .filter(([id]) => id !== threadID && sameThreadSession(id, threadID))
+      .map(([, turnID]) => turnID)
+      .filter(Boolean)
+    return [direct, ...aliases].filter(Boolean)
+  }
+
+  function trackedThreadTurnID(threadID: string): string {
+    return trackedThreadTurnIDs(threadID)[0] ?? ''
+  }
+
+  function threadTurnID(threadID: string): string {
+    return trackedThreadTurnIDs(threadID).find((turnID) => !completedTurns.has(turnID)) ?? ''
+  }
+
+  function threadFeedback(threadID: string): TurnFeedback | null {
+    if (!threadID) return null
+    const direct = turnFeedbackByThread.value[threadID]
+    const aliases = Object.entries(turnFeedbackByThread.value)
+      .filter(([id]) => id !== threadID && sameThreadSession(id, threadID))
+      .map(([, feedback]) => feedback)
+    if (liveFeedbackTurnID(direct)) return direct ?? null
+    const liveAlias = aliases.find((feedback) => Boolean(liveFeedbackTurnID(feedback)))
+    if (liveAlias) return liveAlias
+    if (direct && feedbackIsBusy(direct) && !direct.turnId) return direct
+    return aliases.find((feedback) => feedbackIsBusy(feedback) && !feedback.turnId)
+      ?? direct
+      ?? aliases[0]
+      ?? null
+  }
+
+  function threadReportsActive(threadID: string): boolean {
+    if (!threadID) return false
+    if (
+      activeThread.value
+      && (activeThread.value.id === threadID || sameThreadSession(activeThread.value.id, threadID))
+      && activeThread.value.status
+    ) {
+      return isActiveStatus(activeThread.value.status)
+    }
+    const exact = findThreadSummary(threadID)
+    if (exact?.status) return isActiveStatus(exact.status)
+    return [
+      ...threads.value,
+      ...Object.values(projectThreads.value).flat(),
+    ].some((thread) => sameThreadSession(thread.id, threadID) && isActiveStatus(thread.status))
+  }
+
   function threadIsRunning(threadID: string): boolean {
-    const turnID = activeTurnByThread.value[threadID] ?? ''
+    const turnID = threadTurnID(threadID)
     return Boolean(turnID && !completedTurns.has(turnID))
   }
 
@@ -3297,9 +3409,12 @@ export const useCodexStore = defineStore('codex', () => {
    * stuck forever even though no turn was running.
    */
   function threadHasLiveItems(threadID: string): boolean {
-    const liveTurn = activeTurnByThread.value[threadID] ?? ''
+    const liveTurn = threadTurnID(threadID)
     if (!liveTurn) return false
-    return (itemsByThread.value[threadID] ?? []).some((item) => {
+    const items = Object.entries(itemsByThread.value)
+      .filter(([id]) => id === threadID || sameThreadSession(id, threadID))
+      .flatMap(([, threadItems]) => threadItems)
+    return items.some((item) => {
       if (item.type === 'userMessage') return false
       if (!isActiveStatus(item.status)) return false
       if (item.turnId && completedTurns.has(item.turnId)) return false
@@ -3309,28 +3424,33 @@ export const useCodexStore = defineStore('codex', () => {
     })
   }
 
+  function threadHasLoadingBarrier(threadID: string): boolean {
+    const matches = (id: string) => id === threadID || sameThreadSession(id, threadID)
+    return [...loadingSequenceByThread.keys()].some(matches)
+      || [...workspaceSelectionSequenceByThread.keys()].some(matches)
+  }
+
   /** True while a turn is live OR a send/steer is in flight — used to keep follow-ups queued. */
   function threadIsBusy(threadID: string): boolean {
     if (!threadID) return false
     // Reading history is a dispatch barrier: queue now, then drain after
     // openThread finishes so the disk snapshot cannot overwrite the new turn.
-    if (loadingSequenceByThread.has(threadID) || workspaceSelectionSequenceByThread.has(threadID)) return true
+    if (threadHasLoadingBarrier(threadID)) return true
     // Keep ownership between turn/start RPC acceptance and the later
     // turn/started event. Releasing here creates a false-idle dispatch window.
     if (pendingThreadSubmission(threadID)) return true
     if (threadIsRunning(threadID) || isThreadSubmitting(threadID)) return true
-    const feedback = turnFeedbackByThread.value[threadID]
-    if (feedback?.state === 'submitting' || feedback?.state === 'running') {
+    const feedback = threadFeedback(threadID)
+    if (feedbackIsBusy(feedback)) {
       // Stale feedback after turn/completed used to park the queue forever.
-      if (!(feedback.turnId && completedTurns.has(feedback.turnId))) return true
+      if (!(feedback?.turnId && completedTurns.has(feedback.turnId))) return true
     }
     // Approval / user-input prompts mean the turn is still blocking the queue.
-    if (pendingRequests.value.some((request) => asString(request.data.threadId) === threadID)) return true
+    if (pendingRequests.value.some((request) => sameThreadSession(asString(request.data.threadId), threadID))) return true
     if (threadHasLiveItems(threadID)) return true
-    // Do not use lagged thread.status === "active" alone. Server status often
-    // stays active until thread/status/changed, which blocked auto-drain and
-    // "send now" after the local turn already finished.
-    return false
+    // Server status is the final ownership signal when turn/started and the RPC
+    // response are briefly out of sync. Explicit terminal paths set it back idle.
+    return threadReportsActive(threadID)
   }
 
   /**
@@ -3366,7 +3486,15 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   function releaseDisconnectedTurns(message = ''): void {
-    const disconnectedTurns = Object.entries(activeTurnByThread.value)
+    const disconnectedTurns = new Map(Object.entries(activeTurnByThread.value))
+    for (const [threadID, feedback] of Object.entries(turnFeedbackByThread.value)) {
+      if (feedbackIsBusy(feedback) && !disconnectedTurns.has(threadID)) {
+        disconnectedTurns.set(threadID, feedback.turnId)
+      }
+    }
+    for (const threadID of sendingThreadIds.value) {
+      if (!disconnectedTurns.has(threadID)) disconnectedTurns.set(threadID, '')
+    }
     activeTurnByThread.value = {}
     for (const [threadID, turnID] of disconnectedTurns) {
       if (turnID) rememberCompletedTurn(turnID, message ? 'failed' : 'interrupted')
@@ -3396,7 +3524,7 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function reconcileIdleThread(threadID: string, turnID: string): Promise<void> {
-    if (!turnID || completedTurns.has(turnID) || activeTurnByThread.value[threadID] !== turnID) {
+    if (!turnID || completedTurns.has(turnID) || threadTurnID(threadID) !== turnID) {
       scheduleThreadQueueDrain(threadID)
       return
     }
@@ -3407,26 +3535,60 @@ export const useCodexStore = defineStore('codex', () => {
       const rawThread = asRecord(asRecord(response).thread)
       const turns = [...asArray(rawThread.turns)].reverse().map(asRecord)
       const matchingTurn = turns.find((turn) => asString(turn.id) === turnID)
-      terminalStatus = normalizeThreadStatus(matchingTurn?.status)
-      if (!isTerminalTurnStatus(terminalStatus)) {
-        const runningTurn = turns.find((turn) => isActiveStatus(turn.status))
-        const runningTurnID = asString(runningTurn?.id, turnID)
+      const matchingStatus = normalizeThreadStatus(matchingTurn?.status)
+      const runningTurn = turns.find((turn) => isActiveStatus(turn.status))
+      const runningTurnID = asString(runningTurn?.id)
+      if (runningTurnID) {
+        if (runningTurnID !== turnID) {
+          rememberCompletedTurn(turnID, isTerminalTurnStatus(matchingStatus) ? matchingStatus : 'completed')
+          replaceQueuedBlockingTurn(threadID, turnID, runningTurnID)
+        }
         setThreadTurn(threadID, runningTurnID)
+        setLocalThreadStatus(threadID, 'active')
         setTurnFeedback(threadID, { state: 'running', message: '', turnId: runningTurnID })
         return
       }
+      if (isActiveStatus(normalizeThreadStatus(rawThread.status))) {
+        // An active thread with no turn snapshot is still owned by the server.
+        setThreadTurn(threadID, turnID)
+        setLocalThreadStatus(threadID, 'active')
+        setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
+        return
+      }
+      terminalStatus = isTerminalTurnStatus(matchingStatus) ? matchingStatus : 'completed'
     } catch {
       // A failed/read-fallback snapshot is not proof that a live turn ended.
       // Keep follow-ups queued until turn/completed or an explicit terminal snapshot.
       return
     }
 
-    if (activeTurnByThread.value[threadID] !== turnID) return
+    // A newer dispatch may have claimed the thread while ReadThread was in flight.
+    // Its submitting feedback and queue row must not be cleared by the older idle event.
+    if (pendingThreadSubmission(threadID) || isThreadSubmitting(threadID)) return
+
+    const currentTurnID = threadTurnID(threadID)
+    if (currentTurnID && currentTurnID !== turnID && !completedTurns.has(currentTurnID)) {
+      rememberCompletedTurn(turnID, terminalStatus)
+      replaceQueuedBlockingTurn(threadID, turnID, currentTurnID)
+      return
+    }
+    const feedbackTurnID = liveFeedbackTurnID(threadFeedback(threadID))
+    if (feedbackTurnID && feedbackTurnID !== turnID && !completedTurns.has(feedbackTurnID)) {
+      rememberCompletedTurn(turnID, terminalStatus)
+      setThreadTurn(threadID, feedbackTurnID)
+      replaceQueuedBlockingTurn(threadID, turnID, feedbackTurnID)
+      return
+    }
+    if (completedTurns.has(turnID)) {
+      scheduleThreadQueueDrain(threadID)
+      return
+    }
     rememberCompletedTurn(turnID, terminalStatus)
     finalizeActiveItemsForCompletedTurns(threadID, turnID)
+    if (currentTurnID === turnID) setThreadTurn(threadID, '')
     finalizeOrphanedActiveItems(threadID)
-    setThreadTurn(threadID, '')
     clearTurnFeedback(threadID)
+    setLocalThreadStatus(threadID, 'idle')
     clearStaleBusyState(threadID)
     scheduleThreadQueueDrain(threadID)
   }
@@ -3435,28 +3597,50 @@ export const useCodexStore = defineStore('codex', () => {
   function clearStaleBusyState(threadID: string): void {
     if (!threadID) return
     const pendingSubmission = pendingThreadSubmission(threadID)
-    const liveTurnID = activeTurnByThread.value[threadID] ?? ''
-    if (liveTurnID && completedTurns.has(liveTurnID)) {
+    const feedback = threadFeedback(threadID)
+    let liveTurnID = threadTurnID(threadID)
+    if (!liveTurnID && liveFeedbackTurnID(feedback)) {
+      // Feedback with an unfinished real turn is ownership evidence, not a stale flag.
+      const feedbackTurnID = liveFeedbackTurnID(feedback)
+      setThreadTurn(threadID, feedbackTurnID)
+      liveTurnID = feedbackTurnID
+    }
+    const trackedTurnID = trackedThreadTurnID(threadID)
+    if (!liveTurnID && trackedTurnID && completedTurns.has(trackedTurnID)) {
       setThreadTurn(threadID, '')
     }
     finalizeActiveItemsForCompletedTurns(threadID)
     // No live turn → leftover inProgress rows are orphans (interrupt lag / missed item/completed).
     // Do NOT clear isThreadSubmitting here — drainThreadQueue owns that flag while send is in flight.
-    if (!threadIsRunning(threadID) && !pendingSubmission) {
+    if (!threadIsRunning(threadID) && !pendingSubmission && !threadReportsActive(threadID)) {
       finalizeOrphanedActiveItems(threadID)
       // Only reclaim "sending" queue rows when no drain owns the thread.
       if (!isThreadSubmitting(threadID)) resetOrphanedInFlightSends(threadID)
     }
-    const feedback = turnFeedbackByThread.value[threadID]
-    if (feedback && (feedback.state === 'submitting' || feedback.state === 'running')) {
+    const currentFeedback = threadFeedback(threadID)
+    if (feedbackIsBusy(currentFeedback)) {
       // Keep "submitting" feedback while drainThreadQueue owns the in-flight send.
-      const drainOwnsFeedback = feedback.state === 'submitting'
+      const drainOwnsFeedback = currentFeedback?.state === 'submitting'
         && (isThreadSubmitting(threadID) || Boolean(pendingSubmission))
-      if (!drainOwnsFeedback && (!threadIsRunning(threadID) || (feedback.turnId && completedTurns.has(feedback.turnId)))) {
+      const feedbackTurnCompleted = Boolean(
+        currentFeedback?.turnId && completedTurns.has(currentFeedback.turnId),
+      )
+      if (
+        !drainOwnsFeedback
+        && (
+          feedbackTurnCompleted
+          || (!threadIsRunning(threadID) && !threadReportsActive(threadID))
+        )
+      ) {
         clearTurnFeedback(threadID)
       }
     }
-    if (!threadIsRunning(threadID) && !isThreadSubmitting(threadID) && !pendingSubmission) {
+    if (
+      !threadIsRunning(threadID)
+      && !isThreadSubmitting(threadID)
+      && !pendingSubmission
+      && !threadReportsActive(threadID)
+    ) {
       setLocalThreadStatus(threadID, 'idle')
     }
   }
@@ -3513,18 +3697,17 @@ export const useCodexStore = defineStore('codex', () => {
     return completedTurnStatus.get(turnID) || 'completed'
   }
 
-  function setLocalThreadStatus(threadID: string, status: string): void {
+  function setReportedThreadStatus(threadID: string, status: string): void {
     if (!threadID || !status) return
-    // Only force idle when we know the turn is gone — avoids clobbering a real active turn.
-    if (status === 'idle' && threadIsRunning(threadID)) return
+    const matchesThread = (id: string) => id === threadID || sameThreadSession(id, threadID)
     let touched = false
     const nextThreads = threads.value.map((thread) => {
-      if (thread.id !== threadID || thread.status === status) return thread
+      if (!matchesThread(thread.id) || thread.status === status) return thread
       touched = true
       return { ...thread, status }
     })
     if (touched) threads.value = nextThreads
-    if (activeThread.value?.id === threadID && activeThread.value.status !== status) {
+    if (activeThread.value && matchesThread(activeThread.value.id) && activeThread.value.status !== status) {
       activeThread.value = { ...activeThread.value, status }
     }
     const nextProjects = { ...projectThreads.value }
@@ -3532,7 +3715,7 @@ export const useCodexStore = defineStore('codex', () => {
     for (const [path, list] of Object.entries(nextProjects)) {
       let listTouched = false
       const mapped = list.map((thread) => {
-        if (thread.id !== threadID || thread.status === status) return thread
+        if (!matchesThread(thread.id) || thread.status === status) return thread
         listTouched = true
         return { ...thread, status }
       })
@@ -3542,6 +3725,13 @@ export const useCodexStore = defineStore('codex', () => {
       }
     }
     if (projectTouched) projectThreads.value = nextProjects
+  }
+
+  function setLocalThreadStatus(threadID: string, status: string): void {
+    if (!threadID || !status) return
+    // Only force idle when we know the turn is gone — avoids clobbering a real active turn.
+    if (status === 'idle' && threadIsRunning(threadID)) return
+    setReportedThreadStatus(threadID, status)
   }
 
   function rememberThreadAlias(fromID: string, toID: string): void {
@@ -3620,8 +3810,15 @@ export const useCodexStore = defineStore('codex', () => {
   function scheduleThreadQueueDrain(threadID: string): void {
     if (!threadID) return
     trackedTimeout(() => {
-      // Soft-clear stale busy before drain so completed turns don't leave the queue stuck.
-      if (!threadIsRunning(threadID)) clearStaleBusyState(threadID)
+      // Reclaim only when neither the server nor a dispatch owns this thread.
+      if (
+        !threadReportsActive(threadID)
+        && !threadHasLoadingBarrier(threadID)
+        && !pendingThreadSubmission(threadID)
+        && !isThreadSubmitting(threadID)
+      ) {
+        clearStaleBusyState(threadID)
+      }
       void drainThreadQueue(threadID)
     }, 0)
   }
@@ -3769,20 +3966,33 @@ export const useCodexStore = defineStore('codex', () => {
   function setThreadTurn(threadID: string, turnID: string): void {
     if (!threadID) return
     const next = { ...activeTurnByThread.value }
+    for (const id of Object.keys(next)) {
+      if (id === threadID || sameThreadSession(id, threadID)) delete next[id]
+    }
     if (turnID) next[threadID] = turnID
-    else delete next[threadID]
     activeTurnByThread.value = next
   }
 
   function setTurnFeedback(threadID: string, feedback: TurnFeedback): void {
     if (!threadID) return
-    turnFeedbackByThread.value = { ...turnFeedbackByThread.value, [threadID]: feedback }
+    const next = { ...turnFeedbackByThread.value }
+    for (const id of Object.keys(next)) {
+      if (id === threadID || sameThreadSession(id, threadID)) delete next[id]
+    }
+    next[threadID] = feedback
+    turnFeedbackByThread.value = next
   }
 
   function clearTurnFeedback(threadID: string): void {
-    if (!threadID || !turnFeedbackByThread.value[threadID]) return
+    if (!threadID) return
     const next = { ...turnFeedbackByThread.value }
-    delete next[threadID]
+    let changed = false
+    for (const id of Object.keys(next)) {
+      if (id !== threadID && !sameThreadSession(id, threadID)) continue
+      delete next[id]
+      changed = true
+    }
+    if (!changed) return
     turnFeedbackByThread.value = next
   }
 

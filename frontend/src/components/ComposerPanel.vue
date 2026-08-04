@@ -511,10 +511,7 @@ const willQueueOnSend = computed(() => {
     )
     return loadingActiveSession || claudeStore.isTurnRunning || claudeStore.sending || showQueueStrip.value
   }
-  const loadingActiveThread = Boolean(
-    codexStore.activeThreadId && codexStore.loadingThreadId === codexStore.activeThreadId,
-  )
-  return loadingActiveThread || codexStore.isTurnRunning || codexStore.sendingMessage || showQueueStrip.value
+  return codexStore.activeThreadBusy || showQueueStrip.value
 })
 const activeRuntimeTurnRunning = computed(() => {
   if (appStore.isGrokMode) return grokStore.isTurnRunning
