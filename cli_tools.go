@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -103,7 +104,7 @@ func (s *AppService) CheckCLITools() CLIToolsReport {
 	}
 }
 
-// InstallCLITool installs or upgrades a CLI via pnpm/npm (global).
+// InstallCLITool installs or upgrades a CLI via pnpm (global).
 func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) {
 	toolID = strings.ToLower(strings.TrimSpace(toolID))
 	spec, ok := lookupCLIPackage(toolID)
@@ -129,7 +130,7 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 	if !nodeOK || pm == "" {
 		return CLIToolActionResult{
 			OK:      false,
-			Message: "Node.js / package manager not found. Install Node.js (with pnpm or npm) first.",
+			Message: "Node.js / pnpm was not found. Install pnpm first; NiceCodex configures its global directory automatically.",
 			Tool:    probeCLITool(spec, pm, false),
 		}, errors.New("node package manager not available")
 	}
@@ -139,23 +140,20 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 
 	// Ensure child process inherits the enriched PATH (critical on macOS GUI).
 	codex.EnrichPathForLookups()
-	var commandArgs []string
-	switch pm {
-	case "pnpm":
-		commandArgs = []string{"add", "-g", spec.npmPkg + "@latest"}
-	case "npm":
-		commandArgs = []string{"install", "-g", spec.npmPkg + "@latest"}
-	case "yarn":
-		commandArgs = []string{"global", "add", spec.npmPkg + "@latest"}
-	default:
-		return CLIToolActionResult{}, fmt.Errorf("unsupported package manager: %s", pm)
+	if pm != "pnpm" {
+		return CLIToolActionResult{}, errors.New("pnpm is required to install CLI tools")
 	}
+	installEnv, pnpmHome, envErr := preparePNPMGlobalEnvironment()
+	if envErr != nil {
+		return CLIToolActionResult{}, fmt.Errorf("prepare pnpm global directory: %w", envErr)
+	}
+	commandArgs := []string{"add", "-g", spec.npmPkg + "@latest"}
 	commandPath, resolvedArgs, resolveErr := providerCommand(packageManagerBinary(pm), commandArgs)
 	if resolveErr != nil {
 		return CLIToolActionResult{}, resolveErr
 	}
 	cmd := exec.CommandContext(ctx, commandPath, resolvedArgs...)
-	cmd.Env = os.Environ()
+	cmd.Env = installEnv
 
 	output, err := runManagedCombinedOutput(ctx, cmd)
 	text := strings.TrimSpace(string(output))
@@ -189,7 +187,7 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 	if !tool.Installed {
 		return CLIToolActionResult{
 			OK:      false,
-			Message: "Install finished but CLI was not found on PATH. Restart Nice Codex and ensure Node global bin is on PATH.",
+			Message: fmt.Sprintf("Install finished but CLI was not found in pnpm home (%s). Restart Nice Codex and check the pnpm installation.", pnpmHome),
 			Output:  text,
 			Tool:    tool,
 		}, errors.New("cli not found after install")
@@ -245,7 +243,9 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 
 	switch {
 	case !nodeOK:
-		status.Message = "Install Node.js first, then install this CLI"
+		status.Message = "Install Node.js and pnpm first"
+	case pm == "":
+		status.Message = "Install pnpm first"
 	case !status.Installed:
 		status.Message = "Not installed"
 	case status.UpdateAvailable:
@@ -257,15 +257,10 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 }
 
 func formatInstallCommand(pm, npmPkg string) string {
-	// Same package manager CLI across Windows/macOS/Linux; only shell differs.
-	switch pm {
-	case "pnpm":
+	if pm == "pnpm" {
 		return "pnpm add -g " + npmPkg
-	case "yarn":
-		return "yarn global add " + npmPkg
-	default:
-		return "npm install -g " + npmPkg
 	}
+	return "pnpm add -g " + npmPkg
 }
 
 func detectNodePackageManager() (manager string, nodeOK bool, nodeVersion string) {
@@ -280,17 +275,74 @@ func detectNodePackageManager() (manager string, nodeOK bool, nodeVersion string
 			nodeVersion = strings.TrimSpace(string(out))
 		}
 	}
-	// Prefer pnpm (project convention), then npm, then yarn.
-	for _, name := range []string{"pnpm", "npm", "yarn"} {
-		if findCommand(commandCandidates(name)) != "" {
-			return name, nodeOK || name != "", nodeVersion
+	if findCommand(commandCandidates("pnpm")) != "" {
+		return "pnpm", true, nodeVersion
+	}
+	return "", nodeOK, nodeVersion
+}
+
+func preparePNPMGlobalEnvironment() ([]string, string, error) {
+	pnpmHome := strings.TrimSpace(os.Getenv("PNPM_HOME"))
+	if pnpmHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || strings.TrimSpace(home) == "" {
+			return nil, "", errors.New("user home directory is unavailable")
+		}
+		switch runtime.GOOS {
+		case "windows":
+			pnpmHome = strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+			if pnpmHome != "" {
+				pnpmHome = filepath.Join(pnpmHome, "pnpm")
+			} else {
+				pnpmHome = filepath.Join(home, "AppData", "Local", "pnpm")
+			}
+		case "darwin":
+			pnpmHome = filepath.Join(home, "Library", "pnpm")
+		default:
+			if dataHome := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); dataHome != "" {
+				pnpmHome = filepath.Join(dataHome, "pnpm")
+			} else {
+				pnpmHome = filepath.Join(home, ".local", "share", "pnpm")
+			}
 		}
 	}
-	// npm usually ships with node; if node exists treat npm as available via node dir.
-	if nodeOK {
-		return "npm", true, nodeVersion
+	pnpmHome = filepath.Clean(pnpmHome)
+	if err := os.MkdirAll(pnpmHome, 0o700); err != nil {
+		return nil, "", err
 	}
-	return "", false, nodeVersion
+
+	pathValue := prependPathDirectory(os.Getenv("PATH"), pnpmHome)
+	// Keep the freshly installed shim discoverable for the remainder of this GUI run.
+	_ = os.Setenv("PNPM_HOME", pnpmHome)
+	_ = os.Setenv("PATH", pathValue)
+	environment := replaceEnvironmentValue(os.Environ(), "PNPM_HOME", pnpmHome)
+	environment = replaceEnvironmentValue(environment, "PATH", pathValue)
+	return environment, pnpmHome, nil
+}
+
+func prependPathDirectory(value, directory string) string {
+	for _, item := range filepath.SplitList(value) {
+		if strings.EqualFold(filepath.Clean(item), directory) {
+			return value
+		}
+	}
+	if strings.TrimSpace(value) == "" {
+		return directory
+	}
+	return directory + string(os.PathListSeparator) + value
+}
+
+func replaceEnvironmentValue(environment []string, key, value string) []string {
+	prefix := key + "="
+	next := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		name, _, found := strings.Cut(entry, "=")
+		if found && strings.EqualFold(name, key) {
+			continue
+		}
+		next = append(next, entry)
+	}
+	return append(next, prefix+value)
 }
 
 func packageManagerBinary(name string) string {

@@ -3,6 +3,7 @@ import {
   Activity,
   ArrowDown,
   ArrowUp,
+  Bot,
   Eye,
   EyeOff,
   KeyRound,
@@ -12,6 +13,7 @@ import {
   RotateCcw,
   Route,
   ShieldCheck,
+  Terminal,
   Trash2,
 } from '@lucide/vue'
 import { computed, ref, shallowRef } from 'vue'
@@ -53,6 +55,16 @@ interface RouterUpstreamView {
   requestCount: number
 }
 
+interface RuntimeProviderView {
+  runtime: 'codex' | 'claude'
+  provider: string
+  name: string
+  baseUrl: string
+  configPath: string
+  source: string
+  configured: boolean
+}
+
 interface RouterView {
   enabled: boolean
   running: boolean
@@ -64,6 +76,7 @@ interface RouterView {
   firstByteTimeoutSeconds: number
   codexApplied: boolean
   lastError: string
+  currentProviders: RuntimeProviderView[]
   upstreams: RouterUpstreamView[]
 }
 
@@ -100,6 +113,11 @@ const form = ref<RouterForm>({
 
 const endpoint = computed(() => `http://127.0.0.1:${form.value.port}`)
 const canApply = computed(() => form.value.enabled && form.value.upstreams.some((item) => item.enabled))
+const currentProviders = computed(() => view.value?.currentProviders ?? [])
+
+function runtimeProviderLabel(runtime: RuntimeProviderView['runtime']): string {
+  return runtime === 'claude' ? 'Claude Code' : 'Codex'
+}
 
 function applyView(next: RouterView): void {
   view.value = next
@@ -331,6 +349,33 @@ void refreshRouter(true)
     </div>
 
     <template v-else>
+      <section class="overflow-hidden rounded-xl border bg-card">
+        <div class="border-b px-4 py-3">
+          <h2 class="text-[13px] font-semibold">{{ t('settings.routingCurrentProviders') }}</h2>
+          <p class="mt-1 text-[11px] text-muted-foreground">{{ t('settings.routingCurrentProvidersHint') }}</p>
+        </div>
+        <div class="grid divide-y sm:grid-cols-2 sm:divide-x sm:divide-y-0">
+          <div v-for="provider in currentProviders" :key="provider.runtime" class="min-w-0 space-y-2 px-4 py-3">
+            <div class="flex min-w-0 items-center gap-2">
+              <Terminal v-if="provider.runtime === 'codex'" :size="14" class="shrink-0 text-primary" />
+              <Bot v-else :size="14" class="shrink-0 text-primary" />
+              <span class="text-[12px] font-medium">{{ runtimeProviderLabel(provider.runtime) }}</span>
+              <Badge variant="outline" class="min-w-0 max-w-full truncate text-[9px]">
+                {{ provider.name || provider.provider }}
+              </Badge>
+            </div>
+            <p class="truncate font-mono text-[10px] text-foreground/80">
+              {{ provider.baseUrl || t('settings.routingOfficialEndpoint') }}
+            </p>
+            <SimpleTooltip :content="provider.configPath">
+              <p class="truncate text-[10px] text-muted-foreground">
+                {{ provider.provider }} · {{ provider.source }} · {{ provider.configPath }}
+              </p>
+            </SimpleTooltip>
+          </div>
+        </div>
+      </section>
+
       <section class="overflow-hidden rounded-xl border bg-card">
         <div class="flex items-start justify-between gap-4 border-b px-4 py-3">
           <div class="min-w-0">

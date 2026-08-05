@@ -3014,9 +3014,10 @@ func cloneSettings(settings UserSettings) UserSettings {
 	return settings
 }
 
-func normalizeFollowUpBehavior(_ string) string {
-	// Normal composer sends always use the per-session FIFO queue. Older
-	// installations may still persist "steer" from the former preference.
+func normalizeFollowUpBehavior(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "steer") {
+		return "steer"
+	}
 	return "queue"
 }
 

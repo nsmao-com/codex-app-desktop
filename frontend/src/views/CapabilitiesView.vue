@@ -433,9 +433,9 @@ async function saveMcpEditor(): Promise<void> {
   if (ok) mcpEditorOpen.value = false
 }
 
-function openMcpImport(): void {
+function openMcpImport(mode: 'visual' | 'json' = 'json'): void {
   mcpEditorOpen.value = false
-  mcpImportMode.value = 'visual'
+  mcpImportMode.value = mode
   mcpImportOpen.value = true
 }
 
@@ -1060,9 +1060,9 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
             <Plus :size="13" class="mr-1.5" />
             {{ t('capabilities.addMcp') }}
           </Button>
-          <Button v-if="activeTab === 'mcp'" variant="outline" size="sm" class="h-8" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="openMcpImport">
-            <Bot :size="13" class="mr-1.5" />
-            {{ t('capabilities.importMcpJson') }}
+          <Button v-if="activeTab === 'mcp'" variant="outline" size="sm" class="h-8" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="openMcpImport('json')">
+            <Braces :size="13" class="mr-1.5" />
+            {{ t('capabilities.mcpImportPasteJson') }}
           </Button>
           <Button v-if="activeTab === 'mcp'" variant="outline" size="sm" class="h-8" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="capabilitiesStore.refreshMCPServers()">
             <RefreshCw :size="13" class="mr-1.5" />
@@ -1185,12 +1185,14 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                       <Label class="text-xs">{{ t('capabilities.importMcpTitle') }}</Label>
                       <p class="mt-1 text-[10px] leading-4 text-muted-foreground">{{ t('capabilities.importMcpJsonHint') }}</p>
                     </div>
-                    <div class="flex rounded-lg bg-muted p-0.5">
+                    <div class="grid min-w-[240px] grid-cols-2 rounded-md border bg-muted/40 p-0.5" role="tablist" :aria-label="t('capabilities.importMcpTitle')">
                       <Button
                         type="button"
                         size="xs"
                         :variant="mcpImportMode === 'visual' ? 'secondary' : 'ghost'"
-                        class="h-7 px-2 text-[10px]"
+                        class="h-8 px-2 text-[11px]"
+                        role="tab"
+                        :aria-selected="mcpImportMode === 'visual'"
                         @click="mcpImportMode = 'visual'"
                       >
                         <FileUp :size="12" class="mr-1" />
@@ -1200,11 +1202,13 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                         type="button"
                         size="xs"
                         :variant="mcpImportMode === 'json' ? 'secondary' : 'ghost'"
-                        class="h-7 px-2 text-[10px]"
+                        class="h-8 px-2 text-[11px]"
+                        role="tab"
+                        :aria-selected="mcpImportMode === 'json'"
                         @click="mcpImportMode = 'json'"
                       >
                         <Braces :size="12" class="mr-1" />
-                        JSON
+                        {{ t('capabilities.mcpImportPasteJson') }}
                       </Button>
                     </div>
                   </div>
@@ -1472,8 +1476,8 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                   <Button size="sm" variant="outline" @click="openMcpEditor()">
                     <Plus :size="13" class="mr-1.5" />{{ t('capabilities.addMcp') }}
                   </Button>
-                  <Button size="sm" variant="outline" @click="openMcpImport">
-                    <FileUp :size="13" class="mr-1.5" />{{ t('capabilities.importMcpJson') }}
+                  <Button size="sm" variant="outline" @click="openMcpImport('json')">
+                    <Braces :size="13" class="mr-1.5" />{{ t('capabilities.mcpImportPasteJson') }}
                   </Button>
                 </div>
                 <Button v-else class="mt-3" size="sm" variant="outline" :disabled="capabilitiesStore.capabilitiesLoading" @click="capabilitiesStore.loadCapabilities(true)">

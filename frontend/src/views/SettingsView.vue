@@ -164,6 +164,14 @@ const terminalProfile = shallowRef(appStore.settings.terminalProfile)
 const language = shallowRef(appStore.settings.language)
 const autoConnect = shallowRef(appStore.settings.autoConnect)
 const sendWithModifier = shallowRef(Boolean(appStore.settings.sendWithModifier))
+const followUpBehavior = shallowRef<'steer' | 'queue'>(
+  appStore.settings.followUpBehavior === 'steer' ? 'steer' : 'queue',
+)
+watch(followUpBehavior, (value) => {
+  if (appStore.settings.followUpBehavior === value) return
+  // This control affects the active composer immediately; Save persists the same value.
+  appStore.patchSettings({ followUpBehavior: value })
+})
 const notifyOnTurnComplete = shallowRef(appStore.settings.notifyOnTurnComplete !== false)
 const preventSleepWhileRunning = shallowRef(Boolean(appStore.settings.preventSleepWhileRunning))
 const alwaysOnTop = shallowRef(Boolean(appStore.settings.alwaysOnTop))
@@ -381,6 +389,11 @@ const personalityOptions = computed<SelectOption[]>(() => [
 const multiAgentOptions = computed<SelectOption[]>(() => [
   { value: 'explicitRequestOnly', label: t('settings.explicitAgents'), description: t('settings.explicitAgentsHint') },
   { value: 'proactive', label: t('settings.proactiveAgents'), description: t('settings.proactiveAgentsHint') },
+])
+
+const followUpOptions = computed<SelectOption[]>(() => [
+  { value: 'queue', label: t('settings.followUpQueue'), description: t('settings.followUpQueueHint') },
+  { value: 'steer', label: t('settings.followUpSteer'), description: t('settings.followUpSteerHint') },
 ])
 
 /** Official client identities accepted by most Codex reverse-proxy channels. */
@@ -732,6 +745,7 @@ function syncFromStore(): void {
   language.value = settings.language
   autoConnect.value = settings.autoConnect
   sendWithModifier.value = Boolean(settings.sendWithModifier)
+  followUpBehavior.value = settings.followUpBehavior === 'steer' ? 'steer' : 'queue'
   notifyOnTurnComplete.value = settings.notifyOnTurnComplete !== false
   preventSleepWhileRunning.value = Boolean(settings.preventSleepWhileRunning)
   alwaysOnTop.value = Boolean(settings.alwaysOnTop)
@@ -1355,7 +1369,7 @@ async function save(): Promise<void> {
       language: language.value,
       autoConnect: autoConnect.value,
       sendWithModifier: sendWithModifier.value,
-      followUpBehavior: 'queue',
+      followUpBehavior: followUpBehavior.value,
       notifyOnTurnComplete: notifyOnTurnComplete.value,
       preventSleepWhileRunning: preventSleepWhileRunning.value,
       alwaysOnTop: alwaysOnTop.value,
@@ -1601,11 +1615,18 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
                       <p class="text-[13px]">{{ t('settings.followUpBehavior') }}</p>
-                      <p class="text-[11px] text-muted-foreground">{{ t('settings.followUpQueueHint') }}</p>
+                      <p class="text-[11px] text-muted-foreground">{{ t('settings.followUpBehaviorHint') }}</p>
                     </div>
-                    <Badge variant="outline" class="shrink-0 text-[10px]">
-                      {{ t('settings.followUpQueue') }}
-                    </Badge>
+                    <Select v-model="followUpBehavior">
+                      <SelectTrigger class="h-8 w-[190px] text-xs" :aria-label="t('settings.followUpBehavior')">
+                        <SelectValue>{{ selectedOptionLabel(followUpOptions, followUpBehavior) }}</SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="option in followUpOptions" :key="option.value" :value="option.value">
+                          {{ option.label }}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
                   </div>
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">

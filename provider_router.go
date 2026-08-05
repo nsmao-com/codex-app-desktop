@@ -89,6 +89,16 @@ type ProviderRouterUpstreamView struct {
 	RequestCount        int64  `json:"requestCount"`
 }
 
+type ProviderRuntimeView struct {
+	Runtime    string `json:"runtime"`
+	Provider   string `json:"provider"`
+	Name       string `json:"name"`
+	BaseURL    string `json:"baseUrl"`
+	ConfigPath string `json:"configPath"`
+	Source     string `json:"source"`
+	Configured bool   `json:"configured"`
+}
+
 type ProviderRouterView struct {
 	Enabled                  bool                         `json:"enabled"`
 	Running                  bool                         `json:"running"`
@@ -100,6 +110,7 @@ type ProviderRouterView struct {
 	FirstByteTimeoutSeconds  int                          `json:"firstByteTimeoutSeconds"`
 	CodexApplied             bool                         `json:"codexApplied"`
 	LastError                string                       `json:"lastError"`
+	CurrentProviders         []ProviderRuntimeView        `json:"currentProviders"`
 	Upstreams                []ProviderRouterUpstreamView `json:"upstreams"`
 }
 
@@ -509,6 +520,7 @@ func (r *providerRouter) view() ProviderRouterView {
 		FirstByteTimeoutSeconds:  r.config.FirstByteTimeoutSeconds,
 		CodexApplied:             r.config.CodexApplied,
 		LastError:                r.lastError,
+		CurrentProviders:         detectCurrentRuntimeProviders(),
 		Upstreams:                make([]ProviderRouterUpstreamView, 0, len(r.config.Upstreams)),
 	}
 	for _, upstream := range r.config.Upstreams {
@@ -543,6 +555,92 @@ func (r *providerRouter) view() ProviderRouterView {
 			}
 		}
 		view.Upstreams = append(view.Upstreams, entry)
+	}
+	return view
+}
+
+func detectCurrentRuntimeProviders() []ProviderRuntimeView {
+	return []ProviderRuntimeView{detectCurrentCodexProvider(), detectCurrentClaudeProvider()}
+}
+
+func detectCurrentCodexProvider() ProviderRuntimeView {
+	path := codexConfigPath()
+	view := ProviderRuntimeView{
+		Runtime: "codex", Provider: "openai", Name: "OpenAI",
+		ConfigPath: path, Source: "config.toml",
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return view
+	}
+	text := string(payload)
+	providerID := readTOMLString(text, "", "model_provider")
+	if providerID == "" {
+		return view
+	}
+	view.Provider = providerID
+	view.Configured = true
+	section := "model_providers." + providerID
+	view.Name = readTOMLString(text, section, "name")
+	view.BaseURL = readTOMLString(text, section, "base_url")
+	if view.Name == "" {
+		if providerID == providerRouterID {
+			view.Name = "NiceCodex Local Router"
+		} else {
+			view.Name = providerID
+		}
+	}
+	return view
+}
+
+func detectCurrentClaudeProvider() ProviderRuntimeView {
+	path := filepath.Join(resolveClaudeHome(), "settings.json")
+	view := ProviderRuntimeView{
+		Runtime: "claude", Provider: "anthropic", Name: "Anthropic",
+		ConfigPath: path, Source: "settings.json",
+	}
+	raw := readJSONMap(path)
+	if raw != nil {
+		view.Configured = true
+		view.Provider = firstNonEmpty(firstString(raw, "provider", "apiProvider"), view.Provider)
+		if env, ok := raw["env"].(map[string]any); ok {
+			view.Provider = firstNonEmpty(
+				firstString(env, "ANTHROPIC_PROVIDER", "ANTHROPIC_MODEL_PROVIDER"),
+				view.Provider,
+			)
+			view.BaseURL = firstString(env, "ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE")
+		}
+	}
+	if view.BaseURL == "" {
+		view.BaseURL = firstNonEmpty(
+			strings.TrimSpace(os.Getenv("ANTHROPIC_BASE_URL")),
+			strings.TrimSpace(os.Getenv("ANTHROPIC_API_BASE")),
+		)
+		if view.BaseURL != "" {
+			view.Source = "environment"
+			view.Configured = true
+		}
+	}
+	if environmentProvider := firstNonEmpty(
+		strings.TrimSpace(os.Getenv("ANTHROPIC_PROVIDER")),
+		strings.TrimSpace(os.Getenv("ANTHROPIC_MODEL_PROVIDER")),
+	); environmentProvider != "" && (raw == nil || view.Provider == "anthropic") {
+		view.Provider = environmentProvider
+		view.Source = "environment"
+		view.Configured = true
+	}
+	if view.Provider == "anthropic" && view.BaseURL != "" {
+		if parsed, err := url.Parse(view.BaseURL); err == nil && parsed.Hostname() != "" {
+			host := strings.ToLower(parsed.Hostname())
+			if !strings.Contains(host, "anthropic.com") {
+				view.Provider = host
+			}
+		}
+	}
+	if strings.EqualFold(view.Provider, "anthropic") {
+		view.Name = "Anthropic"
+	} else {
+		view.Name = view.Provider
 	}
 	return view
 }
@@ -1089,6 +1187,7 @@ func (s *AppService) ReadProviderRouterConfig() ProviderRouterView {
 			RecoverySuccessThreshold: config.RecoverySuccessThreshold,
 			CooldownSeconds:          config.CooldownSeconds,
 			FirstByteTimeoutSeconds:  config.FirstByteTimeoutSeconds,
+			CurrentProviders:         detectCurrentRuntimeProviders(),
 			Upstreams:                []ProviderRouterUpstreamView{},
 		}
 	}

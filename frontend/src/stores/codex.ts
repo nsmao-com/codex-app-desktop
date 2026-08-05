@@ -6,6 +6,7 @@ import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type {
   SendMessageRequest,
   SessionPreferencesRequest,
+  SteerTurnRequest,
 } from '../../bindings/nice_codex_desktop/models'
 import type { Event as CodexEvent, Status as CodexStatus } from '../../bindings/nice_codex_desktop/internal/codex/models'
 import { useAppStore } from './app'
@@ -189,6 +190,16 @@ export const useCodexStore = defineStore('codex', () => {
   const activeQueuedMessages = computed(() => queuedMessagesByThread.value[activeThreadId.value] ?? [])
   const activeThreadBusy = computed(() => threadIsBusy(activeThreadId.value) || activeQueuedMessages.value.length > 0)
   const activeThreadUsesExternalProvider = computed(() => false)
+  const canSteerActiveTurn = computed(() => {
+    const threadID = activeThreadId.value
+    const turnID = threadTurnID(threadID)
+    if (appStore.settings.followUpBehavior !== 'steer' || !threadID || !turnID || !isReady.value) return false
+    if (threadID.startsWith('pending-thread-') || workspaceStore.switchingWorkspace) return false
+    if (threadHasLoadingBarrier(threadID) || isThreadSubmitting(threadID) || pendingThreadSubmission(threadID)) return false
+    if (!threadIsRunning(threadID) || activeThreadUsesExternalProvider.value) return false
+    if ((queuedMessagesByThread.value[threadID] ?? []).length > 0) return false
+    return !pendingRequests.value.some((request) => sameThreadSession(asString(request.data.threadId), threadID))
+  })
   const activeTurnFeedback = computed(() => threadFeedback(activeThreadId.value))
   const activeTokenUsage = computed(() => tokenUsageByThread.value[activeThreadId.value] ?? null)
   const activeTurnMetrics = computed(() => turnMetricsByThread.value[activeThreadId.value] ?? {})
@@ -833,6 +844,31 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
+  async function recoverActiveThread(): Promise<void> {
+    const threadID = activeThreadId.value
+    if (!threadID) return
+
+    // Invalidate only this conversation's hydration owners. The abandoned Wails
+    // promise may still resolve later, but its sequence can no longer write state.
+    openThreadSequence += 1
+    for (const id of [...loadingSequenceByThread.keys()]) {
+      if (id === threadID || sameThreadSession(id, threadID)) loadingSequenceByThread.delete(id)
+    }
+    for (const id of [...workspaceSelectionSequenceByThread.keys()]) {
+      if (id === threadID || sameThreadSession(id, threadID)) workspaceSelectionSequenceByThread.delete(id)
+    }
+    if (loadingThreadId.value === threadID || sameThreadSession(loadingThreadId.value, threadID)) {
+      loadingThreadId.value = ''
+    }
+    // A running thread's in-memory timeline is newer than thread/resume and is
+    // enough to leave the loading skeleton immediately. Only cache misses need
+    // another backend history read.
+    if ((itemsByThread.value[threadID] ?? []).length > 0 && threadIsBusy(threadID)) {
+      rememberLoadedThread(threadID)
+    }
+    await openThread(threadID)
+  }
+
   async function openProjectThread(path: string, threadID: string): Promise<void> {
     if (!path || !threadID) return
     if (
@@ -1274,8 +1310,9 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function sendMessage(text: string, images: string[] = []): Promise<boolean> {
-    // Normal sends always enter the per-thread FIFO queue. Keep turn/steer as an
-    // explicit API only so a persisted preference can never bypass admission.
+    // Steer only when ownership is unambiguous. Loading, submitting, approvals,
+    // pending ids, or an existing FIFO queue all fall back to safe queue admission.
+    if (canSteerActiveTurn.value) return steerMessage(text, images)
     return enqueueMessage(text, '', images)
   }
 
@@ -1794,6 +1831,42 @@ export const useCodexStore = defineStore('codex', () => {
       return
     }
     await drainThreadQueue(threadID)
+  }
+
+  async function steerMessage(text: string, images: string[] = []): Promise<boolean> {
+    const message = text.trim()
+    const threadID = activeThreadId.value
+    const turnID = activeTurnId.value
+    const imagePaths = uniqueImagePaths(images).slice(0, 4)
+    if ((!message && !imagePaths.length) || !canSteerActiveTurn.value || !threadID || !turnID) return false
+
+    const localItemID = `local-steer-${Date.now()}-${++queuedMessageSequence}`
+    appendItem(threadID, createLocalUserItem(localItemID, message, imagePaths, turnID))
+    setThreadSubmitting(threadID, true)
+    setTurnFeedback(threadID, { state: 'submitting', message: translate('chat.steering'), turnId: turnID })
+    try {
+      await backend.SteerTurn({
+        threadId: threadID,
+        turnId: turnID,
+        text: message,
+        images: imagePaths,
+      } satisfies SteerTurnRequest)
+      setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
+      return true
+    } catch (error) {
+      const message = errorMessage(error)
+      markItemFailed(threadID, localItemID)
+      setTurnFeedback(threadID, { state: 'failed', message, turnId: turnID })
+      notify('error', translate('notifications.steerFailed'), message)
+      trackedTimeout(() => {
+        if (threadTurnID(threadID) === turnID) {
+          setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
+        }
+      }, 1800)
+      return false
+    } finally {
+      setThreadSubmitting(threadID, false)
+    }
   }
 
   async function interruptTurn(): Promise<void> {
@@ -4156,6 +4229,7 @@ export const useCodexStore = defineStore('codex', () => {
     activeQueuedMessages,
     activeThreadBusy,
     activeThreadUsesExternalProvider,
+    canSteerActiveTurn,
     activeTurnFeedback,
     activeTokenUsage,
     activeTurnMetrics,
@@ -4181,6 +4255,7 @@ export const useCodexStore = defineStore('codex', () => {
     isThreadPinned,
     toggleThreadPin,
     openThread,
+    recoverActiveThread,
     loadEarlierHistory,
     openProjectThread,
     switchProject,
@@ -4207,6 +4282,7 @@ export const useCodexStore = defineStore('codex', () => {
     startReview,
     rollbackToTurn,
     sendMessage,
+    steerMessage,
     retryMessage,
     retryLastMessage,
     removeQueuedMessage,

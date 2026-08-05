@@ -1071,6 +1071,22 @@ export const useClaudeStore = defineStore('claude', () => {
     }
   }
 
+  async function recoverActiveSession(): Promise<void> {
+    const sessionId = activeSessionId.value
+    if (!sessionId) return
+    const related = [...new Set([
+      sessionId,
+      ...sessionOpenSequence.keys(),
+      ...loadingSequenceBySession.keys(),
+    ])].filter((id) => sameClaudeSession(id, sessionId))
+    for (const id of related) {
+      sessionOpenSequence.set(id, (sessionOpenSequence.get(id) || 0) + 1)
+      loadingSequenceBySession.delete(id)
+    }
+    if (sameClaudeSession(loadingSessionId.value, sessionId)) loadingSessionId.value = ''
+    await openSession(sessionId)
+  }
+
   async function hydrateSessionTokenUsage(sessionId: string): Promise<void> {
     if (!sessionId || sessionId.startsWith('pending-claude-')) return
     try {
@@ -2228,6 +2244,7 @@ export const useClaudeStore = defineStore('claude', () => {
     loadSessions,
     loadArchivedSessions,
     openSession,
+    recoverActiveSession,
     loadEarlierHistory,
     newSession,
     sendMessage,

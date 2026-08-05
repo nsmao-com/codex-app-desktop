@@ -529,7 +529,18 @@ export interface ProviderRouterView {
     "firstByteTimeoutSeconds": number;
     "codexApplied": boolean;
     "lastError": string;
+    "currentProviders": ProviderRuntimeView[] | null;
     "upstreams": ProviderRouterUpstreamView[] | null;
+}
+
+export interface ProviderRuntimeView {
+    "runtime": string;
+    "provider": string;
+    "name": string;
+    "baseUrl": string;
+    "configPath": string;
+    "source": string;
+    "configured": boolean;
 }
 
 export interface ReviewStartRequest {

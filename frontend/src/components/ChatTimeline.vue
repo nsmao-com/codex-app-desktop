@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowDown, ChevronsDown, ChevronsUp, LoaderCircle } from '@lucide/vue'
+import { ArrowDown, ChevronsDown, ChevronsUp, LoaderCircle, RefreshCw } from '@lucide/vue'
 import { computed, nextTick, onMounted, onUnmounted, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -67,6 +67,8 @@ const renderWindowStart = shallowRef(0)
 const renderWindowEnd = shallowRef(0)
 const showJumpBottom = shallowRef(false)
 const stickToBottom = shallowRef(true)
+const loadTakingLong = shallowRef(false)
+const recoveringThread = shallowRef(false)
 /** Distance past which we treat the user as having left the bottom (no sticky snap-back). */
 const UNSTICK_DISTANCE = 48
 /** Re-enable sticky only when the viewport is essentially flush with the bottom. */
@@ -80,6 +82,7 @@ let lastTouchY = 0
 let resizeScrollCooldownUntil = 0
 /** Delayed re-pin timers after thread open / layout settle. */
 const settleFollowUpTimers: number[] = []
+let loadTakingLongTimer: number | null = null
 
 const isLoading = timelineLoading
 const historyHasEarlier = computed(() => {
@@ -379,6 +382,42 @@ function clearSettleFollowUps(): void {
   while (settleFollowUpTimers.length) {
     const id = settleFollowUpTimers.pop()
     if (id !== undefined) window.clearTimeout(id)
+  }
+}
+
+function clearLoadTakingLongTimer(): void {
+  if (loadTakingLongTimer !== null) window.clearTimeout(loadTakingLongTimer)
+  loadTakingLongTimer = null
+}
+
+function scheduleLoadRecovery(): void {
+  clearLoadTakingLongTimer()
+  loadTakingLong.value = false
+  const requestedThreadId = timelineThreadId.value
+  if (!requestedThreadId || !isLoading.value) return
+  loadTakingLongTimer = window.setTimeout(() => {
+    loadTakingLongTimer = null
+    if (isLoading.value && timelineThreadId.value === requestedThreadId) loadTakingLong.value = true
+  }, 8000)
+}
+
+async function recoverCurrentThread(): Promise<void> {
+  if (recoveringThread.value || !timelineThreadId.value) return
+  recoveringThread.value = true
+  loadTakingLong.value = false
+  try {
+    const recovery = appStore.isGrokMode
+      ? grokStore.recoverActiveSession()
+      : appStore.isClaudeMode
+        ? claudeStore.recoverActiveSession()
+        : codexStore.recoverActiveThread()
+    await Promise.race([
+      recovery,
+      new Promise<void>((resolve) => window.setTimeout(resolve, 10000)),
+    ])
+  } finally {
+    recoveringThread.value = false
+    if (isLoading.value) scheduleLoadRecovery()
   }
 }
 
@@ -746,6 +785,7 @@ watch(
     // An explicit send always returns the user to the latest context. Subsequent
     // background streaming still respects a manual scroll away from the bottom.
     stickToBottom.value = true
+    markProgrammaticScroll(1200)
     resetRenderWindowToLatest()
     void settleToBottom({ maxFrames: 20, followUp: true })
   },
@@ -789,16 +829,25 @@ watch(timelineThreadId, () => {
   renderWindowStart.value = 0
   renderWindowEnd.value = 0
   stickToBottom.value = true
+  markProgrammaticScroll(1500)
+  scheduleLoadRecovery()
   // Do not pin to skeleton/mid-layout: wait for load, then long settle + follow-ups.
   void settleToBottom({ waitForLoad: true, maxFrames: 48, followUp: true })
-})
+}, { flush: 'post' })
 watch(isLoading, (loading, wasLoading) => {
+  if (loading) scheduleLoadRecovery()
+  else {
+    clearLoadTakingLongTimer()
+    loadTakingLong.value = false
+    recoveringThread.value = false
+  }
   if (wasLoading && !loading) {
     stickToBottom.value = true
+    markProgrammaticScroll(1500)
     resetRenderWindowToLatest()
     void settleToBottom({ maxFrames: 48, followUp: true })
   }
-})
+}, { flush: 'post', immediate: true })
 /**
  * When a turn ends, final reply + file list may expand layout.
  * Prefer settling to bottom if the user was following (or still near the end),
@@ -843,6 +892,9 @@ onMounted(() => {
   area?.addEventListener('touchmove', onTouchMove, { passive: true })
   area?.addEventListener('keydown', onKeyDown)
   if (timelineThreadId.value) {
+    stickToBottom.value = true
+    markProgrammaticScroll(1500)
+    resetRenderWindowToLatest()
     void settleToBottom({ waitForLoad: true, maxFrames: 48, followUp: true })
   }
 })
@@ -850,6 +902,7 @@ onMounted(() => {
 onUnmounted(() => {
   settleToken += 1
   clearSettleFollowUps()
+  clearLoadTakingLongTimer()
   resizeObserver?.disconnect()
   resizeObserver = null
   const area = scrollAreaRef.value
@@ -880,6 +933,29 @@ onUnmounted(() => {
               <Skeleton class="h-3 w-[88%] rounded" />
               <Skeleton class="h-3 w-[60%] rounded" />
             </div>
+          </div>
+          <div
+            v-if="loadTakingLong || recoveringThread"
+            class="flex flex-col items-start gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between"
+            role="status"
+            aria-live="polite"
+          >
+            <p class="max-w-lg text-[11px] leading-5 text-muted-foreground">
+              {{ $t('chat.loadingThreadSlow') }}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              class="h-8 shrink-0 text-xs"
+              :disabled="recoveringThread"
+              :aria-busy="recoveringThread"
+              @click="recoverCurrentThread"
+            >
+              <LoaderCircle v-if="recoveringThread" :size="13" class="mr-1.5 animate-spin" />
+              <RefreshCw v-else :size="13" class="mr-1.5" />
+              {{ recoveringThread ? $t('chat.recoveringThread') : $t('chat.recoverThread') }}
+            </Button>
           </div>
         </div>
 

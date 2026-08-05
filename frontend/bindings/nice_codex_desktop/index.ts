@@ -54,6 +54,7 @@ export type {
     ProviderRouterUpstreamInput,
     ProviderRouterUpstreamView,
     ProviderRouterView,
+    ProviderRuntimeView,
     ReviewStartRequest,
     ScheduledTask,
     SendMessageRequest,

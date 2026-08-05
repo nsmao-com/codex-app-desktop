@@ -136,7 +136,7 @@ export function ImportMCPServers(request: $models.MCPServersImportRequest): $Can
 }
 
 /**
- * InstallCLITool installs or upgrades a CLI via pnpm/npm (global).
+ * InstallCLITool installs or upgrades a CLI via pnpm (global).
  */
 export function InstallCLITool(toolID: string): $CancellablePromise<$models.CLIToolActionResult> {
     return $Call.ByID(1201058047, toolID);

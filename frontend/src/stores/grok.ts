@@ -1768,6 +1768,23 @@ export const useGrokStore = defineStore('grok', () => {
     }
   }
 
+  async function recoverActiveSession(): Promise<void> {
+    const sessionId = activeSessionId.value
+    if (!sessionId) return
+    const related = [...new Set([
+      sessionId,
+      ...sessionOpenSequence.keys(),
+      ...loadingSequenceBySession.keys(),
+    ])].filter((id) => sameGrokSession(id, sessionId))
+
+    for (const id of related) {
+      sessionOpenSequence.set(id, (sessionOpenSequence.get(id) || 0) + 1)
+      loadingSequenceBySession.delete(id)
+    }
+    if (sameGrokSession(loadingSessionId.value, sessionId)) loadingSessionId.value = ''
+    await openSession(sessionId)
+  }
+
   function setGrokHistoryState(
     sessionId: string,
     backend: 'build' | 'api',
@@ -2627,6 +2644,7 @@ export const useGrokStore = defineStore('grok', () => {
     loadSessions,
     loadArchivedSessions,
     openSession,
+    recoverActiveSession,
     loadEarlierHistory,
     newSession,
     sendMessage,
