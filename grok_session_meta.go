@@ -287,7 +287,7 @@ func (s *AppService) ArchiveGrokSession(backend, sessionID string) error {
 		}
 	}
 
-	return s.withGrokMeta(func(meta *grokMetaFile) error {
+	err := s.withGrokMeta(func(meta *grokMetaFile) error {
 		if name := strings.TrimSpace(meta.Names[sessionID]); name != "" {
 			summary.Name = name
 		}
@@ -295,6 +295,10 @@ func (s *AppService) ArchiveGrokSession(backend, sessionID string) error {
 		meta.Archived[sessionID] = summary
 		return nil
 	})
+	if err == nil {
+		s.dropGrokHistoryCache(sessionID)
+	}
+	return err
 }
 
 // UnarchiveGrokSession restores a session to the main list.

@@ -4,6 +4,8 @@ import {
   ArrowLeft,
   Blocks,
   Bot,
+  Braces,
+  FileUp,
   FlaskConical,
   LoaderCircle,
   Pencil,
@@ -17,7 +19,7 @@ import {
   Unplug,
   Webhook,
 } from '@lucide/vue'
-import { computed, onMounted, shallowRef, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -29,10 +31,17 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
-import { useAppStore, useCapabilitiesStore, useClaudeStore, useGrokStore } from '@/stores'
+import { useAppStore, useCapabilitiesStore, useClaudeStore, useDialogStore, useGrokStore } from '@/stores'
 import {
   openClaudeConfigFile,
   openClaudeHome,
@@ -47,7 +56,7 @@ import {
   type GrokCapabilitiesCatalog,
 } from '@/utils/grokBindings'
 import { notify } from '@/utils/notify'
-import { parseMCPImportJSON } from '@/utils/mcpImport'
+import { MCP_IMPORT_MAX_LENGTH, parseMCPImportJSON, type ImportedMCPServer } from '@/utils/mcpImport'
 
 type CapabilityTab = 'plugins' | 'skills' | 'apps' | 'mcp' | 'automation'
 type GrokCapTab = 'runtime' | 'mcp' | 'skills' | 'plugins' | 'instructions'
@@ -59,6 +68,7 @@ const appStore = useAppStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
 const capabilitiesStore = useCapabilitiesStore()
+const dialogStore = useDialogStore()
 const { t } = useI18n()
 const isGrokMode = computed(() => appStore.isGrokMode)
 const isClaudeMode = computed(() => appStore.isClaudeMode)
@@ -110,22 +120,45 @@ const PAGE_SIZE = 40
 const visibleLimit = shallowRef<Record<CapabilityTab, number>>({ plugins: PAGE_SIZE, skills: PAGE_SIZE, apps: PAGE_SIZE, mcp: PAGE_SIZE, automation: PAGE_SIZE })
 const mcpEditorOpen = shallowRef(false)
 const mcpImportOpen = shallowRef(false)
-const mcpImportJSON = shallowRef(`{
-  "mcpServers": {
-    "example": {
-      "command": "npx",
-      "args": ["-y", "mcp-server-example"]
-    }
-  }
-}`)
-const mcpForm = shallowRef({
+const mcpImportMode = shallowRef<'visual' | 'json'>('visual')
+const mcpImportJSON = shallowRef('')
+const mcpImportPreview = shallowRef<ImportedMCPServer[]>([])
+const mcpImportError = shallowRef('')
+const mcpImportSource = shallowRef('')
+const mcpImportParsing = shallowRef(false)
+const mcpImportFileInput = shallowRef<HTMLInputElement | null>(null)
+let mcpImportParseTimer = 0
+const mcpForm = ref({
+  originalName: '',
   name: '',
   enabled: true,
+  kind: 'command' as 'command' | 'url',
   command: '',
-  args: '',
+  args: [] as string[],
   url: '',
-  transport: 'http',
+  transport: 'stdio',
+  env: [] as Array<{ id: string, key: string, value: string }>,
 })
+const mcpFormValid = computed(() => {
+  const form = mcpForm.value
+  const name = form.name.trim()
+  if (!name || name.length > 120 || /[\r\n]/.test(name)) return false
+  if (form.kind === 'url') {
+    try {
+      const url = new URL(form.url.trim())
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+    } catch {
+      return false
+    }
+  } else if (!form.command.trim() || form.command.length > 2048 || form.args.length > 128) {
+    return false
+  }
+  const envKeys = form.env.map((entry) => entry.key.trim()).filter(Boolean)
+  return new Set(envKeys).size === envKeys.length
+    && form.env.length <= 128
+    && form.env.every((entry) => entry.key.length <= 256 && entry.value.length <= 16_384)
+})
+const mcpImportValid = computed(() => !mcpImportParsing.value && !mcpImportError.value && mcpImportPreview.value.length > 0)
 
 const tabs = computed(() => [
   { value: 'plugins' as const, label: t('capabilities.plugins'), icon: Blocks, count: capabilitiesStore.plugins.length },
@@ -346,44 +379,176 @@ function grokScopeLabel(scope: string): string {
 
 function openMcpEditor(server?: MCPServerView): void {
   mcpImportOpen.value = false
+  const env = Object.entries(server?.env ?? {}).map(([key, value]) => ({
+    id: crypto.randomUUID(),
+    key,
+    value,
+  }))
   mcpForm.value = {
+    originalName: server?.name ?? '',
     name: server?.name ?? '',
     enabled: server?.enabled ?? true,
+    kind: server?.url ? 'url' : 'command',
     command: server?.command ?? '',
-    args: (server?.args ?? []).join(' '),
+    args: [...(server?.args ?? [])],
     url: server?.url ?? '',
-    transport: server?.transport || 'http',
+    transport: server?.transport || (server?.url ? 'http' : 'stdio'),
+    env,
   }
   mcpEditorOpen.value = true
 }
 
+function addMcpArgument(): void {
+  mcpForm.value.args.push('')
+}
+
+function removeMcpArgument(index: number): void {
+  mcpForm.value.args.splice(index, 1)
+}
+
+function addMcpEnvironmentVariable(): void {
+  mcpForm.value.env.push({ id: crypto.randomUUID(), key: '', value: '' })
+}
+
+function removeMcpEnvironmentVariable(id: string): void {
+  mcpForm.value.env = mcpForm.value.env.filter((entry) => entry.id !== id)
+}
+
 async function saveMcpEditor(): Promise<void> {
   const form = mcpForm.value
+  const env = Object.fromEntries(
+    form.env
+      .map((entry) => [entry.key.trim(), entry.value] as const)
+      .filter(([key]) => key),
+  )
   const ok = await capabilitiesStore.upsertMCPServer({
     name: form.name.trim(),
     enabled: form.enabled,
-    command: form.command.trim(),
-    args: form.args.trim().split(/\s+/).filter(Boolean),
-    url: form.url.trim(),
+    command: form.kind === 'command' ? form.command.trim() : '',
+    args: form.kind === 'command' ? form.args.map((arg) => arg.trim()).filter(Boolean) : [],
+    url: form.kind === 'url' ? form.url.trim() : '',
     transport: form.transport.trim(),
+    env,
   })
   if (ok) mcpEditorOpen.value = false
 }
 
 function openMcpImport(): void {
   mcpEditorOpen.value = false
+  mcpImportMode.value = 'visual'
   mcpImportOpen.value = true
 }
 
-async function saveMcpImport(): Promise<void> {
-  try {
-    parseMCPImportJSON(mcpImportJSON.value)
-  } catch (error) {
-    notify('error', t('capabilities.mcpImportFailed'), error instanceof Error ? error.message : t('notifications.unexpected'))
+watch(mcpImportJSON, (raw) => {
+  if (mcpImportParseTimer) window.clearTimeout(mcpImportParseTimer)
+  mcpImportParseTimer = 0
+  mcpImportParsing.value = false
+  mcpImportPreview.value = []
+  mcpImportError.value = ''
+  if (!raw.trim()) {
     return
   }
-  const saved = await capabilitiesStore.importMCPServersJSON(mcpImportJSON.value)
-  if (saved > 0) mcpImportOpen.value = false
+  mcpImportParsing.value = true
+  mcpImportParseTimer = window.setTimeout(() => {
+    mcpImportParseTimer = 0
+    try {
+      mcpImportPreview.value = parseMCPImportJSON(raw)
+    } catch (error) {
+      mcpImportPreview.value = []
+      mcpImportError.value = error instanceof Error ? error.message : t('notifications.unexpected')
+    } finally {
+      mcpImportParsing.value = false
+    }
+  }, 180)
+})
+
+function onMcpImportPaste(event: ClipboardEvent): void {
+  const pasted = event.clipboardData?.getData('text') ?? ''
+  const target = event.currentTarget as HTMLTextAreaElement | null
+  const selected = target ? Math.max(0, (target.selectionEnd ?? 0) - (target.selectionStart ?? 0)) : 0
+  if (mcpImportJSON.value.length - selected + pasted.length <= MCP_IMPORT_MAX_LENGTH) return
+  event.preventDefault()
+  if (mcpImportParseTimer) window.clearTimeout(mcpImportParseTimer)
+  mcpImportParseTimer = 0
+  mcpImportParsing.value = false
+  mcpImportPreview.value = []
+  mcpImportError.value = t('capabilities.mcpImportFileTooLarge')
+}
+
+onUnmounted(() => {
+  if (mcpImportParseTimer) window.clearTimeout(mcpImportParseTimer)
+})
+
+watch(() => mcpForm.value.kind, (kind) => {
+  if (kind === 'command') {
+    mcpForm.value.transport = 'stdio'
+  } else if (mcpForm.value.transport === 'stdio' || !mcpForm.value.transport) {
+    mcpForm.value.transport = 'http'
+  }
+})
+
+async function readMcpImportFile(file: File | undefined): Promise<void> {
+  if (!file) return
+  if (mcpImportParseTimer) window.clearTimeout(mcpImportParseTimer)
+  mcpImportParseTimer = 0
+  mcpImportParsing.value = false
+  if (file.size > MCP_IMPORT_MAX_LENGTH) {
+    mcpImportSource.value = file.name
+    mcpImportPreview.value = []
+    mcpImportError.value = t('capabilities.mcpImportFileTooLarge')
+    return
+  }
+  try {
+    mcpImportSource.value = file.name
+    const text = await file.text()
+    if (mcpImportJSON.value !== text) {
+      mcpImportJSON.value = text
+      return
+    }
+    // Selecting the same file again does not trigger the watcher; re-parse it
+    // so a previous file-size/read error cannot leave the import action stuck.
+    mcpImportError.value = ''
+    mcpImportPreview.value = parseMCPImportJSON(text)
+  } catch (error) {
+    mcpImportPreview.value = []
+    mcpImportError.value = error instanceof Error ? error.message : t('notifications.unexpected')
+  }
+}
+
+function onMcpImportFile(event: Event): void {
+  const input = event.target as HTMLInputElement
+  void readMcpImportFile(input.files?.[0])
+  input.value = ''
+}
+
+function onMcpImportDrop(event: DragEvent): void {
+  void readMcpImportFile(event.dataTransfer?.files?.[0])
+}
+
+function chooseMcpImportFile(): void {
+  mcpImportFileInput.value?.click()
+}
+
+async function saveMcpImport(): Promise<void> {
+  if (!mcpImportValid.value) return
+  const saved = await capabilitiesStore.importMCPServers(mcpImportPreview.value)
+  if (saved > 0) {
+    mcpImportJSON.value = ''
+    mcpImportPreview.value = []
+    mcpImportError.value = ''
+    mcpImportSource.value = ''
+    mcpImportOpen.value = false
+  }
+}
+
+async function deleteMcpServer(server: MCPServerView): Promise<void> {
+  const confirmed = await dialogStore.confirm({
+    title: t('capabilities.deleteMcp'),
+    description: t('capabilities.deleteMcpConfirm', { name: server.title || server.name }),
+    confirmLabel: t('common.delete'),
+    destructive: true,
+  })
+  if (confirmed) await capabilitiesStore.deleteMCPServer(server.name)
 }
 </script>
 
@@ -1014,46 +1179,178 @@ async function saveMcpImport(): Promise<void> {
 
             <TabsContent value="mcp" class="mt-0 space-y-3">
               <Card v-if="mcpImportOpen" class="gap-0 rounded-md py-0 shadow-none">
-                <CardContent class="space-y-3 py-3">
-                  <div class="space-y-1">
-                    <Label class="text-[11px]">{{ t('capabilities.importMcpJson') }}</Label>
-                    <p class="text-[10px] text-muted-foreground">{{ t('capabilities.importMcpJsonHint') }}</p>
+                <CardContent class="space-y-4 py-4">
+                  <div class="flex items-start justify-between gap-3">
+                    <div>
+                      <Label class="text-xs">{{ t('capabilities.importMcpTitle') }}</Label>
+                      <p class="mt-1 text-[10px] leading-4 text-muted-foreground">{{ t('capabilities.importMcpJsonHint') }}</p>
+                    </div>
+                    <div class="flex rounded-lg bg-muted p-0.5">
+                      <Button
+                        type="button"
+                        size="xs"
+                        :variant="mcpImportMode === 'visual' ? 'secondary' : 'ghost'"
+                        class="h-7 px-2 text-[10px]"
+                        @click="mcpImportMode = 'visual'"
+                      >
+                        <FileUp :size="12" class="mr-1" />
+                        {{ t('capabilities.mcpImportFile') }}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="xs"
+                        :variant="mcpImportMode === 'json' ? 'secondary' : 'ghost'"
+                        class="h-7 px-2 text-[10px]"
+                        @click="mcpImportMode = 'json'"
+                      >
+                        <Braces :size="12" class="mr-1" />
+                        JSON
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div
+                    v-if="mcpImportMode === 'visual'"
+                    class="rounded-lg border border-dashed bg-muted/20 px-4 py-6 text-center"
+                    @dragover.prevent
+                    @drop.prevent="onMcpImportDrop"
+                  >
+                    <input
+                      ref="mcpImportFileInput"
+                      type="file"
+                      accept=".json,application/json"
+                      class="hidden"
+                      @change="onMcpImportFile"
+                    >
+                    <FileUp :size="22" class="mx-auto text-muted-foreground" />
+                    <p class="mt-2 text-[11px] font-medium">{{ t('capabilities.mcpImportDrop') }}</p>
+                    <p class="mt-1 text-[10px] text-muted-foreground">{{ t('capabilities.mcpImportFileHint') }}</p>
+                    <Button type="button" variant="outline" size="sm" class="mt-3 h-8" @click="chooseMcpImportFile">
+                      {{ t('capabilities.mcpImportChoose') }}
+                    </Button>
+                  </div>
+
+                  <div v-else class="space-y-1.5">
                     <Textarea
                       v-model="mcpImportJSON"
-                      class="min-h-40 font-mono text-[11px] leading-5"
+                      class="min-h-44 font-mono text-[11px] leading-5"
                       :placeholder="t('capabilities.importMcpJsonPlaceholder')"
+                      :maxlength="MCP_IMPORT_MAX_LENGTH"
+                      spellcheck="false"
+                      @paste="onMcpImportPaste"
                     />
+                    <p class="text-[10px] text-muted-foreground">{{ t('capabilities.mcpImportRawSafety') }}</p>
+                  </div>
+
+                  <div v-if="mcpImportError" class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive" role="alert">
+                    {{ mcpImportError }}
+                  </div>
+
+                  <div v-else-if="mcpImportParsing" class="flex items-center gap-2 rounded-md bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground" role="status">
+                    <LoaderCircle :size="13" class="animate-spin" />
+                    {{ t('common.loading') }}
+                  </div>
+
+                  <div v-if="mcpImportPreview.length" class="space-y-2">
+                    <div class="flex items-center justify-between gap-2">
+                      <p class="text-[11px] font-medium">{{ t('capabilities.mcpImportPreview', { count: mcpImportPreview.length }) }}</p>
+                      <span v-if="mcpImportSource" class="max-w-56 truncate text-[10px] text-muted-foreground">{{ mcpImportSource }}</span>
+                    </div>
+                    <div class="max-h-48 space-y-1 overflow-y-auto rounded-lg border p-1.5">
+                      <div v-for="server in mcpImportPreview" :key="server.name" class="flex items-center gap-2 rounded-md px-2 py-1.5 text-[11px] hover:bg-muted/40">
+                        <Badge variant="outline" class="shrink-0 text-[9px]">{{ server.url ? 'HTTP' : 'STDIO' }}</Badge>
+                        <span class="min-w-0 flex-1 truncate font-medium">{{ server.name }}</span>
+                        <span class="max-w-[48%] truncate font-mono text-[9px] text-muted-foreground">{{ server.url || server.command }}</span>
+                      </div>
+                    </div>
                   </div>
                   <div class="flex items-center justify-end gap-2">
                     <Button variant="ghost" size="sm" @click="mcpImportOpen = false">{{ t('common.cancel') }}</Button>
-                    <Button size="sm" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="saveMcpImport">
-                      {{ t('capabilities.importMcpJsonSave') }}
+                    <Button size="sm" :disabled="!mcpImportValid || capabilitiesStore.capabilityMutation !== ''" @click="saveMcpImport">
+                      {{ t('capabilities.mcpImportConfirm', { count: mcpImportPreview.length }) }}
                     </Button>
                   </div>
                 </CardContent>
               </Card>
               <Card v-if="mcpEditorOpen" class="gap-0 rounded-md py-0 shadow-none">
-                <CardContent class="space-y-3 py-3">
+                <CardContent class="space-y-4 py-4">
                   <div class="grid gap-2 sm:grid-cols-2">
                     <div class="space-y-1">
                       <Label class="text-[11px]">{{ t('capabilities.mcpName') }}</Label>
-                      <Input v-model="mcpForm.name" class="h-8 text-xs" />
+                      <Input v-model="mcpForm.name" class="h-8 text-xs" maxlength="120" :disabled="Boolean(mcpForm.originalName)" />
                     </div>
                     <div class="space-y-1">
-                      <Label class="text-[11px]">{{ t('capabilities.mcpTransport') }}</Label>
-                      <Input v-model="mcpForm.transport" class="h-8 text-xs" placeholder="stdio / http" />
+                      <Label class="text-[11px]">{{ t('capabilities.mcpConnectionType') }}</Label>
+                      <Select v-model="mcpForm.kind">
+                        <SelectTrigger class="h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="command">{{ t('capabilities.mcpLocalCommand') }}</SelectItem>
+                          <SelectItem value="url">{{ t('capabilities.mcpRemoteUrl') }}</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
-                    <div class="space-y-1 sm:col-span-2">
+                    <div v-if="mcpForm.kind === 'command'" class="space-y-1 sm:col-span-2">
                       <Label class="text-[11px]">{{ t('capabilities.mcpCommand') }}</Label>
-                      <Input v-model="mcpForm.command" class="h-8 text-xs" />
+                      <Input v-model="mcpForm.command" class="h-8 font-mono text-xs" maxlength="2048" placeholder="npx" />
                     </div>
-                    <div class="space-y-1 sm:col-span-2">
-                      <Label class="text-[11px]">{{ t('capabilities.mcpArgs') }}</Label>
-                      <Input v-model="mcpForm.args" class="h-8 text-xs" />
+                    <div v-if="mcpForm.kind === 'command'" class="space-y-2 sm:col-span-2">
+                      <div class="flex items-center justify-between gap-2">
+                        <Label class="text-[11px]">{{ t('capabilities.mcpArgs') }}</Label>
+                        <Button type="button" variant="ghost" size="xs" class="h-6 text-[10px]" @click="addMcpArgument">
+                          <Plus :size="11" class="mr-1" />{{ t('capabilities.mcpAddArg') }}
+                        </Button>
+                      </div>
+                      <div v-if="mcpForm.args.length" class="space-y-1.5">
+                        <div v-for="(_, index) in mcpForm.args" :key="index" class="flex gap-1.5">
+                          <Input v-model="mcpForm.args[index]" class="h-8 flex-1 font-mono text-xs" maxlength="4096" :placeholder="`arg ${index + 1}`" />
+                          <Button type="button" variant="ghost" size="icon-sm" :aria-label="t('common.delete')" @click="removeMcpArgument(index)">
+                            <Trash2 :size="12" />
+                          </Button>
+                        </div>
+                      </div>
+                      <p v-else class="text-[10px] text-muted-foreground">{{ t('capabilities.mcpArgsEmpty') }}</p>
                     </div>
-                    <div class="space-y-1 sm:col-span-2">
+                    <div v-if="mcpForm.kind === 'url'" class="space-y-1 sm:col-span-2">
                       <Label class="text-[11px]">{{ t('capabilities.mcpUrl') }}</Label>
-                      <Input v-model="mcpForm.url" class="h-8 text-xs" />
+                      <Input v-model="mcpForm.url" type="url" class="h-8 font-mono text-xs" maxlength="4096" placeholder="https://example.com/mcp" />
+                    </div>
+                    <div class="space-y-1 sm:col-span-2">
+                      <Label class="text-[11px]">{{ t('capabilities.mcpTransport') }}</Label>
+                      <Select v-model="mcpForm.transport">
+                        <SelectTrigger class="h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-if="mcpForm.kind === 'command'" value="stdio">stdio</SelectItem>
+                          <template v-else>
+                            <SelectItem value="http">HTTP</SelectItem>
+                            <SelectItem value="sse">SSE</SelectItem>
+                          </template>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  <div class="space-y-2 border-t pt-3">
+                    <div class="flex items-center justify-between gap-2">
+                      <div>
+                        <Label class="text-[11px]">{{ t('capabilities.mcpEnvironment') }}</Label>
+                        <p class="text-[10px] text-muted-foreground">{{ t('capabilities.mcpEnvironmentHint') }}</p>
+                      </div>
+                      <Button type="button" variant="outline" size="xs" class="h-7 text-[10px]" @click="addMcpEnvironmentVariable">
+                        <Plus :size="11" class="mr-1" />{{ t('capabilities.mcpAddEnvironment') }}
+                      </Button>
+                    </div>
+                    <div v-if="mcpForm.env.length" class="space-y-1.5">
+                      <div v-for="entry in mcpForm.env" :key="entry.id" class="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)_32px] gap-1.5">
+                        <Input v-model="entry.key" class="h-8 font-mono text-xs" maxlength="256" placeholder="API_KEY" />
+                        <Input v-model="entry.value" class="h-8 font-mono text-xs" maxlength="16384" :placeholder="t('capabilities.mcpEnvironmentValue')" />
+                        <Button type="button" variant="ghost" size="icon-sm" :aria-label="t('common.delete')" @click="removeMcpEnvironmentVariable(entry.id)">
+                          <Trash2 :size="12" />
+                        </Button>
+                      </div>
                     </div>
                   </div>
                   <div class="flex items-center justify-between gap-2">
@@ -1066,7 +1363,7 @@ async function saveMcpImport(): Promise<void> {
                     </label>
                     <div class="flex gap-2">
                       <Button size="sm" variant="ghost" @click="mcpEditorOpen = false">{{ t('common.cancel') }}</Button>
-                      <Button size="sm" :disabled="!mcpForm.name.trim() || capabilitiesStore.capabilityMutation !== ''" @click="saveMcpEditor">
+                      <Button size="sm" :disabled="!mcpFormValid || capabilitiesStore.capabilityMutation !== ''" @click="saveMcpEditor">
                         {{ t('capabilities.saveMcp') }}
                       </Button>
                     </div>
@@ -1096,10 +1393,10 @@ async function saveMcpImport(): Promise<void> {
                     <Button v-if="server.enabled && server.authStatus === 'notLoggedIn'" size="sm" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="capabilitiesStore.startMCPLogin(server.name)">
                       {{ t('capabilities.connect') }}
                     </Button>
-                    <Button size="icon-sm" variant="ghost" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="openMcpEditor(server)">
+                    <Button size="icon-sm" variant="ghost" :aria-label="t('capabilities.editMcp')" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="openMcpEditor(server)">
                       <Pencil :size="13" />
                     </Button>
-                    <Button size="icon-sm" variant="ghost" class="text-destructive" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="capabilitiesStore.deleteMCPServer(server.name)">
+                    <Button size="icon-sm" variant="ghost" class="text-destructive" :aria-label="t('capabilities.deleteMcp')" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="deleteMcpServer(server)">
                       <Trash2 :size="13" />
                     </Button>
                   </div>
@@ -1168,11 +1465,19 @@ async function saveMcpImport(): Promise<void> {
             </div>
             <div v-else-if="(activeTab === 'plugins' && plugins.length === 0) || (activeTab === 'skills' && skills.length === 0) || (activeTab === 'apps' && apps.length === 0) || (activeTab === 'mcp' && mcpServers.length === 0)" class="grid min-h-48 place-items-center text-center text-xs text-muted-foreground">
               <div>
-                <Blocks :size="24" class="mx-auto mb-2 text-primary" />
-                <p>{{ activeError || t('capabilities.empty') }}</p>
-                <Button class="mt-3" size="sm" variant="outline" :disabled="capabilitiesStore.capabilitiesLoading" @click="capabilitiesStore.loadCapabilities(true)">
-                  <RefreshCw :size="13" class="mr-1.5" />
-                  {{ t('common.retry') }}
+                <PlugZap v-if="activeTab === 'mcp'" :size="24" class="mx-auto mb-2 text-primary" />
+                <Blocks v-else :size="24" class="mx-auto mb-2 text-primary" />
+                <p>{{ activeError || (activeTab === 'mcp' ? t('capabilities.mcpEmpty') : t('capabilities.empty')) }}</p>
+                <div v-if="activeTab === 'mcp' && !activeError" class="mt-3 flex justify-center gap-2">
+                  <Button size="sm" variant="outline" @click="openMcpEditor()">
+                    <Plus :size="13" class="mr-1.5" />{{ t('capabilities.addMcp') }}
+                  </Button>
+                  <Button size="sm" variant="outline" @click="openMcpImport">
+                    <FileUp :size="13" class="mr-1.5" />{{ t('capabilities.importMcpJson') }}
+                  </Button>
+                </div>
+                <Button v-else class="mt-3" size="sm" variant="outline" :disabled="capabilitiesStore.capabilitiesLoading" @click="capabilitiesStore.loadCapabilities(true)">
+                  <RefreshCw :size="13" class="mr-1.5" />{{ t('common.retry') }}
                 </Button>
               </div>
             </div>

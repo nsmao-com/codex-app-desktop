@@ -13,7 +13,7 @@ import {
   normalizePlugins,
   normalizeSkills,
 } from '../utils/capabilities'
-import { parseMCPImportJSON } from '../utils/mcpImport'
+import { parseMCPImportJSON, type ImportedMCPServer } from '../utils/mcpImport'
 import { asRecord, asString } from '../utils/protocol'
 import { useAppStore } from './app'
 
@@ -267,14 +267,13 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
     }
   }
 
-  async function importMCPServersJSON(raw: string): Promise<number> {
+  async function importMCPServers(servers: ImportedMCPServer[]): Promise<number> {
     if (capabilityMutation.value) return 0
-    const servers = parseMCPImportJSON(raw)
+    if (!servers.length) return 0
     capabilityMutation.value = 'mcp:import'
-    let saved = 0
     try {
-      for (const server of servers) {
-        await backend.UpsertMCPServer({
+      await backend.ImportMCPServers({
+        servers: servers.map((server) => ({
           name: server.name,
           enabled: server.enabled,
           command: server.command,
@@ -282,27 +281,26 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
           url: server.url,
           transport: server.transport,
           env: Object.keys(server.env).length ? server.env : null,
-        })
-        saved += 1
-      }
+        })),
+      })
       notify(
         'success',
         translate('capabilities.mcpImportSaved'),
-        translate('capabilities.mcpImportSavedHint', { count: saved }),
+        translate('capabilities.mcpImportSavedHint', { count: servers.length }),
       )
       await loadCapabilitySection('mcpServers', 'mcp', backend.ListMCPServers, normalizeMCPServers)
       await loadMCPServerStatus()
-      return saved
+      return servers.length
     } catch (error) {
       notify('error', translate('capabilities.mcpImportFailed'), errorMessage(error))
-      if (saved > 0) {
-        await loadCapabilitySection('mcpServers', 'mcp', backend.ListMCPServers, normalizeMCPServers)
-        await loadMCPServerStatus()
-      }
-      return saved
+      return 0
     } finally {
       capabilityMutation.value = ''
     }
+  }
+
+  async function importMCPServersJSON(raw: string): Promise<number> {
+    return importMCPServers(parseMCPImportJSON(raw))
   }
 
   async function deleteMCPServer(name: string): Promise<void> {
@@ -397,6 +395,7 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
     refreshMCPServers,
     startMCPLogin,
     upsertMCPServer,
+    importMCPServers,
     importMCPServersJSON,
     deleteMCPServer,
     setHookEnabled,

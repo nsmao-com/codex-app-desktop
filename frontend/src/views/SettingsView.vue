@@ -15,7 +15,9 @@ import {
   LogOut,
   Palette,
   Plus,
+  PlugZap,
   RefreshCw,
+  Route,
   Search,
   Settings2,
   Smile,
@@ -30,6 +32,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import GrokIcon from '@/components/icons/GrokIcon.vue'
 import OpenAIIcon from '@/components/icons/OpenAIIcon.vue'
+import ProviderRouterSettings from '@/components/ProviderRouterSettings.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -80,6 +83,8 @@ type SettingsPanel =
   | 'environment'
   | 'git'
   | 'scheduled'
+  | 'mcp'
+  | 'routing'
 
 type NavItem = {
   id: SettingsPanel
@@ -159,13 +164,6 @@ const terminalProfile = shallowRef(appStore.settings.terminalProfile)
 const language = shallowRef(appStore.settings.language)
 const autoConnect = shallowRef(appStore.settings.autoConnect)
 const sendWithModifier = shallowRef(Boolean(appStore.settings.sendWithModifier))
-const followUpBehavior = shallowRef(appStore.settings.followUpBehavior === 'steer' ? 'steer' : 'queue')
-watch(followUpBehavior, (value) => {
-  const next = value === 'steer' ? 'steer' : 'queue'
-  if (appStore.settings.followUpBehavior === next) return
-  // Apply immediately so composer queue/steer matches the picker before Save.
-  appStore.patchSettings({ followUpBehavior: next })
-})
 const notifyOnTurnComplete = shallowRef(appStore.settings.notifyOnTurnComplete !== false)
 const preventSleepWhileRunning = shallowRef(Boolean(appStore.settings.preventSleepWhileRunning))
 const alwaysOnTop = shallowRef(Boolean(appStore.settings.alwaysOnTop))
@@ -385,11 +383,6 @@ const multiAgentOptions = computed<SelectOption[]>(() => [
   { value: 'proactive', label: t('settings.proactiveAgents'), description: t('settings.proactiveAgentsHint') },
 ])
 
-const followUpOptions = computed<SelectOption[]>(() => [
-  { value: 'steer', label: t('settings.followUpSteer'), description: t('settings.followUpSteerHint') },
-  { value: 'queue', label: t('settings.followUpQueue'), description: t('settings.followUpQueueHint') },
-])
-
 /** Official client identities accepted by most Codex reverse-proxy channels. */
 const CODEX_CLIENT_PRESETS = [
   { id: 'desktop', name: 'codex_desktop', title: 'Codex Desktop', version: '0.1.0' },
@@ -511,6 +504,8 @@ const navGroups = computed<NavGroup[]>(() => [
     label: t('settings.navIntegration'),
     items: [
       { id: 'plugins', label: t('settings.navPlugins'), icon: Blocks, keywords: 'plugins mcp skills 插件', action: 'capabilities', capabilityTab: 'plugins' },
+      { id: 'mcp', label: t('settings.navMcp'), icon: PlugZap, keywords: 'mcp import json server tool 导入 服务', action: 'capabilities', capabilityTab: 'mcp' },
+      { id: 'routing', label: t('settings.navRouting'), icon: Route, keywords: 'provider route failover circuit breaker proxy 服务商 路由 熔断 故障切换 代理' },
       { id: 'browser', label: t('settings.navBrowser'), icon: Compass, keywords: 'browser cdp allowlist 浏览器' },
       { id: 'hooks', label: t('settings.navHooks'), icon: Anchor, keywords: 'hooks automation 钩子', action: 'capabilities', capabilityTab: 'automation' },
       { id: 'scheduled', label: t('settings.navScheduled'), icon: Clock3, keywords: 'scheduled tasks automation 定时任务' },
@@ -529,7 +524,7 @@ const navGroups = computed<NavGroup[]>(() => [
 const filteredNavGroups = computed(() => {
   const query = settingsSearch.value.trim().toLocaleLowerCase()
   // Grok/Claude mode: keep agent config + archived; hide pure Codex product surfaces.
-  const hideExternal = new Set(['plugins', 'hooks', 'scheduled', 'environment', 'account'])
+  const hideExternal = new Set(['plugins', 'mcp', 'routing', 'hooks', 'scheduled', 'environment', 'account'])
   let base = navGroups.value
   if (isGrokSettings.value || isClaudeSettings.value) {
     base = navGroups.value
@@ -654,17 +649,17 @@ onMounted(() => {
   clampPanelForRuntime()
 })
 
-watch(isGrokSettings, (grok) => {
+watch([isGrokSettings, isClaudeSettings], ([grok]) => {
   syncFromStore()
   clampPanelForRuntime()
   if (grok) void grokStore.refreshRuntime()
 })
 
 function clampPanelForRuntime(): void {
-  if (!isGrokSettings.value) return
-  // Archived is supported for Grok (local archive index).
-  const hideInGrok = new Set(['plugins', 'hooks', 'scheduled', 'environment', 'account'])
-  if (hideInGrok.has(activePanel.value)) activePanel.value = 'agent'
+  if (!isGrokSettings.value && !isClaudeSettings.value) return
+  // Archived is supported by both external runtimes; Codex-only panels are hidden.
+  const hiddenExternalPanels = new Set(['plugins', 'mcp', 'routing', 'hooks', 'scheduled', 'environment', 'account'])
+  if (hiddenExternalPanels.has(activePanel.value)) activePanel.value = 'agent'
 }
 
 onUnmounted(() => {
@@ -674,7 +669,7 @@ onUnmounted(() => {
 function isSettingsPanel(value: string): value is SettingsPanel {
   return [
     'general', 'appearance', 'shortcuts', 'agent', 'personalization', 'account', 'archived',
-    'plugins', 'browser', 'hooks', 'environment', 'git', 'scheduled',
+    'browser', 'environment', 'git', 'scheduled', 'routing',
   ].includes(value)
 }
 
@@ -737,7 +732,6 @@ function syncFromStore(): void {
   language.value = settings.language
   autoConnect.value = settings.autoConnect
   sendWithModifier.value = Boolean(settings.sendWithModifier)
-  followUpBehavior.value = settings.followUpBehavior === 'steer' ? 'steer' : 'queue'
   notifyOnTurnComplete.value = settings.notifyOnTurnComplete !== false
   preventSleepWhileRunning.value = Boolean(settings.preventSleepWhileRunning)
   alwaysOnTop.value = Boolean(settings.alwaysOnTop)
@@ -1361,7 +1355,7 @@ async function save(): Promise<void> {
       language: language.value,
       autoConnect: autoConnect.value,
       sendWithModifier: sendWithModifier.value,
-      followUpBehavior: followUpBehavior.value,
+      followUpBehavior: 'queue',
       notifyOnTurnComplete: notifyOnTurnComplete.value,
       preventSleepWhileRunning: preventSleepWhileRunning.value,
       alwaysOnTop: alwaysOnTop.value,
@@ -1412,6 +1406,11 @@ async function save(): Promise<void> {
   } finally {
     saving.value = false
   }
+}
+
+function submitSettings(): void {
+  if (activePanel.value === 'routing') return
+  void save()
 }
 
 async function onNotifyToggle(enabled: boolean): Promise<void> {
@@ -1472,7 +1471,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
       </nav>
 
       <div class="px-4 py-2 text-[10px] text-muted-foreground">
-        {{ isGrokSettings ? 'Grok' : `Codex ${appStore.codexVersion || 'app-server'}` }} · v{{ appStore.appVersion }}
+        {{ isGrokSettings ? 'Grok' : isClaudeSettings ? 'Claude' : `Codex ${appStore.codexVersion || 'app-server'}` }} · v{{ appStore.appVersion }}
       </div>
     </aside>
 
@@ -1483,13 +1482,13 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
           <div class="min-w-0 flex-1">
             <h1 class="text-[15px] font-semibold tracking-tight">{{ activeNavItem?.label || t('settings.title') }}</h1>
           </div>
-          <Button v-if="activePanel !== 'archived'" form="settings-form" type="submit" size="sm" :disabled="saving">
+          <Button v-if="activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving">
             {{ saving ? t('common.saving') : t('settings.save') }}
           </Button>
         </header>
 
         <main class="min-h-0 flex-1 overflow-y-auto px-5 py-5">
-          <form id="settings-form" class="mx-auto max-w-3xl space-y-5" @submit.prevent="save">
+          <form id="settings-form" class="mx-auto max-w-3xl space-y-5" @submit.prevent="submitSettings">
             <!-- General -->
             <template v-if="activePanel === 'general'">
               <section class="overflow-hidden rounded-xl border bg-card">
@@ -1602,18 +1601,11 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
                       <p class="text-[13px]">{{ t('settings.followUpBehavior') }}</p>
-                      <p class="text-[11px] text-muted-foreground">{{ t('settings.followUpBehaviorHint') }}</p>
+                      <p class="text-[11px] text-muted-foreground">{{ t('settings.followUpQueueHint') }}</p>
                     </div>
-                    <Select v-model="followUpBehavior">
-                      <SelectTrigger class="h-8 w-[180px] text-xs" :aria-label="t('settings.followUpBehavior')">
-                        <SelectValue>{{ selectedOptionLabel(followUpOptions, followUpBehavior) }}</SelectValue>
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="option in followUpOptions" :key="option.value" :value="option.value">
-                          {{ option.label }}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <Badge variant="outline" class="shrink-0 text-[10px]">
+                      {{ t('settings.followUpQueue') }}
+                    </Badge>
                   </div>
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
@@ -2897,6 +2889,10 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
             </template>
 
             <!-- Scheduled -->
+            <template v-else-if="activePanel === 'routing'">
+              <ProviderRouterSettings />
+            </template>
+
             <template v-else-if="activePanel === 'scheduled'">
               <section class="overflow-hidden rounded-xl border bg-card">
                 <div class="border-b px-4 py-3">

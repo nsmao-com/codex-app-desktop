@@ -497,6 +497,11 @@ func (s *AppService) cachedClaudeHistory(sessionID string) (ClaudeSessionSummary
 	}
 	info, err := os.Stat(snapshot.path)
 	if err != nil || info.Size() != snapshot.size || info.ModTime().UnixNano() != snapshot.modified {
+		s.historyMu.Lock()
+		if s.claudeHistoryCache[sessionID] == snapshot {
+			delete(s.claudeHistoryCache, sessionID)
+		}
+		s.historyMu.Unlock()
 		return ClaudeSessionSummary{}, nil, false
 	}
 	s.historyMu.Lock()
@@ -517,26 +522,21 @@ func (s *AppService) cacheClaudeHistory(
 	if err != nil || before == nil || info.Size() != before.Size() || info.ModTime() != before.ModTime() {
 		return
 	}
+	weight := info.Size() * 2
 	s.historyMu.Lock()
 	defer s.historyMu.Unlock()
 	if s.claudeHistoryCache == nil {
 		s.claudeHistoryCache = make(map[string]*claudeHistorySnapshot)
 	}
+	if weight > conversationHistoryEntryBytes {
+		delete(s.claudeHistoryCache, sessionID)
+		return
+	}
 	s.claudeHistoryCache[sessionID] = &claudeHistorySnapshot{
 		path: path, size: info.Size(), modified: info.ModTime().UnixNano(),
-		summary: summary, messages: append([]ClaudeMessage(nil), messages...), touchedAt: time.Now(),
+		summary: summary, messages: append([]ClaudeMessage(nil), messages...), weight: weight, touchedAt: time.Now(),
 	}
-	for len(s.claudeHistoryCache) > conversationHistoryCacheLimit {
-		var oldestID string
-		var oldest time.Time
-		for id, snapshot := range s.claudeHistoryCache {
-			if oldestID == "" || snapshot.touchedAt.Before(oldest) {
-				oldestID = id
-				oldest = snapshot.touchedAt
-			}
-		}
-		delete(s.claudeHistoryCache, oldestID)
-	}
+	s.pruneConversationHistoryCachesLocked()
 }
 
 func (s *AppService) RenameClaudeSession(sessionID, name string) error {
@@ -575,17 +575,21 @@ func (s *AppService) setClaudeSessionArchived(sessionID string, archived bool) e
 		return errors.New("Claude session id is required")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	session := s.claudeSessions[sessionID]
 	if session == nil {
 		session = s.ensureClaudeIndexFromNativeLocked(sessionID)
 		if session == nil {
+			s.mu.Unlock()
 			return errors.New("Claude session was not found")
 		}
 	}
 	session.Archived = archived
 	session.UpdatedAt = time.Now().Unix()
 	s.persistClaudeSessionsLocked()
+	s.mu.Unlock()
+	if archived {
+		s.dropClaudeHistoryCache(sessionID)
+	}
 	return nil
 }
 
@@ -639,6 +643,7 @@ func (s *AppService) DeleteClaudeSession(sessionID string) error {
 	session.UpdatedAt = time.Now().Unix()
 	s.persistClaudeSessionsLocked()
 	s.mu.Unlock()
+	s.dropClaudeHistoryCache(sessionID)
 	return nil
 }
 

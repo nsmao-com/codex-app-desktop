@@ -89,6 +89,11 @@ export function normalizeMCPServers(value: unknown): MCPServerView[] {
     const info = asRecord(server.serverInfo)
     const tools = asRecord(server.tools)
     const args = asArray(server.args).map((arg) => asString(arg)).filter(Boolean)
+    const env = Object.fromEntries(
+      Object.entries(asRecord(server.env))
+        .map(([key, raw]) => [key.trim(), asString(raw)] as const)
+        .filter(([key]) => key),
+    )
     return {
       name: asString(server.name),
       title: asString(info.title, asString(server.name)),
@@ -103,6 +108,7 @@ export function normalizeMCPServers(value: unknown): MCPServerView[] {
       url: asString(server.url),
       transport: asString(server.transport, asString(server.type)),
       args,
+      env,
     }
   }).filter((server) => server.name)
 }

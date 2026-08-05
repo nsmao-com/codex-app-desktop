@@ -53,6 +53,7 @@ type AppService struct {
 	codexHistoryCache map[string]*codexHistorySnapshot
 	claudeHistoryCache map[string]*claudeHistorySnapshot
 	grokHistoryCache map[string]*grokHistorySnapshot
+	providerRouter        *providerRouter
 }
 
 const defaultCodexModel = "gpt-5.6-sol"
@@ -61,10 +62,13 @@ const (
 	conversationHistoryPageTurns  = 24
 	conversationHistoryCacheLimit = 8
 	codexHistoryCacheLimit        = 2
+	conversationHistoryCacheBytes int64 = 24 << 20
+	conversationHistoryEntryBytes int64 = 12 << 20
 )
 
 type codexHistorySnapshot struct {
 	turns     []any
+	weight    int64
 	touchedAt time.Time
 }
 
@@ -74,6 +78,7 @@ type claudeHistorySnapshot struct {
 	modified  int64
 	summary   ClaudeSessionSummary
 	messages  []ClaudeMessage
+	weight    int64
 	touchedAt time.Time
 }
 
@@ -84,6 +89,7 @@ type grokHistorySnapshot struct {
 	modified  int64
 	summary   GrokSessionSummary
 	messages  []GrokMessage
+	weight    int64
 	touchedAt time.Time
 }
 
@@ -279,6 +285,12 @@ func NewAppService(app *application.App, pluginAssets *pluginAssetServer) *AppSe
 		grokHistoryCache: make(map[string]*grokHistorySnapshot),
 		scheduledTasks:   newScheduledTaskStore(settingsPath),
 		schedulerStop:    make(chan struct{}),
+		providerRouter:     newProviderRouter(),
+	}
+	if routerConfig, err := loadProviderRouterConfig(settingsPath); err != nil {
+		service.providerRouter.setError(err.Error())
+	} else if err := service.providerRouter.configure(routerConfig); err != nil {
+		service.providerRouter.setError(err.Error())
 	}
 	_ = service.scheduledTasks.load()
 	service.client = codex.NewClient(func(event codex.Event) {
@@ -874,9 +886,11 @@ func (s *AppService) ArchiveThread(threadID string) error {
 	// Local directory is authoritative.
 	s.markSessionArchived(threadID)
 	if session == nil || isExternalSession(session) || session.BackendRef == "" {
+		s.dropCodexHistoryCache(threadID)
 		return nil
 	}
 	backendID := session.BackendRef
+	s.dropCodexHistoryCache(backendID)
 	if err := s.ensureThreadInWorkspace(backendID, workspace); err != nil {
 		return nil
 	}
@@ -922,10 +936,12 @@ func (s *AppService) DeleteThread(threadID string) error {
 		return errors.New("session not found")
 	}
 	if session != nil && !isExternalSession(session) && session.BackendRef != "" {
+		s.dropCodexHistoryCache(session.BackendRef)
 		if err := s.ensureThreadInWorkspace(session.BackendRef, workspace); err == nil {
 			_, _ = s.call("thread/delete", map[string]any{"threadId": session.BackendRef})
 		}
 	}
+	s.dropCodexHistoryCache(threadID)
 	s.mu.Lock()
 	delete(s.allowedThreads, threadID)
 	if session != nil && session.BackendRef != "" {
@@ -1225,26 +1241,22 @@ func (s *AppService) cacheCodexHistory(backendID string, turns []any) {
 	if backendID == "" {
 		return
 	}
+	weight := estimateConversationValueWeight(turns)
 	s.historyMu.Lock()
 	defer s.historyMu.Unlock()
 	if s.codexHistoryCache == nil {
 		s.codexHistoryCache = make(map[string]*codexHistorySnapshot)
 	}
+	if weight > conversationHistoryEntryBytes {
+		delete(s.codexHistoryCache, backendID)
+		return
+	}
 	s.codexHistoryCache[backendID] = &codexHistorySnapshot{
 		turns:     append([]any(nil), turns...),
+		weight:    weight,
 		touchedAt: time.Now(),
 	}
-	for len(s.codexHistoryCache) > codexHistoryCacheLimit {
-		var oldestID string
-		var oldest time.Time
-		for id, snapshot := range s.codexHistoryCache {
-			if oldestID == "" || snapshot.touchedAt.Before(oldest) {
-				oldestID = id
-				oldest = snapshot.touchedAt
-			}
-		}
-		delete(s.codexHistoryCache, oldestID)
-	}
+	s.pruneConversationHistoryCachesLocked()
 }
 
 func (s *AppService) cachedCodexHistory(backendID string) ([]any, bool) {
@@ -1257,6 +1269,175 @@ func (s *AppService) cachedCodexHistory(backendID string) ([]any, bool) {
 	}
 	snapshot.touchedAt = time.Now()
 	return snapshot.turns, true
+}
+
+func (s *AppService) dropCodexHistoryCache(backendID string) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return
+	}
+	s.historyMu.Lock()
+	delete(s.codexHistoryCache, backendID)
+	s.historyMu.Unlock()
+}
+
+func (s *AppService) dropClaudeHistoryCache(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	s.historyMu.Lock()
+	delete(s.claudeHistoryCache, sessionID)
+	s.historyMu.Unlock()
+}
+
+func (s *AppService) dropGrokHistoryCache(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	s.historyMu.Lock()
+	delete(s.grokHistoryCache, sessionID)
+	s.historyMu.Unlock()
+}
+
+func (s *AppService) pruneConversationHistoryCachesLocked() {
+	for len(s.codexHistoryCache) > codexHistoryCacheLimit {
+		id := oldestCodexHistoryID(s.codexHistoryCache)
+		if id == "" {
+			break
+		}
+		delete(s.codexHistoryCache, id)
+	}
+	for len(s.claudeHistoryCache) > conversationHistoryCacheLimit {
+		id := oldestClaudeHistoryID(s.claudeHistoryCache)
+		if id == "" {
+			break
+		}
+		delete(s.claudeHistoryCache, id)
+	}
+	for len(s.grokHistoryCache) > conversationHistoryCacheLimit {
+		id := oldestGrokHistoryID(s.grokHistoryCache)
+		if id == "" {
+			break
+		}
+		delete(s.grokHistoryCache, id)
+	}
+
+	for conversationHistoryWeight(s) > conversationHistoryCacheBytes {
+		kind, id := oldestConversationHistory(s)
+		if id == "" {
+			break
+		}
+		switch kind {
+		case "codex":
+			delete(s.codexHistoryCache, id)
+		case "claude":
+			delete(s.claudeHistoryCache, id)
+		case "grok":
+			delete(s.grokHistoryCache, id)
+		}
+	}
+}
+
+func oldestCodexHistoryID(cache map[string]*codexHistorySnapshot) string {
+	var id string
+	var touched time.Time
+	for key, snapshot := range cache {
+		if snapshot != nil && (id == "" || snapshot.touchedAt.Before(touched)) {
+			id, touched = key, snapshot.touchedAt
+		}
+	}
+	return id
+}
+
+func oldestClaudeHistoryID(cache map[string]*claudeHistorySnapshot) string {
+	var id string
+	var touched time.Time
+	for key, snapshot := range cache {
+		if snapshot != nil && (id == "" || snapshot.touchedAt.Before(touched)) {
+			id, touched = key, snapshot.touchedAt
+		}
+	}
+	return id
+}
+
+func oldestGrokHistoryID(cache map[string]*grokHistorySnapshot) string {
+	var id string
+	var touched time.Time
+	for key, snapshot := range cache {
+		if snapshot != nil && (id == "" || snapshot.touchedAt.Before(touched)) {
+			id, touched = key, snapshot.touchedAt
+		}
+	}
+	return id
+}
+
+func conversationHistoryWeight(s *AppService) int64 {
+	var total int64
+	for _, snapshot := range s.codexHistoryCache {
+		if snapshot != nil {
+			total += snapshot.weight
+		}
+	}
+	for _, snapshot := range s.claudeHistoryCache {
+		if snapshot != nil {
+			total += snapshot.weight
+		}
+	}
+	for _, snapshot := range s.grokHistoryCache {
+		if snapshot != nil {
+			total += snapshot.weight
+		}
+	}
+	return total
+}
+
+func oldestConversationHistory(s *AppService) (string, string) {
+	kind, id := "", ""
+	var touched time.Time
+	consider := func(nextKind, nextID string, next time.Time) {
+		if nextID != "" && (id == "" || next.Before(touched)) {
+			kind, id, touched = nextKind, nextID, next
+		}
+	}
+	if nextID := oldestCodexHistoryID(s.codexHistoryCache); nextID != "" {
+		consider("codex", nextID, s.codexHistoryCache[nextID].touchedAt)
+	}
+	if nextID := oldestClaudeHistoryID(s.claudeHistoryCache); nextID != "" {
+		consider("claude", nextID, s.claudeHistoryCache[nextID].touchedAt)
+	}
+	if nextID := oldestGrokHistoryID(s.grokHistoryCache); nextID != "" {
+		consider("grok", nextID, s.grokHistoryCache[nextID].touchedAt)
+	}
+	return kind, id
+}
+
+func estimateConversationValueWeight(value any) int64 {
+	switch typed := value.(type) {
+	case nil:
+		return 0
+	case string:
+		return int64(len(typed)) + 16
+	case []byte:
+		return int64(len(typed)) + 24
+	case json.RawMessage:
+		return int64(len(typed)) + 24
+	case []any:
+		total := int64(24 + len(typed)*8)
+		for _, item := range typed {
+			total += estimateConversationValueWeight(item)
+		}
+		return total
+	case map[string]any:
+		total := int64(48)
+		for key, item := range typed {
+			total += int64(len(key)+24) + estimateConversationValueWeight(item)
+		}
+		return total
+	default:
+		return 32
+	}
 }
 
 func conversationMessagePageBounds(total, before int, isUser func(index int) bool) (start, end, turnOffset int) {
@@ -1782,6 +1963,7 @@ func (s *AppService) ListMCPServers() (map[string]any, error) {
 		url := ""
 		transport := ""
 		args := []any{}
+		env := map[string]any{}
 		if server, ok := servers[name].(map[string]any); ok {
 			if server["enabled"] == false {
 				enabled = false
@@ -1795,6 +1977,9 @@ func (s *AppService) ListMCPServers() (map[string]any, error) {
 			if list, ok := server["args"].([]any); ok {
 				args = list
 			}
+			if values, ok := server["env"].(map[string]any); ok {
+				env = values
+			}
 		}
 		data = append(data, map[string]any{
 			"name":         name,
@@ -1803,6 +1988,7 @@ func (s *AppService) ListMCPServers() (map[string]any, error) {
 			"url":          url,
 			"transport":    transport,
 			"args":         args,
+			"env":          env,
 			"statusLoaded": false,
 		})
 	}
@@ -1819,53 +2005,16 @@ type MCPServerWriteRequest struct {
 	Env       map[string]string `json:"env"`
 }
 
+type MCPServersImportRequest struct {
+	Servers []MCPServerWriteRequest `json:"servers"`
+}
+
 func (s *AppService) UpsertMCPServer(request MCPServerWriteRequest) error {
-	name := strings.TrimSpace(request.Name)
-	if name == "" || len(name) > 120 {
-		return errors.New("a valid MCP server name is required")
+	name, value, err := mcpServerConfigValue(request)
+	if err != nil {
+		return err
 	}
-	value := map[string]any{"enabled": request.Enabled}
-	transport := strings.TrimSpace(request.Transport)
-	url := strings.TrimSpace(request.URL)
-	command := strings.TrimSpace(request.Command)
-	if url != "" {
-		if transport == "" {
-			transport = "http"
-		}
-		value["type"] = transport
-		value["url"] = url
-	} else if command != "" {
-		value["command"] = command
-		if transport != "" {
-			value["type"] = transport
-		}
-		if len(request.Args) > 0 {
-			args := make([]any, 0, len(request.Args))
-			for _, arg := range request.Args {
-				arg = strings.TrimSpace(arg)
-				if arg != "" {
-					args = append(args, arg)
-				}
-			}
-			value["args"] = args
-		}
-	} else {
-		return errors.New("MCP server requires a command or url")
-	}
-	if len(request.Env) > 0 {
-		env := make(map[string]any, len(request.Env))
-		for key, raw := range request.Env {
-			key = strings.TrimSpace(key)
-			if key == "" {
-				continue
-			}
-			env[key] = raw
-		}
-		if len(env) > 0 {
-			value["env"] = env
-		}
-	}
-	_, err := s.call("config/value/write", map[string]any{
+	_, err = s.call("config/value/write", map[string]any{
 		"key":   "mcp_servers." + name,
 		"value": value,
 	})
@@ -1874,6 +2023,109 @@ func (s *AppService) UpsertMCPServer(request MCPServerWriteRequest) error {
 	}
 	_, err = s.call("config/mcpServer/reload", nil)
 	return err
+}
+
+func (s *AppService) ImportMCPServers(request MCPServersImportRequest) error {
+	if len(request.Servers) == 0 {
+		return errors.New("at least one MCP server is required")
+	}
+	if len(request.Servers) > 100 {
+		return errors.New("import up to 100 MCP servers at a time")
+	}
+	values := make(map[string]any, len(request.Servers))
+	seenNames := make(map[string]struct{}, len(request.Servers))
+	for _, server := range request.Servers {
+		name, value, err := mcpServerConfigValue(server)
+		if err != nil {
+			return err
+		}
+		nameKey := strings.ToLower(name)
+		if _, duplicate := seenNames[nameKey]; duplicate {
+			return fmt.Errorf("duplicate MCP server name: %s", name)
+		}
+		seenNames[nameKey] = struct{}{}
+		values[name] = value
+	}
+	_, err := s.call("config/batchWrite", map[string]any{
+		"edits": []any{
+			map[string]any{
+				"keyPath":       "mcp_servers",
+				"value":         values,
+				"mergeStrategy": "upsert",
+			},
+		},
+		"reloadUserConfig": true,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = s.call("config/mcpServer/reload", nil)
+	return err
+}
+
+func mcpServerConfigValue(request MCPServerWriteRequest) (string, map[string]any, error) {
+	name := strings.TrimSpace(request.Name)
+	if name == "" || len(name) > 120 || strings.ContainsAny(name, "\r\n") {
+		return "", nil, errors.New("a valid MCP server name is required")
+	}
+	value := map[string]any{"enabled": request.Enabled}
+	transport := strings.TrimSpace(request.Transport)
+	serverURL := strings.TrimSpace(request.URL)
+	command := strings.TrimSpace(request.Command)
+	if len(command) > 2048 || len(serverURL) > 4096 || len(transport) > 64 {
+		return "", nil, errors.New("MCP server configuration is too long")
+	}
+	if serverURL != "" {
+		parsed, err := url.ParseRequestURI(serverURL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return "", nil, errors.New("MCP server URL must use http or https")
+		}
+		if transport == "" {
+			transport = "http"
+		}
+		value["type"] = transport
+		value["url"] = serverURL
+	} else if command != "" {
+		value["command"] = command
+		if transport != "" {
+			value["type"] = transport
+		}
+		if len(request.Args) > 128 {
+			return "", nil, errors.New("MCP server has too many arguments")
+		}
+		if len(request.Args) > 0 {
+			args := make([]any, 0, len(request.Args))
+			for _, arg := range request.Args {
+				arg = strings.TrimSpace(arg)
+				if len(arg) > 4096 {
+					return "", nil, errors.New("MCP server argument is too long")
+				}
+				if arg != "" {
+					args = append(args, arg)
+				}
+			}
+			value["args"] = args
+		}
+	} else {
+		return "", nil, errors.New("MCP server requires a command or url")
+	}
+	if len(request.Env) > 128 {
+		return "", nil, errors.New("MCP server has too many environment variables")
+	}
+	if len(request.Env) > 0 {
+		env := make(map[string]any, len(request.Env))
+		for key, raw := range request.Env {
+			key = strings.TrimSpace(key)
+			if key == "" || len(key) > 256 || len(raw) > 16_384 {
+				return "", nil, errors.New("invalid MCP environment variable")
+			}
+			env[key] = raw
+		}
+		if len(env) > 0 {
+			value["env"] = env
+		}
+	}
+	return name, value, nil
 }
 
 func (s *AppService) DeleteMCPServer(name string) error {
@@ -2370,6 +2622,14 @@ func (s *AppService) shutdown() {
 		setSystemSleepPrevention(false)
 		s.cancelExternalRuns()
 		s.stopAllTerminalSessions()
+		if s.providerRouter != nil {
+			s.providerRouter.close()
+		}
+		s.historyMu.Lock()
+		s.codexHistoryCache = nil
+		s.claudeHistoryCache = nil
+		s.grokHistoryCache = nil
+		s.historyMu.Unlock()
 		s.flushLocalUsage()
 		if s.schedulerStop != nil {
 			close(s.schedulerStop)
@@ -2754,11 +3014,9 @@ func cloneSettings(settings UserSettings) UserSettings {
 	return settings
 }
 
-func normalizeFollowUpBehavior(value string) string {
-	value = strings.TrimSpace(strings.ToLower(value))
-	if value == "steer" {
-		return "steer"
-	}
+func normalizeFollowUpBehavior(_ string) string {
+	// Normal composer sends always use the per-session FIFO queue. Older
+	// installations may still persist "steer" from the former preference.
 	return "queue"
 }
 

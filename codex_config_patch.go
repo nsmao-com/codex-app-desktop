@@ -215,12 +215,19 @@ func readTOMLString(text, section, key string) string {
 		if body == "" {
 			return ""
 		}
+	} else if sectionIndex := regexp.MustCompile(`(?m)^\s*\[`).FindStringIndex(text); sectionIndex != nil {
+		// Root keys must not accidentally match a key inside a later table.
+		body = text[:sectionIndex[0]]
 	}
-	re := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*"([^"]*)"\s*$`)
+	re := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*"([^"]*)"\s*(?:#.*)?$`)
 	match := re.FindStringSubmatch(body)
 	if len(match) < 2 {
+		literalRe := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*'([^']*)'\s*(?:#.*)?$`)
+		match = literalRe.FindStringSubmatch(body)
+	}
+	if len(match) < 2 {
 		// bare keys without quotes are rare for provider ids but support them
-		re2 := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*([A-Za-z0-9_.-]+)\s*$`)
+		re2 := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*([A-Za-z0-9_.-]+)\s*(?:#.*)?$`)
 		match = re2.FindStringSubmatch(body)
 		if len(match) < 2 {
 			return ""

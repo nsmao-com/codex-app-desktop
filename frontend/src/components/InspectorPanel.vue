@@ -9,10 +9,11 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Progress } from '@/components/ui/progress'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { SimpleTooltip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { panelFromRight } from '@/lib/motion'
 import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import { buildContextUsageView, CODEX_CONTEXT_BASELINE_TOKENS } from '@/utils/accountUsage'
+import { compactDisplayPath, fullDisplayPath } from '@/utils/workspacePath'
 
 const appStore = useAppStore()
 const codexStore = useCodexStore()
@@ -127,18 +128,23 @@ function statusClass(status: string): string {
             </Button>
           </div>
           <div v-if="changes.length" class="mt-2 space-y-1">
-            <Button
+            <SimpleTooltip
               v-for="change in changes"
               :key="`${change.status}:${change.path}`"
-              variant="ghost"
-              class="h-auto w-full justify-start gap-2 px-2 py-1.5 text-left text-xs"
-              :class="{ 'bg-accent/50': workspaceStore.inspectedDiffPath === change.path && workspaceStore.diffSidebarOpen }"
-              :disabled="workspaceStore.diffInspectionLoading"
-              @click="workspaceStore.inspectWorkspaceDiff(change.path)"
+              :content="fullDisplayPath(change.path, appStore.currentWorkspacePath)"
+              content-class="max-w-sm break-all font-mono text-[10px]"
             >
-              <span class="w-4 text-center font-mono text-[10px]" :class="statusClass(change.status)">{{ change.status || 'M' }}</span>
-              <span class="min-w-0 flex-1 truncate text-[11px]" :title="change.path">{{ change.path }}</span>
-            </Button>
+              <Button
+                variant="ghost"
+                class="h-auto w-full justify-start gap-2 px-2 py-1.5 text-left text-xs"
+                :class="{ 'bg-accent/50': workspaceStore.inspectedDiffPath === change.path && workspaceStore.diffSidebarOpen }"
+                :disabled="workspaceStore.diffInspectionLoading"
+                @click="workspaceStore.inspectWorkspaceDiff(change.path)"
+              >
+                <span class="w-4 text-center font-mono text-[10px]" :class="statusClass(change.status)">{{ change.status || 'M' }}</span>
+                <span class="min-w-0 flex-1 truncate text-[11px]">{{ compactDisplayPath(change.path, appStore.currentWorkspacePath) }}</span>
+              </Button>
+            </SimpleTooltip>
           </div>
           <div v-else class="mt-4 flex flex-col items-center gap-2 text-center text-xs text-muted-foreground">
             <ShieldCheck :size="20" />

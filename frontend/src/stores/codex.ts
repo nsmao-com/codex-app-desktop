@@ -6,7 +6,6 @@ import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type {
   SendMessageRequest,
   SessionPreferencesRequest,
-  SteerTurnRequest,
 } from '../../bindings/nice_codex_desktop/models'
 import type { Event as CodexEvent, Status as CodexStatus } from '../../bindings/nice_codex_desktop/internal/codex/models'
 import { useAppStore } from './app'
@@ -1275,23 +1274,8 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function sendMessage(text: string, images: string[] = []): Promise<boolean> {
-    // Official Codex desktop: mid-run follow-ups queue by default; steer is opt-in.
-    const followUp = appStore.settings.followUpBehavior === 'steer' ? 'steer' : 'queue'
-    const threadID = activeThreadId.value
-    const turnID = activeTurnId.value
-    const busy = threadIsBusy(threadID)
-    if (
-      followUp === 'steer'
-      && busy
-      && turnID
-      && !loadingSequenceByThread.has(threadID)
-      && !workspaceSelectionSequenceByThread.has(threadID)
-      && !activeThreadUsesExternalProvider.value
-      && !threadID.startsWith('pending-thread-')
-    ) {
-      return steerMessage(text, images)
-    }
-    // Queue mode (default): always enqueue; drain only when the thread is idle.
+    // Normal sends always enter the per-thread FIFO queue. Keep turn/steer as an
+    // explicit API only so a persisted preference can never bypass admission.
     return enqueueMessage(text, '', images)
   }
 
@@ -1810,44 +1794,6 @@ export const useCodexStore = defineStore('codex', () => {
       return
     }
     await drainThreadQueue(threadID)
-  }
-
-  async function steerMessage(text: string, images: string[] = []): Promise<boolean> {
-    const message = text.trim()
-    const threadID = activeThreadId.value
-    const turnID = activeTurnId.value
-    const imagePaths = uniqueImagePaths(images).slice(0, 4)
-    if ((!message && !imagePaths.length) || !threadID || !turnID || !isReady.value || isThreadSubmitting(threadID)) return false
-
-    const localItemID = `local-steer-${Date.now()}-${++queuedMessageSequence}`
-    appendItem(threadID, createLocalUserItem(localItemID, message, imagePaths, turnID))
-    setThreadSubmitting(threadID, true)
-    setTurnFeedback(threadID, { state: 'submitting', message: translate('chat.steering'), turnId: turnID })
-    try {
-      await backend.SteerTurn({
-        threadId: threadID,
-        turnId: turnID,
-        text: message,
-        images: imagePaths,
-      } satisfies SteerTurnRequest)
-      setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
-      return true
-    } catch (error) {
-      const message = errorMessage(error)
-      markItemFailed(threadID, localItemID)
-      // Keep the turn running, but surface the steer failure so UI is not "success".
-      setTurnFeedback(threadID, { state: 'failed', message, turnId: turnID })
-      notify('error', translate('notifications.steerFailed'), message)
-      // Restore running indicator shortly after — the turn itself is still live.
-      trackedTimeout(() => {
-        if (threadTurnID(threadID) === turnID) {
-          setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
-        }
-      }, 1800)
-      return false
-    } finally {
-      setThreadSubmitting(threadID, false)
-    }
   }
 
   async function interruptTurn(): Promise<void> {
@@ -3805,11 +3751,18 @@ export const useCodexStore = defineStore('codex', () => {
 
   function rememberCompletedTurn(turnID: string, status: unknown = 'completed'): void {
     if (!turnID) return
+    completedTurns.delete(turnID)
     completedTurns.add(turnID)
     completedTurnStatus.set(
       turnID,
       isFailedStatus(status) ? 'failed' : isInterruptedStatus(status) ? 'interrupted' : 'completed',
     )
+    while (completedTurns.size > 2048) {
+      const oldest = completedTurns.values().next().value
+      if (!oldest) break
+      completedTurns.delete(oldest)
+      completedTurnStatus.delete(oldest)
+    }
   }
 
   function terminalItemStatus(turnID: string): string {
@@ -4254,7 +4207,6 @@ export const useCodexStore = defineStore('codex', () => {
     startReview,
     rollbackToTurn,
     sendMessage,
-    steerMessage,
     retryMessage,
     retryLastMessage,
     removeQueuedMessage,

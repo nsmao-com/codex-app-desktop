@@ -440,6 +440,10 @@ export interface MCPServerWriteRequest {
     "env": { [_ in string]?: string } | null;
 }
 
+export interface MCPServersImportRequest {
+    "servers": MCPServerWriteRequest[] | null;
+}
+
 export interface MemoriesOverview {
     "root": string;
     "enabled": boolean;
@@ -474,6 +478,58 @@ export interface ProjectInstructionsInfo {
     "exists": boolean;
     "emptyFile": boolean;
     "available": boolean;
+}
+
+export interface ProviderRouterSaveRequest {
+    "enabled": boolean;
+    "port": number;
+    "failureThreshold": number;
+    "recoverySuccessThreshold": number;
+    "cooldownSeconds": number;
+    "firstByteTimeoutSeconds": number;
+    "upstreams": ProviderRouterUpstreamInput[] | null;
+}
+
+export interface ProviderRouterUpstreamInput {
+    "id": string;
+    "name": string;
+    "baseUrl": string;
+    "apiKey": string;
+    "keepExistingKey": boolean;
+    "clearApiKey": boolean;
+    "authMode": string;
+    "enabled": boolean;
+}
+
+export interface ProviderRouterUpstreamView {
+    "id": string;
+    "name": string;
+    "baseUrl": string;
+    "authMode": string;
+    "enabled": boolean;
+    "hasApiKey": boolean;
+    "state": string;
+    "consecutiveFailures": number;
+    "recoverySuccesses": number;
+    "openUntil": number;
+    "lastStatus": number;
+    "lastLatencyMs": number;
+    "lastError": string;
+    "requestCount": number;
+}
+
+export interface ProviderRouterView {
+    "enabled": boolean;
+    "running": boolean;
+    "port": number;
+    "listenUrl": string;
+    "failureThreshold": number;
+    "recoverySuccessThreshold": number;
+    "cooldownSeconds": number;
+    "firstByteTimeoutSeconds": number;
+    "codexApplied": boolean;
+    "lastError": string;
+    "upstreams": ProviderRouterUpstreamView[] | null;
 }
 
 export interface ReviewStartRequest {

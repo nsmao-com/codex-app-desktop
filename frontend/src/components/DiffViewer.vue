@@ -5,8 +5,11 @@ import { useI18n } from 'vue-i18n'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { SimpleTooltip } from '@/components/ui/tooltip'
+import { useAppStore } from '@/stores'
 import type { DiffLineView } from '@/types/codex'
 import { parseUnifiedDiff } from '@/utils/diff'
+import { compactDisplayPath, fullDisplayPath } from '@/utils/workspacePath'
 
 const props = defineProps<{
   diff: string
@@ -18,6 +21,7 @@ interface SplitRow {
 }
 
 const { t } = useI18n()
+const appStore = useAppStore()
 const mode = shallowRef<'unified' | 'split'>('unified')
 const selectedIndex = shallowRef(0)
 const lineLimit = shallowRef(600)
@@ -103,7 +107,9 @@ function showMoreLines(): void {
     <header class="flex h-9 shrink-0 items-center gap-2 border-b px-2">
       <h3 class="flex min-w-0 flex-1 items-center gap-2 text-xs font-semibold">
         <FileCode2 :size="14" class="text-primary" />
-        <span class="truncate">{{ selectedFile?.displayPath || t('inspector.liveDiff') }}</span>
+        <SimpleTooltip :content="selectedFile ? fullDisplayPath(selectedFile.displayPath, appStore.currentWorkspacePath) : ''" content-class="max-w-sm break-all font-mono text-[10px]">
+          <span class="truncate">{{ selectedFile ? compactDisplayPath(selectedFile.displayPath, appStore.currentWorkspacePath) : t('inspector.liveDiff') }}</span>
+        </SimpleTooltip>
         <Badge v-if="selectedFile" variant="outline" class="text-[9px]">
           <span class="text-green-600">+{{ selectedFile.additions }}</span>
           <span class="mx-1">/</span>
@@ -121,20 +127,24 @@ function showMoreLines(): void {
     </header>
 
     <div v-if="files.length > 1" class="flex gap-1 overflow-x-auto border-b px-2 py-1.5">
-      <Button
+      <SimpleTooltip
         v-for="(file, index) in files"
         :key="`${file.displayPath}:${index}`"
-        variant="ghost"
-        size="xs"
-        class="h-6 max-w-44 shrink-0 justify-start gap-1.5 px-2 text-[10px]"
-        :class="selectedIndex === index ? 'bg-accent text-accent-foreground' : ''"
-        :title="file.displayPath"
-        @click="selectedIndex = index"
+        :content="fullDisplayPath(file.displayPath, appStore.currentWorkspacePath)"
+        content-class="max-w-sm break-all font-mono text-[10px]"
       >
-        <span class="truncate">{{ file.displayPath }}</span>
-        <span class="text-green-600">+{{ file.additions }}</span>
-        <span class="text-red-600">-{{ file.deletions }}</span>
-      </Button>
+        <Button
+          variant="ghost"
+          size="xs"
+          class="h-6 max-w-44 shrink-0 justify-start gap-1.5 px-2 text-[10px]"
+          :class="selectedIndex === index ? 'bg-accent text-accent-foreground' : ''"
+          @click="selectedIndex = index"
+        >
+          <span class="truncate">{{ compactDisplayPath(file.displayPath, appStore.currentWorkspacePath) }}</span>
+          <span class="text-green-600">+{{ file.additions }}</span>
+          <span class="text-red-600">-{{ file.deletions }}</span>
+        </Button>
+      </SimpleTooltip>
     </div>
 
     <!-- Native overflow so long diffs always get a real vertical/horizontal scrollbar

@@ -193,6 +193,7 @@ export interface MCPServerView {
   url?: string
   transport?: string
   args?: string[]
+  env?: Record<string, string>
 }
 
 export interface HookView {

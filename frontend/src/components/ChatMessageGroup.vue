@@ -27,19 +27,21 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import {
+  SimpleTooltip,
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
-import { useCodexStore } from '@/stores'
+import { useAppStore, useCodexStore } from '@/stores'
 import type { TimelineItem, TurnMetrics } from '@/types/codex'
 import { extractFileDiff, parseUnifiedDiff } from '@/utils/diff'
 import { formatToolPayload, renderToolPayloadHTML } from '@/utils/formatPayload'
 import { renderMarkdown, extractCandidateFilePaths } from '@/utils/markdown'
 import { resolveImagePreview } from '@/utils/imagePreview'
 import { notify } from '@/utils/notify'
+import { compactDisplayPath, fullDisplayPath } from '@/utils/workspacePath'
 
 const props = defineProps<{
   kind: 'user' | 'agent'
@@ -61,6 +63,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+const appStore = useAppStore()
 const codexStore = useCodexStore()
 const openRows = shallowRef<Record<string, boolean>>({})
 const copiedKey = shallowRef('')
@@ -773,12 +776,6 @@ function formatDuration(durationMs: number | null | undefined): string {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
 
-function shortPath(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean)
-  if (parts.length <= 2) return path
-  return `…/${parts.slice(-2).join('/')}`
-}
-
 function commandLabel(command: string): string {
   const compact = command.replace(/\s+/g, ' ').trim()
   if (compact.length <= 72) return compact
@@ -1146,22 +1143,26 @@ function diffStats(diff: string): { add: number; del: number } {
                       </div>
                     </div>
                   </div>
-                  <button
+                  <SimpleTooltip
                     v-for="change in patchChanges(block.item)"
                     :key="`${block.item.id}:${change.path}`"
-                    type="button"
-                    class="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
-                    :title="change.path"
-                    @click="emit('inspect-diff', { path: change.path, diff: change.diff })"
+                    :content="fullDisplayPath(change.path, appStore.currentWorkspacePath)"
+                    content-class="max-w-sm break-all font-mono text-[10px]"
                   >
-                    <Pencil :size="12" class="shrink-0 opacity-50" />
-                    <span class="shrink-0">{{ fileActionLabel(change.kind) }}</span>
-                    <span class="min-w-0 truncate font-medium text-foreground/80 underline decoration-dotted decoration-muted-foreground/50 underline-offset-2">
-                      {{ shortPath(change.path) }}
-                    </span>
-                    <span class="shrink-0 tabular-nums text-[11px] text-positive">+{{ change.add }}</span>
-                    <span class="shrink-0 tabular-nums text-[11px] text-destructive">-{{ change.del }}</span>
-                  </button>
+                    <button
+                      type="button"
+                      class="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+                      @click="emit('inspect-diff', { path: change.path, diff: change.diff })"
+                    >
+                      <Pencil :size="12" class="shrink-0 opacity-50" />
+                      <span class="shrink-0">{{ fileActionLabel(change.kind) }}</span>
+                      <span class="min-w-0 truncate font-medium text-foreground/80 underline decoration-dotted decoration-muted-foreground/50 underline-offset-2">
+                        {{ compactDisplayPath(change.path, appStore.currentWorkspacePath) }}
+                      </span>
+                      <span class="shrink-0 tabular-nums text-[11px] text-positive">+{{ change.add }}</span>
+                      <span class="shrink-0 tabular-nums text-[11px] text-destructive">-{{ change.del }}</span>
+                    </button>
+                  </SimpleTooltip>
                   <div
                     v-if="isRunning(block.item.status) && !patchChanges(block.item).length"
                     class="flex items-center gap-1.5 px-1.5 py-1 text-[12px] text-muted-foreground"
@@ -1349,22 +1350,26 @@ function diffStats(diff: string): { add: number; del: number } {
         <div class="timeline-collapse" :class="turnFilesOpen ? 'is-open' : ''">
           <div class="timeline-collapse-inner">
             <div v-if="turnFilesOpen" class="space-y-0.5 pl-2 pt-0.5">
-              <button
+              <SimpleTooltip
                 v-for="change in visibleResolvedFileChanges"
                 :key="change.path"
-                type="button"
-                class="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
-                :title="change.path"
-                @click="emit('inspect-diff', { path: change.path, diff: change.diff })"
+                :content="fullDisplayPath(change.path, appStore.currentWorkspacePath)"
+                content-class="max-w-sm break-all font-mono text-[10px]"
               >
-                <Pencil :size="12" class="shrink-0 opacity-50" />
-                <span class="shrink-0">{{ fileActionLabel(change.kind) }}</span>
-                <span class="min-w-0 flex-1 truncate font-medium text-foreground/80 underline decoration-dotted decoration-muted-foreground/50 underline-offset-2">
-                  {{ shortPath(change.path) }}
-                </span>
-                <span class="shrink-0 tabular-nums text-[11px] text-positive">+{{ change.add }}</span>
-                <span class="shrink-0 tabular-nums text-[11px] text-destructive">-{{ change.del }}</span>
-              </button>
+                <button
+                  type="button"
+                  class="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+                  @click="emit('inspect-diff', { path: change.path, diff: change.diff })"
+                >
+                  <Pencil :size="12" class="shrink-0 opacity-50" />
+                  <span class="shrink-0">{{ fileActionLabel(change.kind) }}</span>
+                  <span class="min-w-0 flex-1 truncate font-medium text-foreground/80 underline decoration-dotted decoration-muted-foreground/50 underline-offset-2">
+                    {{ compactDisplayPath(change.path, appStore.currentWorkspacePath) }}
+                  </span>
+                  <span class="shrink-0 tabular-nums text-[11px] text-positive">+{{ change.add }}</span>
+                  <span class="shrink-0 tabular-nums text-[11px] text-destructive">-{{ change.del }}</span>
+                </button>
+              </SimpleTooltip>
               <Button
                 v-if="hiddenFileChangeCount"
                 variant="ghost"

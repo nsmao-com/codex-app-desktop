@@ -250,10 +250,33 @@ export const useClaudeStore = defineStore('claude', () => {
   const finalizedTurnIds = new Set<string>()
   const latestStartedTurnBySession = new Map<string, string>()
   const discardedSessionIds = new Set<string>()
+  const loadedSessionIds = new Set<string>()
   let eventUnsub: (() => void) | null = null
   let streamFlushTimer = 0
   let sessionLoadSequence = 0
   let queuedSequence = 0
+
+  function rememberFinalizedClaudeTurn(turnId: string): void {
+    if (!turnId) return
+    finalizedTurnIds.delete(turnId)
+    finalizedTurnIds.add(turnId)
+    while (finalizedTurnIds.size > 512) {
+      const oldest = finalizedTurnIds.values().next().value
+      if (!oldest) break
+      finalizedTurnIds.delete(oldest)
+    }
+  }
+
+  function rememberDiscardedClaudeSession(sessionId: string): void {
+    if (!sessionId) return
+    discardedSessionIds.delete(sessionId)
+    discardedSessionIds.add(sessionId)
+    while (discardedSessionIds.size > 512) {
+      const oldest = discardedSessionIds.values().next().value
+      if (!oldest) break
+      discardedSessionIds.delete(oldest)
+    }
+  }
 
   const workspacePath = computed(() =>
     appStore.settings.claudeWorkspace || appStore.settings.workspace || '',
@@ -343,6 +366,7 @@ export const useClaudeStore = defineStore('claude', () => {
       })
       queueBySession.value = nextQ
     }
+    rememberLoadedClaudeSession(realId)
   }
   const isReady = computed(() => Boolean(runtime.value.available))
   const sending = computed(() =>
@@ -669,7 +693,11 @@ export const useClaudeStore = defineStore('claude', () => {
       flushStreamPatches()
       const activeTurn = activeTurnBySession.value[sessionId]
       if (turnId && activeTurn?.turnId && activeTurn.turnId !== turnId) return
-      if (turnId) finalizedTurnIds.add(turnId)
+      rememberFinalizedClaudeTurn(turnId)
+      streamedAssistantTurns.delete(turnId)
+      for (const key of [...streamSequenceByItem.keys()]) {
+        if (key.startsWith(`${turnId}:`)) streamSequenceByItem.delete(key)
+      }
       markRunning(sessionId, false)
       markInterrupting(sessionId, false)
       const message = data.message as ClaudeMessage | undefined
@@ -792,6 +820,11 @@ export const useClaudeStore = defineStore('claude', () => {
           modelContextWindow: previous?.modelContextWindow ?? 0,
         },
       }
+    }
+    if (turnStartedAtById.value[turnId] !== undefined) {
+      const nextStarts = { ...turnStartedAtById.value }
+      delete nextStarts[turnId]
+      turnStartedAtById.value = nextStarts
     }
   }
 
@@ -921,6 +954,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const activate = options?.activate !== false
     const previousSessionId = activeSessionId.value
     if (activate) activeSessionId.value = requestedId
+    rememberLoadedClaudeSession(requestedId)
     const known = sessions.value.find((item) => sameClaudeSession(item.id, requestedId))
     const sequence = (sessionOpenSequence.get(requestedId) || 0) + 1
     sessionOpenSequence.set(requestedId, sequence)
@@ -1156,6 +1190,7 @@ export const useClaudeStore = defineStore('claude', () => {
         }
       }
       setClaudeHistoryState(sessionId, detail)
+      rememberLoadedClaudeSession(sessionId)
       return prefix.length > 0 || (Number(detail.historyStart) || 0) < before
     } catch (error) {
       if (sameClaudeSession(activeSessionId.value, sessionId)) {
@@ -1343,6 +1378,7 @@ export const useClaudeStore = defineStore('claude', () => {
     )]
     activeSessionId.value = id
     itemsBySession.value = { ...itemsBySession.value, [id]: [] }
+    rememberLoadedClaudeSession(id)
   }
 
   function ensureActiveSessionId(): string {
@@ -1364,6 +1400,7 @@ export const useClaudeStore = defineStore('claude', () => {
       !item.id.startsWith('pending-claude-') || keepPendingSession(item.id),
     )]
     itemsBySession.value = { ...itemsBySession.value, [sessionId]: [] }
+    rememberLoadedClaudeSession(sessionId)
     return sessionId
   }
 
@@ -1382,6 +1419,89 @@ export const useClaudeStore = defineStore('claude', () => {
 
   function isSessionBusy(sessionId: string): boolean {
     return isSessionLoading(sessionId) || isSessionTurnBusy(sessionId)
+  }
+
+  function rememberLoadedClaudeSession(sessionId: string): void {
+    const id = sessionAlias.get(sessionId) || sessionId.trim()
+    if (!id) return
+    for (const cached of [...loadedSessionIds]) {
+      if (sameClaudeSession(cached, id)) loadedSessionIds.delete(cached)
+    }
+    loadedSessionIds.add(id)
+    while (loadedSessionIds.size > 12 || cachedClaudeConversationWeight() > 8_000_000) {
+      const evicted = [...loadedSessionIds].find((candidate) =>
+        !sameClaudeSession(candidate, id)
+        && !sameClaudeSession(candidate, activeSessionId.value)
+        && !isSessionBusy(candidate)
+        && !Object.entries(queueBySession.value).some(([key, queue]) =>
+          sameClaudeSession(key, candidate) && queue.length > 0,
+        ),
+      )
+      if (!evicted) break
+      evictCachedClaudeSession(evicted)
+    }
+  }
+
+  function cachedClaudeConversationWeight(): number {
+    let total = 0
+    for (const items of Object.values(itemsBySession.value)) {
+      for (const item of items) {
+        total += item.text.length + item.output.length + item.detail.length + item.command.length
+        total += (item.reasoningSummary?.length ?? 0) + (item.reasoningContent?.length ?? 0)
+        total += item.changes.reduce((sum, change) => sum + change.path.length + change.diff.length, 0)
+        total += (item.attachments ?? []).reduce((sum, attachment) => sum + attachment.source.length + attachment.name.length, 0)
+      }
+    }
+    return total
+  }
+
+  function evictCachedClaudeSession(sessionId: string): void {
+    const related = new Set<string>([
+      sessionId,
+      ...Object.keys(itemsBySession.value).filter((id) => sameClaudeSession(id, sessionId)),
+      ...Object.keys(historyBySession.value).filter((id) => sameClaudeSession(id, sessionId)),
+    ])
+    const turnIds = new Set<string>()
+    for (const id of related) {
+      for (const item of itemsBySession.value[id] || []) {
+        if (item.turnId) turnIds.add(item.turnId)
+      }
+    }
+    const withoutRelated = <T>(bucket: Record<string, T>): Record<string, T> =>
+      Object.fromEntries(Object.entries(bucket).filter(([id]) =>
+        ![...related].some((key) => sameClaudeSession(id, key)),
+      ))
+    itemsBySession.value = withoutRelated(itemsBySession.value)
+    historyBySession.value = withoutRelated(historyBySession.value)
+    tokenUsageBySession.value = withoutRelated(tokenUsageBySession.value)
+    liveActivityBySession.value = withoutRelated(liveActivityBySession.value)
+
+    const nextMetrics = { ...activeTurnMetrics.value }
+    const nextStarts = { ...turnStartedAtById.value }
+    for (const turnId of turnIds) {
+      delete nextMetrics[turnId]
+      delete nextStarts[turnId]
+      finalizedTurnIds.delete(turnId)
+      streamedAssistantTurns.delete(turnId)
+      for (const key of [...streamSequenceByItem.keys()]) {
+        if (key.startsWith(`${turnId}:`)) streamSequenceByItem.delete(key)
+      }
+    }
+    activeTurnMetrics.value = nextMetrics
+    turnStartedAtById.value = nextStarts
+
+    for (const id of [...loadedSessionIds]) {
+      if ([...related].some((key) => sameClaudeSession(id, key))) loadedSessionIds.delete(id)
+    }
+    for (const id of [...sessionOpenSequence.keys()]) {
+      if ([...related].some((key) => sameClaudeSession(id, key))) sessionOpenSequence.delete(id)
+    }
+    for (const id of [...latestStartedTurnBySession.keys()]) {
+      if ([...related].some((key) => sameClaudeSession(id, key))) latestStartedTurnBySession.delete(id)
+    }
+    for (const [alias, target] of [...sessionAlias.entries()]) {
+      if (related.has(alias) || related.has(target)) sessionAlias.delete(alias)
+    }
   }
 
   /**
@@ -1725,7 +1845,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const current = turnRefForSession(ref.sessionId)
     if (current?.turnId && ref.turnId && current.turnId !== ref.turnId) return false
 
-    if (ref.turnId) finalizedTurnIds.add(ref.turnId)
+    rememberFinalizedClaudeTurn(ref.turnId)
     flushStreamPatches()
     runningSessionIds.value = runningSessionIds.value.filter((id) => !sameClaudeSession(id, ref.sessionId))
     markSending(ref.sessionId, false)
@@ -1916,7 +2036,18 @@ export const useClaudeStore = defineStore('claude', () => {
     const related = [...candidates].filter((id) => id && sameClaudeSession(id, sessionId))
     if (!related.includes(sessionId)) related.push(sessionId)
     const relatedSet = new Set(related)
-    related.forEach((id) => discardedSessionIds.add(id))
+    const turnIds = new Set<string>()
+    for (const id of related) {
+      for (const item of itemsBySession.value[id] || []) {
+        if (item.turnId) turnIds.add(item.turnId)
+      }
+      const activeTurn = activeTurnBySession.value[id]
+      if (activeTurn?.turnId) turnIds.add(activeTurn.turnId)
+    }
+    for (const id of [...loadedSessionIds]) {
+      if (related.some((key) => sameClaudeSession(id, key))) loadedSessionIds.delete(id)
+    }
+    related.forEach(rememberDiscardedClaudeSession)
 
     if (related.some((id) => sameClaudeSession(activeSessionId.value, id))) activeSessionId.value = ''
     if (related.some((id) => sameClaudeSession(loadingSessionId.value, id))) loadingSessionId.value = ''
@@ -1934,6 +2065,23 @@ export const useClaudeStore = defineStore('claude', () => {
     activeTurnBySession.value = withoutRelated(activeTurnBySession.value)
     liveActivityBySession.value = withoutRelated(liveActivityBySession.value)
     tokenUsageBySession.value = withoutRelated(tokenUsageBySession.value)
+
+    const nextMetrics = { ...activeTurnMetrics.value }
+    const nextStarts = { ...turnStartedAtById.value }
+    for (const turnId of turnIds) {
+      delete nextMetrics[turnId]
+      delete nextStarts[turnId]
+      finalizedTurnIds.delete(turnId)
+      streamedAssistantTurns.delete(turnId)
+      for (const key of [...streamSequenceByItem.keys()]) {
+        if (key.startsWith(`${turnId}:`)) streamSequenceByItem.delete(key)
+      }
+    }
+    activeTurnMetrics.value = nextMetrics
+    turnStartedAtById.value = nextStarts
+    for (const [key, patch] of [...pendingStreamPatches.entries()]) {
+      if (related.some((id) => sameClaudeSession(patch.sessionId, id))) pendingStreamPatches.delete(key)
+    }
 
     for (const id of [...sessionOpenSequence.keys()]) {
       if (related.some((key) => sameClaudeSession(id, key))) sessionOpenSequence.delete(id)

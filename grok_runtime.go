@@ -441,6 +441,11 @@ func (s *AppService) cachedGrokHistory(sessionID string) (GrokSessionSummary, []
 	}
 	info, err := os.Stat(snapshot.path)
 	if err != nil || info.Size() != snapshot.size || info.ModTime().UnixNano() != snapshot.modified {
+		s.historyMu.Lock()
+		if s.grokHistoryCache[sessionID] == snapshot {
+			delete(s.grokHistoryCache, sessionID)
+		}
+		s.historyMu.Unlock()
 		return GrokSessionSummary{}, nil, false
 	}
 	s.historyMu.Lock()
@@ -462,26 +467,21 @@ func (s *AppService) cacheGrokHistory(
 	if err != nil || before == nil || info.Size() != before.Size() || info.ModTime() != before.ModTime() {
 		return
 	}
+	weight := info.Size() * 2
 	s.historyMu.Lock()
 	defer s.historyMu.Unlock()
 	if s.grokHistoryCache == nil {
 		s.grokHistoryCache = make(map[string]*grokHistorySnapshot)
 	}
+	if weight > conversationHistoryEntryBytes {
+		delete(s.grokHistoryCache, sessionID)
+		return
+	}
 	s.grokHistoryCache[sessionID] = &grokHistorySnapshot{
 		dir: session.Dir, path: path, size: info.Size(), modified: info.ModTime().UnixNano(),
-		summary: session.Summary, messages: messages, touchedAt: time.Now(),
+		summary: session.Summary, messages: messages, weight: weight, touchedAt: time.Now(),
 	}
-	for len(s.grokHistoryCache) > conversationHistoryCacheLimit {
-		var oldestID string
-		var oldest time.Time
-		for id, snapshot := range s.grokHistoryCache {
-			if oldestID == "" || snapshot.touchedAt.Before(oldest) {
-				oldestID = id
-				oldest = snapshot.touchedAt
-			}
-		}
-		delete(s.grokHistoryCache, oldestID)
-	}
+	s.pruneConversationHistoryCachesLocked()
 }
 
 func (s *AppService) cachedGrokUsageSource(sessionID string) (string, int, bool) {
@@ -622,6 +622,7 @@ func (s *AppService) DeleteGrokSession(backend, sessionID string) error {
 	}
 	if strings.HasPrefix(sessionID, "pending-grok-") {
 		s.removeGrokArchiveEntry(sessionID)
+		s.dropGrokHistoryCache(sessionID)
 		return nil
 	}
 	if backend == grokBackendAPI {
@@ -629,6 +630,7 @@ func (s *AppService) DeleteGrokSession(backend, sessionID string) error {
 			return err
 		}
 		s.removeGrokArchiveEntry(sessionID)
+		s.dropGrokHistoryCache(sessionID)
 		return nil
 	}
 	executable := findCommand(commandCandidates("grok"))
@@ -647,6 +649,7 @@ func (s *AppService) DeleteGrokSession(backend, sessionID string) error {
 		return fmt.Errorf("delete Grok session: %s", strings.TrimSpace(string(output)))
 	}
 	s.removeGrokArchiveEntry(sessionID)
+	s.dropGrokHistoryCache(sessionID)
 	return nil
 }
 

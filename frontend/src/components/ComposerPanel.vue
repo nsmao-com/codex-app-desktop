@@ -461,7 +461,7 @@ const activeSelectionLoading = computed(() => {
   return Boolean(codexStore.activeThreadId && codexStore.loadingThreadId === codexStore.activeThreadId)
 })
 /**
- * Follow-ups must stay sendable while a turn runs (queue or steer).
+ * Follow-ups must stay sendable while a turn runs so they can enter the queue.
  * Never gate this on isTurnRunning / sendingMessage — Grok uses the same queue path.
  */
 const canSend = computed(() => {
@@ -511,17 +511,7 @@ function removeQueued(messageId: string): void {
   else codexStore.removeQueuedMessage(messageId)
 }
 
-const canSteer = computed(() =>
-  appStore.isCodexMode
-  && (appStore.settings.followUpBehavior || 'queue') === 'steer'
-  && codexStore.isTurnRunning
-  && Boolean(codexStore.activeTurnId)
-  && !workspaceStore.switchingWorkspace
-  && codexStore.loadingThreadId !== codexStore.activeThreadId
-  && !codexStore.activeThreadId.startsWith('pending-thread-'),
-)
 const willQueueOnSend = computed(() => {
-  if (canSteer.value) return false
   if (appStore.isGrokMode) {
     const loadingActiveSession = Boolean(
       grokStore.activeSessionId && grokStore.loadingSessionId === grokStore.activeSessionId,
@@ -553,7 +543,6 @@ const stopDisabled = computed(() => {
   return appStore.isCodexMode && codexStore.interruptingTurn
 })
 const sendButtonLabel = computed(() => {
-  if (canSteer.value) return t('chat.steer')
   if (willQueueOnSend.value) return t('chat.queueSend')
   return t('chat.send')
 })
@@ -562,7 +551,6 @@ const composerPlaceholder = computed(() => {
   if (appStore.isGrokMode) return t('chat.grokPlaceholder')
   if (appStore.isClaudeMode && willQueueOnSend.value) return t('chat.queuePlaceholder')
   if (appStore.isClaudeMode) return t('chat.claudePlaceholder')
-  if (canSteer.value) return t('chat.steerPlaceholder')
   if (willQueueOnSend.value) return t('chat.queuePlaceholder')
   return t('chat.placeholder')
 })

@@ -25,7 +25,7 @@ import { translate } from '../i18n'
 import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.1.4'
+const AppVersionFallback = '1.1.5'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok'
@@ -126,7 +126,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.1.4')
+  const appVersion = shallowRef('1.1.5')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -269,7 +269,8 @@ export const useAppStore = defineStore('app', () => {
       claudeApprovalPolicy: data.settings.claudeApprovalPolicy || 'on-request',
       claudePermissionMode: data.settings.claudePermissionMode || 'acceptEdits',
       customModels: data.settings.customModels ?? [],
-      followUpBehavior: data.settings.followUpBehavior === 'steer' ? 'steer' : 'queue',
+      // Migrate the retired steer preference from older installations.
+      followUpBehavior: 'queue',
       notifyOnTurnComplete: data.settings.notifyOnTurnComplete !== false,
       customInstructions: data.settings.customInstructions ?? '',
       sendWithModifier: Boolean(data.settings.sendWithModifier),

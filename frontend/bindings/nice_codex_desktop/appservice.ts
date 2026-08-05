@@ -17,6 +17,10 @@ export function AppVersion(): $CancellablePromise<string> {
     return $Call.ByID(257367811);
 }
 
+export function ApplyProviderRouterToCodex(): $CancellablePromise<$models.ProviderRouterView> {
+    return $Call.ByID(231535978);
+}
+
 export function ApplyUpdateAndRestart(): $CancellablePromise<void> {
     return $Call.ByID(3133742711);
 }
@@ -125,6 +129,10 @@ export function FocusBrowser(): $CancellablePromise<void> {
 
 export function ForkThread(threadID: string): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(1034771762, threadID);
+}
+
+export function ImportMCPServers(request: $models.MCPServersImportRequest): $CancellablePromise<void> {
+    return $Call.ByID(340745843, request);
 }
 
 /**
@@ -402,6 +410,10 @@ export function ReadProjectInstructions(): $CancellablePromise<$models.ProjectIn
     return $Call.ByID(1112136990);
 }
 
+export function ReadProviderRouterConfig(): $CancellablePromise<$models.ProviderRouterView> {
+    return $Call.ByID(42185596);
+}
+
 export function ReadThread(threadID: string): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3198804358, threadID);
 }
@@ -470,12 +482,20 @@ export function RenameGrokSession(backend: string, sessionID: string, name: stri
     return $Call.ByID(2689730813, backend, sessionID, name);
 }
 
+export function ResetProviderRouterCircuits(): $CancellablePromise<$models.ProviderRouterView> {
+    return $Call.ByID(4098080945);
+}
+
 export function ResizeTerminal(processID: string, rows: number, cols: number): $CancellablePromise<void> {
     return $Call.ByID(253488878, processID, rows, cols);
 }
 
 export function ResolveServerRequest(requestKey: string, result: { [_ in string]?: any } | null): $CancellablePromise<void> {
     return $Call.ByID(3513618634, requestKey, result);
+}
+
+export function RestoreCodexProviderRoute(): $CancellablePromise<$models.ProviderRouterView> {
+    return $Call.ByID(70883791);
 }
 
 export function ResumeThread(threadID: string): $CancellablePromise<{ [_ in string]?: any } | null> {
@@ -522,6 +542,10 @@ export function SavePreferences(settings: $models.UserSettings): $CancellablePro
  */
 export function SaveProjectInstructions(content: string): $CancellablePromise<$models.ProjectInstructionsInfo> {
     return $Call.ByID(437632509, content);
+}
+
+export function SaveProviderRouterConfig(request: $models.ProviderRouterSaveRequest): $CancellablePromise<$models.ProviderRouterView> {
+    return $Call.ByID(526581077, request);
 }
 
 export function SaveScheduledTask(task: $models.ScheduledTask): $CancellablePromise<$models.ScheduledTask> {
