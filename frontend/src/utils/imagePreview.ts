@@ -5,12 +5,19 @@ import * as backend from '../../bindings/nice_codex_desktop/appservice'
 const previewCache = new Map<string, string>()
 const previewInflight = new Map<string, Promise<string>>()
 
+function revokeLocalPreview(value = ''): void {
+  if (value.startsWith('blob:')) URL.revokeObjectURL(value)
+}
+
 export function rememberLocalImagePreview(path: string, dataUrl: string): void {
   if (!path || !dataUrl) return
+  const previous = previewCache.get(path)
+  if (previous && previous !== dataUrl) revokeLocalPreview(previous)
   previewCache.set(path, dataUrl)
 }
 
 export function forgetImagePreview(path: string): void {
+  revokeLocalPreview(previewCache.get(path))
   previewCache.delete(path)
   previewInflight.delete(path)
 }

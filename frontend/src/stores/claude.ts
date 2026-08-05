@@ -11,12 +11,14 @@ import {
   listClaudeSessionTurnUsages,
   listClaudeSessions,
   readClaudeSession,
+  readClaudeSessionHistory,
   refreshClaudeRuntime,
   renameClaudeSession as renameClaudeSessionApi,
   sendClaudeMessage as sendClaudeMessageApi,
   unarchiveClaudeSession as unarchiveClaudeSessionApi,
   type ClaudeMessage,
   type ClaudeRuntimeStatus,
+  type ClaudeSessionDetail,
   type ClaudeSessionSummary,
   type ClaudeTurnRef,
 } from '@/utils/claudeBindings'
@@ -146,6 +148,15 @@ interface ClaudeStreamPatch {
   mode: 'append' | 'replace'
 }
 
+interface ClaudeHistoryState {
+  start: number
+  total: number
+  turnOffset: number
+  hasEarlier: boolean
+  loadingEarlier: boolean
+  loadedUpdatedAt: number
+}
+
 function claudeTextTailAfterActivity(fullText: string, activity: ClaudeMessage[]): string {
   if (!fullText) return ''
   let cursor = 0
@@ -213,8 +224,10 @@ export const useClaudeStore = defineStore('claude', () => {
   const archivedSessions = shallowRef<ClaudeSessionSummary[]>([])
   const activeSessionId = shallowRef('')
   const itemsBySession = shallowRef<Record<string, TimelineItem[]>>({})
+  const historyBySession = shallowRef<Record<string, ClaudeHistoryState>>({})
   const loadingSessionId = shallowRef('')
   const sendingSessionIds = shallowRef<string[]>([])
+  const interruptingSessionIds = shallowRef<string[]>([])
   const search = shallowRef('')
   const runningSessionIds = shallowRef<string[]>([])
   const activeTurnBySession = shallowRef<Record<string, ClaudeTurnRef | undefined>>({})
@@ -289,6 +302,14 @@ export const useClaudeStore = defineStore('claude', () => {
     nextItems[realId] = merged
     itemsBySession.value = nextItems
 
+    const pendingHistory = historyBySession.value[pendingId]
+    if (pendingHistory) {
+      const nextHistory = { ...historyBySession.value }
+      delete nextHistory[pendingId]
+      if (!nextHistory[realId]) nextHistory[realId] = pendingHistory
+      historyBySession.value = nextHistory
+    }
+
     sessions.value = sessions.value.map((item) =>
       item.id === pendingId ? { ...item, id: realId } : item,
     )
@@ -327,6 +348,9 @@ export const useClaudeStore = defineStore('claude', () => {
   const sending = computed(() =>
     Boolean(activeSessionId.value && sendingSessionIds.value.some((id) => sameClaudeSession(id, activeSessionId.value))),
   )
+  const interrupting = computed(() =>
+    Boolean(activeSessionId.value && interruptingSessionIds.value.some((id) => sameClaudeSession(id, activeSessionId.value))),
+  )
   const activeItems = computed(() => {
     const sessionId = activeSessionId.value
     const base = [...(itemsBySession.value[sessionId] || [])]
@@ -336,6 +360,9 @@ export const useClaudeStore = defineStore('claude', () => {
     if (!activity.length) return base
     return mergeClaudeLiveActivity(base, activity, turn.turnId)
   })
+  const activeHistoryHasEarlier = computed(() => historyBySession.value[activeSessionId.value]?.hasEarlier === true)
+  const activeHistoryEarlierCount = computed(() => historyBySession.value[activeSessionId.value]?.turnOffset ?? 0)
+  const activeHistoryLoadingEarlier = computed(() => historyBySession.value[activeSessionId.value]?.loadingEarlier === true)
   const isTurnRunning = computed(() =>
     Boolean(activeSessionId.value && runningSessionIds.value.some((id) => sameClaudeSession(id, activeSessionId.value))),
   )
@@ -496,8 +523,11 @@ export const useClaudeStore = defineStore('claude', () => {
       // Turn ids are unique; delayed bridge delivery must not revive a turn whose
       // terminal event was already processed.
       if (turnId && finalizedTurnIds.has(turnId)) {
+        const activeTurn = activeTurnBySession.value[sessionId]
+        if (activeTurn?.turnId && activeTurn.turnId !== turnId) return
         markRunning(sessionId, false)
         markSending(sessionId, false)
+        markInterrupting(sessionId, false)
         return
       }
       if (turnId) {
@@ -641,6 +671,7 @@ export const useClaudeStore = defineStore('claude', () => {
       if (turnId && activeTurn?.turnId && activeTurn.turnId !== turnId) return
       if (turnId) finalizedTurnIds.add(turnId)
       markRunning(sessionId, false)
+      markInterrupting(sessionId, false)
       const message = data.message as ClaudeMessage | undefined
       if (message) {
         const list = [...(itemsBySession.value[sessionId] || [])]
@@ -795,6 +826,12 @@ export const useClaudeStore = defineStore('claude', () => {
     sendingSessionIds.value = next
   }
 
+  function markInterrupting(sessionId: string, active: boolean): void {
+    const next = interruptingSessionIds.value.filter((id) => !sameClaudeSession(id, sessionId))
+    if (active) next.push(sessionId)
+    interruptingSessionIds.value = next
+  }
+
   function sameClaudeSession(left: string, right: string): boolean {
     if (!left || !right) return false
     if (left === right) return true
@@ -884,6 +921,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const activate = options?.activate !== false
     const previousSessionId = activeSessionId.value
     if (activate) activeSessionId.value = requestedId
+    const known = sessions.value.find((item) => sameClaudeSession(item.id, requestedId))
     const sequence = (sessionOpenSequence.get(requestedId) || 0) + 1
     sessionOpenSequence.set(requestedId, sequence)
     loadingSequenceBySession.set(requestedId, sequence)
@@ -891,7 +929,6 @@ export const useClaudeStore = defineStore('claude', () => {
     try {
       // If the session belongs to another project, switch Claude workspace first
       // so the active group highlights like Codex / Grok.
-      const known = sessions.value.find((item) => sameClaudeSession(item.id, requestedId))
       const targetWorkspace = known?.workspace || ''
       if (
         activate && options?.switchWorkspace !== false
@@ -917,10 +954,22 @@ export const useClaudeStore = defineStore('claude', () => {
       // Claude session id. Keep its empty/optimistic timeline without a false error.
       if (requestedId.startsWith('pending-claude-')) return
 
+      const cachedHistory = historyBySession.value[requestedId]
+      const hasCachedTimeline = Object.prototype.hasOwnProperty.call(itemsBySession.value, requestedId)
+      const cacheIsCurrent = !known
+        || !known.updatedAt
+        || known.updatedAt <= (cachedHistory?.loadedUpdatedAt ?? 0)
+      if (
+        !options?.terminalStatus
+        && cachedHistory
+        && hasCachedTimeline
+        && (cacheIsCurrent || isSessionTurnBusy(requestedId))
+      ) return
+
       const detail = await readClaudeSession(requestedId)
       if (sessionOpenSequence.get(requestedId) !== sequence) return
       const messages = detail.messages || []
-      const fromDisk = buildTimelineFromMessages(requestedId, messages)
+      const fromDisk = buildTimelineFromMessages(requestedId, messages, detail.historyTurnOffset || 0)
 
       // Re-read live state after the await. A new turn can start while the native
       // transcript is loading; using the pre-request snapshot would overwrite its
@@ -928,18 +977,28 @@ export const useClaudeStore = defineStore('claude', () => {
       const cached = itemsBySession.value[requestedId] || []
       const liveTurn = activeTurnBySession.value[requestedId]
       const isLive = runningSessionIds.value.some((id) => sameClaudeSession(id, requestedId)) || Boolean(liveTurn)
+      const currentHistory = historyBySession.value[requestedId]
+      const keepLoadedPrefix = Boolean(
+        currentHistory
+        && currentHistory.start < (Number(detail.historyStart) || 0)
+        && (Number(detail.historyTotal) || 0) >= currentHistory.total,
+      )
+      const split = keepLoadedPrefix
+        ? splitClaudeHistoryPrefix(fromDisk, cached)
+        : { prefix: [] as TimelineItem[], current: cached }
 
       let nextItems: TimelineItem[]
-      if (isLive && cached.length > 0) {
+      if (isLive && split.current.length > 0) {
         // Running turn: memory is authoritative for the live bubble; merge disk
         // history underneath so older completed turns are not lost.
-        nextItems = mergeDiskWithLiveTimeline(fromDisk, cached, liveTurn?.turnId || '')
+        nextItems = mergeDiskWithLiveTimeline(fromDisk, split.current, liveTurn?.turnId || '')
       } else {
         // Completed history is disk-authoritative. Keep only cache rows that
         // are genuinely newer/active so an old local snapshot cannot replace
         // or reorder the native transcript.
-        nextItems = mergeDiskWithCachedTimeline(fromDisk, cached)
+        nextItems = mergeDiskWithCachedTimeline(fromDisk, split.current)
       }
+      if (split.prefix.length) nextItems = [...split.prefix, ...nextItems]
       if (!isLive) {
         nextItems = finalizeTimelineItemStatuses(
           nextItems,
@@ -947,6 +1006,14 @@ export const useClaudeStore = defineStore('claude', () => {
         )
       }
       itemsBySession.value = { ...itemsBySession.value, [requestedId]: nextItems }
+      setClaudeHistoryState(requestedId, detail)
+      if (split.prefix.length && currentHistory) {
+        patchClaudeHistoryState(requestedId, {
+          start: currentHistory.start,
+          turnOffset: currentHistory.turnOffset,
+          hasEarlier: currentHistory.hasEarlier,
+        })
+      }
       // Ensure summary is present / refreshed at top of list.
       if (detail.summary?.id) {
         const others = sessions.value.filter((item) => item.id !== detail.summary.id)
@@ -1017,9 +1084,13 @@ export const useClaudeStore = defineStore('claude', () => {
     }
   }
 
-  function buildTimelineFromMessages(sessionId: string, messages: ClaudeMessage[]): TimelineItem[] {
+  function buildTimelineFromMessages(
+    sessionId: string,
+    messages: ClaudeMessage[],
+    turnOffset = 0,
+  ): TimelineItem[] {
     const items: TimelineItem[] = []
-    let turnSeed = 0
+    let turnSeed = turnOffset
     for (const message of messages) {
       const role = (message.role || '').toLowerCase()
       if (role === 'user' || role === 'human') turnSeed += 1
@@ -1035,10 +1106,104 @@ export const useClaudeStore = defineStore('claude', () => {
     return items
   }
 
+  function setClaudeHistoryState(sessionId: string, detail: ClaudeSessionDetail): void {
+    const start = Math.max(0, Number(detail.historyStart) || 0)
+    const turnOffset = Math.max(0, Number(detail.historyTurnOffset) || 0)
+    historyBySession.value = {
+      ...historyBySession.value,
+      [sessionId]: {
+        start,
+        total: Math.max(start, Number(detail.historyTotal) || 0),
+        turnOffset,
+        hasEarlier: detail.hasEarlier === true || start > 0,
+        loadingEarlier: false,
+        loadedUpdatedAt: Number(detail.summary?.updatedAt) || historyBySession.value[sessionId]?.loadedUpdatedAt || 0,
+      },
+    }
+  }
+
+  function patchClaudeHistoryState(sessionId: string, patch: Partial<ClaudeHistoryState>): void {
+    const current = historyBySession.value[sessionId]
+    if (!current) return
+    historyBySession.value = {
+      ...historyBySession.value,
+      [sessionId]: { ...current, ...patch },
+    }
+  }
+
+  async function loadEarlierHistory(): Promise<boolean> {
+    const sessionId = activeSessionId.value
+    const state = historyBySession.value[sessionId]
+    if (!sessionId || !state?.hasEarlier || state.loadingEarlier) return false
+    const before = state.start
+    patchClaudeHistoryState(sessionId, { loadingEarlier: true })
+    try {
+      const detail = await readClaudeSessionHistory(sessionId, before)
+      const currentState = historyBySession.value[sessionId]
+      if (!currentState || currentState.start !== before) return false
+      const earlier = buildTimelineFromMessages(
+        sessionId,
+        detail.messages || [],
+        detail.historyTurnOffset || 0,
+      )
+      const current = itemsBySession.value[sessionId] || []
+      const existingIDs = new Set(current.map((item) => item.id).filter(Boolean))
+      const prefix = earlier.filter((item) => !item.id || !existingIDs.has(item.id))
+      if (prefix.length) {
+        itemsBySession.value = {
+          ...itemsBySession.value,
+          [sessionId]: [...prefix, ...current],
+        }
+      }
+      setClaudeHistoryState(sessionId, detail)
+      return prefix.length > 0 || (Number(detail.historyStart) || 0) < before
+    } catch (error) {
+      if (sameClaudeSession(activeSessionId.value, sessionId)) {
+        notify('error', translate('notifications.taskOpenFailed'), errorMessage(error))
+      }
+      return false
+    } finally {
+      if (historyBySession.value[sessionId]?.loadingEarlier) {
+        patchClaudeHistoryState(sessionId, { loadingEarlier: false })
+      }
+    }
+  }
+
   /**
    * Disk = completed history; live = in-memory stream. Prefer live rows for the
    * active turn and any in-progress items; keep disk order for older turns.
    */
+  function splitClaudeHistoryPrefix(
+    disk: TimelineItem[],
+    current: TimelineItem[],
+  ): { prefix: TimelineItem[], current: TimelineItem[] } {
+    if (!disk.length || !current.length) return { prefix: [], current }
+    const currentByID = new Map<string, number>()
+    current.forEach((item, index) => {
+      if (item.id) currentByID.set(item.id, index)
+    })
+    let diskIndex = -1
+    let currentIndex = -1
+    for (let index = 0; index < disk.length; index += 1) {
+      const item = disk[index]
+      const byID = item.id ? currentByID.get(item.id) : undefined
+      const match = byID ?? (item.type === 'userMessage'
+        ? current.findIndex((row) => sameClaudeUserRow(row, item))
+        : -1)
+      if (match >= 0) {
+        diskIndex = index
+        currentIndex = match
+        break
+      }
+    }
+    if (diskIndex < 0 || currentIndex < 0) return { prefix: [], current }
+    const prefixLength = Math.max(0, currentIndex - diskIndex)
+    return {
+      prefix: current.slice(0, prefixLength),
+      current: current.slice(prefixLength),
+    }
+  }
+
   function mergeDiskWithLiveTimeline(
     disk: TimelineItem[],
     live: TimelineItem[],
@@ -1405,6 +1570,10 @@ export const useClaudeStore = defineStore('claude', () => {
       markRunning(fromId, false)
       markRunning(toId, true)
     }
+    if (interruptingSessionIds.value.includes(fromId)) {
+      markInterrupting(fromId, false)
+      markInterrupting(toId, true)
+    }
     const turn = activeTurnBySession.value[fromId]
     if (turn) {
       const next = { ...activeTurnBySession.value }
@@ -1560,6 +1729,7 @@ export const useClaudeStore = defineStore('claude', () => {
     flushStreamPatches()
     runningSessionIds.value = runningSessionIds.value.filter((id) => !sameClaudeSession(id, ref.sessionId))
     markSending(ref.sessionId, false)
+    markInterrupting(ref.sessionId, false)
 
     const nextTurns = { ...activeTurnBySession.value }
     for (const [id, turn] of Object.entries(nextTurns)) {
@@ -1715,10 +1885,19 @@ export const useClaudeStore = defineStore('claude', () => {
   async function interruptActiveTurn(): Promise<void> {
     const ref = turnRefForSession(activeSessionId.value)
     if (!ref) return
+    if (interruptingSessionIds.value.some((id) => sameClaudeSession(id, ref.sessionId))) return
+    markInterrupting(ref.sessionId, true)
     try {
       await interruptClaudeTurnApi(ref)
+      window.setTimeout(() => {
+        const current = turnRefForSession(ref.sessionId)
+        if (!current || current.turnId === ref.turnId) markInterrupting(ref.sessionId, false)
+      }, 8000)
     } catch (error) {
       if (!await recoverMissingClaudeTurn(ref, error)) {
+        const current = turnRefForSession(ref.sessionId)
+        if (!current || current.turnId !== ref.turnId) return
+        markInterrupting(ref.sessionId, false)
         notify('error', translate('notifications.interruptFailed'), errorMessage(error))
       }
     }
@@ -1730,6 +1909,7 @@ export const useClaudeStore = defineStore('claude', () => {
       ...sessionAlias.keys(),
       ...sessionAlias.values(),
       ...Object.keys(itemsBySession.value),
+      ...Object.keys(historyBySession.value),
       ...Object.keys(queueBySession.value),
       ...Object.keys(activeTurnBySession.value),
     ])
@@ -1742,12 +1922,14 @@ export const useClaudeStore = defineStore('claude', () => {
     if (related.some((id) => sameClaudeSession(loadingSessionId.value, id))) loadingSessionId.value = ''
     sendingSessionIds.value = sendingSessionIds.value.filter((id) => !related.some((key) => sameClaudeSession(id, key)))
     runningSessionIds.value = runningSessionIds.value.filter((id) => !related.some((key) => sameClaudeSession(id, key)))
+    interruptingSessionIds.value = interruptingSessionIds.value.filter((id) => !related.some((key) => sameClaudeSession(id, key)))
 
     const withoutRelated = <T>(bucket: Record<string, T>): Record<string, T> =>
       Object.fromEntries(Object.entries(bucket).filter(([id]) =>
         !related.some((key) => sameClaudeSession(id, key)),
       ))
     itemsBySession.value = withoutRelated(itemsBySession.value)
+    historyBySession.value = withoutRelated(historyBySession.value)
     queueBySession.value = withoutRelated(queueBySession.value)
     activeTurnBySession.value = withoutRelated(activeTurnBySession.value)
     liveActivityBySession.value = withoutRelated(liveActivityBySession.value)
@@ -1874,6 +2056,7 @@ export const useClaudeStore = defineStore('claude', () => {
     itemsBySession,
     loadingSessionId,
     sending,
+    interrupting,
     search,
     runningSessionIds,
     activeTurnMetrics,
@@ -1882,6 +2065,9 @@ export const useClaudeStore = defineStore('claude', () => {
     workspacePath,
     isReady,
     activeItems,
+    activeHistoryHasEarlier,
+    activeHistoryEarlierCount,
+    activeHistoryLoadingEarlier,
     isTurnRunning,
     activeQueuedMessages,
     activeTurn,
@@ -1894,6 +2080,7 @@ export const useClaudeStore = defineStore('claude', () => {
     loadSessions,
     loadArchivedSessions,
     openSession,
+    loadEarlierHistory,
     newSession,
     sendMessage,
     interruptActiveTurn,

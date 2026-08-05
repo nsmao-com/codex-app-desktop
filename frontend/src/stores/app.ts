@@ -22,9 +22,10 @@ import {
   normalizeAccountUsage,
 } from '../utils/protocol'
 import { translate } from '../i18n'
+import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.1.2'
+const AppVersionFallback = '1.1.4'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok'
@@ -53,7 +54,7 @@ const defaultSettings: UserSettings = {
   claudeSandbox: 'workspace-write',
   claudeApprovalPolicy: 'on-request',
   claudePermissionMode: 'acceptEdits',
-  model: '',
+  model: DEFAULT_CODEX_MODEL,
   modelProvider: '',
   customModels: [],
   effort: 'high',
@@ -125,7 +126,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.1.2')
+  const appVersion = shallowRef('1.1.4')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{

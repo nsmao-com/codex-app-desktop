@@ -210,11 +210,15 @@ export interface ClaudeSendRequest {
 }
 
 /**
- * ClaudeSessionDetail is the full open conversation.
+ * ClaudeSessionDetail is one page of an open conversation.
  */
 export interface ClaudeSessionDetail {
     "summary": ClaudeSessionSummary;
     "messages": ClaudeMessage[] | null;
+    "historyStart": number;
+    "historyTotal": number;
+    "historyTurnOffset": number;
+    "hasEarlier": boolean;
 }
 
 /**
@@ -387,6 +391,10 @@ export interface GrokSendRequest {
 export interface GrokSessionDetail {
     "summary": GrokSessionSummary;
     "messages": GrokMessage[] | null;
+    "historyStart": number;
+    "historyTotal": number;
+    "historyTurnOffset": number;
+    "hasEarlier": boolean;
 }
 
 export interface GrokSessionSummary {

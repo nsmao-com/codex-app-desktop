@@ -44,10 +44,14 @@ type ClaudeMessage struct {
 	CreatedAt int64  `json:"createdAt"`
 }
 
-// ClaudeSessionDetail is the full open conversation.
+// ClaudeSessionDetail is one page of an open conversation.
 type ClaudeSessionDetail struct {
-	Summary  ClaudeSessionSummary `json:"summary"`
-	Messages []ClaudeMessage      `json:"messages"`
+	Summary           ClaudeSessionSummary `json:"summary"`
+	Messages          []ClaudeMessage      `json:"messages"`
+	HistoryStart      int                  `json:"historyStart"`
+	HistoryTotal      int                  `json:"historyTotal"`
+	HistoryTurnOffset int                  `json:"historyTurnOffset"`
+	HasEarlier        bool                 `json:"hasEarlier"`
 }
 
 // ClaudeSendRequest starts a Claude Code turn.
@@ -332,6 +336,22 @@ func (s *AppService) ListArchivedClaudeSessions() ([]ClaudeSessionSummary, error
 }
 
 func (s *AppService) ReadClaudeSession(sessionID string) (ClaudeSessionDetail, error) {
+	return s.readClaudeSessionPage(sessionID, -1)
+}
+
+func (s *AppService) ReadClaudeSessionHistory(sessionID string, before int) (ClaudeSessionDetail, error) {
+	return s.readClaudeSessionPage(sessionID, before)
+}
+
+func (s *AppService) readClaudeSessionPage(sessionID string, before int) (ClaudeSessionDetail, error) {
+	detail, err := s.readClaudeSessionFull(sessionID)
+	if err != nil {
+		return ClaudeSessionDetail{}, err
+	}
+	return paginateClaudeSession(detail, before), nil
+}
+
+func (s *AppService) readClaudeSessionFull(sessionID string) (ClaudeSessionDetail, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return ClaudeSessionDetail{}, errors.New("Claude session id is required")
@@ -342,17 +362,24 @@ func (s *AppService) ReadClaudeSession(sessionID string) (ClaudeSessionDetail, e
 	// sessions that do not have a readable native transcript yet.
 	s.mu.Lock()
 	session := s.claudeSessions[sessionID]
-	var localCopy *claudeStoredSession
+	var localMeta *claudeStoredSession
 	if session != nil {
 		clone := *session
-		clone.Messages = append([]ClaudeMessage(nil), session.Messages...)
-		localCopy = &clone
+		clone.Messages = nil
+		localMeta = &clone
 	}
 	s.mu.Unlock()
 
+	if summary, messages, ok := s.cachedClaudeHistory(sessionID); ok {
+		summary = mergeClaudeLocalSummary(summary, localMeta)
+		return ClaudeSessionDetail{Summary: summary, Messages: messages}, nil
+	}
+
 	if native, ok := findClaudeNativeSession(sessionID); ok {
+		before, _ := os.Stat(native.Path)
 		messages, err := readClaudeNativeMessages(native.Path)
 		if err != nil {
+			localCopy := s.copyClaudeStoredSession(sessionID)
 			if localCopy == nil || len(localCopy.Messages) == 0 {
 				return ClaudeSessionDetail{}, err
 			}
@@ -367,28 +394,18 @@ func (s *AppService) ReadClaudeSession(sessionID string) (ClaudeSessionDetail, e
 				Messages: localCopy.Messages,
 			}, nil
 		}
-		summary := native.Summary
-		if localCopy != nil {
-			// Preserve rename / workspace overrides from NiceCodex index.
-			if localCopy.Name != "" && localCopy.Name != "Claude session" {
-				summary.Name = localCopy.Name
-			}
-			if localCopy.Workspace != "" {
-				summary.Workspace = localCopy.Workspace
-			}
-			if localCopy.Model != "" {
-				summary.Model = localCopy.Model
-			}
-		}
-		// Refresh the local index with the complete native history so an old
-		// partial draft cannot mask newer Claude transcript entries later.
+		summary := mergeClaudeLocalSummary(native.Summary, localMeta)
+		s.cacheClaudeHistory(sessionID, native.Path, summary, messages, before)
+		// The native transcript and history cache keep the full conversation. The
+		// persisted index only needs a bounded fallback for brief file locks.
+		fallbackMessages := paginateClaudeSession(ClaudeSessionDetail{Messages: messages}, -1).Messages
 		s.mu.Lock()
 		if s.claudeSessions[sessionID] == nil {
 			s.claudeSessions[sessionID] = &claudeStoredSession{
 				ID: summary.ID, BackendRef: summary.ID, Workspace: summary.Workspace,
 				Name: summary.Name, Preview: summary.Preview, Model: summary.Model,
 				CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt,
-				Messages: messages,
+				Messages: fallbackMessages,
 			}
 			s.persistClaudeSessionsLocked()
 		} else {
@@ -403,13 +420,14 @@ func (s *AppService) ReadClaudeSession(sessionID string) (ClaudeSessionDetail, e
 			if stored.UpdatedAt < summary.UpdatedAt {
 				stored.UpdatedAt = summary.UpdatedAt
 			}
-			stored.Messages = messages
+			stored.Messages = fallbackMessages
 			s.persistClaudeSessionsLocked()
 		}
 		s.mu.Unlock()
 		return ClaudeSessionDetail{Summary: summary, Messages: messages}, nil
 	}
 
+	localCopy := s.copyClaudeStoredSession(sessionID)
 	if localCopy != nil {
 		return ClaudeSessionDetail{
 			Summary: ClaudeSessionSummary{
@@ -420,6 +438,105 @@ func (s *AppService) ReadClaudeSession(sessionID string) (ClaudeSessionDetail, e
 		}, nil
 	}
 	return ClaudeSessionDetail{}, errors.New("Claude session was not found")
+}
+
+func mergeClaudeLocalSummary(summary ClaudeSessionSummary, local *claudeStoredSession) ClaudeSessionSummary {
+	if local == nil {
+		return summary
+	}
+	if local.Name != "" && local.Name != "Claude session" {
+		summary.Name = local.Name
+	}
+	if local.Workspace != "" {
+		summary.Workspace = local.Workspace
+	}
+	if local.Model != "" {
+		summary.Model = local.Model
+	}
+	if local.Effort != "" {
+		summary.Effort = local.Effort
+	}
+	if local.UpdatedAt > summary.UpdatedAt {
+		summary.UpdatedAt = local.UpdatedAt
+	}
+	return summary
+}
+
+func (s *AppService) copyClaudeStoredSession(sessionID string) *claudeStoredSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.claudeSessions[sessionID]
+	if session == nil {
+		return nil
+	}
+	clone := *session
+	clone.Messages = append([]ClaudeMessage(nil), session.Messages...)
+	return &clone
+}
+
+func paginateClaudeSession(detail ClaudeSessionDetail, before int) ClaudeSessionDetail {
+	messages := detail.Messages
+	start, end, turnOffset := conversationMessagePageBounds(len(messages), before, func(index int) bool {
+		role := strings.ToLower(strings.TrimSpace(messages[index].Role))
+		return role == "user" || role == "human"
+	})
+	detail.Messages = append([]ClaudeMessage(nil), messages[start:end]...)
+	detail.HistoryStart = start
+	detail.HistoryTotal = len(messages)
+	detail.HistoryTurnOffset = turnOffset
+	detail.HasEarlier = start > 0
+	return detail
+}
+
+func (s *AppService) cachedClaudeHistory(sessionID string) (ClaudeSessionSummary, []ClaudeMessage, bool) {
+	s.historyMu.Lock()
+	snapshot := s.claudeHistoryCache[sessionID]
+	s.historyMu.Unlock()
+	if snapshot == nil {
+		return ClaudeSessionSummary{}, nil, false
+	}
+	info, err := os.Stat(snapshot.path)
+	if err != nil || info.Size() != snapshot.size || info.ModTime().UnixNano() != snapshot.modified {
+		return ClaudeSessionSummary{}, nil, false
+	}
+	s.historyMu.Lock()
+	if current := s.claudeHistoryCache[sessionID]; current == snapshot {
+		current.touchedAt = time.Now()
+	}
+	s.historyMu.Unlock()
+	return snapshot.summary, snapshot.messages, true
+}
+
+func (s *AppService) cacheClaudeHistory(
+	sessionID, path string,
+	summary ClaudeSessionSummary,
+	messages []ClaudeMessage,
+	before os.FileInfo,
+) {
+	info, err := os.Stat(path)
+	if err != nil || before == nil || info.Size() != before.Size() || info.ModTime() != before.ModTime() {
+		return
+	}
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if s.claudeHistoryCache == nil {
+		s.claudeHistoryCache = make(map[string]*claudeHistorySnapshot)
+	}
+	s.claudeHistoryCache[sessionID] = &claudeHistorySnapshot{
+		path: path, size: info.Size(), modified: info.ModTime().UnixNano(),
+		summary: summary, messages: append([]ClaudeMessage(nil), messages...), touchedAt: time.Now(),
+	}
+	for len(s.claudeHistoryCache) > conversationHistoryCacheLimit {
+		var oldestID string
+		var oldest time.Time
+		for id, snapshot := range s.claudeHistoryCache {
+			if oldestID == "" || snapshot.touchedAt.Before(oldest) {
+				oldestID = id
+				oldest = snapshot.touchedAt
+			}
+		}
+		delete(s.claudeHistoryCache, oldestID)
+	}
 }
 
 func (s *AppService) RenameClaudeSession(sessionID, name string) error {

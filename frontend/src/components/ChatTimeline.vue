@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowDown, ChevronsDown, ChevronsUp } from '@lucide/vue'
+import { ArrowDown, ChevronsDown, ChevronsUp, LoaderCircle } from '@lucide/vue'
 import { computed, nextTick, onMounted, onUnmounted, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -82,6 +82,21 @@ let resizeScrollCooldownUntil = 0
 const settleFollowUpTimers: number[] = []
 
 const isLoading = timelineLoading
+const historyHasEarlier = computed(() => {
+  if (appStore.isGrokMode) return grokStore.activeHistoryHasEarlier
+  if (appStore.isClaudeMode) return claudeStore.activeHistoryHasEarlier
+  return codexStore.activeHistoryHasEarlier
+})
+const historyEarlierCount = computed(() => {
+  if (appStore.isGrokMode) return grokStore.activeHistoryEarlierCount
+  if (appStore.isClaudeMode) return claudeStore.activeHistoryEarlierCount
+  return codexStore.activeHistoryEarlierCount
+})
+const historyLoadingEarlier = computed(() => {
+  if (appStore.isGrokMode) return grokStore.activeHistoryLoadingEarlier
+  if (appStore.isClaudeMode) return claudeStore.activeHistoryLoadingEarlier
+  return codexStore.activeHistoryLoadingEarlier
+})
 
 interface MessageGroup {
   kind: 'user' | 'agent'
@@ -238,6 +253,11 @@ const renderedGroups = computed(() => {
 
 const hiddenEarlierGroups = computed(() => Math.max(0, renderWindowStart.value))
 const hiddenLaterGroups = computed(() => Math.max(0, groups.value.length - renderWindowEnd.value))
+const canLoadEarlier = computed(() => hiddenEarlierGroups.value > 0 || historyHasEarlier.value)
+const earlierLoadCount = computed(() => Math.min(
+  RENDER_PAGE_GROUPS,
+  hiddenEarlierGroups.value || historyEarlierCount.value,
+))
 
 const lastItemSignature = computed(() => {
   const item = timelineItems.value.at(-1)
@@ -607,7 +627,10 @@ async function jumpToLatest(): Promise<void> {
 }
 
 async function loadEarlier(): Promise<void> {
-  if (renderWindowStart.value <= 0) return
+  if (renderWindowStart.value <= 0) {
+    await loadEarlierHistoryPage()
+    return
+  }
   unlockFromBottom()
   const anchorIndex = renderWindowStart.value
   const nextStart = Math.max(0, renderWindowStart.value - RENDER_PAGE_GROUPS)
@@ -616,6 +639,56 @@ async function loadEarlier(): Promise<void> {
     nextStart + MAX_RENDER_GROUPS,
   )
   await shiftRenderWindow(nextStart, nextEnd, anchorIndex)
+}
+
+async function loadEarlierHistoryPage(): Promise<void> {
+  if (!historyHasEarlier.value || historyLoadingEarlier.value || windowShiftPending) return
+  const container = scrollAreaRef.value
+  const first = renderedGroups.value[0]
+  const anchorID = first?.group.items[0]?.id || ''
+  const anchor = first
+    ? contentRef.value?.querySelector(`[data-group-index="${first.index}"]`) as HTMLElement | null
+    : null
+  const anchorTop = anchor?.getBoundingClientRect().top ?? null
+  const previousVisibleCount = Math.max(1, renderWindowEnd.value - renderWindowStart.value)
+  const requestedRuntime = appStore.activeRuntime
+  const requestedThreadId = timelineThreadId.value
+  unlockFromBottom()
+  windowShiftPending = true
+  try {
+    const loaded = appStore.isGrokMode
+      ? await grokStore.loadEarlierHistory()
+      : appStore.isClaudeMode
+        ? await claudeStore.loadEarlierHistory()
+        : await codexStore.loadEarlierHistory()
+    if (!loaded) return
+    if (appStore.activeRuntime !== requestedRuntime || timelineThreadId.value !== requestedThreadId) return
+    await nextTick()
+
+    const anchorIndex = anchorID
+      ? groups.value.findIndex((group) => group.items.some((item) => item.id === anchorID))
+      : -1
+    const targetIndex = anchorIndex >= 0 ? anchorIndex : Math.min(groups.value.length - 1, RENDER_PAGE_GROUPS)
+    let nextStart = Math.max(0, targetIndex - RENDER_PAGE_GROUPS)
+    const windowSize = Math.min(MAX_RENDER_GROUPS, Math.max(previousVisibleCount, RENDER_PAGE_GROUPS * 2))
+    let nextEnd = Math.min(groups.value.length, nextStart + windowSize)
+    nextStart = Math.max(0, nextEnd - windowSize)
+    renderWindowStart.value = nextStart
+    renderWindowEnd.value = nextEnd
+    await nextTick()
+    await waitFrame()
+
+    if (container && anchorTop != null && anchorIndex >= 0) {
+      const nextAnchor = contentRef.value?.querySelector(`[data-group-index="${anchorIndex}"]`) as HTMLElement | null
+      if (nextAnchor) {
+        markProgrammaticScroll()
+        container.scrollTop += nextAnchor.getBoundingClientRect().top - anchorTop
+      }
+    }
+  } finally {
+    windowShiftPending = false
+    updateJumpBottom()
+  }
 }
 
 async function loadLater(): Promise<void> {
@@ -638,7 +711,7 @@ function onScroll(): void {
   } else if (distance > UNSTICK_DISTANCE) {
     unlockFromBottom()
   }
-  if (!windowShiftPending && container.scrollTop < 120 && hiddenEarlierGroups.value > 0) {
+  if (!windowShiftPending && container.scrollTop < 120 && canLoadEarlier.value) {
     void loadEarlier()
   } else if (!windowShiftPending && distance < 120 && hiddenLaterGroups.value > 0) {
     void loadLater()
@@ -820,15 +893,20 @@ onUnmounted(() => {
             <p class="max-w-xs text-[12px] leading-5 text-muted-foreground">{{ $t('chat.emptyThreadHint') }}</p>
           </div>
 
-          <div v-if="hiddenEarlierGroups" class="flex items-center gap-3 py-1">
+          <div v-if="canLoadEarlier" class="flex items-center gap-3 py-1">
             <div class="h-px flex-1 bg-border/70" />
             <Button
               variant="ghost"
               size="sm"
               class="h-6 shrink-0 px-2 text-[11px] text-muted-foreground"
+              :disabled="historyLoadingEarlier"
+              :aria-busy="historyLoadingEarlier"
               @click="loadEarlier"
             >
-              {{ $t('chat.loadEarlier', { count: Math.min(RENDER_PAGE_GROUPS, hiddenEarlierGroups) }) }}
+              <LoaderCircle v-if="historyLoadingEarlier" :size="11" class="mr-1 animate-spin" />
+              {{ historyLoadingEarlier
+                ? $t('chat.loadingThread')
+                : $t('chat.loadEarlier', { count: Math.max(1, earlierLoadCount) }) }}
             </Button>
             <div class="h-px flex-1 bg-border/70" />
           </div>

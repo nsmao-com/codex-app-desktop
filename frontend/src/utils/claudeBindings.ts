@@ -39,6 +39,10 @@ export interface ClaudeMessage {
 export interface ClaudeSessionDetail {
   summary: ClaudeSessionSummary
   messages: ClaudeMessage[] | null
+  historyStart: number
+  historyTotal: number
+  historyTurnOffset: number
+  hasEarlier: boolean
 }
 
 export interface ClaudeSendRequest {
@@ -205,6 +209,16 @@ export function listArchivedClaudeSessions(): Promise<ClaudeSessionSummary[] | n
 
 export function readClaudeSession(sessionID: string): Promise<ClaudeSessionDetail> {
   return byIdOrName('ReadClaudeSession', () => (backend as any).ReadClaudeSession(sessionID), sessionID)
+}
+
+export function readClaudeSessionHistory(sessionID: string, before: number): Promise<ClaudeSessionDetail> {
+  const method = (backend as any).ReadClaudeSessionHistory
+  return byIdOrName(
+    'ReadClaudeSessionHistory',
+    typeof method === 'function' ? () => method(sessionID, before) : undefined,
+    sessionID,
+    before,
+  )
 }
 
 export function listClaudeSessionTurnUsages(sessionID: string): Promise<ClaudeTurnUsageView[] | null> {

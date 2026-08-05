@@ -73,21 +73,43 @@ const capabilitiesStore = useCapabilitiesStore()
 const router = useRouter()
 const { t } = useI18n()
 
+const props = defineProps<{
+  draftKey: string
+}>()
 const modelValue = defineModel<string>({ required: true })
+const attachedImages = defineModel<string[]>('images', { required: true })
 const emit = defineEmits<{
   sent: []
+  'restore-draft': [payload: { draftKey: string; text: string; images: string[] }]
+  'append-draft-images': [payload: { draftKey: string; images: string[] }]
 }>()
 const composer = useTemplateRef<HTMLElement>('composer')
 const composing = shallowRef(false)
-const attachedImages = shallowRef<string[]>([])
 const attachmentPreviews = shallowRef<Record<string, string>>({})
 const slashIndex = shallowRef(0)
 const skillIndex = shallowRef(0)
 const pluginIndex = shallowRef(0)
 const dragDepth = shallowRef(0)
 const composerExpanded = shallowRef(false)
+const sentHistoryIndex = shallowRef(-1)
+const sentHistorySnapshot = shallowRef<string[]>([])
+const sentHistoryDraft = shallowRef('')
+const attachingImageTasks = shallowRef(0)
+let applyingSentHistory = false
 const COMPOSER_MAX_COLLAPSED = 200
 const COMPOSER_MAX_EXPANDED = 480
+
+const sentMessageHistory = computed(() => {
+  const items = appStore.isGrokMode
+    ? grokStore.activeItems
+    : appStore.isClaudeMode
+      ? claudeStore.activeItems
+      : codexStore.activeItems
+  return items
+    .filter((item) => item.type === 'userMessage' && item.text.trim())
+    .map((item) => item.text.trim())
+})
+const attachingImages = computed(() => attachingImageTasks.value > 0)
 
 type SlashCommand = {
   id: string
@@ -444,6 +466,7 @@ const activeSelectionLoading = computed(() => {
  */
 const canSend = computed(() => {
   const hasContent = Boolean(modelValue.value.trim()) || attachedImages.value.length > 0
+  if (attachingImages.value) return false
   if (workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return false
   if (appStore.isGrokMode) {
     return hasContent && grokStore.isReady
@@ -526,6 +549,7 @@ const activeRuntimeSending = computed(() => {
 const stopDisabled = computed(() => {
   if (workspaceStore.switchingWorkspace) return true
   if (appStore.isGrokMode) return grokStore.interrupting
+  if (appStore.isClaudeMode) return claudeStore.interrupting
   return appStore.isCodexMode && codexStore.interruptingTurn
 })
 const sendButtonLabel = computed(() => {
@@ -550,8 +574,12 @@ const composerShortcutHint = computed(() => {
   return t('chat.shortcut')
 })
 
-watch(modelValue, resize, { flush: 'post' })
+watch(modelValue, () => {
+  if (!applyingSentHistory && sentHistoryIndex.value >= 0) resetSentHistoryNavigation()
+  resize()
+}, { flush: 'post' })
 watch(composerExpanded, resize, { flush: 'post' })
+watch(() => props.draftKey, resetSentHistoryNavigation, { flush: 'sync' })
 watch(
   [selectableModels, displayModel],
   () => {
@@ -583,6 +611,79 @@ function resize(): void {
 function toggleComposerHeight(): void {
   composerExpanded.value = !composerExpanded.value
   resize()
+}
+
+function resetSentHistoryNavigation(): void {
+  sentHistoryIndex.value = -1
+  sentHistorySnapshot.value = []
+  sentHistoryDraft.value = ''
+}
+
+function canNavigateSentHistory(event: KeyboardEvent, direction: -1 | 1): event is KeyboardEvent & { target: HTMLTextAreaElement } {
+  const target = event.target
+  if (
+    !(target instanceof HTMLTextAreaElement)
+    || composing.value
+    || event.isComposing
+    || event.altKey
+    || event.ctrlKey
+    || event.metaKey
+    || event.shiftKey
+    || target.selectionStart !== target.selectionEnd
+  ) return false
+  if (sentHistoryIndex.value >= 0) return true
+  if (direction > 0) return false
+  return !target.value.slice(0, target.selectionStart).includes('\n')
+}
+
+function applySentHistoryValue(next: string): void {
+  applyingSentHistory = true
+  modelValue.value = next
+  void nextTick(() => {
+    const textarea = composer.value?.querySelector('textarea')
+    if (textarea) {
+      const cursor = next.length
+      textarea.setSelectionRange(cursor, cursor)
+    }
+    applyingSentHistory = false
+    if (sentHistoryIndex.value < 0) {
+      sentHistorySnapshot.value = []
+      sentHistoryDraft.value = ''
+    }
+  })
+}
+
+function restoreSentHistoryDraft(event: KeyboardEvent): void {
+  if (sentHistoryIndex.value < 0) return
+  event.preventDefault()
+  const draft = sentHistoryDraft.value
+  sentHistoryIndex.value = -1
+  applySentHistoryValue(draft)
+}
+
+function navigateSentHistory(event: KeyboardEvent, direction: -1 | 1): boolean {
+  if (!canNavigateSentHistory(event, direction)) return false
+
+  if (sentHistoryIndex.value < 0) {
+    const history = sentMessageHistory.value
+    if (!history.length || direction > 0) return false
+    sentHistorySnapshot.value = [...history]
+    sentHistoryDraft.value = modelValue.value
+    sentHistoryIndex.value = history.length - 1
+  } else if (direction < 0) {
+    sentHistoryIndex.value = Math.max(0, sentHistoryIndex.value - 1)
+  } else if (sentHistoryIndex.value < sentHistorySnapshot.value.length - 1) {
+    sentHistoryIndex.value += 1
+  } else {
+    sentHistoryIndex.value = -1
+  }
+
+  const next = sentHistoryIndex.value >= 0
+    ? (sentHistorySnapshot.value[sentHistoryIndex.value] ?? '')
+    : sentHistoryDraft.value
+  event.preventDefault()
+  applySentHistoryValue(next)
+  return true
 }
 
 function onKeydown(event: KeyboardEvent): void {
@@ -652,6 +753,16 @@ function onKeydown(event: KeyboardEvent): void {
       return
     }
   }
+  if (event.key === 'Escape' && sentHistoryIndex.value >= 0) {
+    restoreSentHistoryDraft(event)
+    return
+  }
+  if (event.key === 'ArrowUp' && navigateSentHistory(event, -1)) return
+  if (event.key === 'ArrowDown' && navigateSentHistory(event, 1)) return
+  if (
+    sentHistoryIndex.value >= 0
+    && (event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'End')
+  ) resetSentHistoryNavigation()
   // Official Codex: Shift+Tab toggles plan mode.
   if (event.key === 'Tab' && event.shiftKey) {
     event.preventDefault()
@@ -711,28 +822,30 @@ async function togglePlanMode(): Promise<void> {
 async function send(): Promise<void> {
   const message = modelValue.value.trim()
   const images = [...attachedImages.value]
+  const draftKey = props.draftKey
   if (!message && !images.length) return
+  if (attachingImages.value) return
   if (workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return
   if (appStore.isGrokMode) {
     // Do not gate on sending — busy turns enqueue like Codex.
     if (!grokStore.isReady) return
+    resetSentHistoryNavigation()
     modelValue.value = ''
     attachedImages.value = []
     const sendPromise = grokStore.sendMessage(message, images)
     emit('sent')
     const ok = await sendPromise
     if (!ok) {
-      modelValue.value = message
-      attachedImages.value = images
+      emit('restore-draft', { draftKey, text: message, images })
     } else {
-      for (const path of images) forgetImagePreview(path)
-      attachmentPreviews.value = {}
+      releaseAttachmentPreviews(images)
     }
     return
   }
   if (appStore.isClaudeMode) {
     if (!claudeStore.isReady) return
     // Capture then clear immediately so a second Enter cannot re-send the same text.
+    resetSentHistoryNavigation()
     modelValue.value = ''
     attachedImages.value = []
     const sendPromise = claudeStore.sendMessage(message, images)
@@ -740,26 +853,23 @@ async function send(): Promise<void> {
     const ok = await sendPromise
     if (!ok) {
       // Only restore when the send truly failed (not when it was queued).
-      modelValue.value = message
-      attachedImages.value = images
+      emit('restore-draft', { draftKey, text: message, images })
     } else {
-      for (const path of images) forgetImagePreview(path)
-      attachmentPreviews.value = {}
+      releaseAttachmentPreviews(images)
     }
     return
   }
   if (!codexStore.isReady) return
+  resetSentHistoryNavigation()
   modelValue.value = ''
   attachedImages.value = []
   const sendPromise = codexStore.sendMessage(message, images)
   emit('sent')
   const ok = await sendPromise
   if (!ok) {
-    modelValue.value = message
-    attachedImages.value = images
+    emit('restore-draft', { draftKey, text: message, images })
   } else {
-    for (const path of images) forgetImagePreview(path)
-    attachmentPreviews.value = {}
+    releaseAttachmentPreviews(images)
   }
 }
 
@@ -811,22 +921,48 @@ async function fileToBase64(file: File): Promise<string> {
 }
 
 async function loadAttachmentPreview(path: string): Promise<void> {
-  if (!path || attachmentPreviews.value[path]) return
+  if (!path || !attachedImages.value.includes(path) || attachmentPreviews.value[path]) return
   const url = await resolveImagePreview(path)
   if (!url) return
+  if (!attachedImages.value.includes(path)) {
+    forgetImagePreview(path)
+    return
+  }
   attachmentPreviews.value = { ...attachmentPreviews.value, [path]: url }
 }
 
+function releaseAttachmentPreviews(paths: string[]): void {
+  const next = { ...attachmentPreviews.value }
+  let changed = false
+  for (const path of paths) {
+    if (attachedImages.value.includes(path)) continue
+    forgetImagePreview(path)
+    if (!(path in next)) continue
+    delete next[path]
+    changed = true
+  }
+  if (changed) attachmentPreviews.value = next
+}
+
+watch(attachedImages, (paths, previousPaths) => {
+  releaseAttachmentPreviews((previousPaths ?? []).filter((path) => !paths.includes(path)))
+  for (const path of paths) void loadAttachmentPreview(path)
+}, { immediate: true })
+
 async function attachImageFiles(files: File[]): Promise<void> {
+  if (attachingImages.value) return
   const images = files.filter(isImageFile)
   if (!images.length) return
-  const room = 4 - attachedImages.value.length
+  const draftKey = props.draftKey
+  const existingImages = [...attachedImages.value]
+  const room = 4 - existingImages.length
   if (room <= 0) {
     notify('warning', t('chat.attachLimitTitle'), t('chat.attachLimit'))
     return
   }
-  const next = [...attachedImages.value]
+  const added: string[] = []
   const previewPatch: Record<string, string> = {}
+  attachingImageTasks.value += 1
   try {
     for (const file of images.slice(0, room)) {
       const dataBase64 = await fileToBase64(file)
@@ -835,19 +971,23 @@ async function attachImageFiles(files: File[]): Promise<void> {
         file.type || '',
         dataBase64,
       )
-      if (path && !next.includes(path)) {
-        next.push(path)
+      if (path && !existingImages.includes(path) && !added.includes(path)) {
+        added.push(path)
         const localPreview = URL.createObjectURL(file)
         rememberLocalImagePreview(path, localPreview)
         previewPatch[path] = localPreview
       }
     }
-    attachedImages.value = next.slice(0, 4)
-    if (Object.keys(previewPatch).length) {
-      attachmentPreviews.value = { ...attachmentPreviews.value, ...previewPatch }
-    }
   } catch (error) {
     notify('error', t('notifications.imagesNotSelected'), error instanceof Error ? error.message : t('notifications.unexpected'))
+  } finally {
+    attachingImageTasks.value = Math.max(0, attachingImageTasks.value - 1)
+    if (added.length) {
+      emit('append-draft-images', { draftKey, images: added })
+      if (props.draftKey === draftKey) {
+        attachmentPreviews.value = { ...attachmentPreviews.value, ...previewPatch }
+      }
+    }
   }
 }
 
@@ -910,10 +1050,7 @@ function onDrop(event: DragEvent): void {
 
 function removeAttachment(path: string): void {
   attachedImages.value = attachedImages.value.filter((item) => item !== path)
-  const next = { ...attachmentPreviews.value }
-  delete next[path]
-  attachmentPreviews.value = next
-  forgetImagePreview(path)
+  releaseAttachmentPreviews([path])
 }
 
 function attachmentName(path: string): string {
@@ -1302,6 +1439,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         @compositionstart="composing = true"
         @keydown="onKeydown"
         @paste="onPaste"
+        @pointerdown="resetSentHistoryNavigation"
       />
 
       <div class="flex items-center justify-between gap-1">
@@ -1311,10 +1449,12 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             size="icon-sm"
             class="size-7 text-muted-foreground"
             :aria-label="t('chat.attachImages')"
-            :disabled="attachedImages.length >= 4"
+            :disabled="attachedImages.length >= 4 || attachingImages"
+            :aria-busy="attachingImages"
             @click="attachImages"
           >
-            <Paperclip :size="14" />
+            <LoaderCircle v-if="attachingImages" :size="14" class="animate-spin" />
+            <Paperclip v-else :size="14" />
           </Button>
 
           <DropdownMenu>

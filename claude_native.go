@@ -258,11 +258,7 @@ func readClaudeNativeMessages(path string) ([]ClaudeMessage, error) {
 	messages := make([]ClaudeMessage, 0, 64)
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
-	const maxMessages = 800
 	for scanner.Scan() {
-		if len(messages) >= maxMessages {
-			break
-		}
 		var raw map[string]any
 		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
 			continue

@@ -69,6 +69,24 @@ export function readGrokSession(
   )
 }
 
+export function readGrokSessionHistory(
+  backendId: string,
+  sessionID: string,
+  before: number,
+): Promise<GrokSessionDetail> {
+  const method = (backend as any).ReadGrokSessionHistory
+  if (typeof method !== 'function') {
+    return Call.ByName(`${SERVICE}.ReadGrokSessionHistory`, backendId, sessionID, before) as Promise<GrokSessionDetail>
+  }
+  return withNameFallback(
+    'ReadGrokSessionHistory',
+    () => method(backendId, sessionID, before),
+    backendId,
+    sessionID,
+    before,
+  )
+}
+
 export function sendGrokMessage(request: GrokSendRequest): Promise<GrokTurnRef> {
   return withNameFallback(
     'SendGrokMessage',

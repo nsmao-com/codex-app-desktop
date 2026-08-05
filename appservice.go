@@ -25,6 +25,7 @@ type AppService struct {
 	app              *application.App
 	pluginAssets     *pluginAssetServer
 	mu               sync.Mutex
+	historyMu        sync.Mutex
 	usageMu          sync.Mutex
 	usagePersistMu   sync.Mutex
 	client           *codex.Client
@@ -49,6 +50,41 @@ type AppService struct {
 	updateState      updateDownloadState
 	codexThreadStartMu sync.Mutex
 	pendingCodexSessionID string
+	codexHistoryCache map[string]*codexHistorySnapshot
+	claudeHistoryCache map[string]*claudeHistorySnapshot
+	grokHistoryCache map[string]*grokHistorySnapshot
+}
+
+const defaultCodexModel = "gpt-5.6-sol"
+
+const (
+	conversationHistoryPageTurns  = 24
+	conversationHistoryCacheLimit = 8
+	codexHistoryCacheLimit        = 2
+)
+
+type codexHistorySnapshot struct {
+	turns     []any
+	touchedAt time.Time
+}
+
+type claudeHistorySnapshot struct {
+	path      string
+	size      int64
+	modified  int64
+	summary   ClaudeSessionSummary
+	messages  []ClaudeMessage
+	touchedAt time.Time
+}
+
+type grokHistorySnapshot struct {
+	dir       string
+	path      string
+	size      int64
+	modified  int64
+	summary   GrokSessionSummary
+	messages  []GrokMessage
+	touchedAt time.Time
 }
 
 type BootstrapData struct {
@@ -238,6 +274,9 @@ func NewAppService(app *application.App, pluginAssets *pluginAssetServer) *AppSe
 		grokAPISessions:  loadGrokAPISessions(settingsPath),
 		grokApprovals:     make(map[string]*grokPendingApproval),
 		claudeSessions:   loadClaudeSessions(settingsPath),
+		codexHistoryCache: make(map[string]*codexHistorySnapshot),
+		claudeHistoryCache: make(map[string]*claudeHistorySnapshot),
+		grokHistoryCache: make(map[string]*grokHistorySnapshot),
 		scheduledTasks:   newScheduledTaskStore(settingsPath),
 		schedulerStop:    make(chan struct{}),
 	}
@@ -302,6 +341,9 @@ func (s *AppService) Settings() UserSettings {
 func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error) {
 	settings.Workspace = strings.TrimSpace(settings.Workspace)
 	settings.Model = strings.TrimSpace(settings.Model)
+	if settings.Model == "" {
+		settings.Model = defaultCodexModel
+	}
 	settings.ModelProvider = "" // Codex-only: never persist Claude/Gemini/Grok workbench providers
 	settings.CustomModels = sanitizeCustomModels(settings.CustomModels)
 	settings.Effort = strings.TrimSpace(settings.Effort)
@@ -1074,11 +1116,11 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 	session := s.sessionFor(threadID, workspace)
 	if session != nil && isExternalSession(session) {
 		s.rememberThread(threadID, workspace)
-		return s.sessionResponse(session), nil
+		return paginateCodexThreadResponse(s.sessionResponse(session), -1), nil
 	}
 	if session != nil && session.BackendRef == "" {
 		s.rememberThread(threadID, workspace)
-		return s.sessionResponse(session), nil
+		return paginateCodexThreadResponse(s.sessionResponse(session), -1), nil
 	}
 	backendID := s.codexBackendID(threadID, workspace)
 	// After app-server restart, thread/read fails until thread/resume reloads history.
@@ -1086,13 +1128,162 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 	if err != nil {
 		if session != nil {
 			s.rememberThread(threadID, workspace)
-			return s.sessionResponse(session), nil
+			return paginateCodexThreadResponse(s.sessionResponse(session), -1), nil
 		}
 		return nil, err
 	}
 	s.attachSessionIdentity(result, session, threadID)
 	s.rememberThread(threadID, workspace)
-	return result, nil
+	s.cacheCodexHistory(backendID, codexThreadTurns(result))
+	return paginateCodexThreadResponse(result, -1), nil
+}
+
+// ReadThreadHistory returns the page immediately before a previously opened
+// Codex page. The complete app-server snapshot stays in Go so the webview never
+// has to deserialize an entire long conversation at once.
+func (s *AppService) ReadThreadHistory(threadID string, before int) (map[string]any, error) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return nil, errors.New("thread id is required")
+	}
+	settings := s.Settings()
+	workspace := settings.Workspace
+	session := s.sessionFor(threadID, workspace)
+	if session == nil && !s.threadAllowed(threadID, workspace) {
+		return nil, errors.New("open this thread in the current workspace before reading its history")
+	}
+	if session != nil && isExternalSession(session) {
+		return codexTurnsPage(codexThreadTurns(s.sessionResponse(session)), before), nil
+	}
+	if session != nil && session.BackendRef == "" {
+		return codexTurnsPage(nil, before), nil
+	}
+	backendID := s.codexBackendID(threadID, workspace)
+	turns, ok := s.cachedCodexHistory(backendID)
+	if !ok {
+		if _, err := s.ReadThread(threadID); err != nil {
+			return nil, err
+		}
+		turns, ok = s.cachedCodexHistory(backendID)
+		if !ok {
+			return nil, errors.New("thread history is temporarily unavailable")
+		}
+	}
+	return codexTurnsPage(turns, before), nil
+}
+
+func codexThreadTurns(response map[string]any) []any {
+	thread, _ := response["thread"].(map[string]any)
+	turns, _ := thread["turns"].([]any)
+	return turns
+}
+
+func paginateCodexThreadResponse(response map[string]any, before int) map[string]any {
+	next := make(map[string]any, len(response)+4)
+	for key, value := range response {
+		next[key] = value
+	}
+	thread, _ := response["thread"].(map[string]any)
+	threadCopy := make(map[string]any, len(thread))
+	for key, value := range thread {
+		threadCopy[key] = value
+	}
+	page := codexTurnsPage(codexThreadTurns(response), before)
+	threadCopy["turns"] = page["turns"]
+	next["thread"] = threadCopy
+	for _, key := range []string{"historyStart", "historyTotal", "historyTurnOffset", "hasEarlier"} {
+		next[key] = page[key]
+	}
+	return next
+}
+
+func codexTurnsPage(turns []any, before int) map[string]any {
+	total := len(turns)
+	end := before
+	if end < 0 || end > total {
+		end = total
+	}
+	if end < 0 {
+		end = 0
+	}
+	start := end - conversationHistoryPageTurns
+	if start < 0 {
+		start = 0
+	}
+	page := append([]any(nil), turns[start:end]...)
+	return map[string]any{
+		"turns":             page,
+		"historyStart":      start,
+		"historyTotal":      total,
+		"historyTurnOffset": start,
+		"hasEarlier":        start > 0,
+	}
+}
+
+func (s *AppService) cacheCodexHistory(backendID string, turns []any) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return
+	}
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if s.codexHistoryCache == nil {
+		s.codexHistoryCache = make(map[string]*codexHistorySnapshot)
+	}
+	s.codexHistoryCache[backendID] = &codexHistorySnapshot{
+		turns:     append([]any(nil), turns...),
+		touchedAt: time.Now(),
+	}
+	for len(s.codexHistoryCache) > codexHistoryCacheLimit {
+		var oldestID string
+		var oldest time.Time
+		for id, snapshot := range s.codexHistoryCache {
+			if oldestID == "" || snapshot.touchedAt.Before(oldest) {
+				oldestID = id
+				oldest = snapshot.touchedAt
+			}
+		}
+		delete(s.codexHistoryCache, oldestID)
+	}
+}
+
+func (s *AppService) cachedCodexHistory(backendID string) ([]any, bool) {
+	backendID = strings.TrimSpace(backendID)
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	snapshot := s.codexHistoryCache[backendID]
+	if snapshot == nil {
+		return nil, false
+	}
+	snapshot.touchedAt = time.Now()
+	return snapshot.turns, true
+}
+
+func conversationMessagePageBounds(total, before int, isUser func(index int) bool) (start, end, turnOffset int) {
+	end = before
+	if end < 0 || end > total {
+		end = total
+	}
+	if end < 0 {
+		end = 0
+	}
+	start = end
+	turns := 0
+	for start > 0 {
+		start--
+		if isUser(start) {
+			turns++
+			if turns >= conversationHistoryPageTurns {
+				break
+			}
+		}
+	}
+	for index := 0; index < start; index++ {
+		if isUser(index) {
+			turnOffset++
+		}
+	}
+	return start, end, turnOffset
 }
 
 func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, error) {
@@ -1188,15 +1379,17 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 		collaborationMode = "default"
 	}
 
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = defaultCodexModel
+	}
 	params := map[string]any{
 		"threadId":       backendID,
 		"input":          input,
 		"cwd":            workspace,
 		"approvalPolicy": normalizeApproval(settings.ApprovalPolicy),
 		"sandboxPolicy":  sandboxPolicy(settings.Sandbox, workspace),
-	}
-	if model = strings.TrimSpace(model); model != "" {
-		params["model"] = model
+		"model":          model,
 	}
 	if effort = strings.TrimSpace(effort); effort != "" {
 		params["effort"] = effort
@@ -1214,9 +1407,6 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 	// Always send collaborationMode on every turn so UI toggles take effect.
 	// Codex core only injects a mode developer message when the CollaborationMode
 	// object changes AND developer_instructions is non-empty (null/empty = no reset).
-	if model == "" {
-		model = "gpt-5.4"
-	}
 	resetNonce := 0
 	if session != nil {
 		resetNonce = session.CollabResetNonce
@@ -2245,6 +2435,7 @@ func defaultSettings() UserSettings {
 			ClaudeSandbox:          "workspace-write",
 			ClaudeApprovalPolicy:   "on-request",
 			ClaudePermissionMode:   "acceptEdits",
+		Model:                defaultCodexModel,
 		Effort:               "high",
 		CollaborationMode:    "default",
 		Personality:          "pragmatic",
@@ -2319,6 +2510,10 @@ func readSettings(path string) (UserSettings, error) {
 	settings := defaultSettings()
 	if err := json.Unmarshal(payload, &settings); err != nil {
 		return UserSettings{}, err
+	}
+	settings.Model = strings.TrimSpace(settings.Model)
+	if settings.Model == "" {
+		settings.Model = defaultCodexModel
 	}
 	settings.RecentWorkspaces = sanitizeRecentWorkspaces(settings.RecentWorkspaces)
 	settings.GrokRecentWorkspaces = sanitizeRecentWorkspaces(settings.GrokRecentWorkspaces)

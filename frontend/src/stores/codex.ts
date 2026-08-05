@@ -19,6 +19,7 @@ import { sameWorkspacePath as sameWorkspace, workspaceKey } from '../utils/works
 import {
   buildRuntimeProviders,
   cleanModelDisplayName,
+  DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING,
   FALLBACK_CODEX_MODELS,
   selectCodexCatalog,
@@ -74,6 +75,14 @@ interface PendingThreadSubmission {
   turnId: string
 }
 
+interface ThreadHistoryState {
+  start: number
+  total: number
+  turnOffset: number
+  hasEarlier: boolean
+  loadingEarlier: boolean
+}
+
 type CollaborationMode = 'default' | 'plan'
 
 const PENDING_SUBMISSION_ERROR_GRACE_MS = 750
@@ -124,6 +133,7 @@ export const useCodexStore = defineStore('codex', () => {
   const pendingSubmissionByThread = new Map<string, PendingThreadSubmission>()
   const creatingThread = shallowRef(false)
   const itemsByThread = shallowRef<Record<string, TimelineItem[]>>({})
+  const historyByThread = shallowRef<Record<string, ThreadHistoryState>>({})
   const diffsByTurn = shallowRef<Record<string, string>>({})
   const latestDiffByThread = shallowRef<Record<string, string>>({})
   const tokenUsageByThread = shallowRef<Record<string, ReturnType<typeof normalizeThreadTokenUsage>>>({})
@@ -174,6 +184,9 @@ export const useCodexStore = defineStore('codex', () => {
   const isTurnRunning = computed(() => threadIsRunning(activeThreadId.value))
   const sendingMessage = computed(() => isThreadSubmitting(activeThreadId.value))
   const activeItems = computed(() => itemsByThread.value[activeThreadId.value] ?? [])
+  const activeHistoryHasEarlier = computed(() => historyByThread.value[activeThreadId.value]?.hasEarlier === true)
+  const activeHistoryEarlierCount = computed(() => historyByThread.value[activeThreadId.value]?.turnOffset ?? 0)
+  const activeHistoryLoadingEarlier = computed(() => historyByThread.value[activeThreadId.value]?.loadingEarlier === true)
   const activeQueuedMessages = computed(() => queuedMessagesByThread.value[activeThreadId.value] ?? [])
   const activeThreadBusy = computed(() => threadIsBusy(activeThreadId.value) || activeQueuedMessages.value.length > 0)
   const activeThreadUsesExternalProvider = computed(() => false)
@@ -462,18 +475,22 @@ export const useCodexStore = defineStore('codex', () => {
         merged.push(stubCodexModel(id, index === 0))
       }
     }
+    if (merged.some((model) => model.model.toLocaleLowerCase() === DEFAULT_CODEX_MODEL)) {
+      for (const model of merged) {
+        model.isDefault = model.model.toLocaleLowerCase() === DEFAULT_CODEX_MODEL
+      }
+    }
     appStore.models = merged
 
     const configuredModel = appStore.settings.model.trim()
-    const configuredInCatalog = appStore.models.some((model) => model.model === configuredModel)
+    const configuredCatalogModel = appStore.models.find(
+      (model) => model.model.toLocaleLowerCase() === configuredModel.toLocaleLowerCase(),
+    )
+    const configuredInCatalog = Boolean(configuredCatalogModel)
     const configuredCustom = customModels.some((model) => model.toLocaleLowerCase() === configuredModel.toLocaleLowerCase())
     if (configuredModel && !configuredInCatalog && configuredCustom) return
 
-    const preferred = (
-      configuredInCatalog
-        ? appStore.models.find((model) => model.model === configuredModel)
-        : undefined
-    )
+    const preferred = configuredCatalogModel
       ?? appStore.models.find((model) => model.isDefault)
       ?? appStore.models[0]
     if (!preferred) return
@@ -723,6 +740,16 @@ export const useCodexStore = defineStore('codex', () => {
       if (isActiveStatus(thread.status)) runningTurnID = activeTurnIDFromSnapshot(rawThread)
       const snapshotItems = timelineFromTurns(rawThread.turns)
       const cachedItems = itemsByThread.value[thread.id] ?? itemsByThread.value[threadID] ?? []
+      const currentHistory = historyByThread.value[thread.id] ?? historyByThread.value[threadID]
+      const responsePage = asRecord(response)
+      const keepLoadedPrefix = Boolean(
+        currentHistory
+        && currentHistory.start < (Number(responsePage.historyStart) || 0)
+        && (Number(responsePage.historyTotal) || 0) >= currentHistory.total,
+      )
+      const split = keepLoadedPrefix
+        ? splitCodexHistoryPrefix(snapshotItems, cachedItems)
+        : { prefix: [] as TimelineItem[], current: cachedItems }
       const knownTurnID = threadTurnID(thread.id) || threadTurnID(threadID)
       const liveTurnID = runningTurnID || (knownTurnID && !completedTurns.has(knownTurnID) ? knownTurnID : '')
       const preserveInFlightItems = Boolean(
@@ -734,13 +761,25 @@ export const useCodexStore = defineStore('codex', () => {
         || (queuedMessagesByThread.value[thread.id] ?? []).length
         || (queuedMessagesByThread.value[threadID] ?? []).length
       )
-      const items = preserveInFlightItems && cachedItems.length
-        ? mergeThreadSnapshotWithLive(snapshotItems, cachedItems, liveTurnID)
+      const mergedItems = preserveInFlightItems && split.current.length
+        ? mergeThreadSnapshotWithLive(snapshotItems, split.current, liveTurnID)
         : snapshotItems
+      const items = split.prefix.length ? [...split.prefix, ...mergedItems] : mergedItems
       itemsByThread.value = { ...itemsByThread.value, [thread.id]: items }
-      setThreadMetrics(thread.id, rawThread.turns)
+      setThreadHistoryState(thread.id, response)
+      if (split.prefix.length && currentHistory) {
+        patchThreadHistoryState(thread.id, {
+          start: currentHistory.start,
+          turnOffset: currentHistory.turnOffset,
+          hasEarlier: currentHistory.hasEarlier,
+        })
+      }
+      setThreadMetrics(thread.id, rawThread.turns, split.prefix.length > 0)
       rememberLoadedThread(thread.id)
-      if (threadID !== thread.id) loadedThreadIDs.delete(threadID)
+      if (threadID !== thread.id) {
+        loadedThreadIDs.delete(threadID)
+        removeThreadHistoryState(threadID)
+      }
       if (sequence === openThreadSequence && (activeThreadId.value === threadID || activeThreadId.value === thread.id)) {
         activeThread.value = thread
         // Keep activeThreadId aligned with the remapped session id from the backend.
@@ -1104,6 +1143,7 @@ export const useCodexStore = defineStore('codex', () => {
     const nextItems = { ...itemsByThread.value }
     delete nextItems[threadID]
     itemsByThread.value = nextItems
+    removeThreadHistoryState(threadID)
 
     releasePendingThreadSubmissions(threadID)
     clearThreadQueue(threadID)
@@ -3058,13 +3098,91 @@ export const useCodexStore = defineStore('codex', () => {
     if (activeThread.value?.id === threadID) activeThread.value = apply(activeThread.value)
   }
 
-  function setThreadMetrics(threadID: string, turns: unknown): void {
+  function setThreadMetrics(threadID: string, turns: unknown, merge = false): void {
     const historical = metricsFromTurns(turns)
     const existing = turnMetricsByThread.value[threadID] ?? {}
     for (const [turnID, metrics] of Object.entries(historical)) {
       if (existing[turnID]?.tokenUsage) metrics.tokenUsage = existing[turnID].tokenUsage
     }
-    turnMetricsByThread.value = { ...turnMetricsByThread.value, [threadID]: historical }
+    turnMetricsByThread.value = {
+      ...turnMetricsByThread.value,
+      [threadID]: merge ? { ...existing, ...historical } : historical,
+    }
+  }
+
+  function setThreadHistoryState(threadID: string, value: unknown): void {
+    const page = asRecord(value)
+    const start = Math.max(0, Number(page.historyStart) || 0)
+    const total = Math.max(start, Number(page.historyTotal) || 0)
+    const turnOffset = Math.max(0, Number(page.historyTurnOffset) || start)
+    historyByThread.value = {
+      ...historyByThread.value,
+      [threadID]: {
+        start,
+        total,
+        turnOffset,
+        hasEarlier: page.hasEarlier === true || start > 0,
+        loadingEarlier: false,
+      },
+    }
+  }
+
+  function patchThreadHistoryState(threadID: string, patch: Partial<ThreadHistoryState>): void {
+    const current = historyByThread.value[threadID] ?? {
+      start: 0,
+      total: 0,
+      turnOffset: 0,
+      hasEarlier: false,
+      loadingEarlier: false,
+    }
+    historyByThread.value = {
+      ...historyByThread.value,
+      [threadID]: { ...current, ...patch },
+    }
+  }
+
+  function removeThreadHistoryState(threadID: string): void {
+    if (!historyByThread.value[threadID]) return
+    const next = { ...historyByThread.value }
+    delete next[threadID]
+    historyByThread.value = next
+  }
+
+  async function loadEarlierHistory(): Promise<boolean> {
+    const threadID = activeThreadId.value
+    const state = historyByThread.value[threadID]
+    if (!threadID || !state?.hasEarlier || state.loadingEarlier) return false
+    const before = state.start
+    patchThreadHistoryState(threadID, { loadingEarlier: true })
+    try {
+      const response = await backend.ReadThreadHistory(threadID, before)
+      const currentState = historyByThread.value[threadID]
+      if (!currentState || currentState.start !== before) return false
+      const page = asRecord(response)
+      const turns = page.turns
+      const earlierItems = timelineFromTurns(turns)
+      const currentItems = itemsByThread.value[threadID] ?? []
+      const existingIDs = new Set(currentItems.map((item) => item.id).filter(Boolean))
+      const prefix = earlierItems.filter((item) => !item.id || !existingIDs.has(item.id))
+      if (prefix.length) {
+        itemsByThread.value = {
+          ...itemsByThread.value,
+          [threadID]: [...prefix, ...currentItems],
+        }
+      }
+      setThreadMetrics(threadID, turns, true)
+      setThreadHistoryState(threadID, page)
+      return prefix.length > 0 || (Number(page.historyStart) || 0) < before
+    } catch (error) {
+      if (activeThreadId.value === threadID) {
+        notify('error', translate('notifications.taskOpenFailed'), errorMessage(error))
+      }
+      return false
+    } finally {
+      if (historyByThread.value[threadID]?.loadingEarlier) {
+        patchThreadHistoryState(threadID, { loadingEarlier: false })
+      }
+    }
   }
 
   function patchTurnMetrics(threadID: string, turnID: string, patch: Partial<TurnMetrics>): void {
@@ -3115,6 +3233,7 @@ export const useCodexStore = defineStore('codex', () => {
       if (pending.threadId === threadID) pendingDiffs.delete(key)
     }
     itemsByThread.value = nextItems
+    removeThreadHistoryState(threadID)
     tokenUsageByThread.value = nextUsage
     latestDiffByThread.value = nextDiffs
     turnMetricsByThread.value = nextMetrics
@@ -3805,6 +3924,13 @@ export const useCodexStore = defineStore('codex', () => {
     if (sendingThreadIds.value.includes(fromID)) {
       sendingThreadIds.value = [...new Set(sendingThreadIds.value.map((id) => id === fromID ? toID : id))]
     }
+    const history = historyByThread.value[fromID]
+    if (history) {
+      const nextHistory = { ...historyByThread.value }
+      delete nextHistory[fromID]
+      if (!nextHistory[toID]) nextHistory[toID] = history
+      historyByThread.value = nextHistory
+    }
   }
 
   function scheduleThreadQueueDrain(threadID: string): void {
@@ -4014,6 +4140,7 @@ export const useCodexStore = defineStore('codex', () => {
     threads.value = []
     archivedThreads.value = []
     itemsByThread.value = {}
+    historyByThread.value = {}
     tokenUsageByThread.value = {}
     turnMetricsByThread.value = {}
     diffsByTurn.value = {}
@@ -4070,6 +4197,9 @@ export const useCodexStore = defineStore('codex', () => {
     isTurnRunning,
     activeTurnId,
     activeItems,
+    activeHistoryHasEarlier,
+    activeHistoryEarlierCount,
+    activeHistoryLoadingEarlier,
     activeQueuedMessages,
     activeThreadBusy,
     activeThreadUsesExternalProvider,
@@ -4098,6 +4228,7 @@ export const useCodexStore = defineStore('codex', () => {
     isThreadPinned,
     toggleThreadPin,
     openThread,
+    loadEarlierHistory,
     openProjectThread,
     switchProject,
     selectProject,
@@ -4399,6 +4530,39 @@ function mergeThreadSnapshotWithLive(
     }
   }
   return result
+}
+
+function splitCodexHistoryPrefix(
+  snapshot: TimelineItem[],
+  current: TimelineItem[],
+): { prefix: TimelineItem[], current: TimelineItem[] } {
+  if (!snapshot.length || !current.length) return { prefix: [], current }
+  const currentByID = new Map<string, number>()
+  current.forEach((item, index) => {
+    if (item.id) currentByID.set(item.id, index)
+  })
+  let snapshotIndex = -1
+  let currentIndex = -1
+  for (let index = 0; index < snapshot.length; index += 1) {
+    const item = snapshot[index]
+    const byID = item.id ? currentByID.get(item.id) : undefined
+    const match = byID ?? current.findIndex((row) =>
+      row.turnId === item.turnId
+      && row.type === item.type
+      && row.text === item.text,
+    )
+    if (match >= 0) {
+      snapshotIndex = index
+      currentIndex = match
+      break
+    }
+  }
+  if (snapshotIndex < 0 || currentIndex < 0) return { prefix: [], current }
+  const prefixLength = Math.max(0, currentIndex - snapshotIndex)
+  return {
+    prefix: current.slice(0, prefixLength),
+    current: current.slice(prefixLength),
+  }
 }
 
 function loadLastThreadByWorkspace(): Record<string, string> {

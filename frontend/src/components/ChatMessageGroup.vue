@@ -464,7 +464,7 @@ const turnFilesOpen = computed(() => {
   if (Object.prototype.hasOwnProperty.call(openRows.value, 'turn-files')) {
     return openRows.value['turn-files'] === true
   }
-  return true
+  return false
 })
 
 /** Official Codex keeps patch steps expanded so file +/- stay visible. */
@@ -1331,6 +1331,7 @@ function diffStats(diff: string): { add: number; del: number } {
       >
         <button
           type="button"
+          :aria-expanded="turnFilesOpen"
           class="inline-flex max-w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
           @click="toggleTurnFiles"
         >

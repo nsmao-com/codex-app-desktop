@@ -353,6 +353,10 @@ export function ReadClaudeSession(sessionID: string): $CancellablePromise<$model
     return $Call.ByID(392135644, sessionID);
 }
 
+export function ReadClaudeSessionHistory(sessionID: string, before: number): $CancellablePromise<$models.ClaudeSessionDetail> {
+    return $Call.ByID(325508716, sessionID, before);
+}
+
 export function ReadCodexFeatureFlags(): $CancellablePromise<$models.CodexFeatureFlags> {
     return $Call.ByID(1079251556);
 }
@@ -387,6 +391,10 @@ export function ReadGrokSession(backend: string, sessionID: string): $Cancellabl
     return $Call.ByID(2063656043, backend, sessionID);
 }
 
+export function ReadGrokSessionHistory(backend: string, sessionID: string, before: number): $CancellablePromise<$models.GrokSessionDetail> {
+    return $Call.ByID(1433908917, backend, sessionID, before);
+}
+
 /**
  * ReadProjectInstructions returns the current workspace AGENTS.md content.
  */
@@ -396,6 +404,15 @@ export function ReadProjectInstructions(): $CancellablePromise<$models.ProjectIn
 
 export function ReadThread(threadID: string): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3198804358, threadID);
+}
+
+/**
+ * ReadThreadHistory returns the page immediately before a previously opened
+ * Codex page. The complete app-server snapshot stays in Go so the webview never
+ * has to deserialize an entire long conversation at once.
+ */
+export function ReadThreadHistory(threadID: string, before: number): $CancellablePromise<{ [_ in string]?: any } | null> {
+    return $Call.ByID(2666883278, threadID, before);
 }
 
 export function ReadWorkspaceDiff(relativePath: string): $CancellablePromise<string> {

@@ -29,7 +29,7 @@ import {
 import { easeOutQuick } from '@/lib/motion'
 import { useAppStore, useBrowserStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import { Motion } from 'motion-v'
-import { sameWorkspacePath } from '@/utils/workspacePath'
+import { workspaceKey } from '@/utils/workspacePath'
 
 const appStore = useAppStore()
 const codexStore = useCodexStore()
@@ -44,7 +44,131 @@ const emit = defineEmits<{
   'show-inspector': []
 }>()
 
-const draft = shallowRef('')
+type ComposerRuntime = 'codex' | 'claude' | 'grok'
+type ComposerDraft = { text: string; images: string[] }
+type ComposerDraftContext = {
+  key: string
+  runtime: ComposerRuntime
+  sessionId: string
+  workspace: string
+}
+
+const composerDrafts = shallowRef<Record<string, ComposerDraft>>({})
+const draftKeyAliases = new Map<string, string>()
+
+const activeComposerContext = computed<ComposerDraftContext>(() => {
+  const runtime = appStore.activeRuntime as ComposerRuntime
+  const sessionId = runtime === 'grok'
+    ? grokStore.activeSessionId
+    : runtime === 'claude'
+      ? claudeStore.activeSessionId
+      : codexStore.activeThreadId
+  const workspace = runtime === 'grok'
+    ? grokStore.workspacePath
+    : runtime === 'claude'
+      ? claudeStore.workspacePath
+      : appStore.settings.workspace
+  const identity = sessionId
+    ? ['session', sessionId.trim()]
+    : ['workspace', workspaceKey(workspace)]
+  return {
+    key: JSON.stringify([runtime, ...identity]),
+    runtime,
+    sessionId: sessionId.trim(),
+    workspace,
+  }
+})
+
+function setComposerDraft(key: string, patch: Partial<ComposerDraft>): void {
+  const current = composerDrafts.value[key] ?? { text: '', images: [] }
+  const nextDraft: ComposerDraft = {
+    text: patch.text ?? current.text,
+    images: patch.images ? [...patch.images] : current.images,
+  }
+  const next = { ...composerDrafts.value }
+  if (!nextDraft.text && !nextDraft.images.length) delete next[key]
+  else next[key] = nextDraft
+  composerDrafts.value = next
+}
+
+function mergeComposerDraftText(restored: string, current: string): string {
+  if (!restored) return current
+  if (!current) return restored
+  if (restored.trim() === current.trim()) return current
+  return `${restored}\n\n${current}`
+}
+
+function resolveDraftKey(key: string): string {
+  const seen = new Set<string>()
+  let current = key
+  while (!seen.has(current)) {
+    seen.add(current)
+    const next = draftKeyAliases.get(current)
+    if (!next || next === current) break
+    current = next
+  }
+  return current
+}
+
+function migrateComposerDraft(fromKey: string, toKey: string): void {
+  const sourceKey = resolveDraftKey(fromKey)
+  const targetKey = resolveDraftKey(toKey)
+  draftKeyAliases.set(fromKey, targetKey)
+  if (sourceKey !== fromKey) draftKeyAliases.set(sourceKey, targetKey)
+  if (sourceKey === targetKey) return
+
+  const source = composerDrafts.value[sourceKey]
+  if (!source) return
+  const target = composerDrafts.value[targetKey]
+  const next = { ...composerDrafts.value }
+  delete next[sourceKey]
+  next[targetKey] = {
+    text: mergeComposerDraftText(source.text, target?.text || ''),
+    images: [...new Set([...source.images, ...(target?.images ?? [])])].slice(0, 4),
+  }
+  composerDrafts.value = next
+}
+
+function sameComposerSession(previous: ComposerDraftContext, current: ComposerDraftContext): boolean {
+  if (previous.runtime !== current.runtime || !previous.sessionId || !current.sessionId) return false
+  if (previous.sessionId === current.sessionId) return true
+  if (current.runtime === 'grok') return grokStore.sameSession(previous.sessionId, current.sessionId)
+  if (current.runtime === 'claude') return claudeStore.sameSession(previous.sessionId, current.sessionId)
+  return codexStore.sameThread(previous.sessionId, current.sessionId)
+}
+
+watch(activeComposerContext, (current, previous) => {
+  if (current.key !== previous.key && sameComposerSession(previous, current)) {
+    migrateComposerDraft(previous.key, current.key)
+  }
+}, { flush: 'sync' })
+
+const draft = computed<string>({
+  get: () => composerDrafts.value[activeComposerContext.value.key]?.text ?? '',
+  set: (text) => setComposerDraft(activeComposerContext.value.key, { text }),
+})
+const draftImages = computed<string[]>({
+  get: () => composerDrafts.value[activeComposerContext.value.key]?.images ?? [],
+  set: (images) => setComposerDraft(activeComposerContext.value.key, { images }),
+})
+
+function restoreComposerDraft(payload: { draftKey: string; text: string; images: string[] }): void {
+  const key = resolveDraftKey(payload.draftKey)
+  const current = composerDrafts.value[key] ?? { text: '', images: [] }
+  setComposerDraft(key, {
+    text: mergeComposerDraftText(payload.text, current.text),
+    images: [...new Set([...current.images, ...payload.images])].slice(0, 4),
+  })
+}
+
+function appendComposerDraftImages(payload: { draftKey: string; images: string[] }): void {
+  const key = resolveDraftKey(payload.draftKey)
+  const current = composerDrafts.value[key] ?? { text: '', images: [] }
+  setComposerDraft(key, {
+    images: [...new Set([...current.images, ...payload.images])].slice(0, 4),
+  })
+}
+
 const welcomeEpoch = shallowRef(0)
 const messageSentEpoch = shallowRef(0)
 const hasConversation = computed(() => {
@@ -199,58 +323,6 @@ function commitFromBar(): void {
   })()
 }
 
-watch(
-  [
-    () => appStore.activeRuntime,
-    () => (appStore.isGrokMode
-      ? grokStore.activeSessionId
-      : appStore.isClaudeMode
-        ? claudeStore.activeSessionId
-        : codexStore.activeThreadId),
-    () => (appStore.isGrokMode
-      ? grokStore.workspacePath
-      : appStore.isClaudeMode
-        ? claudeStore.workspacePath
-        : appStore.settings.workspace),
-  ],
-  ([runtime, sessionId, workspace], [previousRuntime, previousSessionId, previousWorkspace]) => {
-    const previousWasPending = previousRuntime === 'codex'
-      ? previousSessionId.startsWith('pending-thread-')
-      : previousSessionId.startsWith(`pending-${previousRuntime}-`)
-    const previousPendingStillExists = previousRuntime === 'grok'
-      ? grokStore.sessions.some((session) => session.id === previousSessionId)
-      : previousRuntime === 'claude'
-        ? claudeStore.sessions.some((session) => session.id === previousSessionId)
-        : codexStore.threadGroups.some((group) =>
-            group.threads.some((thread) => thread.id === previousSessionId),
-          )
-    const promotedPendingSession = runtime === previousRuntime
-      && previousWasPending
-      && !previousPendingStillExists
-      && Boolean(sessionId)
-      && (runtime === 'grok'
-        ? grokStore.sameSession(previousSessionId, sessionId)
-        : runtime === 'claude'
-          ? claudeStore.sameSession(previousSessionId, sessionId)
-          : codexStore.sameThread(previousSessionId, sessionId))
-    const activeWorkspace = runtime === 'grok'
-      ? grokStore.sessions.find((session) => session.id === sessionId)?.workspace || ''
-      : runtime === 'claude'
-        ? claudeStore.sessions.find((session) => session.id === sessionId)?.workspace || ''
-        : codexStore.activeThread?.cwd || ''
-    const workspaceReboundToSelectedSession = runtime === previousRuntime
-      && sessionId === previousSessionId
-      && !sameWorkspacePath(workspace, previousWorkspace)
-      && sameWorkspacePath(activeWorkspace, workspace)
-    if (
-      runtime !== previousRuntime
-      || (!sameWorkspacePath(workspace, previousWorkspace) && !workspaceReboundToSelectedSession)
-      || (sessionId !== previousSessionId && !promotedPendingSession)
-    ) {
-      draft.value = ''
-    }
-  },
-)
 </script>
 
 <template>
@@ -483,7 +555,14 @@ watch(
       </div>
     </div>
 
-    <ComposerPanel v-model="draft" @sent="onMessageSent" />
+    <ComposerPanel
+      v-model="draft"
+      v-model:images="draftImages"
+      :draft-key="activeComposerContext.key"
+      @sent="onMessageSent"
+      @restore-draft="restoreComposerDraft"
+      @append-draft-images="appendComposerDraftImages"
+    />
 
     <ApprovalDialog
       :request="codexStore.pendingRequest"

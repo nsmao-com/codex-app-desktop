@@ -75,8 +75,12 @@ type grokToolCallMeta struct {
 }
 
 type GrokSessionDetail struct {
-	Summary  GrokSessionSummary `json:"summary"`
-	Messages []GrokMessage      `json:"messages"`
+	Summary           GrokSessionSummary `json:"summary"`
+	Messages          []GrokMessage      `json:"messages"`
+	HistoryStart      int                `json:"historyStart"`
+	HistoryTotal      int                `json:"historyTotal"`
+	HistoryTurnOffset int                `json:"historyTurnOffset"`
+	HasEarlier        bool               `json:"hasEarlier"`
 }
 
 type GrokSendRequest struct {
@@ -373,6 +377,22 @@ func (s *AppService) ListGrokSessions(backend, workspace, search string) ([]Grok
 }
 
 func (s *AppService) ReadGrokSession(backend, sessionID string) (GrokSessionDetail, error) {
+	return s.readGrokSessionPage(backend, sessionID, -1)
+}
+
+func (s *AppService) ReadGrokSessionHistory(backend, sessionID string, before int) (GrokSessionDetail, error) {
+	return s.readGrokSessionPage(backend, sessionID, before)
+}
+
+func (s *AppService) readGrokSessionPage(backend, sessionID string, before int) (GrokSessionDetail, error) {
+	detail, err := s.readGrokSessionFull(backend, sessionID)
+	if err != nil {
+		return GrokSessionDetail{}, err
+	}
+	return paginateGrokSession(detail, before), nil
+}
+
+func (s *AppService) readGrokSessionFull(backend, sessionID string) (GrokSessionDetail, error) {
 	backend = normalizeGrokBackend(backend)
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
@@ -381,15 +401,108 @@ func (s *AppService) ReadGrokSession(backend, sessionID string) (GrokSessionDeta
 	if backend == grokBackendAPI {
 		return s.readGrokAPISession(sessionID)
 	}
+	if summary, messages, ok := s.cachedGrokHistory(sessionID); ok {
+		return GrokSessionDetail{Summary: s.applyGrokLocalName(summary), Messages: messages}, nil
+	}
 	session, err := findGrokNativeSession(sessionID)
 	if err != nil {
 		return GrokSessionDetail{}, err
 	}
+	historyPath := filepath.Join(session.Dir, "chat_history.jsonl")
+	before, _ := os.Stat(historyPath)
 	messages, err := readGrokNativeMessages(session.Dir)
 	if err != nil {
 		return GrokSessionDetail{}, err
 	}
-	return GrokSessionDetail{Summary: session.Summary, Messages: messages}, nil
+	s.cacheGrokHistory(sessionID, session, messages, before)
+	return GrokSessionDetail{Summary: s.applyGrokLocalName(session.Summary), Messages: messages}, nil
+}
+
+func paginateGrokSession(detail GrokSessionDetail, before int) GrokSessionDetail {
+	messages := detail.Messages
+	start, end, turnOffset := conversationMessagePageBounds(len(messages), before, func(index int) bool {
+		role := strings.ToLower(strings.TrimSpace(messages[index].Role))
+		return role == "user" || role == "human"
+	})
+	detail.Messages = append([]GrokMessage(nil), messages[start:end]...)
+	detail.HistoryStart = start
+	detail.HistoryTotal = len(messages)
+	detail.HistoryTurnOffset = turnOffset
+	detail.HasEarlier = start > 0
+	return detail
+}
+
+func (s *AppService) cachedGrokHistory(sessionID string) (GrokSessionSummary, []GrokMessage, bool) {
+	s.historyMu.Lock()
+	snapshot := s.grokHistoryCache[sessionID]
+	s.historyMu.Unlock()
+	if snapshot == nil {
+		return GrokSessionSummary{}, nil, false
+	}
+	info, err := os.Stat(snapshot.path)
+	if err != nil || info.Size() != snapshot.size || info.ModTime().UnixNano() != snapshot.modified {
+		return GrokSessionSummary{}, nil, false
+	}
+	s.historyMu.Lock()
+	if current := s.grokHistoryCache[sessionID]; current == snapshot {
+		current.touchedAt = time.Now()
+	}
+	s.historyMu.Unlock()
+	return snapshot.summary, snapshot.messages, true
+}
+
+func (s *AppService) cacheGrokHistory(
+	sessionID string,
+	session grokNativeSession,
+	messages []GrokMessage,
+	before os.FileInfo,
+) {
+	path := filepath.Join(session.Dir, "chat_history.jsonl")
+	info, err := os.Stat(path)
+	if err != nil || before == nil || info.Size() != before.Size() || info.ModTime() != before.ModTime() {
+		return
+	}
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if s.grokHistoryCache == nil {
+		s.grokHistoryCache = make(map[string]*grokHistorySnapshot)
+	}
+	s.grokHistoryCache[sessionID] = &grokHistorySnapshot{
+		dir: session.Dir, path: path, size: info.Size(), modified: info.ModTime().UnixNano(),
+		summary: session.Summary, messages: messages, touchedAt: time.Now(),
+	}
+	for len(s.grokHistoryCache) > conversationHistoryCacheLimit {
+		var oldestID string
+		var oldest time.Time
+		for id, snapshot := range s.grokHistoryCache {
+			if oldestID == "" || snapshot.touchedAt.Before(oldest) {
+				oldestID = id
+				oldest = snapshot.touchedAt
+			}
+		}
+		delete(s.grokHistoryCache, oldestID)
+	}
+}
+
+func (s *AppService) cachedGrokUsageSource(sessionID string) (string, int, bool) {
+	s.historyMu.Lock()
+	snapshot := s.grokHistoryCache[sessionID]
+	s.historyMu.Unlock()
+	if snapshot == nil {
+		return "", 0, false
+	}
+	info, err := os.Stat(snapshot.path)
+	if err != nil || info.Size() != snapshot.size || info.ModTime().UnixNano() != snapshot.modified {
+		return "", 0, false
+	}
+	count := 0
+	for _, message := range snapshot.messages {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		if role == "user" || role == "human" {
+			count++
+		}
+	}
+	return snapshot.dir, count, true
 }
 
 func (s *AppService) clearGrokRun(turnID string) {

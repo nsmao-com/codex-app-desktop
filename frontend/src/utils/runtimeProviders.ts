@@ -10,9 +10,11 @@ export const DEFAULT_CODEX_REASONING = [
   { effort: 'ultra', description: 'Ultra reasoning depth' },
 ] as const
 
+export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol'
+
 /** Soft fallback when model/list is unavailable. */
 export const FALLBACK_CODEX_MODELS = [
-  'gpt-5.6-sol',
+  DEFAULT_CODEX_MODEL,
   'gpt-5.6-terra',
   'gpt-5.6-luna',
   'gpt-5.5',

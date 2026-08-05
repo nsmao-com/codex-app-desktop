@@ -5,6 +5,7 @@ import { computed, shallowRef, watch } from 'vue'
 import type {
   GrokMessage,
   GrokRuntimeStatus,
+  GrokSessionDetail,
   GrokSessionSummary,
   GrokTurnRef,
 } from '../../bindings/nice_codex_desktop/models'
@@ -18,6 +19,7 @@ import {
   listGrokSessionTurnUsages,
   listGrokSessions,
   readGrokSession,
+  readGrokSessionHistory,
   refreshGrokRuntime,
   refreshGrokRuntimeQuick,
   renameGrokSession as renameGrokSessionApi,
@@ -280,6 +282,42 @@ function mergeGrokDiskWithCurrent(
   return result
 }
 
+function splitGrokHistoryPrefix(
+  disk: GrokMessage[],
+  current: GrokMessage[],
+): { prefix: GrokMessage[], current: GrokMessage[] } {
+  if (!disk.length || !current.length) return { prefix: [], current }
+  const currentByID = new Map<string, number>()
+  current.forEach((message, index) => {
+    if (message.id) currentByID.set(message.id, index)
+  })
+  let diskIndex = -1
+  let currentIndex = -1
+  for (let index = 0; index < disk.length; index += 1) {
+    const message = disk[index]
+    const byID = message.id ? currentByID.get(message.id) : undefined
+    const role = (message.role || '').toLowerCase()
+    const match = byID ?? ((role === 'user' || role === 'human')
+      ? current.findIndex((row) => {
+          const rowRole = (row.role || '').toLowerCase()
+          return (rowRole === 'user' || rowRole === 'human')
+            && sameGrokUserText(row.text, message.text)
+        })
+      : -1)
+    if (match >= 0) {
+      diskIndex = index
+      currentIndex = match
+      break
+    }
+  }
+  if (diskIndex < 0 || currentIndex < 0) return { prefix: [], current }
+  const prefixLength = Math.max(0, currentIndex - diskIndex)
+  return {
+    prefix: current.slice(0, prefixLength),
+    current: current.slice(prefixLength),
+  }
+}
+
 function normalizeGrokUserText(text = ''): string {
   return text.trim().replace(/\r\n/g, '\n')
 }
@@ -319,6 +357,16 @@ export interface GrokQueuedMessage {
   blockedByTurnId?: string
   /** Timeline user row already injected for this queue item. */
   localAppended?: boolean
+}
+
+interface GrokHistoryState {
+  start: number
+  total: number
+  turnOffset: number
+  hasEarlier: boolean
+  loadingEarlier: boolean
+  loadedUpdatedAt: number
+  backend: 'build' | 'api'
 }
 
 function sanitizeGrokThoughtText(text: string): string {
@@ -370,6 +418,7 @@ export const useGrokStore = defineStore('grok', () => {
   const archivedSessions = shallowRef<GrokSessionSummary[]>([])
   const activeSessionId = shallowRef('')
   const messagesBySession = shallowRef<Record<string, GrokMessage[]>>({})
+  const historyBySession = shallowRef<Record<string, GrokHistoryState>>({})
   const loadingSessionId = shallowRef('')
   const sessionMutation = shallowRef('')
   const sendingSessionIds = shallowRef<string[]>([])
@@ -586,6 +635,18 @@ export const useGrokStore = defineStore('grok', () => {
     const messageKeys = relatedSessionKeys(messagesBySession.value, to)
     if (messageKeys.length) replaceSessionMessages(to, mergedSessionMessages(to))
 
+    const historyKeys = relatedSessionKeys(historyBySession.value, to)
+    if (historyKeys.length) {
+      const next = { ...historyBySession.value }
+      const history = historyKeys
+        .map((key) => next[key])
+        .filter((value): value is GrokHistoryState => Boolean(value))
+        .sort((left, right) => left.start - right.start)[0]
+      for (const key of historyKeys) delete next[key]
+      if (history) next[to] = { ...history, loadingEarlier: false }
+      historyBySession.value = next
+    }
+
     const mergeTextBucket = (bucket: Record<string, string>): Record<string, string> => {
       const keys = relatedSessionKeys(bucket, to)
       if (!keys.length) return bucket
@@ -799,9 +860,17 @@ export const useGrokStore = defineStore('grok', () => {
       : usage
   })
 
+  const activeHistoryState = computed(() => {
+    const key = sessionStateKey(historyBySession.value, activeSessionId.value)
+    return (key && historyBySession.value[key]) || null
+  })
+  const activeHistoryHasEarlier = computed(() => activeHistoryState.value?.hasEarlier === true)
+  const activeHistoryEarlierCount = computed(() => activeHistoryState.value?.turnOffset ?? 0)
+  const activeHistoryLoadingEarlier = computed(() => activeHistoryState.value?.loadingEarlier === true)
+
   const activeHistoryItems = computed<TimelineItem[]>(() => {
     const sessionId = activeSessionId.value
-    let turn = 0
+    let turn = activeHistoryState.value?.turnOffset ?? 0
     const items: TimelineItem[] = []
     const messages = activeMessages.value
     for (const message of messages) {
@@ -813,7 +882,7 @@ export const useGrokStore = defineStore('grok', () => {
     return items
   })
   const activeHistoryTurnCount = computed(() => {
-    let count = 0
+    let count = activeHistoryState.value?.turnOffset ?? 0
     for (const message of activeMessages.value) {
       const role = (message.role || '').toLowerCase()
       if (role === 'user' || role === 'human') count += 1
@@ -1246,7 +1315,8 @@ export const useGrokStore = defineStore('grok', () => {
 
   function countUserTurns(sessionId: string): number {
     const messages = mergedSessionMessages(sessionId)
-    let count = 0
+    const historyKey = sessionStateKey(historyBySession.value, sessionId)
+    let count = historyKey ? (historyBySession.value[historyKey]?.turnOffset ?? 0) : 0
     for (const message of messages) {
       const role = (message.role || '').toLowerCase()
       if (role === 'user' || role === 'human') count += 1
@@ -1515,6 +1585,22 @@ export const useGrokStore = defineStore('grok', () => {
         return
       }
 
+      const historyKey = sessionStateKey(historyBySession.value, id)
+      const cachedHistory = (historyKey && historyBySession.value[historyKey]) || null
+      const hasCachedMessages = relatedSessionKeys(messagesBySession.value, id).length > 0
+      const cacheIsCurrent = !known
+        || !known.updatedAt
+        || known.updatedAt <= (cachedHistory?.loadedUpdatedAt ?? 0)
+      if (
+        !options?.terminalStatus
+        && cachedHistory?.backend === requestedBackend
+        && hasCachedMessages
+        && cacheIsCurrent
+      ) {
+        loadedSessionId = id
+        return
+      }
+
       const detail = await readGrokSession(requestedBackend, id)
       if (sessionOpenSequence.get(id) !== sequence || requestedBackend !== backendId.value) return
       const targetId = resolveSessionId(id) || id
@@ -1523,9 +1609,29 @@ export const useGrokStore = defineStore('grok', () => {
       const busy = isSessionTurnBusy(targetId)
       const terminalStatus = options?.terminalStatus || (!busy ? 'completed' : '')
       const cached = mergedSessionMessages(targetId)
-      const merged = mergeGrokDiskWithCurrent(messages, cached, busy)
-      const nextMessages = terminalStatus ? finalizeGrokMessages(merged, terminalStatus) : merged
+      const currentHistoryKey = sessionStateKey(historyBySession.value, targetId)
+      const currentHistory = currentHistoryKey ? historyBySession.value[currentHistoryKey] : undefined
+      const keepLoadedPrefix = Boolean(
+        currentHistory
+        && currentHistory.backend === requestedBackend
+        && currentHistory.start < (Number(detail.historyStart) || 0)
+        && (Number(detail.historyTotal) || 0) >= currentHistory.total,
+      )
+      const split = keepLoadedPrefix
+        ? splitGrokHistoryPrefix(messages, cached)
+        : { prefix: [] as GrokMessage[], current: cached }
+      const merged = mergeGrokDiskWithCurrent(messages, split.current, busy)
+      const combined = split.prefix.length ? [...split.prefix, ...merged] : merged
+      const nextMessages = terminalStatus ? finalizeGrokMessages(combined, terminalStatus) : combined
       replaceSessionMessages(targetId, nextMessages)
+      setGrokHistoryState(targetId, requestedBackend, detail)
+      if (split.prefix.length && currentHistory) {
+        patchGrokHistoryState(targetId, {
+          start: currentHistory.start,
+          turnOffset: currentHistory.turnOffset,
+          hasEarlier: currentHistory.hasEarlier,
+        })
+      }
       loadedSessionId = targetId
       if (detail.summary?.id) {
         const others = sessions.value.filter((item) => item.id !== detail.summary.id)
@@ -1565,9 +1671,73 @@ export const useGrokStore = defineStore('grok', () => {
     }
   }
 
+  function setGrokHistoryState(
+    sessionId: string,
+    backend: 'build' | 'api',
+    detail: GrokSessionDetail,
+  ): void {
+    const id = resolveSessionId(sessionId) || sessionId.trim()
+    if (!id) return
+    const start = Math.max(0, Number(detail.historyStart) || 0)
+    const turnOffset = Math.max(0, Number(detail.historyTurnOffset) || 0)
+    const next = { ...historyBySession.value }
+    for (const key of relatedSessionKeys(next, id)) delete next[key]
+    next[id] = {
+      start,
+      total: Math.max(start, Number(detail.historyTotal) || 0),
+      turnOffset,
+      hasEarlier: detail.hasEarlier === true || start > 0,
+      loadingEarlier: false,
+      loadedUpdatedAt: Number(detail.summary?.updatedAt) || historyBySession.value[id]?.loadedUpdatedAt || 0,
+      backend,
+    }
+    historyBySession.value = next
+  }
+
+  function patchGrokHistoryState(sessionId: string, patch: Partial<GrokHistoryState>): void {
+    const key = sessionStateKey(historyBySession.value, sessionId)
+    const current = key && historyBySession.value[key]
+    if (!key || !current) return
+    historyBySession.value = {
+      ...historyBySession.value,
+      [key]: { ...current, ...patch },
+    }
+  }
+
+  async function loadEarlierHistory(): Promise<boolean> {
+    const sessionId = activeSessionId.value
+    const key = sessionStateKey(historyBySession.value, sessionId)
+    const state = key ? historyBySession.value[key] : undefined
+    if (!sessionId || !key || !state?.hasEarlier || state.loadingEarlier) return false
+    const before = state.start
+    patchGrokHistoryState(key, { loadingEarlier: true })
+    try {
+      const detail = await readGrokSessionHistory(state.backend, resolveSessionId(sessionId) || sessionId, before)
+      const currentKey = sessionStateKey(historyBySession.value, sessionId)
+      const currentState = currentKey ? historyBySession.value[currentKey] : undefined
+      if (!currentKey || !currentState || currentState.start !== before) return false
+      const current = mergedSessionMessages(sessionId)
+      const existingIDs = new Set(current.map((message) => message.id).filter(Boolean))
+      const prefix = (detail.messages || []).filter((message) => !message.id || !existingIDs.has(message.id))
+      if (prefix.length) replaceSessionMessages(sessionId, [...prefix, ...current])
+      setGrokHistoryState(sessionId, state.backend, detail)
+      return prefix.length > 0 || (Number(detail.historyStart) || 0) < before
+    } catch (error) {
+      if (sameGrokSession(activeSessionId.value, sessionId)) {
+        notify('error', translate('notifications.taskOpenFailed'), errorMessage(error))
+      }
+      return false
+    } finally {
+      const finalKey = sessionStateKey(historyBySession.value, sessionId)
+      if (finalKey && historyBySession.value[finalKey]?.loadingEarlier) {
+        patchGrokHistoryState(sessionId, { loadingEarlier: false })
+      }
+    }
+  }
+
   async function hydrateSessionTurnUsages(sessionID: string): Promise<void> {
     const id = sessionID.trim()
-    if (!id || id.startsWith('pending-grok-')) return
+    if (!id || id.startsWith('pending-grok-') || backendForSession(id) === 'api') return
     try {
       const list = await listGrokSessionTurnUsages(id)
       if (!list?.length) return
@@ -2050,6 +2220,8 @@ export const useGrokStore = defineStore('grok', () => {
       if (!ok) throw lastError || new Error('Grok turn is not running')
       void reconcileInterruptedTurn(ref)
     } catch (error) {
+      const current = turnForSession(ref.sessionId)
+      if (!current || current.turnId !== ref.turnId) return
       if (/not running/i.test(errorMessage(error))) {
         // The backend has no owner for this turn, so keeping the local lock would
         // park every follow-up forever after a missed terminal bridge event.
@@ -2076,10 +2248,14 @@ export const useGrokStore = defineStore('grok', () => {
         return
       }
     } catch (error) {
+      const latest = turnForSession(ref.sessionId)
+      if (!latest || latest.turnId !== ref.turnId) return
       markSessionState(interruptingSessionIds, ref.sessionId, false)
       notify('error', translate('notifications.turnStopFailed'), errorMessage(error))
       return
     }
+    const latest = turnForSession(ref.sessionId)
+    if (!latest || latest.turnId !== ref.turnId) return
     if (attempt < 9) {
       void reconcileInterruptedTurn(ref, attempt + 1)
       return
@@ -2094,6 +2270,7 @@ export const useGrokStore = defineStore('grok', () => {
       ...sessionAlias.keys(),
       ...sessionAlias.values(),
       ...Object.keys(messagesBySession.value),
+      ...Object.keys(historyBySession.value),
       ...Object.keys(queuedBySession.value),
       ...Object.keys(activeTurnBySession.value),
     ])
@@ -2113,6 +2290,7 @@ export const useGrokStore = defineStore('grok', () => {
     const withoutRelated = <T>(bucket: Record<string, T>): Record<string, T> =>
       Object.fromEntries(Object.entries(bucket).filter(([id]) => !matches(id)))
     messagesBySession.value = withoutRelated(messagesBySession.value)
+    historyBySession.value = withoutRelated(historyBySession.value)
     queuedBySession.value = withoutRelated(queuedBySession.value)
     activeTurnBySession.value = withoutRelated(activeTurnBySession.value)
     liveTextBySession.value = withoutRelated(liveTextBySession.value)
@@ -2332,6 +2510,9 @@ export const useGrokStore = defineStore('grok', () => {
     activeMessages,
     activeQueuedMessages,
     activeItems,
+    activeHistoryHasEarlier,
+    activeHistoryEarlierCount,
+    activeHistoryLoadingEarlier,
     activeTurnMetrics,
     activeTokenUsage,
     isTurnRunning,
@@ -2345,6 +2526,7 @@ export const useGrokStore = defineStore('grok', () => {
     loadSessions,
     loadArchivedSessions,
     openSession,
+    loadEarlierHistory,
     newSession,
     sendMessage,
     interruptTurn,
