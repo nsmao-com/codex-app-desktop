@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -714,9 +715,14 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 	turnSettings.Sandbox = settings.GrokSandbox
 	turnSettings.ApprovalPolicy = settings.GrokApprovalPolicy
 	resumeID := ""
+	historyStart := int64(0)
 	if !newSession {
-		if _, err := findGrokNativeSession(request.SessionID); err == nil {
+		if session, err := findGrokNativeSession(request.SessionID); err == nil {
 			resumeID = request.SessionID
+			historyStart = -1
+			if info, statErr := os.Stat(filepath.Join(session.Dir, "chat_history.jsonl")); statErr == nil {
+				historyStart = info.Size()
+			}
 		}
 	}
 	var streamedText strings.Builder
@@ -740,7 +746,7 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 			pollSessionID = delta
 			go func() {
 				defer close(toolPollingDone)
-				s.pollGrokBuildActivity(pollCtx, request.SessionID, turnID, delta, request.Text)
+				s.pollGrokBuildActivity(pollCtx, request.SessionID, turnID, delta, request.Text, historyStart)
 			}()
 			return
 		}
@@ -762,7 +768,7 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 	if toolPollingStarted {
 		<-toolPollingDone
 		// Capture a result written immediately before process exit.
-		s.emitGrokBuildActivitySnapshot(request.SessionID, turnID, pollSessionID, request.Text)
+		s.emitGrokBuildActivitySnapshot(request.SessionID, turnID, pollSessionID, request.Text, historyStart)
 	}
 	bindNativeSession := err == nil
 	if !bindNativeSession && nativeID != "" {
@@ -783,6 +789,7 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 func (s *AppService) pollGrokBuildActivity(
 	ctx context.Context,
 	eventSessionID, turnID, nativeSessionID, prompt string,
+	historyStart int64,
 ) {
 	ticker := time.NewTicker(180 * time.Millisecond)
 	defer ticker.Stop()
@@ -807,7 +814,7 @@ func (s *AppService) pollGrokBuildActivity(
 		if info.Size() == lastSize && modified == lastModified {
 			return
 		}
-		activity, err := readGrokCurrentTurnActivityFromDir(sessionDir, prompt)
+		activity, err := readGrokCurrentTurnActivityFromDir(sessionDir, prompt, historyStart)
 		if err != nil {
 			return
 		}
@@ -834,8 +841,8 @@ func (s *AppService) pollGrokBuildActivity(
 	}
 }
 
-func (s *AppService) emitGrokBuildActivitySnapshot(eventSessionID, turnID, nativeSessionID, prompt string) {
-	activity, err := readGrokCurrentTurnActivity(nativeSessionID, prompt)
+func (s *AppService) emitGrokBuildActivitySnapshot(eventSessionID, turnID, nativeSessionID, prompt string, historyStart int64) {
+	activity, err := readGrokCurrentTurnActivity(nativeSessionID, prompt, historyStart)
 	if err != nil {
 		return
 	}
@@ -844,15 +851,28 @@ func (s *AppService) emitGrokBuildActivitySnapshot(eventSessionID, turnID, nativ
 	})
 }
 
-func readGrokCurrentTurnActivity(sessionID, prompt string) ([]GrokMessage, error) {
+func readGrokCurrentTurnActivity(sessionID, prompt string, historyStart int64) ([]GrokMessage, error) {
 	session, err := findGrokNativeSession(sessionID)
 	if err != nil {
 		return nil, err
 	}
-	return readGrokCurrentTurnActivityFromDir(session.Dir, prompt)
+	return readGrokCurrentTurnActivityFromDir(session.Dir, prompt, historyStart)
 }
 
-func readGrokCurrentTurnActivityFromDir(sessionDir, prompt string) ([]GrokMessage, error) {
+func readGrokCurrentTurnActivityFromDir(sessionDir, prompt string, historyStart int64) ([]GrokMessage, error) {
+	if historyStart < 0 {
+		// If the pre-turn boundary could not be captured, suppress native activity
+		// for this turn. The streaming channel remains available and the terminal
+		// history reload restores the authoritative tool/text ordering.
+		return []GrokMessage{}, nil
+	}
+	ready, err := grokHistoryHasPromptAfter(sessionDir, prompt, historyStart)
+	if err != nil {
+		return nil, err
+	}
+	if !ready {
+		return []GrokMessage{}, nil
+	}
 	messages, err := readGrokNativeMessages(sessionDir)
 	if err != nil {
 		return nil, err
@@ -864,13 +884,16 @@ func readGrokCurrentTurnActivityFromDir(sessionDir, prompt string) ([]GrokMessag
 		if role != "user" && role != "human" {
 			continue
 		}
-		if start < 0 {
+		// The current prompt must be the newest persisted user row. Before Grok
+		// writes that row, falling back to the previous turn duplicates its final
+		// assistant message in the live timeline.
+		if wanted == "" || grokHistoryUserMatchesPrompt(messages[index].Text, wanted) {
 			start = index
 		}
-		if wanted != "" && strings.TrimSpace(messages[index].Text) == wanted {
-			start = index
-			break
-		}
+		break
+	}
+	if start < 0 {
+		return []GrokMessage{}, nil
 	}
 	activity := make([]GrokMessage, 0, 16)
 	for index := start + 1; index < len(messages); index++ {
@@ -881,6 +904,64 @@ func readGrokCurrentTurnActivityFromDir(sessionDir, prompt string) ([]GrokMessag
 		}
 	}
 	return activity, nil
+}
+
+func grokHistoryHasPromptAfter(sessionDir, prompt string, historyStart int64) (bool, error) {
+	path := filepath.Join(sessionDir, "chat_history.jsonl")
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return false, err
+	}
+	if historyStart > info.Size() {
+		return false, nil
+	}
+	if _, err := file.Seek(historyStart, io.SeekStart); err != nil {
+		return false, err
+	}
+	wanted := strings.TrimSpace(prompt)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 16*1024), 8*1024*1024)
+	for scanner.Scan() {
+		var raw map[string]any
+		if json.Unmarshal(scanner.Bytes(), &raw) != nil {
+			continue
+		}
+		role := strings.ToLower(firstMapString(raw, "type", "role"))
+		if (role != "user" && role != "human") || firstMapString(raw, "synthetic_reason") != "" {
+			continue
+		}
+		text := extractGrokUserFacingText(raw)
+		if wanted == "" || grokHistoryUserMatchesPrompt(text, wanted) {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func grokHistoryUserMatchesPrompt(historyText, prompt string) bool {
+	historyText = strings.TrimSpace(strings.ReplaceAll(historyText, "\r\n", "\n"))
+	prompt = strings.TrimSpace(strings.ReplaceAll(prompt, "\r\n", "\n"))
+	if historyText == prompt {
+		return true
+	}
+	shorter, longer := historyText, prompt
+	if len(shorter) > len(longer) {
+		shorter, longer = longer, shorter
+	}
+	// Grok Build can persist only a prefix or suffix of very long prompts.
+	// Keep short messages exact so unrelated prompts cannot share a turn.
+	if len(shorter) < 256 {
+		return false
+	}
+	return strings.HasPrefix(longer, shorter) || strings.HasSuffix(longer, shorter)
 }
 
 // rekeyGrokRun moves an in-flight run from pending/local session id → native id.

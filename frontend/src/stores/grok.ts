@@ -1293,7 +1293,21 @@ export const useGrokStore = defineStore('grok', () => {
       if (turnId && finalizedTurnIds.has(turnId)) return
       if (!sessionId) return
       const key = liveWriteKey(sessionId) || sessionId
-      const messages = Array.isArray(data.messages) ? data.messages as GrokMessage[] : []
+      const currentTurn = turnForSession(sessionId)
+      if (
+        turnId
+        && currentTurn?.turnId
+        && currentTurn.turnId !== turnId
+        && !currentTurn.turnId.startsWith('grok-turn-pending-')
+      ) return
+      // A snapshot can cross the bridge before chat_history contains the new
+      // user row. Never append rows already owned by committed history; doing so
+      // briefly duplicates the previous assistant answer after the new prompt.
+      const historyIds = new Set(
+        mergedSessionMessages(key).map((message) => message.id).filter(Boolean),
+      )
+      const messages = (Array.isArray(data.messages) ? data.messages as GrokMessage[] : [])
+        .filter((message) => !message.id || !historyIds.has(message.id))
       liveActivityBySession.value = { ...liveActivityBySession.value, [key]: messages }
       return
     }
