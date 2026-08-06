@@ -1111,7 +1111,11 @@ async function applyModelSelection(value: string): Promise<void> {
     return
   }
   if (appStore.isOpenCodeMode) {
-    appStore.patchSettings({ openCodeModel: modelID })
+    const provider = modelID.includes('/') ? modelID.slice(0, modelID.indexOf('/')).trim() : ''
+    appStore.patchSettings({
+      openCodeModel: modelID,
+      ...(provider ? { openCodeProvider: provider } : {}),
+    })
     if (sessionLocked.value && codexStore.activeThread) {
       void codexStore.updateSessionPreferences({ sessionId: codexStore.activeThread.id, model: modelID, effort: displayEffort.value, collaborationMode: collaborationMode.value }).catch(() => undefined)
     }

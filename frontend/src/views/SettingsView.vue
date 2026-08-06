@@ -50,6 +50,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
+import type { ExternalRuntimeCatalog } from '../../bindings/nice_codex_desktop/models'
 import { supportedLocales } from '@/i18n'
 import { ACCENT_OPTIONS, type AppAccent } from '@/lib/accents'
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
@@ -253,12 +254,107 @@ const isOpenCodeSettings = computed(() => appStore.isOpenCodeMode)
 const externalRuntimeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
 const externalModel = computed({
   get: () => isGeminiSettings.value ? appStore.settings.geminiModel : appStore.settings.openCodeModel,
-  set: (value: string) => appStore.patchSettings(isGeminiSettings.value ? { geminiModel: value } : { openCodeModel: value }),
+  set: (value: string) => {
+    if (isGeminiSettings.value) {
+      appStore.patchSettings({ geminiModel: value })
+      return
+    }
+    const provider = value.includes('/') ? value.slice(0, value.indexOf('/')).trim() : ''
+    appStore.patchSettings({
+      openCodeModel: value,
+      ...(provider ? { openCodeProvider: provider } : {}),
+    })
+  },
 })
 const externalEffort = computed({
   get: () => isGeminiSettings.value ? appStore.settings.geminiEffort : appStore.settings.openCodeEffort,
   set: (value: string) => appStore.patchSettings(isGeminiSettings.value ? { geminiEffort: value } : { openCodeEffort: value }),
 })
+const externalCustomModelDraft = shallowRef('')
+const externalCatalog = shallowRef<ExternalRuntimeCatalog | null>(null)
+const externalCatalogLoading = shallowRef(false)
+const externalInstructionScope = shallowRef<'global' | 'project'>('global')
+const externalInstructionDraft = shallowRef('')
+const externalCustomModels = computed(() => isGeminiSettings.value
+  ? (appStore.settings.geminiCustomModels ?? [])
+  : (appStore.settings.openCodeCustomModels ?? []))
+const externalProviderSelection = computed({
+  get: () => appStore.settings.openCodeProvider || '',
+  set: (value: string) => appStore.patchSettings({ openCodeProvider: value }),
+})
+const externalProviderOptions = computed(() => (externalCatalog.value?.providers || []).map((provider) => ({
+  value: provider.id,
+  label: provider.name,
+  description: `${provider.id} · ${provider.models?.length || 0} models`,
+})))
+const externalModelOptions = computed(() => {
+  const catalog = externalCatalog.value?.models?.length
+    ? externalCatalog.value.models
+    : externalRuntimeProvider.value?.models || []
+  const options = catalog.map((item) => ({ value: item.model, label: item.displayName || item.model, description: item.description, badge: item.isDefault ? t('common.recommended') : '' }))
+  for (const model of externalCustomModels.value) {
+    if (!options.some((item) => item.value.toLocaleLowerCase() === model.toLocaleLowerCase())) {
+      options.push({ value: model, label: model, description: 'Custom native runtime model', badge: '' })
+    }
+  }
+  return options
+})
+
+async function loadExternalSettingsCatalog(): Promise<void> {
+  if (!isGeminiSettings.value && !isOpenCodeSettings.value) return
+  externalCatalogLoading.value = true
+  try {
+    externalCatalog.value = await backend.ReadExternalRuntimeCatalog(
+      isGeminiSettings.value ? 'gemini' : 'opencode',
+      appStore.settings.workspace || '',
+    )
+    const info = externalInstructionScope.value === 'global'
+      ? externalCatalog.value.globalInstructions
+      : externalCatalog.value.projectInstructions
+    externalInstructionDraft.value = info?.content || ''
+  } catch {
+    externalCatalog.value = null
+  } finally {
+    externalCatalogLoading.value = false
+  }
+}
+
+watch(externalInstructionScope, () => {
+  const catalog = externalCatalog.value
+  if (!catalog) return
+  const info = externalInstructionScope.value === 'global' ? catalog.globalInstructions : catalog.projectInstructions
+  externalInstructionDraft.value = info?.content || ''
+})
+
+async function saveExternalInstructionsSettings(): Promise<void> {
+  try {
+    await backend.SaveExternalRuntimeInstructions({
+      runtime: isGeminiSettings.value ? 'gemini' : 'opencode',
+      workspace: appStore.settings.workspace || '',
+      scope: externalInstructionScope.value,
+      content: externalInstructionDraft.value,
+    })
+    await loadExternalSettingsCatalog()
+    notify('success', 'Instructions', 'Native instructions saved')
+  } catch (error) {
+    notify('error', 'Instructions', error instanceof Error ? error.message : String(error))
+  }
+}
+
+function addExternalCustomModel(): void {
+  const value = externalCustomModelDraft.value.trim()
+  if (!value || value.length > 160 || externalCustomModels.value.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) return
+  const next = [...externalCustomModels.value, value].slice(0, 64)
+  appStore.patchSettings(isGeminiSettings.value ? { geminiCustomModels: next } : { openCodeCustomModels: next })
+  void codexStore.loadModels()
+  externalCustomModelDraft.value = ''
+}
+
+function removeExternalCustomModel(value: string): void {
+  const next = externalCustomModels.value.filter((item) => item !== value)
+  appStore.patchSettings(isGeminiSettings.value ? { geminiCustomModels: next } : { openCodeCustomModels: next })
+  void codexStore.loadModels()
+}
 const claudeStatus = computed(() => {
   const fromProviders = appStore.agentProviders.find((provider) => provider.kind === 'claude')
   const rt = claudeStore.runtime
@@ -672,6 +768,7 @@ onMounted(() => {
   void loadCollaborationModes()
   if (!isGrokSettings.value) void appStore.refreshAccountData().catch(() => undefined)
   else void grokStore.refreshRuntime()
+  if (isGeminiSettings.value || isOpenCodeSettings.value) void loadExternalSettingsCatalog()
   const section = typeof route.query.section === 'string' ? route.query.section : ''
   if (isSettingsPanel(section)) activePanel.value = section
   clampPanelForRuntime()
@@ -681,7 +778,10 @@ watch([isGrokSettings, isClaudeSettings, isGeminiSettings, isOpenCodeSettings], 
   syncFromStore()
   clampPanelForRuntime()
   if (grok) void grokStore.refreshRuntime()
-  else if (gemini || openCode) void appStore.refreshRuntimes()
+  else if (gemini || openCode) {
+    void appStore.refreshRuntimes()
+    void loadExternalSettingsCatalog()
+  }
 })
 
 function clampPanelForRuntime(): void {
@@ -1321,6 +1421,8 @@ async function save(): Promise<void> {
         projectInstructionsWorkspace.value = info?.workspace ?? projectInstructionsWorkspace.value
         projectInstructionsWorkspaceName.value = info?.workspaceName ?? projectInstructionsWorkspaceName.value
       }
+    } else if (isGeminiSettings.value || isOpenCodeSettings.value) {
+      // Gemini/OpenCode instructions are saved by their native runtime card.
     } else {
       const globalInfo = await backend.SaveGlobalInstructions(customInstructions.value)
       customInstructions.value = globalInfo?.content ?? customInstructions.value
@@ -1370,8 +1472,11 @@ async function save(): Promise<void> {
       claudePermissionMode: claudePermissionMode.value || 'acceptEdits',
       geminiModel: appStore.settings.geminiModel || 'gemini-2.5-pro',
       geminiEffort: appStore.settings.geminiEffort || 'auto',
+      geminiCustomModels: appStore.settings.geminiCustomModels ?? [],
       openCodeModel: appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6',
       openCodeEffort: appStore.settings.openCodeEffort || 'high',
+      openCodeProvider: appStore.settings.openCodeProvider || '',
+      openCodeCustomModels: appStore.settings.openCodeCustomModels ?? [],
       theme: theme.value,
       accentColor: accentColor.value,
       fontFamily: fontFamily.value,
@@ -2183,10 +2288,27 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                       class="h-9"
                       content-class="min-w-[320px]"
                       align="start"
-                      :options="(externalRuntimeProvider?.models || []).map((item) => ({ value: item.model, label: item.displayName || item.model, description: item.description, badge: item.isDefault ? t('common.recommended') : '' }))"
+                      :options="externalModelOptions"
                       :aria-label="t('settings.model')"
                       :search-placeholder="t('settings.modelSearch')"
                     />
+                  </div>
+                  <div v-if="isOpenCodeSettings" class="space-y-1">
+                    <Label class="text-xs">OpenCode provider</Label>
+                    <Select v-model="externalProviderSelection">
+                      <SelectTrigger class="h-9 text-xs"><SelectValue placeholder="Select provider" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem v-for="option in externalProviderOptions" :key="option.value" :value="option.value">
+                          <span class="flex items-center gap-2"><span>{{ option.label }}</span><span class="text-[10px] text-muted-foreground">{{ option.description }}</span></span>
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-[10px] text-muted-foreground">OpenCode 会把 provider/model 原样传给 `opencode run --model`，Zen、Go 和第三方 provider 不共用 Codex 配置。</p>
+                  </div>
+                  <div class="space-y-2">
+                    <Label class="text-xs">自定义原生模型</Label>
+                    <div class="flex gap-2"><Input v-model="externalCustomModelDraft" class="h-9 font-mono text-xs" :placeholder="isOpenCodeSettings ? 'provider/model' : 'gemini-model-id'" maxlength="160" @keydown.enter.prevent="addExternalCustomModel" /><Button type="button" variant="outline" size="sm" class="h-9 shrink-0" :disabled="!externalCustomModelDraft.trim()" @click="addExternalCustomModel"><Plus :size="14" class="mr-1.5" />{{ t('common.add') }}</Button></div>
+                    <div v-if="externalCustomModels.length" class="divide-y rounded-md border"><div v-for="item in externalCustomModels" :key="item" class="flex items-center gap-2 px-3 py-2"><code class="min-w-0 flex-1 truncate text-[11px]">{{ item }}</code><Button type="button" variant="ghost" size="icon-xs" :aria-label="t('common.delete')" @click="removeExternalCustomModel(item)"><Trash2 :size="12" /></Button></div></div>
                   </div>
                   <div class="space-y-1">
                     <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
@@ -2206,7 +2328,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                     </div>
                   </div>
                   <p class="rounded-lg border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">
-                    {{ isGeminiSettings ? 'Gemini CLI 的模型、认证和 MCP 由本机 Gemini 配置管理。' : 'OpenCode 的服务商、模型和 MCP 由 OpenCode 配置管理。Nice Codex 会保留会话、队列和工作区隔离。' }}
+                    {{ isGeminiSettings ? 'Gemini CLI 的认证、模型、MCP 和 GEMINI.md 使用本机原生配置。' : `OpenCode 的 provider、Zen/Go 模型、MCP、AGENTS.md、历史和 usage 使用 OpenCode 原生数据。${externalCatalogLoading ? '正在刷新…' : ''}` }}
                   </p>
                 </div>
               </section>
@@ -2311,7 +2433,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.grokInstructionsHint') }}</p>
                 </div>
               </section>
-              <section v-if="!isGrokSettings" class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="!isGrokSettings && !isGeminiSettings && !isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="divide-y">
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
@@ -2342,7 +2464,22 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   </div>
                 </div>
               </section>
-              <section class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="isGeminiSettings || isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
+                <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
+                  <div class="min-w-0">
+                    <h2 class="text-[13px] font-semibold">{{ isGeminiSettings ? 'Gemini CLI native instructions' : 'OpenCode native instructions' }}</h2>
+                    <p class="mt-0.5 text-[11px] text-muted-foreground">{{ isGeminiSettings ? 'Gemini CLI 读取 GEMINI.md；这里不会写入 Codex AGENTS.md。' : 'OpenCode 读取 AGENTS.md 和 opencode.json instructions；这里不会写入 Codex 设置。' }}</p>
+                  </div>
+                  <Badge v-if="externalCatalogLoading" variant="outline" class="text-[9px]">loading</Badge>
+                </div>
+                <div class="space-y-3 p-4">
+                  <div class="grid grid-cols-2 rounded-md border bg-muted/40 p-0.5"><Button type="button" size="xs" :variant="externalInstructionScope === 'global' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'global'">Global</Button><Button type="button" size="xs" :variant="externalInstructionScope === 'project' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'project'">Project</Button></div>
+                  <p class="truncate font-mono text-[10px] text-muted-foreground">{{ externalInstructionScope === 'global' ? externalCatalog?.globalInstructions?.path : externalCatalog?.projectInstructions?.path }}</p>
+                  <Textarea v-model="externalInstructionDraft" class="min-h-[180px] font-mono text-xs leading-5" maxlength="16000" spellcheck="false" />
+                  <div class="flex justify-end"><Button type="button" size="sm" @click="void saveExternalInstructionsSettings()">保存原生 Instructions</Button></div>
+                </div>
+              </section>
+              <section v-if="!isGeminiSettings && !isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
                   <div class="min-w-0">
                     <h2 class="text-[13px] font-semibold">
@@ -2389,7 +2526,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   </p>
                 </div>
               </section>
-              <section class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="!isGeminiSettings && !isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
                   <div class="min-w-0">
                     <h2 class="text-[13px] font-semibold">

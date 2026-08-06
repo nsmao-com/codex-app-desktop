@@ -466,9 +466,35 @@ export const useCodexStore = defineStore('codex', () => {
 
   async function loadModels(): Promise<void> {
     if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
-      const provider = appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime)
-      const catalog = provider?.models ?? []
-      appStore.models = catalog.map((model) => ({
+      let provider = appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime)
+      let catalog = provider?.models ?? []
+      let nativeActiveProvider = ''
+      try {
+        const nativeCatalog = await backend.ReadExternalRuntimeCatalog(appStore.activeRuntime, appStore.settings.workspace || '')
+        if (nativeCatalog.models?.length) catalog = nativeCatalog.models
+        nativeActiveProvider = nativeCatalog.activeProvider || ''
+        if (provider && nativeCatalog.providers?.length) {
+          const nextProviders = [...appStore.agentProviders]
+          const index = nextProviders.findIndex((item) => item.kind === appStore.activeRuntime)
+          if (index >= 0) {
+            nextProviders[index] = { ...nextProviders[index], models: catalog }
+            appStore.agentProviders = nextProviders
+            provider = nextProviders[index]
+          }
+        }
+      } catch {
+        // Bootstrap catalog remains a usable offline fallback.
+      }
+      const custom = appStore.isGeminiMode
+        ? (appStore.settings.geminiCustomModels ?? [])
+        : (appStore.settings.openCodeCustomModels ?? [])
+      const merged = [...catalog]
+      for (const id of custom) {
+        const trimmed = id.trim()
+        if (!trimmed || merged.some((item) => item.model.toLocaleLowerCase() === trimmed.toLocaleLowerCase())) continue
+        merged.push({ model: trimmed, displayName: trimmed, description: 'Custom native runtime model', isDefault: false, contextWindow: 0 } as typeof catalog[number])
+      }
+      appStore.models = merged.map((model) => ({
         id: model.model,
         model: model.model,
         displayName: model.displayName || model.model,
@@ -480,6 +506,26 @@ export const useCodexStore = defineStore('codex', () => {
         supportsPersonality: false,
         supportedReasoningEfforts: (provider?.reasoningEfforts ?? []).map((item) => ({ effort: item.effort, description: item.description })),
       }))
+      const configured = (appStore.isGeminiMode ? appStore.settings.geminiModel : appStore.settings.openCodeModel).trim()
+      const configuredCustom = custom.some((item) => item.toLocaleLowerCase() === configured.toLocaleLowerCase())
+      const selected = merged.find((item) => item.model.toLocaleLowerCase() === configured.toLocaleLowerCase())
+        ?? merged.find((item) => item.isDefault)
+        ?? merged[0]
+      if (selected && !configuredCustom && !merged.some((item) => item.model.toLocaleLowerCase() === configured.toLocaleLowerCase())) {
+        if (appStore.isGeminiMode) {
+          appStore.patchSettings({ geminiModel: selected.model })
+        } else {
+          appStore.patchSettings({
+            openCodeModel: selected.model,
+            openCodeProvider: appStore.settings.openCodeProvider || selected.providerId || '',
+          })
+        }
+      } else if (appStore.isOpenCodeMode && !configuredCustom) {
+        const modelProvider = selected?.providerId || nativeActiveProvider
+        if (modelProvider && modelProvider !== appStore.settings.openCodeProvider) {
+          appStore.patchSettings({ openCodeProvider: modelProvider })
+        }
+      }
       return
     }
     // Codex-only: clear any leftover Claude/Gemini/Grok workbench provider.

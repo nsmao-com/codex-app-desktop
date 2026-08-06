@@ -834,6 +834,9 @@ func externalCommandArgs(provider, sessionID, workspace string, settings UserSet
 		if sessionID != "" {
 			args = append(args, "--session", sessionID)
 		}
+		if model != "" && !strings.Contains(model, "/") && strings.TrimSpace(settings.OpenCodeProvider) != "" {
+			model = strings.TrimSpace(settings.OpenCodeProvider) + "/" + model
+		}
 		if model != "" {
 			args = append(args, "--model", model)
 		}

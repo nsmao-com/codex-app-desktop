@@ -7,6 +7,7 @@ import * as codex$0 from "./internal/codex/models.js";
 
 export interface AgentProviderModel {
     "model": string;
+    "providerId"?: string;
     "displayName": string;
     "description": string;
     "isDefault": boolean;
@@ -34,6 +35,13 @@ export interface AgentProviderRuntime {
     "capabilities": string[] | null;
     "models": AgentProviderModel[] | null;
     "reasoningEfforts": AgentProviderReasoningEffort[] | null;
+
+    /**
+     * Providers is populated by runtimes that expose their own provider catalog
+     * (currently OpenCode). It is deliberately separate from Codex's provider
+     * field so external CLIs keep their native provider/model identity.
+     */
+    "providers"?: ExternalProviderView[] | null;
 }
 
 export interface BootstrapData {
@@ -282,6 +290,107 @@ export interface CodexFeatureFlags {
     "memoriesDisableExternalContext": boolean;
     "browserUseFullCDP": boolean;
     "inAppBrowser": boolean;
+}
+
+export interface ExternalInstructionsSaveRequest {
+    "runtime": string;
+    "workspace": string;
+
+    /**
+     * global | project
+     */
+    "scope": string;
+    "content": string;
+}
+
+export interface ExternalMCPJSONSaveRequest {
+    "runtime": string;
+    "workspace": string;
+
+    /**
+     * global | project
+     */
+    "scope": string;
+    "json": string;
+}
+
+export interface ExternalMCPServerView {
+    "name": string;
+    "enabled": boolean;
+    "type": string;
+    "command": string;
+    "args": string;
+    "url": string;
+    "transport": string;
+    "configPath": string;
+    "source": string;
+}
+
+export interface ExternalProviderView {
+    "id": string;
+    "name": string;
+    "source": string;
+    "configured": boolean;
+    "authenticated": boolean;
+    "baseUrl"?: string;
+    "models": AgentProviderModel[] | null;
+}
+
+export interface ExternalRuntimeCatalog {
+    "runtime": string;
+    "workspace": string;
+    "nativeHome": string;
+    "configPath": string;
+    "activeProvider": string;
+    "defaultModel": string;
+    "providerSource": string;
+    "providers": ExternalProviderView[] | null;
+    "models": AgentProviderModel[] | null;
+    "mcp": ExternalMCPServerView[] | null;
+    "globalInstructions": GlobalInstructionsInfo;
+    "projectInstructions": ProjectInstructionsInfo;
+    "configInstructions"?: string;
+    "sessions": ExternalSessionView[] | null;
+    "usage": ExternalUsageSummary;
+    "readOnlyNotice"?: string;
+}
+
+export interface ExternalSessionView {
+    "id": string;
+    "title": string;
+    "preview": string;
+    "workspace": string;
+    "provider": string;
+    "model": string;
+    "createdAt": number;
+    "updatedAt": number;
+    "native": boolean;
+}
+
+export interface ExternalUsageModelView {
+    "model": string;
+    "provider": string;
+    "sessions": number;
+    "inputTokens": number;
+    "outputTokens": number;
+    "reasoningTokens": number;
+    "cachedTokens": number;
+    "totalTokens": number;
+    "cost": number;
+}
+
+export interface ExternalUsageSummary {
+    "rangeDays": number;
+    "sessions": number;
+    "messages": number;
+    "inputTokens": number;
+    "outputTokens": number;
+    "reasoningTokens": number;
+    "cachedTokens": number;
+    "totalTokens": number;
+    "cost": number;
+    "byModel": ExternalUsageModelView[] | null;
+    "source": string;
 }
 
 export interface GitActionResult {
@@ -673,10 +782,18 @@ export interface UserSettings {
      * Empty falls back to ClaudeSandbox + ClaudeApprovalPolicy mapping.
      */
     "claudePermissionMode": string;
+
+    /**
+     * Gemini/OpenCode preferences stay separate from Codex/Claude/Grok so a
+     * runtime switch never changes another provider's default model.
+     */
     "geminiModel": string;
     "geminiEffort": string;
+    "geminiCustomModels": string[] | null;
     "openCodeModel": string;
     "openCodeEffort": string;
+    "openCodeProvider": string;
+    "openCodeCustomModels": string[] | null;
     "model": string;
     "modelProvider": string;
     "customModels": string[] | null;

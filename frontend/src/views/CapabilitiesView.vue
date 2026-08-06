@@ -43,6 +43,8 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
+import * as backend from '../../bindings/nice_codex_desktop/appservice'
+import type { ExternalRuntimeCatalog } from '../../bindings/nice_codex_desktop/models'
 import { useAppStore, useCapabilitiesStore, useClaudeStore, useDialogStore, useGrokStore } from '@/stores'
 import {
   openClaudeConfigFile,
@@ -86,9 +88,16 @@ const claudeCatalog = shallowRef<ClaudeCapabilitiesCatalog | null>(null)
 const claudeCatalogLoading = shallowRef(false)
 const claudeTab = shallowRef<ClaudeCapTab>('runtime')
 const externalTab = shallowRef<'runtime' | 'mcp' | 'instructions'>('runtime')
+const externalCatalog = shallowRef<ExternalRuntimeCatalog | null>(null)
+const externalCatalogLoading = shallowRef(false)
+const externalInstructionScope = shallowRef<'global' | 'project'>('global')
+const externalMcpScope = shallowRef<'global' | 'project'>('global')
+const externalInstructionDraft = shallowRef('')
+const externalMcpJSON = shallowRef('')
+const externalMcpSaving = shallowRef(false)
 const externalTabs = computed(() => [
-  { value: 'runtime' as const, label: 'Runtime', icon: isGeminiMode.value ? GeminiIcon : OpenCodeIcon, count: 0 },
-  { value: 'mcp' as const, label: 'MCP', icon: PlugZap, count: 0 },
+  { value: 'runtime' as const, label: 'Runtime', icon: isGeminiMode.value ? GeminiIcon : OpenCodeIcon, count: externalCatalog.value?.models?.length ?? 0 },
+  { value: 'mcp' as const, label: 'MCP', icon: PlugZap, count: externalCatalog.value?.mcp?.length ?? 0 },
   { value: 'instructions' as const, label: 'Instructions', icon: Settings2, count: 0 },
 ])
 
@@ -285,6 +294,76 @@ async function loadClaudeCatalog(): Promise<void> {
   }
 }
 
+function externalRuntimeID(): 'gemini' | 'opencode' {
+  return isGeminiMode.value ? 'gemini' : 'opencode'
+}
+
+function hydrateExternalEditors(): void {
+  const catalog = externalCatalog.value
+  if (!catalog) return
+  const info = externalInstructionScope.value === 'global'
+    ? catalog.globalInstructions
+    : catalog.projectInstructions
+  externalInstructionDraft.value = info?.content || ''
+  const key = isGeminiMode.value ? 'mcpServers' : 'mcp'
+  const mcpServers = (catalog.mcp || []).filter((server) => externalMcpScope.value === 'global'
+    ? server.configPath === catalog.configPath
+    : server.configPath !== catalog.configPath)
+  const servers = Object.fromEntries(mcpServers.map((server) => [server.name, {
+    type: server.type,
+    command: server.command || undefined,
+    args: server.args ? server.args.split(' ').filter(Boolean) : undefined,
+    url: server.url || undefined,
+    transport: server.transport || undefined,
+    enabled: server.enabled,
+  }]))
+  externalMcpJSON.value = JSON.stringify({ [key]: servers }, null, 2)
+}
+
+async function loadExternalCatalog(): Promise<void> {
+  externalCatalogLoading.value = true
+  try {
+    externalCatalog.value = await backend.ReadExternalRuntimeCatalog(
+      externalRuntimeID(),
+      appStore.settings.workspace || '',
+    )
+    hydrateExternalEditors()
+  } catch (error) {
+    notify('error', 'External runtime', error instanceof Error ? error.message : String(error))
+  } finally {
+    externalCatalogLoading.value = false
+  }
+}
+
+async function saveExternalInstructions(): Promise<void> {
+  try {
+    await backend.SaveExternalRuntimeInstructions({
+      runtime: externalRuntimeID(), workspace: appStore.settings.workspace || '',
+      scope: externalInstructionScope.value, content: externalInstructionDraft.value,
+    })
+    await loadExternalCatalog()
+    notify('success', 'Instructions', 'Native instructions saved')
+  } catch (error) {
+    notify('error', 'Instructions', error instanceof Error ? error.message : String(error))
+  }
+}
+
+async function saveExternalMCP(): Promise<void> {
+  externalMcpSaving.value = true
+  try {
+    await backend.SaveExternalRuntimeMCP({
+      runtime: externalRuntimeID(), workspace: appStore.settings.workspace || '', json: externalMcpJSON.value,
+      scope: externalMcpScope.value,
+    })
+    await loadExternalCatalog()
+    notify('success', 'MCP', 'Native MCP configuration saved')
+  } catch (error) {
+    notify('error', 'MCP', error instanceof Error ? error.message : String(error))
+  } finally {
+    externalMcpSaving.value = false
+  }
+}
+
 function loadWhenReady(): void {
   if (isGrokMode.value) {
     void loadGrokCatalog()
@@ -292,6 +371,10 @@ function loadWhenReady(): void {
   }
   if (isClaudeMode.value) {
     void loadClaudeCatalog()
+    return
+  }
+  if (isGeminiMode.value || isOpenCodeMode.value) {
+    void loadExternalCatalog()
     return
   }
   if (appStore.codexAvailable && !capabilitiesStore.capabilitiesLoading) {
@@ -312,6 +395,9 @@ onMounted(() => {
 watch(() => appStore.codexAvailable, loadWhenReady)
 watch(isGrokMode, loadWhenReady)
 watch(isClaudeMode, loadWhenReady)
+watch(isGeminiMode, loadWhenReady)
+watch(isOpenCodeMode, loadWhenReady)
+watch([externalInstructionScope, externalMcpScope], () => hydrateExternalEditors())
 watch(
   () => route.query.tab,
   (tab) => {
@@ -1120,36 +1206,104 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
             <OpenCodeIcon v-else :size="16" class="opacity-80" />
             <h2 class="text-[14px] font-semibold">{{ externalTabs.find((item) => item.value === externalTab)?.label }}</h2>
             <div class="flex-1" />
-            <Button variant="outline" size="sm" class="h-8" @click="void appStore.refreshRuntimes()">
-              <RefreshCw :size="13" class="mr-1.5" />{{ t('common.refresh') }}
+            <Button variant="outline" size="sm" class="h-8" :disabled="externalCatalogLoading" @click="void loadExternalCatalog()">
+              <RefreshCw :size="13" class="mr-1.5" :class="{ 'animate-spin': externalCatalogLoading }" />{{ t('common.refresh') }}
             </Button>
             <Button size="sm" class="h-8" @click="openExternalSettings">
               <Settings2 :size="13" class="mr-1.5" />{{ t('capabilities.grokOpenSettings') }}
             </Button>
           </header>
           <ScrollArea class="min-h-0 flex-1">
-            <div class="mx-auto max-w-3xl space-y-4 p-5">
-              <Card v-if="externalTab === 'runtime'">
-                <CardHeader class="pb-2"><CardTitle class="text-[13px]">{{ isGeminiMode ? 'Gemini CLI' : 'OpenCode' }}</CardTitle></CardHeader>
-                <CardContent class="space-y-3 text-[12px]">
-                  <p class="text-muted-foreground">{{ externalProvider?.message || 'CLI runtime status' }}</p>
-                  <div class="grid gap-2 sm:grid-cols-2">
-                    <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">CLI</p><p class="mt-1 font-medium">{{ externalProvider?.runtimeReady ? t('capabilities.ready') : t('capabilities.unavailable') }}</p><p class="mt-0.5 font-mono text-[10px] text-muted-foreground">{{ externalProvider?.version || externalProvider?.executable || '—' }}</p></div>
-                    <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ t('settings.model') }}</p><p class="mt-1 font-medium">{{ isGeminiMode ? appStore.settings.geminiModel : appStore.settings.openCodeModel }}</p><p class="mt-0.5 text-[10px] text-muted-foreground">effort={{ isGeminiMode ? appStore.settings.geminiEffort : appStore.settings.openCodeEffort }}</p></div>
-                  </div>
-                  <p class="rounded-lg border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">{{ isGeminiMode ? 'Gemini CLI 的认证、模型和 MCP 读取本机 Gemini 配置。' : 'OpenCode 的服务商、模型和 MCP 读取本机 OpenCode 配置。' }}</p>
-                </CardContent>
-              </Card>
-              <Card v-else-if="externalTab === 'mcp'" class="p-4">
-                <CardHeader class="p-0 pb-2"><CardTitle class="text-[13px]">MCP</CardTitle></CardHeader>
-                <CardContent class="space-y-3 p-0 pt-2 text-[11px] text-muted-foreground">
-                  <p>{{ isGeminiMode ? 'Gemini CLI 使用 ~/.gemini/settings.json 中的 MCP 配置。' : 'OpenCode 使用其配置目录中的 MCP 服务商配置。' }}</p>
-                  <p>请在对应 CLI 的配置中心编辑 MCP；Nice Codex 会保持当前运行时、会话和消息队列隔离。</p>
-                </CardContent>
-              </Card>
-              <Card v-else class="p-4 text-[11px] text-muted-foreground">
-                {{ isGeminiMode ? 'Gemini CLI instructions are read from its local configuration.' : 'OpenCode instructions are read from the active project and OpenCode configuration.' }}
-              </Card>
+            <div class="mx-auto max-w-4xl space-y-4 p-5">
+              <div v-if="externalCatalogLoading && !externalCatalog" class="flex items-center gap-2 py-16 text-[12px] text-muted-foreground">
+                <LoaderCircle :size="14" class="animate-spin" />正在读取 {{ isGeminiMode ? 'Gemini CLI' : 'OpenCode' }} 原生数据…
+              </div>
+
+              <template v-else-if="externalTab === 'runtime'">
+                <Card>
+                  <CardHeader class="pb-2"><CardTitle class="text-[13px]">{{ isGeminiMode ? 'Gemini CLI 原生运行时' : 'OpenCode 原生运行时' }}</CardTitle></CardHeader>
+                  <CardContent class="space-y-3 text-[12px]">
+                    <p class="text-muted-foreground">{{ externalCatalog?.readOnlyNotice || externalProvider?.message || 'CLI runtime status' }}</p>
+                    <div class="grid gap-2 sm:grid-cols-3">
+                      <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">CLI</p><p class="mt-1 font-medium">{{ externalProvider?.runtimeReady ? t('capabilities.ready') : t('capabilities.unavailable') }}</p><p class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{{ externalProvider?.version || externalProvider?.executable || '—' }}</p></div>
+                      <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ isGeminiMode ? 'Auth' : 'Active provider' }}</p><p class="mt-1 font-medium">{{ externalCatalog?.activeProvider || '—' }}</p><p class="mt-0.5 truncate text-[10px] text-muted-foreground">{{ externalCatalog?.providerSource || '—' }}</p></div>
+                      <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">Native usage</p><p class="mt-1 font-medium tabular-nums">{{ externalCatalog?.usage?.totalTokens?.toLocaleString() || 0 }} tokens</p><p class="mt-0.5 text-[10px] text-muted-foreground">{{ externalCatalog?.usage?.sessions || 0 }} sessions · 30 days</p></div>
+                    </div>
+                    <div v-if="isOpenCodeMode" class="space-y-2">
+                      <p class="text-[11px] font-medium">OpenCode providers</p>
+                      <div class="grid gap-2 sm:grid-cols-2">
+                        <div v-for="provider in (externalCatalog?.providers || [])" :key="provider.id" class="rounded-lg border px-3 py-2">
+                          <div class="flex items-center gap-2"><span class="font-medium">{{ provider.name }}</span><Badge :variant="provider.configured ? 'default' : 'outline'" class="text-[9px]">{{ provider.configured ? 'configured' : 'catalog' }}</Badge></div>
+                          <p class="mt-1 text-[10px] text-muted-foreground">{{ provider.id }} · {{ provider.models?.length || 0 }} models · {{ provider.authenticated ? 'credential ready' : 'credential not detected' }}</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div>
+                      <div class="mb-2 flex items-center justify-between"><p class="text-[11px] font-medium">{{ isOpenCodeMode ? 'Provider / model catalog' : 'Gemini models' }}</p><span class="text-[10px] text-muted-foreground">{{ externalCatalog?.models?.length || 0 }} models</span></div>
+                      <div class="max-h-64 space-y-1 overflow-y-auto rounded-lg border p-1.5">
+                        <div v-for="model in (externalCatalog?.models || [])" :key="model.model" class="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted/40">
+                          <span class="min-w-0 flex-1 truncate font-mono text-[11px]">{{ model.model }}</span><Badge v-if="model.isDefault" variant="secondary" class="text-[9px]">default</Badge><span v-if="model.contextWindow" class="text-[9px] tabular-nums text-muted-foreground">{{ Math.round(model.contextWindow / 1000) }}K ctx</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="grid gap-2 sm:grid-cols-4">
+                      <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">Native history</p><p class="mt-1 text-lg font-semibold tabular-nums">{{ externalCatalog?.sessions?.length || 0 }}</p><p class="text-[10px] text-muted-foreground">{{ isGeminiMode ? 'Gemini chat JSONL' : 'OpenCode session database' }}</p></div>
+                      <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">Messages</p><p class="mt-1 text-lg font-semibold tabular-nums">{{ externalCatalog?.usage?.messages || 0 }}</p><p class="text-[10px] text-muted-foreground">last 30 days</p></div>
+                      <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">Cost</p><p class="mt-1 text-lg font-semibold tabular-nums">{{ externalCatalog?.usage?.cost?.toFixed(4) || '0.0000' }}</p><p class="text-[10px] text-muted-foreground">native reported</p></div>
+                      <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">Token breakdown</p><p class="mt-1 text-[10px] text-muted-foreground">input {{ externalCatalog?.usage?.inputTokens?.toLocaleString() || 0 }} · output {{ externalCatalog?.usage?.outputTokens?.toLocaleString() || 0 }} · reasoning {{ externalCatalog?.usage?.reasoningTokens?.toLocaleString() || 0 }} · cache {{ externalCatalog?.usage?.cachedTokens?.toLocaleString() || 0 }}</p></div>
+                    </div>
+                    <div v-if="externalCatalog?.usage?.byModel?.length" class="space-y-1.5">
+                      <div class="flex items-center justify-between"><p class="text-[11px] font-medium">Usage by model</p><span class="text-[10px] text-muted-foreground">native source</span></div>
+                      <div v-for="item in (externalCatalog?.usage?.byModel || [])" :key="`${item.provider}:${item.model}`" class="flex items-center gap-2 rounded-md border px-3 py-2 text-[10px]">
+                        <span class="min-w-0 flex-1 truncate font-mono">{{ item.model }}</span>
+                        <span class="shrink-0 tabular-nums text-muted-foreground">{{ item.totalTokens?.toLocaleString() || 0 }} tokens</span>
+                        <span class="shrink-0 tabular-nums text-muted-foreground">${{ item.cost?.toFixed(4) || '0.0000' }}</span>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+                <Card v-if="externalCatalog?.sessions?.length">
+                  <CardHeader class="pb-2"><CardTitle class="text-[13px]">Native history</CardTitle></CardHeader>
+                  <CardContent class="space-y-1 text-[11px]">
+                    <div v-for="session in (externalCatalog?.sessions || []).slice(0, 20)" :key="session.id" class="flex items-center gap-3 rounded-md border px-3 py-2">
+                      <div class="min-w-0 flex-1"><p class="truncate font-medium">{{ session.title || session.id }}</p><p class="truncate text-[10px] text-muted-foreground">{{ session.preview || session.model || session.id }}</p></div><Badge variant="outline" class="shrink-0 font-mono text-[9px]">{{ session.provider || (isGeminiMode ? 'gemini' : 'opencode') }}</Badge>
+                    </div>
+                  </CardContent>
+                </Card>
+              </template>
+
+              <template v-else-if="externalTab === 'mcp'">
+                <Card>
+                  <CardHeader class="pb-2"><CardTitle class="text-[13px]">{{ isGeminiMode ? 'Gemini CLI MCP' : 'OpenCode MCP' }}</CardTitle></CardHeader>
+                  <CardContent class="space-y-3">
+                    <p class="text-[11px] text-muted-foreground">原生配置文件：<code class="font-mono">{{ externalCatalog?.configPath }}</code></p>
+                    <div class="grid grid-cols-2 rounded-md border bg-muted/40 p-0.5">
+                      <Button type="button" size="xs" :variant="externalMcpScope === 'global' ? 'secondary' : 'ghost'" @click="externalMcpScope = 'global'">Global MCP</Button>
+                      <Button type="button" size="xs" :variant="externalMcpScope === 'project' ? 'secondary' : 'ghost'" @click="externalMcpScope = 'project'">Project MCP</Button>
+                    </div>
+                    <p class="truncate font-mono text-[10px] text-muted-foreground">{{ externalMcpScope === 'global' ? externalCatalog?.configPath : (externalCatalog?.mcp?.find((item) => item.configPath !== externalCatalog?.configPath)?.configPath || 'project config') }}</p>
+                    <div v-if="externalCatalog?.mcp?.filter((item) => externalMcpScope === 'global' ? item.configPath === externalCatalog?.configPath : item.configPath !== externalCatalog?.configPath).length" class="space-y-1">
+                      <div v-for="server in (externalCatalog?.mcp || []).filter((item) => externalMcpScope === 'global' ? item.configPath === externalCatalog?.configPath : item.configPath !== externalCatalog?.configPath)" :key="server.name" class="flex items-center gap-3 rounded-md border px-3 py-2 text-[11px]"><span class="min-w-0 flex-1 truncate font-medium">{{ server.name }}</span><span class="max-w-[45%] truncate font-mono text-[10px] text-muted-foreground">{{ server.command || server.url || '—' }}</span><Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">{{ server.enabled ? 'enabled' : 'disabled' }}</Badge></div>
+                    </div>
+                    <p v-else class="rounded-md border border-dashed px-3 py-5 text-center text-[11px] text-muted-foreground">没有发现 {{ isGeminiMode ? 'Gemini' : 'OpenCode' }} MCP 服务。</p>
+                    <Textarea v-model="externalMcpJSON" class="min-h-52 font-mono text-[11px] leading-5" spellcheck="false" :placeholder="isGeminiMode ? '{ &quot;mcpServers&quot;: {} }' : '{ &quot;mcp&quot;: {} }'" />
+                    <div class="flex justify-end"><Button size="sm" :disabled="externalMcpSaving || !externalMcpJSON.trim()" @click="void saveExternalMCP()"><LoaderCircle v-if="externalMcpSaving" :size="13" class="mr-1.5 animate-spin" />保存原生 MCP</Button></div>
+                  </CardContent>
+                </Card>
+              </template>
+
+              <template v-else>
+                <Card>
+                  <CardHeader class="pb-2"><CardTitle class="text-[13px]">{{ isGeminiMode ? 'Gemini GEMINI.md' : 'OpenCode AGENTS.md / instructions' }}</CardTitle></CardHeader>
+                  <CardContent class="space-y-3">
+                    <div class="grid grid-cols-2 rounded-md border bg-muted/40 p-0.5"><Button type="button" size="xs" :variant="externalInstructionScope === 'global' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'global'">Global</Button><Button type="button" size="xs" :variant="externalInstructionScope === 'project' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'project'">Project</Button></div>
+                    <p class="text-[10px] text-muted-foreground">{{ externalInstructionScope === 'global' ? externalCatalog?.globalInstructions?.path : externalCatalog?.projectInstructions?.path }}</p>
+                    <Textarea v-model="externalInstructionDraft" class="min-h-72 font-mono text-[11px] leading-5" spellcheck="false" :placeholder="isGeminiMode ? 'Gemini CLI global/project instructions' : 'OpenCode project instructions'" />
+                    <div class="flex justify-end"><Button size="sm" @click="void saveExternalInstructions()">保存原生 Instructions</Button></div>
+                    <p v-if="externalCatalog?.configInstructions" class="rounded-md border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">OpenCode config instructions: {{ externalCatalog.configInstructions }}</p>
+                  </CardContent>
+                </Card>
+              </template>
             </div>
           </ScrollArea>
         </template>

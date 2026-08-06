@@ -369,6 +369,10 @@ export function ReadCodexFeatureFlags(): $CancellablePromise<$models.CodexFeatur
     return $Call.ByID(1079251556);
 }
 
+export function ReadExternalRuntimeCatalog(runtime: string, workspace: string): $CancellablePromise<$models.ExternalRuntimeCatalog> {
+    return $Call.ByID(2982606466, runtime, workspace);
+}
+
 /**
  * ReadGlobalInstructions returns personal Codex AGENTS.md content from disk.
  */
@@ -516,6 +520,14 @@ export function SaveClaudeProjectInstructions(content: string): $CancellableProm
 
 export function SaveCodexFeatureFlags(flags: $models.CodexFeatureFlags): $CancellablePromise<$models.CodexFeatureFlags> {
     return $Call.ByID(199517151, flags);
+}
+
+export function SaveExternalRuntimeInstructions(request: $models.ExternalInstructionsSaveRequest): $CancellablePromise<void> {
+    return $Call.ByID(1994634985, request);
+}
+
+export function SaveExternalRuntimeMCP(request: $models.ExternalMCPJSONSaveRequest): $CancellablePromise<void> {
+    return $Call.ByID(1700593124, request);
 }
 
 /**

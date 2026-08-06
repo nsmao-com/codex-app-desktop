@@ -46,10 +46,15 @@ type AgentProviderRuntime struct {
 	Capabilities     []string                       `json:"capabilities"`
 	Models           []AgentProviderModel           `json:"models"`
 	ReasoningEfforts []AgentProviderReasoningEffort `json:"reasoningEfforts"`
+	// Providers is populated by runtimes that expose their own provider catalog
+	// (currently OpenCode). It is deliberately separate from Codex's provider
+	// field so external CLIs keep their native provider/model identity.
+	Providers []ExternalProviderView `json:"providers,omitempty"`
 }
 
 type AgentProviderModel struct {
 	Model         string `json:"model"`
+	ProviderID    string `json:"providerId,omitempty"`
 	DisplayName   string `json:"displayName"`
 	Description   string `json:"description"`
 	IsDefault     bool   `json:"isDefault"`
@@ -174,6 +179,9 @@ func detectAgentProvidersQuick(codexDetection codex.Detection, grokStatus GrokRu
 		Message: "Install OpenCode CLI (opencode) to use this runtime", Capabilities: []string{"cli", "streaming", "tools", "mcp", "sessions"},
 		Models: opencodeModels, ReasoningEfforts: opencodeEfforts,
 	}
+	if home, err := os.UserHomeDir(); err == nil && opencodeExecutable != "" {
+		_, _, opencodeProvider.Providers = discoverOpenCodeCatalog(home)
+	}
 	if opencodeExecutable != "" {
 		opencodeProvider.Message = "OpenCode CLI installed; provider credentials are managed by OpenCode"
 	}
@@ -264,6 +272,11 @@ func runProviderProbe(probe providerProbe) AgentProviderRuntime {
 		ID: probe.id, Name: probe.name, Kind: probe.id, Status: "not-installed",
 		Capabilities: append([]string(nil), probe.capabilities...), Models: models, ReasoningEfforts: reasoningEfforts,
 	}
+	if probe.id == "opencode" {
+		if home, err := os.UserHomeDir(); err == nil {
+			_, _, result.Providers = discoverOpenCodeCatalog(home)
+		}
+	}
 	// Keep workbench labels fixed to the four local runtimes.
 	// Do not append third-party proxy nicknames onto Claude Code.
 	executable := findCommand(probe.commands)
@@ -350,11 +363,23 @@ func discoverProviderCatalog(kind string) ([]AgentProviderModel, []AgentProvider
 			addModel(model, model, "Discovered in local Gemini CLI data", len(models) == 0, 0)
 		}
 	case "opencode":
-		for _, model := range readJSONModelValues(
-			filepath.Join(home, ".config", "opencode", "opencode.json"),
-			filepath.Join(home, ".config", "opencode", "config.json"),
-		) {
-			addModel(model, model, "Discovered in OpenCode configuration", len(models) == 0, 0)
+		if discovered, discoveredEfforts, _ := discoverOpenCodeCatalog(home); len(discovered) > 0 {
+			for _, model := range discovered {
+				addModel(model.Model, model.DisplayName, model.Description, model.IsDefault, model.ContextWindow)
+				if index, ok := seen[strings.ToLower(model.Model)]; ok {
+					models[index].ProviderID = model.ProviderID
+				}
+			}
+			if len(discoveredEfforts) > 0 {
+				return models, discoveredEfforts
+			}
+		} else {
+			for _, model := range readJSONModelValues(
+				filepath.Join(home, ".config", "opencode", "opencode.json"),
+				filepath.Join(home, ".config", "opencode", "config.json"),
+			) {
+				addModel(model, model, "Discovered in OpenCode configuration", len(models) == 0, 0)
+			}
 		}
 	case "grok":
 		configured := readTOMLModel(filepath.Join(home, ".grok", "config.toml"))

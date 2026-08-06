@@ -137,8 +137,11 @@ type UserSettings struct {
 	// runtime switch never changes another provider's default model.
 	GeminiModel              string   `json:"geminiModel"`
 	GeminiEffort             string   `json:"geminiEffort"`
+	GeminiCustomModels       []string `json:"geminiCustomModels"`
 	OpenCodeModel            string   `json:"openCodeModel"`
 	OpenCodeEffort           string   `json:"openCodeEffort"`
+	OpenCodeProvider         string   `json:"openCodeProvider"`
+	OpenCodeCustomModels     []string `json:"openCodeCustomModels"`
 	Model                    string   `json:"model"`
 	ModelProvider            string   `json:"modelProvider"`
 	CustomModels             []string `json:"customModels"`
@@ -375,11 +378,14 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	settings.ClaudeModel = sanitizeShortText(settings.ClaudeModel, 160)
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
 	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
+	settings.GeminiCustomModels = sanitizeCustomModels(settings.GeminiCustomModels)
 	if settings.GeminiEffort == "" {
 		settings.GeminiEffort = "auto"
 	}
 	settings.OpenCodeModel = sanitizeShortText(settings.OpenCodeModel, 160)
 	settings.OpenCodeEffort = sanitizeShortText(settings.OpenCodeEffort, 32)
+	settings.OpenCodeProvider = sanitizeShortText(settings.OpenCodeProvider, 160)
+	settings.OpenCodeCustomModels = sanitizeCustomModels(settings.OpenCodeCustomModels)
 	if settings.OpenCodeEffort == "" {
 		settings.OpenCodeEffort = "high"
 	}
@@ -2749,8 +2755,11 @@ func defaultSettings() UserSettings {
 		ClaudePermissionMode:     "acceptEdits",
 		GeminiModel:              "gemini-2.5-pro",
 		GeminiEffort:             "auto",
+		GeminiCustomModels:       []string{},
 		OpenCodeModel:            "anthropic/claude-sonnet-4-6",
 		OpenCodeEffort:           "high",
+		OpenCodeProvider:         "",
+		OpenCodeCustomModels:     []string{},
 		Model:                    defaultCodexModel,
 		Effort:                   "high",
 		CollaborationMode:        "default",
@@ -2861,11 +2870,14 @@ func readSettings(path string) (UserSettings, error) {
 	settings.ClaudeModel = sanitizeShortText(settings.ClaudeModel, 160)
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
 	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
+	settings.GeminiCustomModels = sanitizeCustomModels(settings.GeminiCustomModels)
 	if settings.GeminiEffort == "" {
 		settings.GeminiEffort = "auto"
 	}
 	settings.OpenCodeModel = sanitizeShortText(settings.OpenCodeModel, 160)
 	settings.OpenCodeEffort = sanitizeShortText(settings.OpenCodeEffort, 32)
+	settings.OpenCodeProvider = sanitizeShortText(settings.OpenCodeProvider, 160)
+	settings.OpenCodeCustomModels = sanitizeCustomModels(settings.OpenCodeCustomModels)
 	if settings.OpenCodeEffort == "" {
 		settings.OpenCodeEffort = "high"
 	}
@@ -3073,6 +3085,8 @@ func cloneSettings(settings UserSettings) UserSettings {
 	settings.RecentWorkspaces = append([]string(nil), settings.RecentWorkspaces...)
 	settings.GrokRecentWorkspaces = append([]string(nil), settings.GrokRecentWorkspaces...)
 	settings.ClaudeRecentWorkspaces = append([]string(nil), settings.ClaudeRecentWorkspaces...)
+	settings.GeminiCustomModels = append([]string(nil), settings.GeminiCustomModels...)
+	settings.OpenCodeCustomModels = append([]string(nil), settings.OpenCodeCustomModels...)
 	settings.CustomModels = append([]string(nil), settings.CustomModels...)
 	settings.BrowserAllowedHosts = append([]string(nil), settings.BrowserAllowedHosts...)
 	settings.BrowserBlockedHosts = append([]string(nil), settings.BrowserBlockedHosts...)

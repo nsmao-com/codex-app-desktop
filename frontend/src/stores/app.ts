@@ -25,7 +25,7 @@ import { translate } from '../i18n'
 import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.1.8'
+const AppVersionFallback = '1.1.9'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -56,8 +56,11 @@ const defaultSettings: UserSettings = {
   claudePermissionMode: 'acceptEdits',
   geminiModel: 'gemini-2.5-pro',
   geminiEffort: 'auto',
+  geminiCustomModels: [],
   openCodeModel: 'anthropic/claude-sonnet-4-6',
   openCodeEffort: 'high',
+  openCodeProvider: '',
+  openCodeCustomModels: [],
   model: DEFAULT_CODEX_MODEL,
   modelProvider: '',
   customModels: [],
@@ -130,7 +133,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.1.8')
+  const appVersion = shallowRef('1.1.9')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -276,8 +279,11 @@ export const useAppStore = defineStore('app', () => {
       claudePermissionMode: data.settings.claudePermissionMode || 'acceptEdits',
       geminiModel: data.settings.geminiModel || 'gemini-2.5-pro',
       geminiEffort: data.settings.geminiEffort || 'auto',
+      geminiCustomModels: data.settings.geminiCustomModels ?? [],
       openCodeModel: data.settings.openCodeModel || 'anthropic/claude-sonnet-4-6',
       openCodeEffort: data.settings.openCodeEffort || 'high',
+      openCodeProvider: data.settings.openCodeProvider ?? '',
+      openCodeCustomModels: data.settings.openCodeCustomModels ?? [],
       customModels: data.settings.customModels ?? [],
       followUpBehavior: data.settings.followUpBehavior === 'steer' ? 'steer' : 'queue',
       notifyOnTurnComplete: data.settings.notifyOnTurnComplete !== false,

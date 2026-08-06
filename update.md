@@ -2,6 +2,27 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.1.9 - 2026-08-06
+
+### 新增
+
+- Gemini CLI 与 OpenCode 改为独立的原生运行时 catalog：分别读取各自的 provider、模型、配置来源、MCP、instructions、原生历史与 usage，不再把 Codex 的服务商字段当作外部运行时配置。
+- OpenCode 完整读取 `opencode models --verbose`，按 provider 展示 OpenCode Zen、OpenCode Go 及已发现的第三方 provider/model，并支持独立选择 provider、添加自定义原生模型。
+- Gemini/OpenCode 能力中心支持查看并保存各自的 MCP JSON 与 global/project instructions；设置页支持独立自定义模型入口。
+- OpenCode usage 从原生 session 数据库聚合 token、cache、reasoning、cost 与 model 分组；Gemini usage 从原生 chat JSONL 的 usage metadata 聚合。
+- 原生 MCP JSON 编辑会保留未展示的 env、headers 和 transport 字段，避免保存时丢失 CLI 配置；Windows 配置文件写入使用可恢复的备份替换。
+- Gemini/OpenCode MCP 现在区分 global 与 project 配置，项目级服务不会再被全局配置覆盖或漏读。
+
+### 修改
+
+- 外部运行时历史读取按 workspace 与 CLI 原生存储隔离：Gemini 使用 `~/.gemini/tmp/*/chats/*.jsonl`，OpenCode 使用 `opencode db` 查询自己的 session 数据库。
+- OpenCode 发送模型保持 `provider/model` 原生格式，Gemini 继续使用 Gemini CLI 的 `--model`；外部 instructions 不再复用 Codex `customInstructions`。
+- OpenCode 当前 provider 优先从原生 `model` 前缀识别；项目指令兼容 `.opencode/AGENTS.md`，Gemini 历史跳过 CLI 注入的 session context 并正确按 30 天读取 token metadata。
+
+### 修复
+
+- 修复 Gemini/OpenCode 只有 fallback 模型、没有真实 provider/自定义模型、MCP/提示词/历史/usage 被错误标注为 Codex 配置的问题。
+
 ## 1.1.8 - 2026-08-06
 
 ### 新增
