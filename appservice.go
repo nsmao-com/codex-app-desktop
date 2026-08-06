@@ -2339,7 +2339,7 @@ func (s *AppService) ReadAccountRateLimits() (map[string]any, error) {
 	return result, err
 }
 
-// ReadAccountUsage returns spend for the *active* runtime only (codex | grok | claude).
+// ReadAccountUsage returns spend for the active runtime only.
 // Codex may backfill from ~/.codex rollouts / ChatGPT cloud when its local bucket is empty.
 // Grok backfills input/output/cache/reasoning from ~/.grok session updates.jsonl when missing.
 // Claude backfills from ~/.claude/projects/**/*.jsonl assistant message.usage when missing.

@@ -1,6 +1,6 @@
 import type { ModelOption, ModelProviderOption } from '@/types/codex'
 
-/** NiceCodex is Codex-only — a full replacement for Codex Desktop. */
+/** Codex-specific fallbacks used only when the active runtime is Codex. */
 export const DEFAULT_CODEX_REASONING = [
   { effort: 'low', description: 'Fast responses with lighter reasoning' },
   { effort: 'medium', description: 'Balanced speed and depth' },

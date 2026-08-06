@@ -69,7 +69,7 @@ export function CancelUpdateDownload(): $CancellablePromise<void> {
 }
 
 /**
- * CheckCLITools detects local Codex/Grok CLIs and queries npm for latest versions.
+ * CheckCLITools detects every supported local CLI and queries npm for latest versions.
  */
 export function CheckCLITools(): $CancellablePromise<$models.CLIToolsReport> {
     return $Call.ByID(4153243591);
@@ -336,7 +336,7 @@ export function ReadAccountRateLimits(): $CancellablePromise<{ [_ in string]?: a
 }
 
 /**
- * ReadAccountUsage returns spend for the *active* runtime only (codex | grok | claude).
+ * ReadAccountUsage returns spend for the active runtime only.
  * Codex may backfill from ~/.codex rollouts / ChatGPT cloud when its local bucket is empty.
  * Grok backfills input/output/cache/reasoning from ~/.grok session updates.jsonl when missing.
  * Claude backfills from ~/.claude/projects/** /*.jsonl assistant message.usage when missing.

@@ -116,6 +116,8 @@ const usageLocale = computed(() => (locale.value === 'zh-CN' ? 'zh-CN' : 'en-US'
 const usageSubtitle = computed(() => {
   if (appStore.isGrokMode) return t('sidebar.usageSubtitleGrok')
   if (appStore.isClaudeMode) return t('sidebar.usageSubtitleClaude')
+  if (appStore.isGeminiMode) return t('sidebar.usageSubtitleGemini')
+  if (appStore.isOpenCodeMode) return t('sidebar.usageSubtitleOpenCode')
   return t('sidebar.usageSubtitle')
 })
 
@@ -505,6 +507,22 @@ function providerIcon(thread: ThreadSummary): Component {
   if (provider.includes('anthropic') || provider.includes('claude')) return Bot
   if (provider.includes('xai') || provider.includes('grok')) return Blocks
   return OpenAIIcon
+}
+
+function providerLabel(thread: ThreadSummary): string {
+  const provider = thread.modelProvider.trim()
+  const normalized = provider.toLocaleLowerCase()
+  if (normalized === '__gemini__' || normalized === 'gemini-cli') return 'Gemini CLI'
+  if (normalized === '__opencode__' || normalized === 'opencode-cli') {
+    const modelProvider = thread.model.includes('/') ? thread.model.split('/', 1)[0]?.trim() : ''
+    return modelProvider ? `OpenCode · ${modelProvider}` : 'OpenCode'
+  }
+  if (normalized === '__claude__' || normalized === 'claude-cli') return 'Claude Code'
+  if (normalized === '__grok__' || normalized === 'grok-cli') return 'Grok'
+  if (provider) return provider
+  if (appStore.isGeminiMode) return 'Gemini CLI'
+  if (appStore.isOpenCodeMode) return 'OpenCode'
+  return 'Codex / OpenAI'
 }
 
 const isCollapsed = shallowRef<Record<string, boolean>>({})
@@ -1272,7 +1290,7 @@ function formatGrokUpdated(value?: number | null): string {
                   <SimpleTooltip
                     :content="codexStore.runningThreadIds.includes(thread.id)
                       ? t('sidebar.runningInBackground')
-                      : (thread.modelProvider || 'Codex / OpenAI')"
+                      : providerLabel(thread)"
                   >
                     <span
                       class="relative mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg border border-border/60 bg-panel/80 text-muted-foreground"

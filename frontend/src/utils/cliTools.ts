@@ -33,7 +33,10 @@ export interface CLIToolsReport {
   /** GOOS: windows | darwin | linux */
   platform?: string
   codexHome?: string
+  claudeHome?: string
   grokHome?: string
+  geminiHome?: string
+  openCodeHome?: string
 }
 
 export interface CLIToolActionResult {

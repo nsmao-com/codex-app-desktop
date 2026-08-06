@@ -19,10 +19,16 @@ const emit = defineEmits<{
 
 const isGrok = computed(() => appStore.isGrokMode)
 const isClaude = computed(() => appStore.isClaudeMode)
-const isCowork = computed(() => !isGrok.value && !isClaude.value && appStore.settings.workMode === 'cowork')
+const isGemini = computed(() => appStore.isGeminiMode)
+const isOpenCode = computed(() => appStore.isOpenCodeMode)
+const isExternal = computed(() => isGemini.value || isOpenCode.value)
+const externalRuntimeName = computed(() => isGemini.value ? 'Gemini CLI' : 'OpenCode')
+const externalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+const isCowork = computed(() => appStore.isCodexMode && appStore.settings.workMode === 'cowork')
 const titleText = computed(() => {
   if (isGrok.value) return t('chat.grokTitle')
   if (isClaude.value) return t('chat.claudeTitle')
+  if (isExternal.value) return t('chat.runtimeTitle', { runtime: externalRuntimeName.value })
   return isCowork.value ? t('chat.coworkTitle') : t('chat.title')
 })
 const titleChars = computed(() => [...titleText.value])
@@ -40,6 +46,11 @@ const runtimeWarning = computed(() => {
     if (claudeStore.isReady) return ''
     return claudeStore.runtime.message || t('sidebar.claudeRuntimeMissing')
   }
+  if (isExternal.value) {
+    if (externalProvider.value?.runtimeReady) return ''
+    return externalProvider.value?.message
+      || t('welcome.runtimeNotReady', { name: externalRuntimeName.value })
+  }
   if (appStore.codexAvailable) return ''
   return appStore.codexVersion || t('welcome.cliRequired')
 })
@@ -47,11 +58,13 @@ const needsWorkspace = computed(() => !workspaceStore.workspace)
 const kickerText = computed(() => {
   if (isGrok.value) return t('chat.grokReadyHere')
   if (isClaude.value) return t('chat.claudeReadyHere')
+  if (isExternal.value) return t('chat.runtimeReadyHere', { runtime: externalRuntimeName.value })
   return t('chat.readyHere')
 })
 const descriptionText = computed(() => {
   if (isGrok.value) return t('chat.grokDescription')
   if (isClaude.value) return t('chat.claudeDescription')
+  if (isExternal.value) return t('chat.runtimeDescription', { runtime: externalRuntimeName.value })
   return isCowork.value ? t('chat.coworkDescription') : t('chat.description')
 })
 

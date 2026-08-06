@@ -528,8 +528,8 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	}
 	completed := time.Now()
 	if b := breakdownFromUsageMap(usage); b.valid() {
-		// External agents launched from the Codex workbench still attribute to codex
-		// unless the provider itself is grok/claude dual-runtime.
+		// Attribute usage to the active native runtime. The Codex bucket is only
+		// the fallback for legacy sessions without an external provider ID.
 		runtime := "codex"
 		switch strings.ToLower(strings.TrimSpace(provider)) {
 		case "grok":

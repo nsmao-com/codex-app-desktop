@@ -201,6 +201,25 @@ export const useCodexStore = defineStore('codex', () => {
     return provider === '__gemini__' || provider === '__opencode__'
       || appStore.isGeminiMode || appStore.isOpenCodeMode
   })
+
+  function runtimeIDForThread(threadID = ''): 'codex' | 'gemini' | 'opencode' {
+    const thread = threadID
+      ? (findThreadSummary(threadID) || (activeThread.value?.id === threadID ? activeThread.value : null))
+      : activeThread.value
+    const provider = (thread?.modelProvider || threadModelIdentity[threadID]?.provider || '').toLocaleLowerCase()
+    if (provider === '__gemini__' || provider === 'gemini-cli') return 'gemini'
+    if (provider === '__opencode__' || provider === 'opencode-cli') return 'opencode'
+    if (!threadID && appStore.isGeminiMode) return 'gemini'
+    if (!threadID && appStore.isOpenCodeMode) return 'opencode'
+    return 'codex'
+  }
+
+  function runtimeNameForThread(threadID = ''): string {
+    const runtime = runtimeIDForThread(threadID)
+    if (runtime === 'gemini') return 'Gemini CLI'
+    if (runtime === 'opencode') return 'OpenCode'
+    return 'Codex'
+  }
   const canSteerActiveTurn = computed(() => {
     const threadID = activeThreadId.value
     const turnID = threadTurnID(threadID)
@@ -219,7 +238,7 @@ export const useCodexStore = defineStore('codex', () => {
   const threadGroups = computed<ThreadGroup[]>(() => {
     const recent = appStore.settings.recentWorkspaces ?? []
     const paths = appStore.orderWorkspacePaths(
-      'codex',
+      appStore.activeRuntime,
       uniqueWorkspacePaths(appStore.settings.workspace, recent),
       recent,
     )
@@ -492,7 +511,7 @@ export const useCodexStore = defineStore('codex', () => {
       for (const id of custom) {
         const trimmed = id.trim()
         if (!trimmed || merged.some((item) => item.model.toLocaleLowerCase() === trimmed.toLocaleLowerCase())) continue
-        merged.push({ model: trimmed, displayName: trimmed, description: 'Custom native runtime model', isDefault: false, contextWindow: 0 } as typeof catalog[number])
+        merged.push({ model: trimmed, displayName: trimmed, description: translate('settings.externalCustomModel'), isDefault: false, contextWindow: 0 } as typeof catalog[number])
       }
       appStore.models = merged.map((model) => ({
         id: model.model,
@@ -1154,7 +1173,9 @@ export const useCodexStore = defineStore('codex', () => {
         loadedThreadIDs.delete(threadID)
         await openThread(threadID)
       }
-      notify('info', translate('threadActions.compacting'), translate('threadActions.compactingHint'))
+      notify('info', translate('threadActions.compacting'), translate('threadActions.compactingRuntimeHint', {
+        runtime: runtimeNameForThread(threadID),
+      }))
     } catch (error) {
       notify('error', translate('threadActions.compactFailed'), errorMessage(error))
     } finally {
@@ -2233,7 +2254,9 @@ export const useCodexStore = defineStore('codex', () => {
         break
       }
       case 'thread/compacted':
-        notify('info', translate('notifications.contextCompacted'), translate('notifications.contextCompactedHint'))
+        notify('info', translate('notifications.contextCompacted'), translate('notifications.contextCompactedRuntimeHint', {
+          runtime: runtimeNameForThread(asString(payload.threadId)),
+        }))
         break
       case 'turn/started':
         {
@@ -2544,12 +2567,18 @@ export const useCodexStore = defineStore('codex', () => {
         break
       case 'warning':
       case 'configWarning':
-        notify('warning', translate('notifications.codexWarning'), asString(payload.message, translate('notifications.warningFallback')))
+        notify('warning', translate('notifications.runtimeWarning', {
+          runtime: runtimeNameForThread(asString(payload.threadId)),
+        }), asString(payload.message, translate('notifications.warningFallbackRuntime', {
+          runtime: runtimeNameForThread(asString(payload.threadId)),
+        })))
         break
       case 'guardianWarning':
       case 'deprecationNotice':
       case 'windows/worldWritableWarning':
-        notify('warning', translate('notifications.codexWarning'), asString(payload.message, asString(payload.detail)))
+        notify('warning', translate('notifications.runtimeWarning', {
+          runtime: runtimeNameForThread(asString(payload.threadId)),
+        }), asString(payload.message, asString(payload.detail)))
         break
       case 'error':
       case 'turn/error': {
@@ -2569,7 +2598,9 @@ export const useCodexStore = defineStore('codex', () => {
         // A generic transport/protocol error without turn ownership is not proof
         // that the currently running turn ended.
         if (!turnID) {
-          notify('error', translate('notifications.turnFailed'), message)
+          notify('error', translate('notifications.turnFailedRuntime', {
+            runtime: runtimeNameForThread(threadID),
+          }), message)
           break
         }
         if (payload.willRetry === true) {
@@ -2577,7 +2608,9 @@ export const useCodexStore = defineStore('codex', () => {
           setLocalThreadStatus(threadID, 'active')
           setTurnFeedback(threadID, {
             state: 'retrying',
-            message: `${translate('chat.retrying')} ${message}`,
+            message: `${translate('chat.runtimeRetrying', {
+              runtime: runtimeNameForThread(threadID),
+            })} ${message}`,
             turnId: turnID,
           })
         } else {
@@ -2686,6 +2719,7 @@ export const useCodexStore = defineStore('codex', () => {
         )
         if (tokens > 0) {
           // Always persist full breakdown when available (input/cache/output/reasoning).
+          const usageRuntime = runtimeIDForThread(threadId)
           persistJobs.push(
             Promise.resolve(
               (backend as {
@@ -2700,7 +2734,7 @@ export const useCodexStore = defineStore('codex', () => {
                   total: number,
                 ) => Promise<void>
               }).RecordLocalTurnUsageDetailed?.(
-                'codex',
+                usageRuntime,
                 threadId,
                 turnId,
                 last?.inputTokens || 0,
@@ -2712,9 +2746,12 @@ export const useCodexStore = defineStore('codex', () => {
             )
               .then((result) => {
                 if (result !== undefined) return result
-                return backend.RecordLocalTurnUsage(threadId, turnId, tokens)
+                if (usageRuntime === 'codex') return backend.RecordLocalTurnUsage(threadId, turnId, tokens)
+                return undefined
               })
-              .catch(() => backend.RecordLocalTurnUsage(threadId, turnId, tokens).catch(() => undefined)),
+              .catch(() => usageRuntime === 'codex'
+                ? backend.RecordLocalTurnUsage(threadId, turnId, tokens).catch(() => undefined)
+                : undefined),
           )
         }
       }
@@ -2733,7 +2770,9 @@ export const useCodexStore = defineStore('codex', () => {
     if (typeof document !== 'undefined' && !document.hidden && document.hasFocus()) return
     const thread = findThreadSummary(threadID) || (activeThread.value?.id === threadID ? activeThread.value : null)
     const title = thread?.name?.trim() || translate('notifications.turnCompleteTitle')
-    let message = translate('notifications.turnCompleteHint')
+    let message = translate('notifications.turnCompleteHintRuntime', {
+      runtime: runtimeNameForThread(threadID),
+    })
     if (isInterruptedStatus(status)) message = translate('chat.interrupted')
     else if (isFailedStatus(status)) message = translate('notifications.turnFailedFallback')
     notify(isFailedStatus(status) ? 'error' : isInterruptedStatus(status) ? 'warning' : 'success', title, message)

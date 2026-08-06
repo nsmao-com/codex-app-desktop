@@ -103,7 +103,10 @@ export interface CLIToolsReport {
      * Config homes (env override aware) so Settings can show real paths on each OS.
      */
     "codexHome": string;
+    "claudeHome": string;
     "grokHome": string;
+    "geminiHome": string;
+    "openCodeHome": string;
 }
 
 /**

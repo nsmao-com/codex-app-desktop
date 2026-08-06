@@ -23,8 +23,11 @@ import (
 type CLIToolID string
 
 const (
-	cliToolCodex CLIToolID = "codex"
-	cliToolGrok  CLIToolID = "grok"
+	cliToolCodex    CLIToolID = "codex"
+	cliToolClaude   CLIToolID = "claude"
+	cliToolGrok     CLIToolID = "grok"
+	cliToolGemini   CLIToolID = "gemini"
+	cliToolOpenCode CLIToolID = "opencode"
 )
 
 // CLIToolStatus describes install / update state for one CLI.
@@ -54,8 +57,11 @@ type CLIToolsReport struct {
 	// Platform is GOOS: windows | darwin | linux — for UI install hints.
 	Platform string `json:"platform"`
 	// Config homes (env override aware) so Settings can show real paths on each OS.
-	CodexHome string `json:"codexHome"`
-	GrokHome  string `json:"grokHome"`
+	CodexHome    string `json:"codexHome"`
+	ClaudeHome   string `json:"claudeHome"`
+	GrokHome     string `json:"grokHome"`
+	GeminiHome   string `json:"geminiHome"`
+	OpenCodeHome string `json:"openCodeHome"`
 }
 
 // CLIToolActionResult is returned after install / update.
@@ -75,7 +81,10 @@ type cliPackageSpec struct {
 
 var cliPackages = []cliPackageSpec{
 	{id: cliToolCodex, name: "Codex CLI", npmPkg: "@openai/codex", binName: "codex"},
+	{id: cliToolClaude, name: "Claude Code", npmPkg: "@anthropic-ai/claude-code", binName: "claude"},
 	{id: cliToolGrok, name: "Grok CLI", npmPkg: "@xai-official/grok", binName: "grok"},
+	{id: cliToolGemini, name: "Gemini CLI", npmPkg: "@google/gemini-cli", binName: "gemini"},
+	{id: cliToolOpenCode, name: "OpenCode", npmPkg: "opencode-ai", binName: "opencode"},
 }
 
 var (
@@ -84,14 +93,21 @@ var (
 	semverInText   = regexp.MustCompile(`(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)`)
 )
 
-// CheckCLITools detects local Codex/Grok CLIs and queries npm for latest versions.
+// CheckCLITools detects every supported local CLI and queries npm for latest versions.
 func (s *AppService) CheckCLITools() CLIToolsReport {
 	codex.EnrichPathForLookups()
 	pm, nodeOK, nodeVer := detectNodePackageManager()
-	tools := make([]CLIToolStatus, 0, len(cliPackages))
-	for _, spec := range cliPackages {
-		tools = append(tools, probeCLITool(spec, pm, nodeOK))
+	tools := make([]CLIToolStatus, len(cliPackages))
+	var probeGroup sync.WaitGroup
+	for index, spec := range cliPackages {
+		probeGroup.Add(1)
+		go func() {
+			defer probeGroup.Done()
+			tools[index] = probeCLITool(spec, pm, nodeOK)
+		}()
 	}
+	probeGroup.Wait()
+	home, _ := os.UserHomeDir()
 	return CLIToolsReport{
 		Tools:          tools,
 		PackageManager: pm,
@@ -100,7 +116,10 @@ func (s *AppService) CheckCLITools() CLIToolsReport {
 		CheckedAt:      time.Now().Unix(),
 		Platform:       runtime.GOOS,
 		CodexHome:      resolveCodexHome(),
+		ClaudeHome:     resolveClaudeHome(),
 		GrokHome:       resolveGrokHome(),
+		GeminiHome:     filepath.Join(home, ".gemini"),
+		OpenCodeHome:   openCodeConfigDir(home),
 	}
 }
 
@@ -231,6 +250,14 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 		status.Installed = gr.BuildAvailable
 		status.Executable = gr.BuildExecutable
 		status.Version = normalizeCLIVersion(gr.BuildVersion)
+	case cliToolClaude, cliToolGemini, cliToolOpenCode:
+		status.Executable = findCommand(commandCandidates(spec.binName))
+		status.Installed = status.Executable != ""
+		if status.Installed {
+			if output, err := runProbeCommand(status.Executable, []string{"--version"}, 4*time.Second); err == nil {
+				status.Version = normalizeCLIVersion(firstOutputLine(output))
+			}
+		}
 	}
 
 	latest, err := fetchNPMLatestVersion(spec.npmPkg)

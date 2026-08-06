@@ -93,7 +93,7 @@ var tomlModelPattern = regexp.MustCompile(`(?m)^\s*(?:model|default_model)\s*=\s
 var geminiModelPattern = regexp.MustCompile(`gemini-[A-Za-z0-9._-]+`)
 
 func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime {
-	// Product runtimes: Codex workbench + Claude Code + optional Grok Build/API.
+	// Product runtimes: Codex, Claude Code, Grok, Gemini CLI, and OpenCode.
 	codexProvider := codexAgentProvider(codexDetection)
 	claudeProbe := providerProbe{
 		id:           "claude",
@@ -277,7 +277,7 @@ func runProviderProbe(probe providerProbe) AgentProviderRuntime {
 			_, _, result.Providers = discoverOpenCodeCatalog(home)
 		}
 	}
-	// Keep workbench labels fixed to the four local runtimes.
+	// Keep workbench labels fixed to the supported local runtimes.
 	// Do not append third-party proxy nicknames onto Claude Code.
 	executable := findCommand(probe.commands)
 	if executable == "" {

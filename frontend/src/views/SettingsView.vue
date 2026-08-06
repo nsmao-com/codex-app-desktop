@@ -252,6 +252,14 @@ const isClaudeSettings = computed(() => appStore.isClaudeMode)
 const isGeminiSettings = computed(() => appStore.isGeminiMode)
 const isOpenCodeSettings = computed(() => appStore.isOpenCodeMode)
 const externalRuntimeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+const activeRuntimeName = computed(() => {
+  if (appStore.isClaudeMode) return 'Claude Code'
+  if (appStore.isGrokMode) return 'Grok'
+  if (appStore.isGeminiMode) return 'Gemini CLI'
+  if (appStore.isOpenCodeMode) return 'OpenCode'
+  return 'Codex'
+})
+const activeRuntimeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
 const externalModel = computed({
   get: () => isGeminiSettings.value ? appStore.settings.geminiModel : appStore.settings.openCodeModel,
   set: (value: string) => {
@@ -285,7 +293,7 @@ const externalProviderSelection = computed({
 const externalProviderOptions = computed(() => (externalCatalog.value?.providers || []).map((provider) => ({
   value: provider.id,
   label: provider.name,
-  description: `${provider.id} · ${provider.models?.length || 0} models`,
+  description: t('settings.externalProviderMeta', { id: provider.id, count: provider.models?.length || 0 }),
 })))
 const externalModelOptions = computed(() => {
   const catalog = externalCatalog.value?.models?.length
@@ -294,7 +302,7 @@ const externalModelOptions = computed(() => {
   const options = catalog.map((item) => ({ value: item.model, label: item.displayName || item.model, description: item.description, badge: item.isDefault ? t('common.recommended') : '' }))
   for (const model of externalCustomModels.value) {
     if (!options.some((item) => item.value.toLocaleLowerCase() === model.toLocaleLowerCase())) {
-      options.push({ value: model, label: model, description: 'Custom native runtime model', badge: '' })
+      options.push({ value: model, label: model, description: t('settings.externalCustomModel'), badge: '' })
     }
   }
   return options
@@ -335,9 +343,9 @@ async function saveExternalInstructionsSettings(): Promise<void> {
       content: externalInstructionDraft.value,
     })
     await loadExternalSettingsCatalog()
-    notify('success', 'Instructions', 'Native instructions saved')
+    notify('success', t('settings.externalInstructionsTitle'), t('settings.externalInstructionsSaved'))
   } catch (error) {
-    notify('error', 'Instructions', error instanceof Error ? error.message : String(error))
+    notify('error', t('settings.externalInstructionsTitle'), error instanceof Error ? error.message : String(error))
   }
 }
 
@@ -646,7 +654,7 @@ const navGroups = computed<NavGroup[]>(() => [
 const filteredNavGroups = computed(() => {
   const query = settingsSearch.value.trim().toLocaleLowerCase()
   // Grok/Claude mode: keep agent config + archived; hide pure Codex product surfaces.
-  const hideExternal = new Set(['plugins', 'mcp', 'routing', 'hooks', 'scheduled', 'environment', 'account'])
+  const hideExternal = new Set(['plugins', 'mcp', 'routing', 'hooks', 'scheduled', 'account'])
   let base = navGroups.value
   if (isGrokSettings.value || isClaudeSettings.value || isGeminiSettings.value || isOpenCodeSettings.value) {
     base = navGroups.value
@@ -659,8 +667,8 @@ const filteredNavGroups = computed(() => {
             if (isGrokSettings.value) {
               return { ...item, label: t('settings.navGrokAgent'), keywords: 'grok model backend xai 配置 模型 后端' }
             }
-            if (isGeminiSettings.value) return { ...item, label: 'Gemini configuration', keywords: 'gemini model cli 配置 模型' }
-            if (isOpenCodeSettings.value) return { ...item, label: 'OpenCode configuration', keywords: 'opencode model cli provider 配置 模型' }
+            if (isGeminiSettings.value) return { ...item, label: t('settings.navGeminiAgent'), keywords: 'gemini model cli 配置 模型' }
+            if (isOpenCodeSettings.value) return { ...item, label: t('settings.navOpenCodeAgent'), keywords: 'opencode model cli provider 配置 模型' }
             return { ...item, label: t('settings.navClaudeAgent'), keywords: 'claude model permission sonnet opus 配置 模型 权限' }
           }),
       }))
@@ -787,7 +795,7 @@ watch([isGrokSettings, isClaudeSettings, isGeminiSettings, isOpenCodeSettings], 
 function clampPanelForRuntime(): void {
   if (!isGrokSettings.value && !isClaudeSettings.value && !isGeminiSettings.value && !isOpenCodeSettings.value) return
   // Archived is supported by external runtimes; Codex-only panels are hidden.
-  const hiddenExternalPanels = new Set(['plugins', 'mcp', 'routing', 'hooks', 'scheduled', 'environment', 'account'])
+  const hiddenExternalPanels = new Set(['plugins', 'mcp', 'routing', 'hooks', 'scheduled', 'account'])
   if (hiddenExternalPanels.has(activePanel.value)) activePanel.value = 'agent'
 }
 
@@ -1543,6 +1551,24 @@ async function save(): Promise<void> {
   }
 }
 
+async function refreshActiveRuntime(options: { silent?: boolean } = {}): Promise<boolean> {
+  if (appStore.isCodexMode) return reconnectCodexRuntime(options)
+  const refreshTitle = t('settings.runtimeRefresh')
+  try {
+    if (appStore.isGrokMode) await grokStore.refreshRuntime()
+    else if (appStore.isClaudeMode) await claudeStore.refreshRuntime()
+    else {
+      await appStore.refreshRuntimes()
+      if (appStore.isGeminiMode || appStore.isOpenCodeMode) await codexStore.loadModels()
+    }
+    if (!options.silent) notify('success', refreshTitle, t('settings.runtimeRefreshDone', { runtime: activeRuntimeName.value }))
+    return true
+  } catch (error) {
+    if (!options.silent) notify('error', refreshTitle, error instanceof Error ? error.message : String(error))
+    return false
+  }
+}
+
 function submitSettings(): void {
   if (activePanel.value === 'routing') return
   void save()
@@ -2270,7 +2296,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   <div class="min-w-0 flex-1">
                     <p class="text-[13px] font-medium">{{ isGeminiSettings ? 'Gemini CLI' : 'OpenCode' }}</p>
                     <p class="truncate text-[11px] text-muted-foreground">
-                      {{ externalRuntimeProvider?.message || (isGeminiSettings ? 'Gemini CLI runtime' : 'OpenCode runtime') }}
+                      {{ externalRuntimeProvider?.message || t('settings.externalRuntimeFallback', { runtime: isGeminiSettings ? 'Gemini CLI' : 'OpenCode' }) }}
                     </p>
                     <p v-if="externalRuntimeProvider?.executable" class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80" :title="externalRuntimeProvider.executable">
                       {{ externalRuntimeProvider.executable }}
@@ -2294,20 +2320,20 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                     />
                   </div>
                   <div v-if="isOpenCodeSettings" class="space-y-1">
-                    <Label class="text-xs">OpenCode provider</Label>
-                    <Select v-model="externalProviderSelection">
-                      <SelectTrigger class="h-9 text-xs"><SelectValue placeholder="Select provider" /></SelectTrigger>
+                     <Label class="text-xs">{{ t('settings.externalProvider') }}</Label>
+                     <Select v-model="externalProviderSelection">
+                       <SelectTrigger class="h-9 text-xs"><SelectValue :placeholder="t('settings.externalProviderPlaceholder')" /></SelectTrigger>
                       <SelectContent>
                         <SelectItem v-for="option in externalProviderOptions" :key="option.value" :value="option.value">
                           <span class="flex items-center gap-2"><span>{{ option.label }}</span><span class="text-[10px] text-muted-foreground">{{ option.description }}</span></span>
                         </SelectItem>
                       </SelectContent>
                     </Select>
-                    <p class="text-[10px] text-muted-foreground">OpenCode 会把 provider/model 原样传给 `opencode run --model`，Zen、Go 和第三方 provider 不共用 Codex 配置。</p>
+                     <p class="text-[10px] text-muted-foreground">{{ t('settings.openCodeProviderHint') }}</p>
                   </div>
                   <div class="space-y-2">
-                    <Label class="text-xs">自定义原生模型</Label>
-                    <div class="flex gap-2"><Input v-model="externalCustomModelDraft" class="h-9 font-mono text-xs" :placeholder="isOpenCodeSettings ? 'provider/model' : 'gemini-model-id'" maxlength="160" @keydown.enter.prevent="addExternalCustomModel" /><Button type="button" variant="outline" size="sm" class="h-9 shrink-0" :disabled="!externalCustomModelDraft.trim()" @click="addExternalCustomModel"><Plus :size="14" class="mr-1.5" />{{ t('common.add') }}</Button></div>
+                     <Label class="text-xs">{{ t('settings.externalCustomModelTitle') }}</Label>
+                     <div class="flex gap-2"><Input v-model="externalCustomModelDraft" class="h-9 font-mono text-xs" :placeholder="isOpenCodeSettings ? t('settings.openCodeModelPlaceholder') : t('settings.geminiModelPlaceholder')" maxlength="160" @keydown.enter.prevent="addExternalCustomModel" /><Button type="button" variant="outline" size="sm" class="h-9 shrink-0" :disabled="!externalCustomModelDraft.trim()" @click="addExternalCustomModel"><Plus :size="14" class="mr-1.5" />{{ t('common.add') }}</Button></div>
                     <div v-if="externalCustomModels.length" class="divide-y rounded-md border"><div v-for="item in externalCustomModels" :key="item" class="flex items-center gap-2 px-3 py-2"><code class="min-w-0 flex-1 truncate text-[11px]">{{ item }}</code><Button type="button" variant="ghost" size="icon-xs" :aria-label="t('common.delete')" @click="removeExternalCustomModel(item)"><Trash2 :size="12" /></Button></div></div>
                   </div>
                   <div class="space-y-1">
@@ -2328,7 +2354,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                     </div>
                   </div>
                   <p class="rounded-lg border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">
-                    {{ isGeminiSettings ? 'Gemini CLI 的认证、模型、MCP 和 GEMINI.md 使用本机原生配置。' : `OpenCode 的 provider、Zen/Go 模型、MCP、AGENTS.md、历史和 usage 使用 OpenCode 原生数据。${externalCatalogLoading ? '正在刷新…' : ''}` }}
+                     {{ isGeminiSettings ? t('settings.geminiNativeConfigHint') : t('settings.openCodeNativeConfigHint', { refreshing: externalCatalogLoading ? t('common.loading') : '' }) }}
                   </p>
                 </div>
               </section>
@@ -2467,16 +2493,16 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
               <section v-if="isGeminiSettings || isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
                   <div class="min-w-0">
-                    <h2 class="text-[13px] font-semibold">{{ isGeminiSettings ? 'Gemini CLI native instructions' : 'OpenCode native instructions' }}</h2>
-                    <p class="mt-0.5 text-[11px] text-muted-foreground">{{ isGeminiSettings ? 'Gemini CLI 读取 GEMINI.md；这里不会写入 Codex AGENTS.md。' : 'OpenCode 读取 AGENTS.md 和 opencode.json instructions；这里不会写入 Codex 设置。' }}</p>
+                   <h2 class="text-[13px] font-semibold">{{ isGeminiSettings ? t('settings.geminiNativeInstructions') : t('settings.openCodeNativeInstructions') }}</h2>
+                   <p class="mt-0.5 text-[11px] text-muted-foreground">{{ isGeminiSettings ? t('settings.geminiNativeInstructionsHint') : t('settings.openCodeNativeInstructionsHint') }}</p>
                   </div>
-                  <Badge v-if="externalCatalogLoading" variant="outline" class="text-[9px]">loading</Badge>
+                  <Badge v-if="externalCatalogLoading" variant="outline" class="text-[9px]">{{ t('common.loading') }}</Badge>
                 </div>
                 <div class="space-y-3 p-4">
-                  <div class="grid grid-cols-2 rounded-md border bg-muted/40 p-0.5"><Button type="button" size="xs" :variant="externalInstructionScope === 'global' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'global'">Global</Button><Button type="button" size="xs" :variant="externalInstructionScope === 'project' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'project'">Project</Button></div>
+                   <div class="grid grid-cols-2 rounded-md border bg-muted/40 p-0.5"><Button type="button" size="xs" :variant="externalInstructionScope === 'global' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'global'">{{ t('settings.instructionsGlobal') }}</Button><Button type="button" size="xs" :variant="externalInstructionScope === 'project' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'project'">{{ t('settings.instructionsProject') }}</Button></div>
                   <p class="truncate font-mono text-[10px] text-muted-foreground">{{ externalInstructionScope === 'global' ? externalCatalog?.globalInstructions?.path : externalCatalog?.projectInstructions?.path }}</p>
                   <Textarea v-model="externalInstructionDraft" class="min-h-[180px] font-mono text-xs leading-5" maxlength="16000" spellcheck="false" />
-                  <div class="flex justify-end"><Button type="button" size="sm" @click="void saveExternalInstructionsSettings()">保存原生 Instructions</Button></div>
+                   <div class="flex justify-end"><Button type="button" size="sm" @click="void saveExternalInstructionsSettings()">{{ t('settings.saveNativeInstructions') }}</Button></div>
                 </div>
               </section>
               <section v-if="!isGeminiSettings && !isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
@@ -2816,15 +2842,24 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   {{ t('onboarding.nodeMissingBody') }}
                 </div>
                 <div
-                  v-if="cliReport && (cliReport.codexHome || cliReport.grokHome)"
+                  v-if="cliReport && (cliReport.codexHome || cliReport.claudeHome || cliReport.grokHome || cliReport.geminiHome || cliReport.openCodeHome)"
                   class="space-y-1 border-b px-4 py-2.5 text-[11px] text-muted-foreground"
                 >
                   <p class="text-[12px] font-medium text-foreground">{{ t('settings.cliToolsHomes') }}</p>
                   <p v-if="cliReport.codexHome" class="truncate font-mono text-[10px]" :title="cliReport.codexHome">
                     {{ t('settings.cliToolsCodexHome') }}: {{ cliReport.codexHome }}
                   </p>
+                  <p v-if="cliReport.claudeHome" class="truncate font-mono text-[10px]" :title="cliReport.claudeHome">
+                    {{ t('settings.cliToolsClaudeHome') }}: {{ cliReport.claudeHome }}
+                  </p>
                   <p v-if="cliReport.grokHome" class="truncate font-mono text-[10px]" :title="cliReport.grokHome">
                     {{ t('settings.cliToolsGrokHome') }}: {{ cliReport.grokHome }}
+                  </p>
+                  <p v-if="cliReport.geminiHome" class="truncate font-mono text-[10px]" :title="cliReport.geminiHome">
+                    {{ t('settings.cliToolsGeminiHome') }}: {{ cliReport.geminiHome }}
+                  </p>
+                  <p v-if="cliReport.openCodeHome" class="truncate font-mono text-[10px]" :title="cliReport.openCodeHome">
+                    {{ t('settings.cliToolsOpenCodeHome') }}: {{ cliReport.openCodeHome }}
                   </p>
                   <p v-if="cliReport.platform" class="text-[10px]">
                     {{ t('onboarding.cliPlatformHint', { platform: cliReport.platform }) }}
@@ -2904,23 +2939,23 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                 <div class="divide-y">
                   <div class="flex items-center justify-between gap-3 px-4 py-3">
                     <div class="min-w-0">
-                      <p class="text-[13px] font-medium">Codex CLI / app-server</p>
+                      <p class="text-[13px] font-medium">{{ activeRuntimeName }} CLI</p>
                       <p class="text-[11px] text-muted-foreground">
-                        {{ codexStatus?.runtimeReady ? t('settings.runtimeReadyHint') : (codexStatus?.message || t('settings.providerCodexHint')) }}
+                        {{ activeRuntimeProvider?.runtimeReady ? t('settings.runtimeReadyNativeHint', { runtime: activeRuntimeName }) : (activeRuntimeProvider?.message || t('settings.runtimeMissingNativeHint', { runtime: activeRuntimeName })) }}
                       </p>
                     </div>
-                    <Badge :variant="codexStatus?.runtimeReady ? 'default' : 'outline'">
-                      {{ codexStatus?.runtimeReady ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
+                    <Badge :variant="activeRuntimeProvider?.runtimeReady ? 'default' : 'outline'">
+                      {{ activeRuntimeProvider?.runtimeReady ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
                     </Badge>
                   </div>
                   <div class="flex items-center justify-between gap-3 px-4 py-3">
                     <div class="min-w-0">
-                      <p class="text-[13px]">{{ t('settings.runtimeReconnect') }}</p>
-                      <p class="text-[11px] text-muted-foreground">{{ t('settings.runtimeReconnectHint') }}</p>
+                      <p class="text-[13px]">{{ t('settings.runtimeRefresh') }}</p>
+                      <p class="text-[11px] text-muted-foreground">{{ t('settings.runtimeRefreshHint', { runtime: activeRuntimeName }) }}</p>
                     </div>
-                    <Button type="button" variant="outline" size="sm" class="h-8 shrink-0 text-xs" @click="reconnectCodexRuntime">
+                    <Button type="button" variant="outline" size="sm" class="h-8 shrink-0 text-xs" @click="void refreshActiveRuntime()">
                       <RefreshCw :size="12" class="mr-1.5" />
-                      {{ t('settings.runtimeReconnect') }}
+                      {{ t('settings.runtimeRefresh') }}
                     </Button>
                   </div>
                   <div class="flex items-center justify-between gap-3 px-4 py-3">
@@ -2934,7 +2969,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                 </div>
               </section>
 
-              <section class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="appStore.isCodexMode" class="overflow-hidden rounded-xl border bg-card">
                 <div class="border-b px-4 py-3">
                   <h2 class="text-[13px] font-semibold">{{ t('settings.codexClientTitle') }}</h2>
                   <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.codexClientHint') }}</p>
