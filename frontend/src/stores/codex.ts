@@ -331,8 +331,19 @@ export const useCodexStore = defineStore('codex', () => {
     trackedTimeouts.clear()
   }
 
-  async function connect(path = appStore.settings.workspace): Promise<boolean> {
+  async function connect(
+    path = appStore.settings.workspace,
+    options: { forceRestart?: boolean } = {},
+  ): Promise<boolean> {
     if (!path || busy.value) return false
+    let previousStatus: CodexStatus | null = null
+    try {
+      previousStatus = await backend.CodexStatus()
+    } catch {
+      // StartCodex below remains the source of truth when the status probe fails.
+    }
+    const restartingServer = options.forceRestart === true && previousStatus?.running === true
+    const reusingRunningServer = previousStatus?.running === true && !restartingServer
     busy.value = true
     connection.value = {
       ...connection.value,
@@ -342,21 +353,24 @@ export const useCodexStore = defineStore('codex', () => {
       workspace: path,
     }
     try {
+      if (restartingServer) await backend.StopCodex()
       await backend.StartCodex(path)
       connection.value = await backend.CodexStatus()
       if (connection.value.state !== 'ready') {
         throw new Error(connection.value.message || translate('notifications.connectionFailed'))
       }
       lastTransportMessage.value = ''
-      // App-server is a new process — in-memory thread cache is invalid.
-      loadedThreadIDs.clear()
-       await Promise.allSettled([
-         loadThreads(),
-         loadModels(),
-         loadModelProviders(),
-         appStore.loadAccount(),
-         workspaceStore.refreshWorkspace(),
-       ])
+      // Only a newly started process invalidates the app-server thread cache.
+      // Switching cwd while reusing a healthy server must keep every project's
+      // local timeline available, including turns running in the background.
+      if (!reusingRunningServer) loadedThreadIDs.clear()
+      await Promise.allSettled([
+        loadThreads(),
+        loadModels(),
+        loadModelProviders(),
+        appStore.loadAccount(),
+        workspaceStore.refreshWorkspace(),
+      ])
       appStore.loadAccountInsights()
       const threadID = activeThreadId.value
       if (threadID) {
@@ -402,13 +416,15 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
-  async function loadThreads(): Promise<void> {
-    const requestedPath = appStore.settings.workspace
+  async function loadThreads(path = appStore.settings.workspace): Promise<void> {
+    const requestedPath = path
     if (!requestedPath) return
     try {
       const [response, archivedResponse] = await Promise.all([
-        backend.ListThreads(''),
-        backend.ListArchivedThreads('').catch(() => ({ data: [] })),
+        backend.ListWorkspaceThreads(requestedPath, ''),
+        sameWorkspace(requestedPath, appStore.settings.workspace)
+          ? backend.ListArchivedThreads('').catch(() => ({ data: [] }))
+          : Promise.resolve({ data: [] }),
       ])
       const list = normalizeThreadList(asRecord(response).data)
       const archived = normalizeThreadList(asRecord(archivedResponse).data)
@@ -1072,7 +1088,9 @@ export const useCodexStore = defineStore('codex', () => {
       activeThreadId.value = ''
     }
     // Keep the cached conversation visible while refreshing the target project.
-    void loadThreads().catch(() => undefined)
+    // The explicit path prevents an older project refresh from querying the new
+    // active workspace after a rapid switch.
+    void loadThreads(path).catch(() => undefined)
   }
 
   function findThreadSummary(threadID: string): ThreadSummary | undefined {

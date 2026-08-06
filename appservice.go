@@ -48,6 +48,7 @@ type AppService struct {
 	usageFlushGen         uint64
 	usageBackfillAt       map[string]time.Time
 	updateState           updateDownloadState
+	codexLifecycleMu      sync.Mutex
 	codexThreadStartMu    sync.Mutex
 	pendingCodexSessionID string
 	codexHistoryCache     map[string]*codexHistorySnapshot
@@ -638,6 +639,9 @@ func (s *AppService) RefreshWorkspace() (WorkspaceInfo, error) {
 }
 
 func (s *AppService) StartCodex(workspace string) error {
+	s.codexLifecycleMu.Lock()
+	defer s.codexLifecycleMu.Unlock()
+
 	cleanPath, err := validateWorkspace(workspace)
 	if err != nil {
 		return err
@@ -649,11 +653,12 @@ func (s *AppService) StartCodex(workspace string) error {
 	if client == nil {
 		return errors.New("Codex client is not initialized")
 	}
-	// Restart when already running so reconnect (and updated clientInfo) take effect.
+	// A single app-server can serve threads from multiple workspaces via the
+	// per-request cwd. StartCodex is also used by project switching, so it must
+	// be idempotent: never tear down a running process and interrupt its turn.
+	// Call StopCodex explicitly before this method when a true reconnect is needed.
 	if client.Status().Running {
-		if err := client.Stop(); err != nil {
-			return err
-		}
+		return nil
 	}
 	settings := s.Settings()
 	name := strings.TrimSpace(settings.CodexClientName)
@@ -677,6 +682,9 @@ func (s *AppService) StartCodex(workspace string) error {
 }
 
 func (s *AppService) StopCodex() error {
+	s.codexLifecycleMu.Lock()
+	defer s.codexLifecycleMu.Unlock()
+
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()

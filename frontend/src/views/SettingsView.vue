@@ -1219,7 +1219,7 @@ async function reconnectCodexRuntime(options: { silent?: boolean } = {}): Promis
   }
   try {
     // Prefer store connect so thread/queue state is reset with the new app-server.
-    const ok = await codexStore.connect(workspace)
+    const ok = await codexStore.connect(workspace, { forceRestart: true })
     if (ok) {
       if (!options.silent) {
         notify('success', t('settings.runtimeReconnect'), t('settings.runtimeReady'))
