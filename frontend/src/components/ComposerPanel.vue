@@ -147,6 +147,40 @@ const slashCommands = computed<SlashCommand[]>(() => {
       },
     ]
   }
+  if (appStore.isClaudeMode || appStore.isGeminiMode || appStore.isOpenCodeMode) {
+    return [
+      {
+        id: 'compact',
+        label: '/compact',
+        description: t('slash.compact'),
+        run: () => codexStore.compactActiveThread(),
+      },
+      {
+        id: 'fork',
+        label: '/fork',
+        description: t('slash.fork'),
+        run: () => codexStore.forkActiveThread(),
+      },
+      {
+        id: 'archive',
+        label: '/archive',
+        description: t('slash.archive'),
+        run: () => codexStore.archiveActiveThread(),
+      },
+      {
+        id: 'rename',
+        label: '/rename',
+        description: t('slash.rename'),
+        run: () => codexStore.renameActiveThread(),
+      },
+      {
+        id: 'mcp',
+        label: '/mcp',
+        description: t('slash.mcp'),
+        run: () => { void router.push({ name: 'capabilities', query: { tab: 'mcp' } }) },
+      },
+    ]
+  }
   return [
   {
     id: 'review',

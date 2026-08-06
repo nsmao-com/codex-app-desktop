@@ -15,6 +15,7 @@
 - 修复 MCP 粘贴 JSON 在 Wails WebView 中没有写回输入状态、导致文本不显示和预览不触发的问题；粘贴时保留光标位置并继续执行长度校验。
 - 扩展 OpenCode JSON 流解析，兼容 `part` 嵌套文本和思维事件，避免不同 CLI 版本的消息内容丢失。
 - 外部运行时读取会话时跳过 Codex app-server 探测，避免切换 Gemini/OpenCode 时产生无意义的连接等待。
+- 修正外部会话的压缩、回滚和 `/review` 命令边界；Gemini/OpenCode/Claude 仅显示实际支持的会话操作，避免误报成功。
 
 ## 1.1.7 - 2026-08-06
 

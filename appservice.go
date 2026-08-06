@@ -1044,8 +1044,7 @@ func (s *AppService) StartReview(request ReviewStartRequest) (map[string]any, er
 	workspace := s.Settings().Workspace
 	session := s.sessionFor(threadID, workspace)
 	if session != nil && isExternalSession(session) {
-		s.rememberThread(threadID, workspace)
-		return s.sessionResponse(session), nil
+		return nil, errors.New("change review is available only for Codex sessions")
 	}
 	backendID := s.codexBackendID(threadID, workspace)
 	if backendID == "" || (session != nil && session.BackendRef == "") {
@@ -1144,7 +1143,7 @@ func (s *AppService) CompactThread(threadID string) error {
 	threadID = strings.TrimSpace(threadID)
 	workspace := s.Settings().Workspace
 	if session := s.sessionFor(threadID, workspace); session != nil && isExternalSession(session) {
-		return errors.New("NiceCodex is Codex-only; create a new Codex session to continue")
+		return s.compactExternalSession(session)
 	}
 	backendID := s.codexBackendID(threadID, workspace)
 	if backendID == "" {
@@ -1164,7 +1163,7 @@ func (s *AppService) RollbackThread(threadID string, numTurns int) (map[string]a
 	}
 	workspace := s.Settings().Workspace
 	if session := s.sessionFor(threadID, workspace); session != nil && isExternalSession(session) {
-		return nil, errors.New("NiceCodex is Codex-only; create a new Codex session to continue")
+		return s.rollbackExternalSession(session, numTurns)
 	}
 	backendID := s.codexBackendID(threadID, workspace)
 	if backendID == "" {

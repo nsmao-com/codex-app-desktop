@@ -304,6 +304,9 @@ onMounted(() => {
   if (tab === 'plugins' || tab === 'skills' || tab === 'apps' || tab === 'mcp' || tab === 'automation') {
     activeTab.value = tab
   }
+  if (tab === 'runtime' || tab === 'mcp' || tab === 'instructions') {
+    externalTab.value = tab
+  }
   loadWhenReady()
 })
 watch(() => appStore.codexAvailable, loadWhenReady)
@@ -315,6 +318,9 @@ watch(
     const value = String(tab || '')
     if (value === 'plugins' || value === 'skills' || value === 'apps' || value === 'mcp' || value === 'automation') {
       activeTab.value = value
+    }
+    if (value === 'runtime' || value === 'mcp' || value === 'instructions') {
+      externalTab.value = value
     }
   },
 )
