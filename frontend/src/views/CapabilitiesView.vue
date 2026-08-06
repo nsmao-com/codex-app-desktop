@@ -25,6 +25,8 @@ import { useRoute, useRouter } from 'vue-router'
 
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import GrokIcon from '@/components/icons/GrokIcon.vue'
+import GeminiIcon from '@/components/icons/GeminiIcon.vue'
+import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -72,6 +74,9 @@ const dialogStore = useDialogStore()
 const { t } = useI18n()
 const isGrokMode = computed(() => appStore.isGrokMode)
 const isClaudeMode = computed(() => appStore.isClaudeMode)
+const isGeminiMode = computed(() => appStore.isGeminiMode)
+const isOpenCodeMode = computed(() => appStore.isOpenCodeMode)
+const externalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
 const grokProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'grok'))
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
 const grokCatalog = shallowRef<GrokCapabilitiesCatalog | null>(null)
@@ -80,6 +85,12 @@ const grokTab = shallowRef<GrokCapTab>('runtime')
 const claudeCatalog = shallowRef<ClaudeCapabilitiesCatalog | null>(null)
 const claudeCatalogLoading = shallowRef(false)
 const claudeTab = shallowRef<ClaudeCapTab>('runtime')
+const externalTab = shallowRef<'runtime' | 'mcp' | 'instructions'>('runtime')
+const externalTabs = computed(() => [
+  { value: 'runtime' as const, label: 'Runtime', icon: isGeminiMode.value ? GeminiIcon : OpenCodeIcon, count: 0 },
+  { value: 'mcp' as const, label: 'MCP', icon: PlugZap, count: 0 },
+  { value: 'instructions' as const, label: 'Instructions', icon: Settings2, count: 0 },
+])
 
 const grokTabs = computed(() => [
   { value: 'runtime' as const, label: t('capabilities.grokTabRuntime'), icon: GrokIcon, count: 0 },
@@ -347,8 +358,12 @@ function closeCapabilities(): void {
   void router.replace(route.query.from === 'settings' ? { name: 'settings' } : { name: 'workbench' })
 }
 
-function openGrokSettings(): void {
+function openExternalSettings(): void {
   void router.push({ name: 'settings', query: { section: 'agent', from: 'capabilities' } })
+}
+
+function openGrokSettings(): void {
+  openExternalSettings()
 }
 
 function openGrokInstructionsSettings(): void {
@@ -464,10 +479,23 @@ watch(mcpImportJSON, (raw) => {
 
 function onMcpImportPaste(event: ClipboardEvent): void {
   const pasted = event.clipboardData?.getData('text') ?? ''
+  if (!pasted) return
   const target = event.currentTarget as HTMLTextAreaElement | null
-  const selected = target ? Math.max(0, (target.selectionEnd ?? 0) - (target.selectionStart ?? 0)) : 0
-  if (mcpImportJSON.value.length - selected + pasted.length <= MCP_IMPORT_MAX_LENGTH) return
+  const start = target ? Math.max(0, target.selectionStart ?? mcpImportJSON.value.length) : mcpImportJSON.value.length
+  const end = target ? Math.max(start, target.selectionEnd ?? start) : start
+  const next = mcpImportJSON.value.slice(0, start) + pasted + mcpImportJSON.value.slice(end)
+  // Wails/WebView can deliver paste without the passive useVModel update. Keep
+  // the canonical ref authoritative so the preview watcher always sees it.
   event.preventDefault()
+  if (next.length <= MCP_IMPORT_MAX_LENGTH) {
+    mcpImportJSON.value = next
+    requestAnimationFrame(() => {
+      if (!target) return
+      const caret = start + pasted.length
+      target.setSelectionRange(caret, caret)
+    })
+    return
+  }
   if (mcpImportParseTimer) window.clearTimeout(mcpImportParseTimer)
   mcpImportParseTimer = 0
   mcpImportParsing.value = false
@@ -567,6 +595,8 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
               ? t('capabilities.grokKicker')
               : isClaudeMode
                 ? t('capabilities.claudeKicker')
+                : (isGeminiMode || isOpenCodeMode)
+                  ? 'EXTERNAL RUNTIME'
                 : t('capabilities.kicker') }}
           </p>
           <h1 class="text-[15px] font-semibold tracking-tight">
@@ -574,6 +604,8 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
               ? t('capabilities.grokTitle')
               : isClaudeMode
                 ? t('capabilities.claudeTitle')
+                : (isGeminiMode || isOpenCodeMode)
+                  ? (isGeminiMode ? 'Gemini CLI' : 'OpenCode')
                 : t('capabilities.title') }}
           </h1>
           <p v-if="isGrokMode" class="mt-1 text-[10px] leading-4 text-muted-foreground">
@@ -582,11 +614,14 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
           <p v-else-if="isClaudeMode" class="mt-1 text-[10px] leading-4 text-muted-foreground">
             {{ t('capabilities.claudeModeBanner') }}
           </p>
+          <p v-else-if="isGeminiMode || isOpenCodeMode" class="mt-1 text-[10px] leading-4 text-muted-foreground">
+            {{ externalProvider?.message || 'Provider-native capabilities and MCP are managed by the selected CLI.' }}
+          </p>
         </div>
       </div>
 
       <nav
-        v-if="!isGrokMode && !isClaudeMode"
+        v-if="!isGrokMode && !isClaudeMode && !isGeminiMode && !isOpenCodeMode"
         class="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
         :aria-label="t('capabilities.title')"
       >
@@ -630,7 +665,7 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
         </button>
       </nav>
       <nav
-        v-else
+        v-else-if="isGrokMode"
         class="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
         :aria-label="t('capabilities.grokTitle')"
       >
@@ -640,9 +675,32 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
           type="button"
           class="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[12.5px] transition-colors"
           :class="grokTab === tab.value
-            ? 'bg-card font-medium text-foreground shadow-sm'
+            ? 'bg-card font-medium text-foreground'
             : 'text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground'"
           @click="grokTab = tab.value"
+        >
+          <component :is="tab.icon" :size="14" class="shrink-0 opacity-70" />
+          <span class="min-w-0 flex-1 truncate">{{ tab.label }}</span>
+          <span
+            v-if="tab.count > 0"
+            class="rounded-full bg-foreground/[0.06] px-1.5 text-[10px] tabular-nums text-muted-foreground"
+          >{{ tab.count }}</span>
+        </button>
+      </nav>
+      <nav
+        v-else-if="isGeminiMode || isOpenCodeMode"
+        class="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
+        :aria-label="t('capabilities.grokTitle')"
+      >
+        <button
+          v-for="tab in externalTabs"
+          :key="tab.value"
+          type="button"
+          class="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[12.5px] transition-colors"
+          :class="externalTab === tab.value
+            ? 'bg-card font-medium text-foreground shadow-sm'
+            : 'text-muted-foreground hover:bg-foreground/[0.05] hover:text-foreground'"
+          @click="externalTab = tab.value"
         >
           <component :is="tab.icon" :size="14" class="shrink-0 opacity-70" />
           <span class="min-w-0 flex-1 truncate">{{ tab.label }}</span>
@@ -1050,6 +1108,45 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
           </ScrollArea>
         </template>
 
+        <template v-else-if="isGeminiMode || isOpenCodeMode">
+          <header class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+            <GeminiIcon v-if="isGeminiMode" :size="16" class="opacity-80" />
+            <OpenCodeIcon v-else :size="16" class="opacity-80" />
+            <h2 class="text-[14px] font-semibold">{{ externalTabs.find((item) => item.value === externalTab)?.label }}</h2>
+            <div class="flex-1" />
+            <Button variant="outline" size="sm" class="h-8" @click="void appStore.refreshRuntimes()">
+              <RefreshCw :size="13" class="mr-1.5" />{{ t('common.refresh') }}
+            </Button>
+            <Button size="sm" class="h-8" @click="openExternalSettings">
+              <Settings2 :size="13" class="mr-1.5" />{{ t('capabilities.grokOpenSettings') }}
+            </Button>
+          </header>
+          <ScrollArea class="min-h-0 flex-1">
+            <div class="mx-auto max-w-3xl space-y-4 p-5">
+              <Card v-if="externalTab === 'runtime'">
+                <CardHeader class="pb-2"><CardTitle class="text-[13px]">{{ isGeminiMode ? 'Gemini CLI' : 'OpenCode' }}</CardTitle></CardHeader>
+                <CardContent class="space-y-3 text-[12px]">
+                  <p class="text-muted-foreground">{{ externalProvider?.message || 'CLI runtime status' }}</p>
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">CLI</p><p class="mt-1 font-medium">{{ externalProvider?.runtimeReady ? t('capabilities.ready') : t('capabilities.unavailable') }}</p><p class="mt-0.5 font-mono text-[10px] text-muted-foreground">{{ externalProvider?.version || externalProvider?.executable || '—' }}</p></div>
+                    <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ t('settings.model') }}</p><p class="mt-1 font-medium">{{ isGeminiMode ? appStore.settings.geminiModel : appStore.settings.openCodeModel }}</p><p class="mt-0.5 text-[10px] text-muted-foreground">effort={{ isGeminiMode ? appStore.settings.geminiEffort : appStore.settings.openCodeEffort }}</p></div>
+                  </div>
+                  <p class="rounded-lg border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">{{ isGeminiMode ? 'Gemini CLI 的认证、模型和 MCP 读取本机 Gemini 配置。' : 'OpenCode 的服务商、模型和 MCP 读取本机 OpenCode 配置。' }}</p>
+                </CardContent>
+              </Card>
+              <Card v-else-if="externalTab === 'mcp'" class="p-4">
+                <CardHeader class="p-0 pb-2"><CardTitle class="text-[13px]">MCP</CardTitle></CardHeader>
+                <CardContent class="space-y-3 p-0 pt-2 text-[11px] text-muted-foreground">
+                  <p>{{ isGeminiMode ? 'Gemini CLI 使用 ~/.gemini/settings.json 中的 MCP 配置。' : 'OpenCode 使用其配置目录中的 MCP 服务商配置。' }}</p>
+                  <p>请在对应 CLI 的配置中心编辑 MCP；Nice Codex 会保持当前运行时、会话和消息队列隔离。</p>
+                </CardContent>
+              </Card>
+              <Card v-else class="p-4 text-[11px] text-muted-foreground">
+                {{ isGeminiMode ? 'Gemini CLI instructions are read from its local configuration.' : 'OpenCode instructions are read from the active project and OpenCode configuration.' }}
+              </Card>
+            </div>
+          </ScrollArea>
+        </template>
         <template v-else>
         <header class="flex h-12 shrink-0 items-center gap-2 border-b px-4">
           <div class="relative min-w-0 flex-1">

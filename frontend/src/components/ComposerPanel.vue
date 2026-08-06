@@ -296,7 +296,7 @@ const contextUsageTooltip = computed(() => {
   return `${t('inspector.contextUsage')} ${contextUsedPercent.value.toFixed(1)}% · ${formatTokenCount(contextUsedTokens.value)} / ${formatTokenCount(contextWindow.value)}`
 })
 const sessionLocked = computed(() => Boolean(
-  appStore.isCodexMode
+  (appStore.isCodexMode || appStore.isGeminiMode || appStore.isOpenCodeMode)
   && codexStore.activeThreadId
   && !codexStore.activeThreadId.startsWith('pending-thread-')
   && codexStore.activeThread,
@@ -312,6 +312,8 @@ const displayModel = computed(() => {
   if (appStore.isClaudeMode) {
     return appStore.settings.claudeModel || 'sonnet'
   }
+  if (appStore.isGeminiMode) return appStore.settings.geminiModel || 'gemini-2.5-pro'
+  if (appStore.isOpenCodeMode) return appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6'
   return sessionLocked.value
     ? (codexStore.activeThread?.model || appStore.settings.model)
     : appStore.settings.model
@@ -319,6 +321,8 @@ const displayModel = computed(() => {
 const displayEffort = computed(() => {
   if (appStore.isGrokMode) return appStore.settings.grokEffort || 'high'
   if (appStore.isClaudeMode) return appStore.settings.claudeEffort || 'high'
+  if (appStore.isGeminiMode) return appStore.settings.geminiEffort || 'auto'
+  if (appStore.isOpenCodeMode) return appStore.settings.openCodeEffort || 'high'
   return sessionLocked.value
     ? (codexStore.activeThread?.effort || appStore.settings.effort)
     : appStore.settings.effort
@@ -346,9 +350,9 @@ const selectableModels = computed(() => {
       { model: 'fable', displayName: 'Claude Fable', description: 'alias `fable` → latest Fable', isDefault: false },
     ]
   }
-  return modelsForRuntime(appStore.models, appStore.settings.customModels ?? [])
+  return modelsForRuntime(appStore.models, appStore.settings.customModels ?? []) ?? []
 })
-const composerModelOptions = computed(() => selectableModels.value.map((model) => {
+const composerModelOptions = computed(() => (selectableModels.value ?? []).map((model) => {
   const description = 'description' in model && typeof model.description === 'string'
     ? model.description
     : (model.displayName && model.displayName !== model.model ? model.model : '')
@@ -542,7 +546,7 @@ const stopDisabled = computed(() => {
   if (workspaceStore.switchingWorkspace) return true
   if (appStore.isGrokMode) return grokStore.interrupting
   if (appStore.isClaudeMode) return claudeStore.interrupting
-  return appStore.isCodexMode && codexStore.interruptingTurn
+  return codexStore.interruptingTurn
 })
 const sendButtonLabel = computed(() => {
   if (canSteer.value) return t('chat.steer')
@@ -575,7 +579,7 @@ watch(() => props.draftKey, resetSentHistoryNavigation, { flush: 'sync' })
 watch(
   [selectableModels, displayModel],
   () => {
-    const models = selectableModels.value
+    const models = selectableModels.value ?? []
     if (!models.length) return
     const current = displayModel.value.trim()
     if (current && models.some((model) => model.model === current)) return
@@ -1065,6 +1069,20 @@ async function applyModelSelection(value: string): Promise<void> {
     appStore.patchSettings({ claudeModel: modelID })
     return
   }
+  if (appStore.isGeminiMode) {
+    appStore.patchSettings({ geminiModel: modelID })
+    if (sessionLocked.value && codexStore.activeThread) {
+      void codexStore.updateSessionPreferences({ sessionId: codexStore.activeThread.id, model: modelID, effort: displayEffort.value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+    }
+    return
+  }
+  if (appStore.isOpenCodeMode) {
+    appStore.patchSettings({ openCodeModel: modelID })
+    if (sessionLocked.value && codexStore.activeThread) {
+      void codexStore.updateSessionPreferences({ sessionId: codexStore.activeThread.id, model: modelID, effort: displayEffort.value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+    }
+    return
+  }
 
   let effort = displayEffort.value
   let serviceTier = appStore.settings.serviceTier
@@ -1107,6 +1125,20 @@ function onEffortChange(value: string): void {
   }
   if (appStore.isClaudeMode) {
     appStore.patchSettings({ claudeEffort: value })
+    return
+  }
+  if (appStore.isGeminiMode) {
+    appStore.patchSettings({ geminiEffort: value })
+    if (sessionLocked.value && codexStore.activeThread) {
+      void codexStore.updateSessionPreferences({ sessionId: codexStore.activeThread.id, model: displayModel.value, effort: value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+    }
+    return
+  }
+  if (appStore.isOpenCodeMode) {
+    appStore.patchSettings({ openCodeEffort: value })
+    if (sessionLocked.value && codexStore.activeThread) {
+      void codexStore.updateSessionPreferences({ sessionId: codexStore.activeThread.id, model: displayModel.value, effort: value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+    }
     return
   }
   if (sessionLocked.value && codexStore.activeThread) {

@@ -6,6 +6,7 @@ import type { WorkspaceInfo } from '../../bindings/nice_codex_desktop/models'
 import { selectClaudeWorkspace, useClaudeWorkspace } from '@/utils/claudeBindings'
 import { sameWorkspacePath as sameWorkspace, workspaceKey } from '@/utils/workspacePath'
 import { useAppStore } from './app'
+import type { WorkspaceRuntime } from './app'
 import { notify } from '../utils/notify'
 import { translate } from '../i18n'
 
@@ -99,7 +100,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
-  async function activateWorkspace(selected: WorkspaceInfo, runtime: 'codex' | 'claude' | 'grok'): Promise<void> {
+  async function activateWorkspace(selected: WorkspaceInfo, runtime: WorkspaceRuntime): Promise<void> {
     hydrateWorkspace(selected)
     if (runtime === 'grok') {
       // SelectGrokWorkspace / UseGrokWorkspace already persisted Grok workspace on disk.

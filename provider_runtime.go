@@ -102,6 +102,14 @@ func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime
 	grokStatusCh := make(chan GrokRuntimeStatus, 1)
 	go func() { grokStatusCh <- detectGrokRuntime() }()
 	claudeProvider := cachedRunProviderProbe(claudeProbe)
+	geminiProvider := cachedRunProviderProbe(providerProbe{
+		id: "gemini", name: "Gemini CLI", commands: commandCandidates("gemini"),
+		capabilities: []string{"cli", "streaming", "tools", "mcp"}, healthArgs: []string{"--version"},
+	})
+	opencodeProvider := cachedRunProviderProbe(providerProbe{
+		id: "opencode", name: "OpenCode", commands: commandCandidates("opencode"),
+		capabilities: []string{"cli", "streaming", "tools", "mcp", "sessions"}, healthArgs: []string{"--version"},
+	})
 	// Fallback health probe when `auth status --json` is unavailable on older CLIs.
 	if claudeProvider.Installed && claudeProvider.Status == "configuration-error" {
 		if _, err := runProbeCommand(claudeProvider.Executable, []string{"--version"}, 3*time.Second); err == nil {
@@ -118,7 +126,7 @@ func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime
 		claudeProvider.Message = "Install Claude Code CLI (claude) to use this runtime"
 	}
 	grokProvider := grokAgentProvider(<-grokStatusCh)
-	return []AgentProviderRuntime{codexProvider, claudeProvider, grokProvider}
+	return []AgentProviderRuntime{codexProvider, claudeProvider, grokProvider, geminiProvider, opencodeProvider}
 }
 
 // detectAgentProvidersQuick is safe for Bootstrap: it performs path/config
@@ -145,10 +153,36 @@ func detectAgentProvidersQuick(codexDetection codex.Detection, grokStatus GrokRu
 		Models:           claudeModels,
 		ReasoningEfforts: claudeEfforts,
 	}
+	geminiModels, geminiEfforts := discoverProviderCatalog("gemini")
+	geminiExecutable := findCommand(commandCandidates("gemini"))
+	geminiProvider := AgentProviderRuntime{
+		ID: "gemini", Name: "Gemini CLI", Kind: "gemini", Installed: geminiExecutable != "",
+		Healthy: geminiExecutable != "", RuntimeReady: geminiExecutable != "", Executable: geminiExecutable,
+		Status:  providerStatus(geminiExecutable != "", geminiExecutable != "", true),
+		Message: "Install Gemini CLI (gemini) to use this runtime", Capabilities: []string{"cli", "streaming", "tools", "mcp"},
+		Models: geminiModels, ReasoningEfforts: geminiEfforts,
+	}
+	if geminiExecutable != "" {
+		geminiProvider.Message = "Gemini CLI installed; authentication is checked when opened"
+	}
+	opencodeModels, opencodeEfforts := discoverProviderCatalog("opencode")
+	opencodeExecutable := findCommand(commandCandidates("opencode"))
+	opencodeProvider := AgentProviderRuntime{
+		ID: "opencode", Name: "OpenCode", Kind: "opencode", Installed: opencodeExecutable != "",
+		Healthy: opencodeExecutable != "", RuntimeReady: opencodeExecutable != "", Executable: opencodeExecutable,
+		Status:  providerStatus(opencodeExecutable != "", opencodeExecutable != "", true),
+		Message: "Install OpenCode CLI (opencode) to use this runtime", Capabilities: []string{"cli", "streaming", "tools", "mcp", "sessions"},
+		Models: opencodeModels, ReasoningEfforts: opencodeEfforts,
+	}
+	if opencodeExecutable != "" {
+		opencodeProvider.Message = "OpenCode CLI installed; provider credentials are managed by OpenCode"
+	}
 	return []AgentProviderRuntime{
 		codexAgentProvider(codexDetection),
 		claudeProvider,
 		grokAgentProvider(grokStatus),
+		geminiProvider,
+		opencodeProvider,
 	}
 }
 
@@ -315,6 +349,13 @@ func discoverProviderCatalog(kind string) ([]AgentProviderModel, []AgentProvider
 		for _, model := range readModelIDsFromDirectory(filepath.Join(home, ".gemini"), geminiModelPattern) {
 			addModel(model, model, "Discovered in local Gemini CLI data", len(models) == 0, 0)
 		}
+	case "opencode":
+		for _, model := range readJSONModelValues(
+			filepath.Join(home, ".config", "opencode", "opencode.json"),
+			filepath.Join(home, ".config", "opencode", "config.json"),
+		) {
+			addModel(model, model, "Discovered in OpenCode configuration", len(models) == 0, 0)
+		}
 	case "grok":
 		configured := readTOMLModel(filepath.Join(home, ".grok", "config.toml"))
 		if configured != "" {
@@ -364,6 +405,8 @@ func fallbackProviderModels(kind string) []AgentProviderModel {
 		}
 	case "grok":
 		return []AgentProviderModel{{Model: "grok-4.5", DisplayName: "Grok 4.5", Description: "Grok Build frontier model", IsDefault: true, ContextWindow: 500_000}}
+	case "opencode":
+		return []AgentProviderModel{{Model: "anthropic/claude-sonnet-4-6", DisplayName: "Claude Sonnet", Description: "OpenCode provider/model", IsDefault: true}}
 	default:
 		return nil
 	}
@@ -420,6 +463,13 @@ func fallbackReasoningEfforts(kind string) []AgentProviderReasoningEffort {
 			{Effort: "low", DisplayName: "Low", Description: "Faster responses with lighter reasoning"},
 			{Effort: "xhigh", DisplayName: "Extra high", Description: "Extended reasoning for especially difficult work"},
 			{Effort: "max", DisplayName: "Max", Description: "Maximum effort when supported by the selected Claude model"},
+		}
+	case "opencode":
+		return []AgentProviderReasoningEffort{
+			{Effort: "high", DisplayName: "High", Description: "Provider variant for deeper reasoning", IsDefault: true},
+			{Effort: "medium", DisplayName: "Medium", Description: "Balanced provider variant"},
+			{Effort: "low", DisplayName: "Low", Description: "Faster provider variant"},
+			{Effort: "max", DisplayName: "Max", Description: "Maximum provider variant"},
 		}
 	case "gemini":
 		return []AgentProviderReasoningEffort{{

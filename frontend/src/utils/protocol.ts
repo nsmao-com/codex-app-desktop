@@ -183,7 +183,7 @@ export function normalizeModelProviders(value: unknown): ModelProviderOption[] {
     return {
       id: asString(record.id),
       name: asString(record.name, asString(record.id)),
-      kind: ['codex', 'claude', 'gemini', 'grok', 'custom'].includes(kind)
+      kind: ['codex', 'claude', 'gemini', 'grok', 'opencode', 'custom'].includes(kind)
         ? kind as ModelProviderOption['kind']
         : 'custom',
       configured: record.configured !== false,

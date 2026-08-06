@@ -673,6 +673,10 @@ export interface UserSettings {
      * Empty falls back to ClaudeSandbox + ClaudeApprovalPolicy mapping.
      */
     "claudePermissionMode": string;
+    "geminiModel": string;
+    "geminiEffort": string;
+    "openCodeModel": string;
+    "openCodeEffort": string;
     "model": string;
     "modelProvider": string;
     "customModels": string[] | null;

@@ -20,7 +20,7 @@ const POINTER_ATTR = 'data-pointer-cursor'
 const MOTION_ATTR = 'data-reduce-motion'
 const RUNTIME_ATTR = 'data-runtime'
 
-export type AppRuntime = 'codex' | 'claude' | 'grok'
+export type AppRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
 
 const theme = ref<AppTheme>('light')
 const accent = ref<AppAccent>('codex')
@@ -115,7 +115,7 @@ function initAppearance(initial: AppearanceState = {}): void {
 }
 
 function normalizeRuntime(value: string | undefined | null): AppRuntime {
-  if (value === 'grok' || value === 'claude') return value
+  if (value === 'grok' || value === 'claude' || value === 'gemini' || value === 'opencode') return value
   return 'codex'
 }
 

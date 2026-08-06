@@ -2,6 +2,20 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.1.8 - 2026-08-06
+
+### 新增
+
+- 左侧运行时新增 Gemini CLI 与 OpenCode，支持官方品牌图标、Tooltip、窄屏图标模式、独立模型/推理设置和 provider 状态识别。
+- Gemini/OpenCode 接入会话创建、历史、发送、停止、归档、重命名和会话级 FIFO 队列，并按 provider 隔离项目会话。
+- Capabilities 与 Settings 增加 Gemini/OpenCode 独立运行时入口，并明确各自原生 MCP 与 instructions 配置来源。
+
+### 修复
+
+- 修复 MCP 粘贴 JSON 在 Wails WebView 中没有写回输入状态、导致文本不显示和预览不触发的问题；粘贴时保留光标位置并继续执行长度校验。
+- 扩展 OpenCode JSON 流解析，兼容 `part` 嵌套文本和思维事件，避免不同 CLI 版本的消息内容丢失。
+- 外部运行时读取会话时跳过 Codex app-server 探测，避免切换 Gemini/OpenCode 时产生无意义的连接等待。
+
 ## 1.1.7 - 2026-08-06
 
 ### 修复

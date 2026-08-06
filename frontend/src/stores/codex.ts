@@ -179,7 +179,14 @@ export const useCodexStore = defineStore('codex', () => {
   const pendingTokenUsage = new Map<string, { threadId: string; turnId: string; usage: ReturnType<typeof normalizeThreadTokenUsage> }>()
   const threadModelIdentity: Record<string, ThreadModelIdentity> = loadThreadModelIdentity()
 
-  const isReady = computed(() => connection.value.state === 'ready')
+  const isReady = computed(() => {
+    if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
+      return appStore.agentProviders.some((provider) =>
+        provider.kind === appStore.activeRuntime && provider.runtimeReady,
+      )
+    }
+    return connection.value.state === 'ready'
+  })
   const activeTurnId = computed(() => threadTurnID(activeThreadId.value))
   const isTurnRunning = computed(() => threadIsRunning(activeThreadId.value))
   const sendingMessage = computed(() => isThreadSubmitting(activeThreadId.value))
@@ -189,7 +196,11 @@ export const useCodexStore = defineStore('codex', () => {
   const activeHistoryLoadingEarlier = computed(() => historyByThread.value[activeThreadId.value]?.loadingEarlier === true)
   const activeQueuedMessages = computed(() => queuedMessagesByThread.value[activeThreadId.value] ?? [])
   const activeThreadBusy = computed(() => threadIsBusy(activeThreadId.value) || activeQueuedMessages.value.length > 0)
-  const activeThreadUsesExternalProvider = computed(() => false)
+  const activeThreadUsesExternalProvider = computed(() => {
+    const provider = activeThread.value?.modelProvider || ''
+    return provider === '__gemini__' || provider === '__opencode__'
+      || appStore.isGeminiMode || appStore.isOpenCodeMode
+  })
   const canSteerActiveTurn = computed(() => {
     const threadID = activeThreadId.value
     const turnID = threadTurnID(threadID)
@@ -454,6 +465,23 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function loadModels(): Promise<void> {
+    if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
+      const provider = appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime)
+      const catalog = provider?.models ?? []
+      appStore.models = catalog.map((model) => ({
+        id: model.model,
+        model: model.model,
+        displayName: model.displayName || model.model,
+        description: model.description || '',
+        isDefault: model.isDefault,
+        defaultReasoningEffort: provider?.reasoningEfforts?.find((item) => item.isDefault)?.effort || (appStore.isGeminiMode ? 'auto' : 'high'),
+        defaultServiceTier: '',
+        serviceTiers: [],
+        supportsPersonality: false,
+        supportedReasoningEfforts: (provider?.reasoningEfforts ?? []).map((item) => ({ effort: item.effort, description: item.description })),
+      }))
+      return
+    }
     // Codex-only: clear any leftover Claude/Gemini/Grok workbench provider.
     if (appStore.settings.modelProvider) {
       appStore.patchSettings({ modelProvider: '' })
@@ -586,6 +614,17 @@ export const useCodexStore = defineStore('codex', () => {
     creatingThread.value = false
     const now = Math.floor(Date.now() / 1000)
     const pendingID = `pending-thread-${Date.now()}-${createThreadSequence}`
+    const externalProvider = appStore.isGeminiMode ? '__gemini__' : appStore.isOpenCodeMode ? '__opencode__' : appStore.settings.modelProvider
+    const externalModel = appStore.isGeminiMode
+      ? (appStore.settings.geminiModel || 'gemini-2.5-pro')
+      : appStore.isOpenCodeMode
+        ? (appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6')
+        : appStore.settings.model
+    const externalEffort = appStore.isGeminiMode
+      ? (appStore.settings.geminiEffort || 'auto')
+      : appStore.isOpenCodeMode
+        ? (appStore.settings.openCodeEffort || 'high')
+        : appStore.settings.effort
     const optimistic: ThreadSummary = {
       id: pendingID,
       name: translate('sidebar.newTask'),
@@ -595,9 +634,9 @@ export const useCodexStore = defineStore('codex', () => {
       updatedAt: now,
       status: 'idle',
       cliVersion: '',
-      model: appStore.settings.model,
-      modelProvider: appStore.settings.modelProvider,
-      effort: appStore.settings.effort,
+      model: externalModel,
+      modelProvider: externalProvider,
+      effort: externalEffort,
       collaborationMode: appStore.settings.collaborationMode,
       workMode: appStore.settings.workMode || 'code',
     }
@@ -4354,7 +4393,7 @@ function normalizeModelProviders(value: unknown): import('../types/codex').Model
     return {
       id: asString(record.id),
       name: asString(record.name, asString(record.id)),
-      kind: ['codex', 'claude', 'gemini', 'grok', 'custom'].includes(kind)
+      kind: ['codex', 'claude', 'gemini', 'grok', 'opencode', 'custom'].includes(kind)
         ? kind as import('../types/codex').ModelProviderOption['kind']
         : 'custom',
       configured: record.configured !== false,

@@ -39,12 +39,13 @@ const workspaceStore = useWorkspaceStore()
 const browserStore = useBrowserStore()
 const dialogStore = useDialogStore()
 const { t } = useI18n()
+const usesCodexTimeline = computed(() => appStore.isCodexMode || appStore.isGeminiMode || appStore.isOpenCodeMode)
 
 const emit = defineEmits<{
   'show-inspector': []
 }>()
 
-type ComposerRuntime = 'codex' | 'claude' | 'grok'
+type ComposerRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
 type ComposerDraft = { text: string; images: string[] }
 type ComposerDraftContext = {
   key: string
@@ -328,7 +329,7 @@ function commitFromBar(): void {
 <template>
   <div class="relative flex h-full flex-col">
     <div
-      v-if="appStore.isCodexMode && codexStore.creatingThread"
+      v-if="usesCodexTimeline && codexStore.creatingThread"
       class="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center"
     >
       <div class="flex items-center gap-2 rounded-full border bg-card/95 px-3 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
@@ -378,6 +379,20 @@ function commitFromBar(): void {
           >
             Claude
           </Badge>
+          <Badge
+            v-else-if="appStore.isGeminiMode"
+            variant="secondary"
+            class="h-5 shrink-0 rounded-md px-1.5 text-[9px] font-normal"
+          >
+            Gemini
+          </Badge>
+          <Badge
+            v-else-if="appStore.isOpenCodeMode"
+            variant="secondary"
+            class="h-5 shrink-0 rounded-md px-1.5 text-[9px] font-normal"
+          >
+            OpenCode
+          </Badge>
           <div
             v-if="workspaceStore.workspace"
             class="hidden items-center gap-1.5 text-[11px] text-muted-foreground sm:flex"
@@ -392,7 +407,7 @@ function commitFromBar(): void {
       </div>
 
       <DropdownMenu
-        v-if="(appStore.isCodexMode && codexStore.activeThread)
+        v-if="(usesCodexTimeline && codexStore.activeThread)
           || (appStore.isGrokMode && grokStore.activeSessionId)
           || (appStore.isClaudeMode && claudeStore.activeSessionId)"
       >
@@ -417,6 +432,8 @@ function commitFromBar(): void {
               <ScanSearch :size="14" class="mr-2" />
               {{ t('threadActions.review') }}
             </DropdownMenuItem>
+          </template>
+          <template v-if="usesCodexTimeline">
             <DropdownMenuItem @click="forkThread">
               <Copy :size="14" class="mr-2" />
               {{ t('threadActions.fork') }}
@@ -433,7 +450,8 @@ function commitFromBar(): void {
           <DropdownMenuSeparator />
           <DropdownMenuItem
             :disabled="(appStore.isGrokMode && grokStore.activeSessionId.startsWith('pending-grok-'))
-              || (appStore.isClaudeMode && claudeStore.activeSessionId.startsWith('pending-claude-'))"
+              || (appStore.isClaudeMode && claudeStore.activeSessionId.startsWith('pending-claude-'))
+              || (usesCodexTimeline && codexStore.activeThreadId.startsWith('pending-thread-'))"
             @click="archiveThread"
           >
             <Archive :size="14" class="mr-2" />

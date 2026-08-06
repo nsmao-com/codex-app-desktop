@@ -31,6 +31,8 @@ import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
 import GrokIcon from '@/components/icons/GrokIcon.vue'
+import GeminiIcon from '@/components/icons/GeminiIcon.vue'
+import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
 import OpenAIIcon from '@/components/icons/OpenAIIcon.vue'
 import ProviderRouterSettings from '@/components/ProviderRouterSettings.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
@@ -246,6 +248,17 @@ const selectedModel = computed(() => appStore.models.find((item) => item.model =
 const codexStatus = computed(() => appStore.agentProviders.find((provider) => provider.kind === 'codex'))
 const isGrokSettings = computed(() => appStore.isGrokMode)
 const isClaudeSettings = computed(() => appStore.isClaudeMode)
+const isGeminiSettings = computed(() => appStore.isGeminiMode)
+const isOpenCodeSettings = computed(() => appStore.isOpenCodeMode)
+const externalRuntimeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+const externalModel = computed({
+  get: () => isGeminiSettings.value ? appStore.settings.geminiModel : appStore.settings.openCodeModel,
+  set: (value: string) => appStore.patchSettings(isGeminiSettings.value ? { geminiModel: value } : { openCodeModel: value }),
+})
+const externalEffort = computed({
+  get: () => isGeminiSettings.value ? appStore.settings.geminiEffort : appStore.settings.openCodeEffort,
+  set: (value: string) => appStore.patchSettings(isGeminiSettings.value ? { geminiEffort: value } : { openCodeEffort: value }),
+})
 const claudeStatus = computed(() => {
   const fromProviders = appStore.agentProviders.find((provider) => provider.kind === 'claude')
   const rt = claudeStore.runtime
@@ -539,7 +552,7 @@ const filteredNavGroups = computed(() => {
   // Grok/Claude mode: keep agent config + archived; hide pure Codex product surfaces.
   const hideExternal = new Set(['plugins', 'mcp', 'routing', 'hooks', 'scheduled', 'environment', 'account'])
   let base = navGroups.value
-  if (isGrokSettings.value || isClaudeSettings.value) {
+  if (isGrokSettings.value || isClaudeSettings.value || isGeminiSettings.value || isOpenCodeSettings.value) {
     base = navGroups.value
       .map((group) => ({
         ...group,
@@ -550,6 +563,8 @@ const filteredNavGroups = computed(() => {
             if (isGrokSettings.value) {
               return { ...item, label: t('settings.navGrokAgent'), keywords: 'grok model backend xai 配置 模型 后端' }
             }
+            if (isGeminiSettings.value) return { ...item, label: 'Gemini configuration', keywords: 'gemini model cli 配置 模型' }
+            if (isOpenCodeSettings.value) return { ...item, label: 'OpenCode configuration', keywords: 'opencode model cli provider 配置 模型' }
             return { ...item, label: t('settings.navClaudeAgent'), keywords: 'claude model permission sonnet opus 配置 模型 权限' }
           }),
       }))
@@ -662,15 +677,16 @@ onMounted(() => {
   clampPanelForRuntime()
 })
 
-watch([isGrokSettings, isClaudeSettings], ([grok]) => {
+watch([isGrokSettings, isClaudeSettings, isGeminiSettings, isOpenCodeSettings], ([grok, _claude, gemini, openCode]) => {
   syncFromStore()
   clampPanelForRuntime()
   if (grok) void grokStore.refreshRuntime()
+  else if (gemini || openCode) void appStore.refreshRuntimes()
 })
 
 function clampPanelForRuntime(): void {
-  if (!isGrokSettings.value && !isClaudeSettings.value) return
-  // Archived is supported by both external runtimes; Codex-only panels are hidden.
+  if (!isGrokSettings.value && !isClaudeSettings.value && !isGeminiSettings.value && !isOpenCodeSettings.value) return
+  // Archived is supported by external runtimes; Codex-only panels are hidden.
   const hiddenExternalPanels = new Set(['plugins', 'mcp', 'routing', 'hooks', 'scheduled', 'environment', 'account'])
   if (hiddenExternalPanels.has(activePanel.value)) activePanel.value = 'agent'
 }
@@ -1254,7 +1270,7 @@ async function save(): Promise<void> {
   if (saving.value) return
 
   // Upstream client identity only applies after app-server re-handshake (Codex only).
-  const identityChanged = !isGrokSettings.value && !isClaudeSettings.value && codexClientIdentityChanged()
+  const identityChanged = !isGrokSettings.value && !isClaudeSettings.value && !isGeminiSettings.value && !isOpenCodeSettings.value && codexClientIdentityChanged()
   let reconnectAfterSave = false
   if (identityChanged) {
     reconnectAfterSave = await dialogStore.confirm({
@@ -1325,11 +1341,7 @@ async function save(): Promise<void> {
     }
     await appStore.savePreferences({
       ...appStore.settings,
-      activeRuntime: appStore.settings.activeRuntime === 'grok'
-        ? 'grok'
-        : appStore.settings.activeRuntime === 'claude'
-          ? 'claude'
-          : 'codex',
+      activeRuntime: appStore.settings.activeRuntime,
       recentWorkspaces: appStore.settings.recentWorkspaces ?? [],
       model: model.value,
       modelProvider: '',
@@ -1356,6 +1368,10 @@ async function save(): Promise<void> {
       claudeSandbox: claudeSandbox.value || 'workspace-write',
       claudeApprovalPolicy: claudeApprovalPolicy.value || 'on-request',
       claudePermissionMode: claudePermissionMode.value || 'acceptEdits',
+      geminiModel: appStore.settings.geminiModel || 'gemini-2.5-pro',
+      geminiEffort: appStore.settings.geminiEffort || 'auto',
+      openCodeModel: appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6',
+      openCodeEffort: appStore.settings.openCodeEffort || 'high',
       theme: theme.value,
       accentColor: accentColor.value,
       fontFamily: fontFamily.value,
@@ -1485,7 +1501,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
       </nav>
 
       <div class="px-4 py-2 text-[10px] text-muted-foreground">
-        {{ isGrokSettings ? 'Grok' : isClaudeSettings ? 'Claude' : `Codex ${appStore.codexVersion || 'app-server'}` }} · v{{ appStore.appVersion }}
+        {{ isGrokSettings ? 'Grok' : isClaudeSettings ? 'Claude' : isGeminiSettings ? 'Gemini' : isOpenCodeSettings ? 'OpenCode' : `Codex ${appStore.codexVersion || 'app-server'}` }} · v{{ appStore.appVersion }}
       </div>
     </aside>
 
@@ -2140,6 +2156,60 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                 </div>
               </section>
 
+              <section v-else-if="isGeminiSettings || isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
+                <div class="flex items-center gap-3 border-b px-4 py-3">
+                  <div class="grid size-8 place-items-center rounded-md border bg-muted/40">
+                    <GeminiIcon v-if="isGeminiSettings" :size="16" />
+                    <OpenCodeIcon v-else :size="16" />
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <p class="text-[13px] font-medium">{{ isGeminiSettings ? 'Gemini CLI' : 'OpenCode' }}</p>
+                    <p class="truncate text-[11px] text-muted-foreground">
+                      {{ externalRuntimeProvider?.message || (isGeminiSettings ? 'Gemini CLI runtime' : 'OpenCode runtime') }}
+                    </p>
+                    <p v-if="externalRuntimeProvider?.executable" class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80" :title="externalRuntimeProvider.executable">
+                      {{ externalRuntimeProvider.executable }}
+                    </p>
+                  </div>
+                  <Badge :variant="externalRuntimeProvider?.runtimeReady ? 'default' : 'outline'" class="text-[9px]">
+                    {{ externalRuntimeProvider?.runtimeReady ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
+                  </Badge>
+                </div>
+                <div class="space-y-4 p-4">
+                  <div class="space-y-1">
+                    <Label class="text-xs">{{ t('settings.model') }}</Label>
+                    <SearchableSelect
+                      v-model="externalModel"
+                      class="h-9"
+                      content-class="min-w-[320px]"
+                      align="start"
+                      :options="(externalRuntimeProvider?.models || []).map((item) => ({ value: item.model, label: item.displayName || item.model, description: item.description, badge: item.isDefault ? t('common.recommended') : '' }))"
+                      :aria-label="t('settings.model')"
+                      :search-placeholder="t('settings.modelSearch')"
+                    />
+                  </div>
+                  <div class="space-y-1">
+                    <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
+                    <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      <Button
+                        v-for="option in (externalRuntimeProvider?.reasoningEfforts || [])"
+                        :key="option.effort"
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-8"
+                        :class="externalEffort === option.effort ? 'border-primary bg-primary/5' : ''"
+                        @click="externalEffort = option.effort"
+                      >
+                        {{ option.displayName || option.effort }}
+                      </Button>
+                    </div>
+                  </div>
+                  <p class="rounded-lg border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">
+                    {{ isGeminiSettings ? 'Gemini CLI 的模型、认证和 MCP 由本机 Gemini 配置管理。' : 'OpenCode 的服务商、模型和 MCP 由 OpenCode 配置管理。Nice Codex 会保留会话、队列和工作区隔离。' }}
+                  </p>
+                </div>
+              </section>
               <section v-else class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-center gap-3 border-b px-4 py-3">
                   <div class="grid size-8 place-items-center rounded-md border bg-muted/40">

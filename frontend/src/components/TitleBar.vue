@@ -32,6 +32,7 @@ const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const shellStore = useShellStore()
 const navStore = useNavigationStore()
+const usesCodexTimeline = computed(() => appStore.isCodexMode || appStore.isGeminiMode || appStore.isOpenCodeMode)
 
 const maximised = shallowRef(false)
 
@@ -189,7 +190,7 @@ function openGitHub(): void {
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
-            v-if="appStore.isCodexMode"
+            v-if="usesCodexTimeline"
             :disabled="!codexStore.activeThread || Boolean(codexStore.threadMutation) || codexStore.activeThreadBusy"
             @click="void codexStore.archiveActiveThread()"
           >

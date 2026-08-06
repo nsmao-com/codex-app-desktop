@@ -25,10 +25,10 @@ import { translate } from '../i18n'
 import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.1.7'
+const AppVersionFallback = '1.1.8'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
-export type WorkspaceRuntime = 'codex' | 'claude' | 'grok'
+export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
 type WorkspaceOrderByRuntime = Record<WorkspaceRuntime, string[]>
 
 const defaultSettings: UserSettings = {
@@ -54,6 +54,10 @@ const defaultSettings: UserSettings = {
   claudeSandbox: 'workspace-write',
   claudeApprovalPolicy: 'on-request',
   claudePermissionMode: 'acceptEdits',
+  geminiModel: 'gemini-2.5-pro',
+  geminiEffort: 'auto',
+  openCodeModel: 'anthropic/claude-sonnet-4-6',
+  openCodeEffort: 'high',
   model: DEFAULT_CODEX_MODEL,
   modelProvider: '',
   customModels: [],
@@ -126,7 +130,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.1.7')
+  const appVersion = shallowRef('1.1.8')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -168,6 +172,8 @@ export const useAppStore = defineStore('app', () => {
   const activeRuntime = computed(() => normalizeRuntimeID(settings.value.activeRuntime))
   const isGrokMode = computed(() => activeRuntime.value === 'grok')
   const isClaudeMode = computed(() => activeRuntime.value === 'claude')
+  const isGeminiMode = computed(() => activeRuntime.value === 'gemini')
+  const isOpenCodeMode = computed(() => activeRuntime.value === 'opencode')
   const isCodexMode = computed(() => activeRuntime.value === 'codex')
 
   function orderWorkspacePaths(
@@ -268,6 +274,10 @@ export const useAppStore = defineStore('app', () => {
       claudeSandbox: data.settings.claudeSandbox || 'workspace-write',
       claudeApprovalPolicy: data.settings.claudeApprovalPolicy || 'on-request',
       claudePermissionMode: data.settings.claudePermissionMode || 'acceptEdits',
+      geminiModel: data.settings.geminiModel || 'gemini-2.5-pro',
+      geminiEffort: data.settings.geminiEffort || 'auto',
+      openCodeModel: data.settings.openCodeModel || 'anthropic/claude-sonnet-4-6',
+      openCodeEffort: data.settings.openCodeEffort || 'high',
       customModels: data.settings.customModels ?? [],
       followUpBehavior: data.settings.followUpBehavior === 'steer' ? 'steer' : 'queue',
       notifyOnTurnComplete: data.settings.notifyOnTurnComplete !== false,
@@ -318,7 +328,7 @@ export const useAppStore = defineStore('app', () => {
     void checkForUpdates(true)
   }
 
-  async function setActiveRuntime(runtimeID: 'codex' | 'claude' | 'grok'): Promise<boolean> {
+  async function setActiveRuntime(runtimeID: WorkspaceRuntime): Promise<boolean> {
     const nextRuntime = normalizeRuntimeID(runtimeID)
     if (activeRuntime.value !== nextRuntime) {
       // Instant UI switch — backend persistence continues in the returned promise.
@@ -344,7 +354,7 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  async function ensureActiveRuntimeSynced(runtimeID: 'codex' | 'claude' | 'grok'): Promise<boolean> {
+  async function ensureActiveRuntimeSynced(runtimeID: WorkspaceRuntime): Promise<boolean> {
     try {
       await runtimeSync
     } catch {
@@ -390,6 +400,10 @@ export const useAppStore = defineStore('app', () => {
       claudeSandbox: saved.claudeSandbox || next.claudeSandbox || 'workspace-write',
       claudeApprovalPolicy: saved.claudeApprovalPolicy || next.claudeApprovalPolicy || 'on-request',
       claudePermissionMode: saved.claudePermissionMode || next.claudePermissionMode || 'acceptEdits',
+      geminiModel: saved.geminiModel || next.geminiModel || 'gemini-2.5-pro',
+      geminiEffort: saved.geminiEffort || next.geminiEffort || 'auto',
+      openCodeModel: saved.openCodeModel || next.openCodeModel || 'anthropic/claude-sonnet-4-6',
+      openCodeEffort: saved.openCodeEffort || next.openCodeEffort || 'high',
       customModels: saved.customModels ?? next.customModels ?? [],
       onboardingCompleted: Boolean(saved.onboardingCompleted)
         || Boolean(next.onboardingCompleted)
@@ -806,6 +820,8 @@ export const useAppStore = defineStore('app', () => {
     activeRuntime,
     isGrokMode,
     isClaudeMode,
+    isGeminiMode,
+    isOpenCodeMode,
     isCodexMode,
     orderWorkspacePaths,
     setWorkspaceOrder,
@@ -842,11 +858,13 @@ function normalizeRuntimeID(value: string | undefined | null): WorkspaceRuntime 
   const id = String(value || '').trim().toLowerCase()
   if (id === 'grok') return 'grok'
   if (id === 'claude') return 'claude'
+  if (id === 'gemini') return 'gemini'
+  if (id === 'opencode' || id === 'open-code') return 'opencode'
   return 'codex'
 }
 
 function loadWorkspaceOrder(): WorkspaceOrderByRuntime {
-  const fallback: WorkspaceOrderByRuntime = { codex: [], claude: [], grok: [] }
+  const fallback: WorkspaceOrderByRuntime = { codex: [], claude: [], grok: [], gemini: [], opencode: [] }
   if (typeof window === 'undefined') return fallback
   try {
     const value = asRecord(JSON.parse(window.localStorage.getItem(workspaceOrderStorageKey) || '{}'))
@@ -854,6 +872,8 @@ function loadWorkspaceOrder(): WorkspaceOrderByRuntime {
       codex: sanitizeWorkspaceOrder(value.codex),
       claude: sanitizeWorkspaceOrder(value.claude),
       grok: sanitizeWorkspaceOrder(value.grok),
+      gemini: sanitizeWorkspaceOrder(value.gemini),
+      opencode: sanitizeWorkspaceOrder(value.opencode),
     }
   } catch {
     return fallback

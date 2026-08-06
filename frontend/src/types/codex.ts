@@ -130,7 +130,7 @@ export interface ModelOption {
 export interface ModelProviderOption {
   id: string
   name: string
-  kind: 'codex' | 'claude' | 'gemini' | 'grok' | 'custom'
+  kind: 'codex' | 'claude' | 'gemini' | 'grok' | 'opencode' | 'custom'
   configured: boolean
 }
 

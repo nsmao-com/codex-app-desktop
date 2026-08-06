@@ -115,13 +115,15 @@ func externalProviderKind(value string) string {
 		return "gemini"
 	case "__grok__", "grok-cli":
 		return "grok"
+	case "__opencode__", "opencode-cli":
+		return "opencode"
 	default:
 		return ""
 	}
 }
 
 func externalProviderID(kind string) string {
-	if kind == "claude" || kind == "gemini" || kind == "grok" {
+	if kind == "claude" || kind == "gemini" || kind == "grok" || kind == "opencode" {
 		return "__" + kind + "__"
 	}
 	return ""
@@ -286,6 +288,7 @@ func (s *AppService) listArchivedSessionsForWorkspace(workspace, search, workMod
 
 func (s *AppService) listSessionsForWorkspaceFiltered(workspace, search, workMode string, archivedOnly bool) map[string]any {
 	workMode = normalizeWorkMode(workMode)
+	activeRuntime := normalizeRuntime(s.Settings().ActiveRuntime)
 	s.mu.Lock()
 	candidates := make([]*SessionRecord, 0, len(s.sessions))
 	for _, record := range s.sessions {
@@ -295,8 +298,16 @@ func (s *AppService) listSessionsForWorkspaceFiltered(workspace, search, workMod
 		if record.Archived != archivedOnly {
 			continue
 		}
-		// Codex-only workbench: hide legacy Claude/Gemini/Grok sessions.
-		if isExternalSession(record) {
+		// Keep each runtime's conversation index isolated. Gemini/OpenCode use the
+		// Codex-compatible timeline store but must never leak into Codex/Claude/Grok.
+		provider := strings.ToLower(strings.TrimSpace(record.Provider))
+		if provider == "" {
+			provider = externalProviderKind(record.ProviderID)
+		}
+		if isExternalSession(record) && provider != activeRuntime {
+			continue
+		}
+		if !isExternalSession(record) && activeRuntime != "codex" {
 			continue
 		}
 		if normalizeWorkMode(record.WorkMode) != workMode {
@@ -525,6 +536,10 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 			runtime = "grok"
 		case "claude":
 			runtime = "claude"
+		case "gemini":
+			runtime = "gemini"
+		case "opencode":
+			runtime = "opencode"
 		}
 		s.persistTurnUsage(runtime, threadID, turnID, b, completed)
 		s.emitExternalNotification("thread/tokenUsage/updated", map[string]any{
@@ -812,6 +827,23 @@ func externalCommandArgs(provider, sessionID, workspace string, settings UserSet
 			args = append(args, "--disallowed-tools", "x_keyword_search,x_semantic_search")
 		}
 		return append(args, grokPermissionArgs(settings)...), generatedSessionID
+	case "opencode":
+		// OpenCode's non-interactive runner emits one JSON event per line and owns
+		// the native session id. `-s` resumes it; a new run creates the id.
+		args := []string{"run", prompt, "--format", "json", "--dir", workspace}
+		if sessionID != "" {
+			args = append(args, "--session", sessionID)
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		if effort != "" && effort != "auto" {
+			args = append(args, "--variant", effort)
+		}
+		if settings.Sandbox == "danger-full-access" && settings.ApprovalPolicy == "never" {
+			args = append(args, "--auto")
+		}
+		return args, generatedSessionID
 	default:
 		return nil, generatedSessionID
 	}
@@ -1122,7 +1154,7 @@ func tokenTotalFromUsage(usage map[string]any) int64 {
 // parseExternalEvent returns (chunk, sessionID, final, kind).
 // kind is "text" | "thought" | "".
 func parseExternalEvent(provider string, event map[string]any) (string, string, bool, string) {
-	sessionID := firstMapString(event, "session_id", "sessionId")
+	sessionID := firstMapString(event, "session_id", "sessionId", "sessionID")
 	eventType := strings.ToLower(firstMapString(event, "type", "event"))
 	if provider == "claude" {
 		// Claude Code stream-json — Anthropic-native AND proxy backends (GPT / GLM / etc.):
@@ -1278,6 +1310,46 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 		default:
 			return "", sessionID, false, ""
 		}
+	}
+	if provider == "opencode" {
+		// OpenCode JSON events vary slightly between releases. Accept the stable
+		// text/reasoning/result shapes and generic nested message deltas.
+		switch eventType {
+		case "text", "text_delta", "message", "message_delta", "assistant", "content", "delta", "response.delta", "output_text.delta":
+			text := firstMapString(event, "text", "content", "data", "delta", "output", "message")
+			if text == "" {
+				text = textFromExternalValue(event["data"])
+			}
+			if text == "" {
+				text = textFromExternalValue(event["message"])
+			}
+			if text == "" {
+				text = textFromExternalValue(event["part"])
+			}
+			return text, sessionID, false, "text"
+		case "reasoning", "thinking", "thought":
+			text := firstMapString(event, "text", "content", "data", "reasoning", "thinking")
+			if text == "" {
+				text = textFromExternalValue(event["part"])
+			}
+			return text, sessionID, false, "thought"
+		case "step_finish", "finish", "result", "completed", "done":
+			text := firstMapString(event, "text", "result", "content", "data", "output")
+			if text == "" {
+				text = textFromExternalValue(event["result"])
+			}
+			return text, sessionID, true, "text"
+		case "error":
+			message := firstMapString(event, "message", "error", "data", "text")
+			if message == "" {
+				message = "OpenCode stream error"
+			}
+			return message, sessionID, true, "error"
+		}
+		if strings.Contains(eventType, "delta") {
+			return textFromExternalValue(event["delta"]), sessionID, false, "text"
+		}
+		return "", sessionID, false, ""
 	}
 	if strings.Contains(eventType, "delta") {
 		return textFromExternalValue(event["delta"]), sessionID, false, "text"

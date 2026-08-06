@@ -4,14 +4,15 @@
 
 **Nice Codex** is an unofficial, lightweight desktop client for the official OpenAI Codex runtime. It ships as a native Windows / macOS app (Wails v3 + Vue 3) and talks to the local `codex app-server` for auth, threads, turns, approvals, tools, and streamed agent events.
 
-> Current version: **v1.1.7**
+> Current version: **v1.1.8**
 > Releases: [github.com/nsmao-com/codex-app-desktop/releases](https://github.com/nsmao-com/codex-app-desktop/releases)
 
 ## Highlights
 
-- Codex-only workbench that replaces the official Codex Desktop flow with a local CLI / app-server
+- Unified workbench for Codex, Claude Code, Grok, Gemini CLI, and OpenCode with provider-isolated sessions
 - Workspace picker, recent workspaces, streamed chat, approvals, plan / collaboration modes
 - Capability center for Skills, MCP, Apps, Hooks, and experimental features
+- Runtime-specific MCP/configuration views, JSON import, and native CLI configuration hints
 - Embedded interactive terminal (ConPTY / PTY)
 - Appearance: theme, accent, **local system font dropdown** (Windows registry / macOS font families)
 - **Version badge** in the sidebar + **GitHub Releases auto-update check**

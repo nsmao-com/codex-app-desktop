@@ -22,46 +22,46 @@ import (
 )
 
 type AppService struct {
-	app              *application.App
-	pluginAssets     *pluginAssetServer
-	mu               sync.Mutex
-	historyMu        sync.Mutex
-	usageMu          sync.Mutex
-	usagePersistMu   sync.Mutex
-	client           *codex.Client
-	settings         UserSettings
-	settingsPath     string
-	allowedThreads   map[string]string
-	allowedImages    map[string]struct{}
-	terminalSessions map[string]*terminalSession
-	agentProviders   []AgentProviderRuntime
-	sessions         map[string]*SessionRecord
-	externalRuns     map[string]*externalRun
-	grokAPISessions  map[string]*GrokAPISession
-	grokApprovals     map[string]*grokPendingApproval
-	claudeSessions   map[string]*claudeStoredSession
-	scheduledTasks   *scheduledTaskStore
-	schedulerStop    chan struct{}
-	shutdownOnce     sync.Once
-	usageCache       *localUsageFile
-	usageFlushTimer  *time.Timer
-	usageFlushGen    uint64
-	usageBackfillAt  map[string]time.Time
-	updateState      updateDownloadState
-	codexThreadStartMu sync.Mutex
+	app                   *application.App
+	pluginAssets          *pluginAssetServer
+	mu                    sync.Mutex
+	historyMu             sync.Mutex
+	usageMu               sync.Mutex
+	usagePersistMu        sync.Mutex
+	client                *codex.Client
+	settings              UserSettings
+	settingsPath          string
+	allowedThreads        map[string]string
+	allowedImages         map[string]struct{}
+	terminalSessions      map[string]*terminalSession
+	agentProviders        []AgentProviderRuntime
+	sessions              map[string]*SessionRecord
+	externalRuns          map[string]*externalRun
+	grokAPISessions       map[string]*GrokAPISession
+	grokApprovals         map[string]*grokPendingApproval
+	claudeSessions        map[string]*claudeStoredSession
+	scheduledTasks        *scheduledTaskStore
+	schedulerStop         chan struct{}
+	shutdownOnce          sync.Once
+	usageCache            *localUsageFile
+	usageFlushTimer       *time.Timer
+	usageFlushGen         uint64
+	usageBackfillAt       map[string]time.Time
+	updateState           updateDownloadState
+	codexThreadStartMu    sync.Mutex
 	pendingCodexSessionID string
-	codexHistoryCache map[string]*codexHistorySnapshot
-	claudeHistoryCache map[string]*claudeHistorySnapshot
-	grokHistoryCache map[string]*grokHistorySnapshot
+	codexHistoryCache     map[string]*codexHistorySnapshot
+	claudeHistoryCache    map[string]*claudeHistorySnapshot
+	grokHistoryCache      map[string]*grokHistorySnapshot
 	providerRouter        *providerRouter
 }
 
 const defaultCodexModel = "gpt-5.6-sol"
 
 const (
-	conversationHistoryPageTurns  = 24
-	conversationHistoryCacheLimit = 8
-	codexHistoryCacheLimit        = 2
+	conversationHistoryPageTurns        = 24
+	conversationHistoryCacheLimit       = 8
+	codexHistoryCacheLimit              = 2
 	conversationHistoryCacheBytes int64 = 24 << 20
 	conversationHistoryEntryBytes int64 = 12 << 20
 )
@@ -105,23 +105,23 @@ type BootstrapData struct {
 }
 
 type UserSettings struct {
-	ActiveRuntime          string   `json:"activeRuntime"`
-	Workspace              string   `json:"workspace"`
-	RecentWorkspaces       []string `json:"recentWorkspaces"`
-	GrokWorkspace          string   `json:"grokWorkspace"`
-	GrokRecentWorkspaces   []string `json:"grokRecentWorkspaces"`
-	GrokBackend            string   `json:"grokBackend"`
-	GrokBuildModel         string   `json:"grokBuildModel"`
-	GrokAPIModel           string   `json:"grokAPIModel"`
-	GrokEffort             string   `json:"grokEffort"`
-	GrokSandbox            string   `json:"grokSandbox"`
-	GrokApprovalPolicy     string   `json:"grokApprovalPolicy"`
-	GrokWebSearch          bool     `json:"grokWebSearch"`
-	GrokXSearch            bool     `json:"grokXSearch"`
+	ActiveRuntime        string   `json:"activeRuntime"`
+	Workspace            string   `json:"workspace"`
+	RecentWorkspaces     []string `json:"recentWorkspaces"`
+	GrokWorkspace        string   `json:"grokWorkspace"`
+	GrokRecentWorkspaces []string `json:"grokRecentWorkspaces"`
+	GrokBackend          string   `json:"grokBackend"`
+	GrokBuildModel       string   `json:"grokBuildModel"`
+	GrokAPIModel         string   `json:"grokAPIModel"`
+	GrokEffort           string   `json:"grokEffort"`
+	GrokSandbox          string   `json:"grokSandbox"`
+	GrokApprovalPolicy   string   `json:"grokApprovalPolicy"`
+	GrokWebSearch        bool     `json:"grokWebSearch"`
+	GrokXSearch          bool     `json:"grokXSearch"`
 	// GrokAPIKey / GrokAPIBaseURL configure NiceCodex Grok API mode (OpenAI-compatible).
 	// Empty key falls back to XAI_API_KEY / GROK_API_KEY env; empty base uses https://api.x.ai/v1.
-	GrokAPIKey             string   `json:"grokAPIKey"`
-	GrokAPIBaseURL         string   `json:"grokAPIBaseURL"`
+	GrokAPIKey     string `json:"grokAPIKey"`
+	GrokAPIBaseURL string `json:"grokAPIBaseURL"`
 	// Claude Code independent stack (workspace / model / permissions).
 	ClaudeWorkspace        string   `json:"claudeWorkspace"`
 	ClaudeRecentWorkspaces []string `json:"claudeRecentWorkspaces"`
@@ -133,53 +133,59 @@ type UserSettings struct {
 	// acceptEdits | auto | bypassPermissions | manual | dontAsk | plan.
 	// Empty falls back to ClaudeSandbox + ClaudeApprovalPolicy mapping.
 	ClaudePermissionMode string `json:"claudePermissionMode"`
-	Model                  string   `json:"model"`
-	ModelProvider          string   `json:"modelProvider"`
-	CustomModels           []string `json:"customModels"`
-	Effort                 string   `json:"effort"`
-	ServiceTier            string   `json:"serviceTier"`
-	CollaborationMode      string   `json:"collaborationMode"`
-	Personality            string   `json:"personality"`
-	MultiAgentMode         string   `json:"multiAgentMode"`
-	Sandbox                string   `json:"sandbox"`
-	ApprovalPolicy         string   `json:"approvalPolicy"`
-	Theme                  string   `json:"theme"`
-	AccentColor            string   `json:"accentColor"`
-	FontFamily             string   `json:"fontFamily"`
-	TerminalProfile        string   `json:"terminalProfile"`
-	Language               string   `json:"language"`
-	AutoConnect            bool     `json:"autoConnect"`
-	WorkMode               string   `json:"workMode"`
-	SendWithModifier       bool     `json:"sendWithModifier"`
-	FollowUpBehavior       string   `json:"followUpBehavior"`
-	NotifyOnTurnComplete   bool     `json:"notifyOnTurnComplete"`
-	CustomInstructions     string   `json:"customInstructions"`
-	TranslucentSidebar     bool     `json:"translucentSidebar"`
-	HighContrast           bool     `json:"highContrast"`
-	PointerCursor          bool     `json:"pointerCursor"`
-	ReduceMotion           bool     `json:"reduceMotion"`
-	UiFontSize             string   `json:"uiFontSize"`
-	CodeFontSize           string   `json:"codeFontSize"`
-	PreventSleepWhileRunning bool   `json:"preventSleepWhileRunning"`
-	AlwaysOnTop            bool     `json:"alwaysOnTop"`
-	GitBranchPrefix        string   `json:"gitBranchPrefix"`
-	GitCommitPrefix        string   `json:"gitCommitPrefix"`
-	GitOpenPRAfterPush     bool     `json:"gitOpenPRAfterPush"`
-	GitPRBodyTemplate      string   `json:"gitPRBodyTemplate"`
-	BrowserAllowedHosts    []string `json:"browserAllowedHosts"`
-	BrowserBlockedHosts    []string `json:"browserBlockedHosts"`
-	BrowserDownloadDir     string   `json:"browserDownloadDir"`
-	BrowserFullCDP         bool     `json:"browserFullCDP"`
-	ShortcutCommandPalette string   `json:"shortcutCommandPalette"`
-	ShortcutNewThread      string   `json:"shortcutNewThread"`
-	ShortcutTerminal       string   `json:"shortcutTerminal"`
-	ShortcutBrowser        string   `json:"shortcutBrowser"`
+	// Gemini/OpenCode preferences stay separate from Codex/Claude/Grok so a
+	// runtime switch never changes another provider's default model.
+	GeminiModel              string   `json:"geminiModel"`
+	GeminiEffort             string   `json:"geminiEffort"`
+	OpenCodeModel            string   `json:"openCodeModel"`
+	OpenCodeEffort           string   `json:"openCodeEffort"`
+	Model                    string   `json:"model"`
+	ModelProvider            string   `json:"modelProvider"`
+	CustomModels             []string `json:"customModels"`
+	Effort                   string   `json:"effort"`
+	ServiceTier              string   `json:"serviceTier"`
+	CollaborationMode        string   `json:"collaborationMode"`
+	Personality              string   `json:"personality"`
+	MultiAgentMode           string   `json:"multiAgentMode"`
+	Sandbox                  string   `json:"sandbox"`
+	ApprovalPolicy           string   `json:"approvalPolicy"`
+	Theme                    string   `json:"theme"`
+	AccentColor              string   `json:"accentColor"`
+	FontFamily               string   `json:"fontFamily"`
+	TerminalProfile          string   `json:"terminalProfile"`
+	Language                 string   `json:"language"`
+	AutoConnect              bool     `json:"autoConnect"`
+	WorkMode                 string   `json:"workMode"`
+	SendWithModifier         bool     `json:"sendWithModifier"`
+	FollowUpBehavior         string   `json:"followUpBehavior"`
+	NotifyOnTurnComplete     bool     `json:"notifyOnTurnComplete"`
+	CustomInstructions       string   `json:"customInstructions"`
+	TranslucentSidebar       bool     `json:"translucentSidebar"`
+	HighContrast             bool     `json:"highContrast"`
+	PointerCursor            bool     `json:"pointerCursor"`
+	ReduceMotion             bool     `json:"reduceMotion"`
+	UiFontSize               string   `json:"uiFontSize"`
+	CodeFontSize             string   `json:"codeFontSize"`
+	PreventSleepWhileRunning bool     `json:"preventSleepWhileRunning"`
+	AlwaysOnTop              bool     `json:"alwaysOnTop"`
+	GitBranchPrefix          string   `json:"gitBranchPrefix"`
+	GitCommitPrefix          string   `json:"gitCommitPrefix"`
+	GitOpenPRAfterPush       bool     `json:"gitOpenPRAfterPush"`
+	GitPRBodyTemplate        string   `json:"gitPRBodyTemplate"`
+	BrowserAllowedHosts      []string `json:"browserAllowedHosts"`
+	BrowserBlockedHosts      []string `json:"browserBlockedHosts"`
+	BrowserDownloadDir       string   `json:"browserDownloadDir"`
+	BrowserFullCDP           bool     `json:"browserFullCDP"`
+	ShortcutCommandPalette   string   `json:"shortcutCommandPalette"`
+	ShortcutNewThread        string   `json:"shortcutNewThread"`
+	ShortcutTerminal         string   `json:"shortcutTerminal"`
+	ShortcutBrowser          string   `json:"shortcutBrowser"`
 	// CodexClient* is the app-server initialize clientInfo sent upstream as User-Agent.
 	// Empty values fall back to official Codex Desktop defaults (or NICE_CODEX_CLIENT_* env).
-	CodexClientName        string   `json:"codexClientName"`
-	CodexClientTitle       string   `json:"codexClientTitle"`
-	CodexClientVersion     string   `json:"codexClientVersion"`
-	OnboardingCompleted    bool     `json:"onboardingCompleted"`
+	CodexClientName     string `json:"codexClientName"`
+	CodexClientTitle    string `json:"codexClientTitle"`
+	CodexClientVersion  string `json:"codexClientVersion"`
+	OnboardingCompleted bool   `json:"onboardingCompleted"`
 }
 
 type WorkspaceInfo struct {
@@ -219,9 +225,9 @@ type GitChange struct {
 }
 
 type SendMessageRequest struct {
-	ThreadID          string   `json:"threadId"`
-	Text              string   `json:"text"`
-	Images            []string `json:"images"`
+	ThreadID string   `json:"threadId"`
+	Text     string   `json:"text"`
+	Images   []string `json:"images"`
 	// Per-turn mode override — mirrors official TUI SubmitUserMessageWithMode.
 	CollaborationMode string `json:"collaborationMode,omitempty"`
 }
@@ -268,23 +274,23 @@ func NewAppService(app *application.App, pluginAssets *pluginAssetServer) *AppSe
 	}
 
 	service := &AppService{
-		app:              app,
-		pluginAssets:     pluginAssets,
-		settings:         settings,
-		settingsPath:     settingsPath,
-		allowedThreads:   make(map[string]string),
-		allowedImages:    make(map[string]struct{}),
-		terminalSessions: make(map[string]*terminalSession),
-		sessions:         loadSessions(settingsPath),
-		externalRuns:     make(map[string]*externalRun),
-		grokAPISessions:  loadGrokAPISessions(settingsPath),
-		grokApprovals:     make(map[string]*grokPendingApproval),
-		claudeSessions:   loadClaudeSessions(settingsPath),
-		codexHistoryCache: make(map[string]*codexHistorySnapshot),
+		app:                app,
+		pluginAssets:       pluginAssets,
+		settings:           settings,
+		settingsPath:       settingsPath,
+		allowedThreads:     make(map[string]string),
+		allowedImages:      make(map[string]struct{}),
+		terminalSessions:   make(map[string]*terminalSession),
+		sessions:           loadSessions(settingsPath),
+		externalRuns:       make(map[string]*externalRun),
+		grokAPISessions:    loadGrokAPISessions(settingsPath),
+		grokApprovals:      make(map[string]*grokPendingApproval),
+		claudeSessions:     loadClaudeSessions(settingsPath),
+		codexHistoryCache:  make(map[string]*codexHistorySnapshot),
 		claudeHistoryCache: make(map[string]*claudeHistorySnapshot),
-		grokHistoryCache: make(map[string]*grokHistorySnapshot),
-		scheduledTasks:   newScheduledTaskStore(settingsPath),
-		schedulerStop:    make(chan struct{}),
+		grokHistoryCache:   make(map[string]*grokHistorySnapshot),
+		scheduledTasks:     newScheduledTaskStore(settingsPath),
+		schedulerStop:      make(chan struct{}),
 		providerRouter:     newProviderRouter(),
 	}
 	if routerConfig, err := loadProviderRouterConfig(settingsPath); err != nil {
@@ -368,6 +374,15 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	settings.GrokEffort = normalizeGrokEffort(settings.GrokEffort)
 	settings.ClaudeModel = sanitizeShortText(settings.ClaudeModel, 160)
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
+	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
+	if settings.GeminiEffort == "" {
+		settings.GeminiEffort = "auto"
+	}
+	settings.OpenCodeModel = sanitizeShortText(settings.OpenCodeModel, 160)
+	settings.OpenCodeEffort = sanitizeShortText(settings.OpenCodeEffort, 32)
+	if settings.OpenCodeEffort == "" {
+		settings.OpenCodeEffort = "high"
+	}
 	if !isAllowed(settings.GrokSandbox, "read-only", "workspace-write", "danger-full-access") {
 		return UserSettings{}, errors.New("invalid Grok sandbox mode")
 	}
@@ -704,18 +719,23 @@ func (s *AppService) ListWorkspaceThreads(workspace string, search string) (map[
 func (s *AppService) listThreadsForWorkspace(workspace string, search string) (map[string]any, error) {
 	settings := s.Settings()
 	workMode := normalizeWorkMode(settings.WorkMode)
-	// Sync Codex app-server history into the NiceCodex index so the sidebar
-	// shows real past threads (names/previews), not just empty local stubs.
-	// useStateDbOnly keeps this fast; a timeout must not block the local index.
-	if response, err := s.callWithTimeout("thread/list", map[string]any{
-		"cwd":            workspace,
-		"limit":          100,
-		"archived":       false,
-		"sortKey":        "updated_at",
-		"sortDirection":  "desc",
-		"useStateDbOnly": true,
-	}, 12*time.Second); err == nil {
-		s.syncCodexThreadsIntoSessions(response, workspace, workMode)
+	// Only Codex owns an app-server thread index. External runtimes use the
+	// NiceCodex session store and must not probe a stopped Codex process during
+	// every runtime/workspace switch (which otherwise adds a long timeout).
+	if normalizeRuntime(settings.ActiveRuntime) == "codex" {
+		// Sync Codex app-server history into the NiceCodex index so the sidebar
+		// shows real past threads (names/previews), not just empty local stubs.
+		// useStateDbOnly keeps this fast; a timeout must not block the local index.
+		if response, err := s.callWithTimeout("thread/list", map[string]any{
+			"cwd":            workspace,
+			"limit":          100,
+			"archived":       false,
+			"sortKey":        "updated_at",
+			"sortDirection":  "desc",
+			"useStateDbOnly": true,
+		}, 12*time.Second); err == nil {
+			s.syncCodexThreadsIntoSessions(response, workspace, workMode)
+		}
 	}
 	return s.listSessionsForWorkspace(workspace, search, workMode), nil
 }
@@ -788,9 +808,30 @@ func (s *AppService) CreateThread() (map[string]any, error) {
 		collaborationMode = "plan"
 	}
 
-	// Codex-only: every workbench session is NiceCodex-owned Codex.
-	// App-server threads are allocated lazily on the first send (BackendRef).
-	record := s.createSessionRecord(workspace, "", "", settings.Model, settings.Effort, collaborationMode, workMode)
+	provider := ""
+	providerID := ""
+	model := settings.Model
+	effort := settings.Effort
+	switch normalizeRuntime(settings.ActiveRuntime) {
+	case "gemini":
+		provider, providerID = "gemini", externalProviderID("gemini")
+		model, effort = settings.GeminiModel, settings.GeminiEffort
+	case "opencode":
+		provider, providerID = "opencode", externalProviderID("opencode")
+		model, effort = settings.OpenCodeModel, settings.OpenCodeEffort
+	}
+	if model == "" || effort == "" {
+		models, efforts := discoverProviderCatalog(provider)
+		if model == "" && len(models) > 0 {
+			model = models[0].Model
+		}
+		if effort == "" && len(efforts) > 0 {
+			effort = efforts[0].Effort
+		}
+	}
+	// App-server threads and external CLI sessions are both allocated lazily on
+	// the first send; the local UUID remains stable for queue/history ownership.
+	record := s.createSessionRecord(workspace, provider, providerID, model, effort, collaborationMode, workMode)
 	s.mu.Lock()
 	s.upsertSessionLocked(record)
 	s.mu.Unlock()
@@ -806,7 +847,8 @@ func (s *AppService) ResumeThread(threadID string) (map[string]any, error) {
 	workspace := settings.Workspace
 	session := s.sessionFor(threadID, workspace)
 	if session != nil && isExternalSession(session) {
-		return nil, errors.New("NiceCodex is Codex-only; create a new Codex session to continue")
+		s.rememberThread(threadID, workspace)
+		return s.sessionResponse(session), nil
 	}
 	// NiceCodex Codex session that has not started an app-server thread yet.
 	if session != nil && session.BackendRef == "" {
@@ -837,7 +879,7 @@ func (s *AppService) ForkThread(threadID string) (map[string]any, error) {
 	}
 	source := s.sessionFor(threadID, workspace)
 	if source != nil && isExternalSession(source) {
-		return nil, errors.New("NiceCodex is Codex-only; create a new Codex session to continue")
+		return s.forkExternalSession(source)
 	}
 	// NiceCodex-owned fork: keep our UUID as the directory id.
 	if source != nil && source.BackendRef == "" {
@@ -909,7 +951,12 @@ func (s *AppService) UnarchiveThread(threadID string) (map[string]any, error) {
 		return nil, errors.New("session not found")
 	}
 	if isExternalSession(session) {
-		return nil, errors.New("NiceCodex is Codex-only; create a new Codex session to continue")
+		restored := s.markSessionUnarchived(threadID)
+		if restored == nil {
+			return nil, errors.New("session not found")
+		}
+		s.rememberThread(restored.ID, workspace)
+		return s.sessionResponse(restored), nil
 	}
 	restored := s.markSessionUnarchived(threadID)
 	if restored == nil {
@@ -966,7 +1013,12 @@ func (s *AppService) SetThreadName(threadID string, name string) (map[string]any
 		return nil, errors.New("session not found")
 	}
 	if isExternalSession(session) {
-		return nil, errors.New("NiceCodex is Codex-only; create a new Codex session to continue")
+		updated := s.renameSession(threadID, name)
+		if updated == nil {
+			return nil, errors.New("session not found")
+		}
+		s.rememberThread(updated.ID, workspace)
+		return s.sessionResponse(updated), nil
 	}
 	updated := s.renameSession(threadID, name)
 	if updated == nil {
@@ -992,7 +1044,8 @@ func (s *AppService) StartReview(request ReviewStartRequest) (map[string]any, er
 	workspace := s.Settings().Workspace
 	session := s.sessionFor(threadID, workspace)
 	if session != nil && isExternalSession(session) {
-		return nil, errors.New("NiceCodex is Codex-only; create a new Codex session to continue")
+		s.rememberThread(threadID, workspace)
+		return s.sessionResponse(session), nil
 	}
 	backendID := s.codexBackendID(threadID, workspace)
 	if backendID == "" || (session != nil && session.BackendRef == "") {
@@ -1488,7 +1541,7 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 
 	session := s.sessionFor(request.ThreadID, workspace)
 	if session != nil && isExternalSession(session) {
-		return nil, errors.New("NiceCodex is Codex-only; create a new Codex session to continue")
+		return s.runExternalTurn(request.ThreadID, session.Provider, workspace, settings, request.Text, request.Images)
 	}
 
 	backendID := request.ThreadID
@@ -2676,70 +2729,74 @@ func defaultSettings() UserSettings {
 			profile = "bash"
 		}
 	}
-		return UserSettings{
-			ActiveRuntime:          "codex",
-			GrokBackend:            "build",
-			GrokBuildModel:         "",
-			GrokAPIModel:           "grok-4.5",
-			GrokAPIKey:             "",
-			GrokAPIBaseURL:         "",
-			GrokEffort:             "high",
-			GrokSandbox:            "workspace-write",
-			GrokApprovalPolicy:     "on-request",
-			GrokWebSearch:          false,
-			GrokXSearch:            false,
-			ClaudeWorkspace:        "",
-			ClaudeRecentWorkspaces: []string{},
-			ClaudeModel:            "sonnet",
-			ClaudeEffort:           "high",
-			ClaudeSandbox:          "workspace-write",
-			ClaudeApprovalPolicy:   "on-request",
-			ClaudePermissionMode:   "acceptEdits",
-		Model:                defaultCodexModel,
-		Effort:               "high",
-		CollaborationMode:    "default",
-		Personality:          "pragmatic",
-		MultiAgentMode:       "explicitRequestOnly",
-		Sandbox:              "workspace-write",
-		ApprovalPolicy:       "on-request",
-		Theme:                "light",
-		AccentColor:          "codex",
-		FontFamily:           "system",
-		TerminalProfile:      profile,
-		Language:             "zh-CN",
-		AutoConnect:          true,
-		WorkMode:             "code",
-		SendWithModifier:      false,
-		FollowUpBehavior:     "queue",
-		NotifyOnTurnComplete: true,
-		CustomInstructions:   "",
-		TranslucentSidebar:   true,
-		HighContrast:         false,
-		PointerCursor:        false,
-		ReduceMotion:         false,
-		UiFontSize:           "md",
-		CodeFontSize:         "md",
+	return UserSettings{
+		ActiveRuntime:            "codex",
+		GrokBackend:              "build",
+		GrokBuildModel:           "",
+		GrokAPIModel:             "grok-4.5",
+		GrokAPIKey:               "",
+		GrokAPIBaseURL:           "",
+		GrokEffort:               "high",
+		GrokSandbox:              "workspace-write",
+		GrokApprovalPolicy:       "on-request",
+		GrokWebSearch:            false,
+		GrokXSearch:              false,
+		ClaudeWorkspace:          "",
+		ClaudeRecentWorkspaces:   []string{},
+		ClaudeModel:              "sonnet",
+		ClaudeEffort:             "high",
+		ClaudeSandbox:            "workspace-write",
+		ClaudeApprovalPolicy:     "on-request",
+		ClaudePermissionMode:     "acceptEdits",
+		GeminiModel:              "gemini-2.5-pro",
+		GeminiEffort:             "auto",
+		OpenCodeModel:            "anthropic/claude-sonnet-4-6",
+		OpenCodeEffort:           "high",
+		Model:                    defaultCodexModel,
+		Effort:                   "high",
+		CollaborationMode:        "default",
+		Personality:              "pragmatic",
+		MultiAgentMode:           "explicitRequestOnly",
+		Sandbox:                  "workspace-write",
+		ApprovalPolicy:           "on-request",
+		Theme:                    "light",
+		AccentColor:              "codex",
+		FontFamily:               "system",
+		TerminalProfile:          profile,
+		Language:                 "zh-CN",
+		AutoConnect:              true,
+		WorkMode:                 "code",
+		SendWithModifier:         false,
+		FollowUpBehavior:         "queue",
+		NotifyOnTurnComplete:     true,
+		CustomInstructions:       "",
+		TranslucentSidebar:       true,
+		HighContrast:             false,
+		PointerCursor:            false,
+		ReduceMotion:             false,
+		UiFontSize:               "md",
+		CodeFontSize:             "md",
 		PreventSleepWhileRunning: false,
-		AlwaysOnTop:          false,
-		GitBranchPrefix:      "",
-		GitCommitPrefix:      "",
-		GitOpenPRAfterPush:   false,
-		GitPRBodyTemplate:    "",
-		BrowserAllowedHosts:  []string{},
-		BrowserBlockedHosts:  []string{},
-		BrowserDownloadDir:   "",
-		BrowserFullCDP:       false,
-		ShortcutCommandPalette: "Ctrl+K",
-		ShortcutNewThread:      "Ctrl+N",
-		ShortcutTerminal:       "Ctrl+`",
-		ShortcutBrowser:        "Ctrl+Shift+B",
+		AlwaysOnTop:              false,
+		GitBranchPrefix:          "",
+		GitCommitPrefix:          "",
+		GitOpenPRAfterPush:       false,
+		GitPRBodyTemplate:        "",
+		BrowserAllowedHosts:      []string{},
+		BrowserBlockedHosts:      []string{},
+		BrowserDownloadDir:       "",
+		BrowserFullCDP:           false,
+		ShortcutCommandPalette:   "Ctrl+K",
+		ShortcutNewThread:        "Ctrl+N",
+		ShortcutTerminal:         "Ctrl+`",
+		ShortcutBrowser:          "Ctrl+Shift+B",
 		// Empty = use official Codex Desktop defaults at handshake time.
-		CodexClientName:        "",
-		CodexClientTitle:       "",
-		CodexClientVersion:     "",
-		OnboardingCompleted:    false,
-			RecentWorkspaces:     []string{},
-			GrokRecentWorkspaces: []string{},
+		CodexClientName:      "",
+		CodexClientTitle:     "",
+		CodexClientVersion:   "",
+		OnboardingCompleted:  false,
+		RecentWorkspaces:     []string{},
+		GrokRecentWorkspaces: []string{},
 		CustomModels:         []string{},
 	}
 }
@@ -2804,6 +2861,15 @@ func readSettings(path string) (UserSettings, error) {
 	settings.ClaudeRecentWorkspaces = sanitizeRecentWorkspaces(settings.ClaudeRecentWorkspaces)
 	settings.ClaudeModel = sanitizeShortText(settings.ClaudeModel, 160)
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
+	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
+	if settings.GeminiEffort == "" {
+		settings.GeminiEffort = "auto"
+	}
+	settings.OpenCodeModel = sanitizeShortText(settings.OpenCodeModel, 160)
+	settings.OpenCodeEffort = sanitizeShortText(settings.OpenCodeEffort, 32)
+	if settings.OpenCodeEffort == "" {
+		settings.OpenCodeEffort = "high"
+	}
 	if !isAllowed(settings.ClaudeSandbox, "read-only", "workspace-write", "danger-full-access") {
 		settings.ClaudeSandbox = "workspace-write"
 	}
@@ -3795,6 +3861,8 @@ func providerKind(name string) string {
 		return "gemini"
 	case strings.Contains(value, "grok") || strings.Contains(value, "xai"):
 		return "grok"
+	case strings.Contains(value, "opencode"):
+		return "opencode"
 	default:
 		return "custom"
 	}

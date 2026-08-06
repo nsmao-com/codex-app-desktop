@@ -111,6 +111,10 @@ func normalizeRuntime(value string) string {
 		return "grok"
 	case "claude":
 		return "claude"
+	case "gemini":
+		return "gemini"
+	case "opencode", "open-code":
+		return "opencode"
 	default:
 		return "codex"
 	}

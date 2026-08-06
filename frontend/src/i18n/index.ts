@@ -313,6 +313,8 @@ const messages = {
       runtimeCodex: '切换到 Codex',
       runtimeClaude: '切换到 Claude',
       runtimeGrok: '切换到 Grok',
+      runtimeGemini: '切换到 Gemini',
+      runtimeOpenCode: '切换到 OpenCode',
       runtimeSwitchFailed: '切换运行时失败',
       claudeEmpty: 'Claude Code',
       claudeEmptyHint: '还没有 Claude 会话。新建任务后，将使用本机 Claude Code CLI 回复。',

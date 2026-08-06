@@ -13,6 +13,7 @@ import OnboardingView from '@/views/OnboardingView.vue'
 import { Toaster } from '@/components/ui/sonner'
 import { useNavigationHistory } from '@/composables/useNavigationHistory'
 import { useAppStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useTerminalStore, useWorkspaceStore } from '@/stores'
+import type { WorkspaceRuntime } from '@/stores/app'
 
 const appStore = useAppStore()
 const codexStore = useCodexStore()
@@ -25,7 +26,7 @@ const commandPaletteOpen = shallowRef(false)
 const memoriesOpen = shallowRef(false)
 let runtimeSwitchReady = false
 let runtimeActivationSequence = 0
-let bootstrapActivationRuntime: 'codex' | 'claude' | 'grok' | null = null
+let bootstrapActivationRuntime: WorkspaceRuntime | null = null
 let bootstrapActivationCompleted = false
 
 useNavigationHistory()
@@ -51,7 +52,7 @@ function openMemoriesDialog(): void {
   memoriesOpen.value = true
 }
 
-async function activateRuntime(runtime: 'codex' | 'claude' | 'grok'): Promise<void> {
+async function activateRuntime(runtime: WorkspaceRuntime): Promise<void> {
   const sequence = ++runtimeActivationSequence
   if (!await appStore.ensureActiveRuntimeSynced(runtime)) return
   await workspaceStore.hydrateActiveRuntimeWorkspace()
@@ -64,7 +65,20 @@ async function activateRuntime(runtime: 'codex' | 'claude' | 'grok'): Promise<vo
     await claudeStore.enterRuntime()
     return
   }
-  await codexStore.loadThreads()
+  // Gemini/OpenCode share Codex's event bridge and timeline/FIFO store, but do
+  // not require a Codex app-server connection.
+  if (runtime === 'gemini' || runtime === 'opencode') {
+    await Promise.all([
+      codexStore.loadModels(),
+      codexStore.loadThreads(),
+    ])
+    return
+  }
+  await Promise.all([
+    codexStore.loadModels(),
+    codexStore.loadModelProviders(),
+    codexStore.loadThreads(),
+  ])
   if (
     !codexStore.isReady
     && appStore.settings.workspace
@@ -81,8 +95,6 @@ onMounted(() => {
   claudeStore.bootstrapEvents()
   void appStore.bootstrap().then(async () => {
     if (appStore.workspace) workspaceStore.hydrateWorkspace(appStore.workspace)
-    void codexStore.loadModels()
-    void codexStore.loadModelProviders()
     bootstrapActivationRuntime = appStore.activeRuntime
     await activateRuntime(bootstrapActivationRuntime)
     bootstrapActivationCompleted = true
@@ -163,6 +175,10 @@ function onGlobalKeydown(event: KeyboardEvent): void {
     }
     if (appStore.isClaudeMode) {
       claudeStore.newSession()
+      return
+    }
+    if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
+      void codexStore.newThread()
       return
     }
     if (codexStore.isReady) void codexStore.newThread()

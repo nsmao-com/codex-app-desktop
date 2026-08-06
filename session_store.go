@@ -13,29 +13,29 @@ import (
 // Codex app-server thread ids (when allocated) are stored only in BackendRef.
 // External CLI sessions also use BackendRef for the provider session id.
 type SessionRecord struct {
-	ID                string         `json:"id"`
-	Workspace         string         `json:"workspace"`
-	Provider          string         `json:"provider"`   // "", "claude", "gemini", "grok", or custom codex provider id
-	ProviderID        string         `json:"providerId"` // "", "__claude__", "__gemini__", "__grok__", or custom id
-	BackendRef        string         `json:"backendRef"` // Codex threadId or CLI session id
-	Model             string         `json:"model"`
-	Effort            string         `json:"effort"`
-	CollaborationMode string         `json:"collaborationMode"`
+	ID                string `json:"id"`
+	Workspace         string `json:"workspace"`
+	Provider          string `json:"provider"`   // "", "claude", "gemini", "grok", or custom codex provider id
+	ProviderID        string `json:"providerId"` // "", "__claude__", "__gemini__", "__grok__", or custom id
+	BackendRef        string `json:"backendRef"` // Codex threadId or CLI session id
+	Model             string `json:"model"`
+	Effort            string `json:"effort"`
+	CollaborationMode string `json:"collaborationMode"`
 	// HadPlan is set once the session enters Plan; used to force a Default reset.
 	HadPlan bool `json:"hadPlan,omitempty"`
 	// CollabResetNonce bumps on each Plan→Default toggle so core emits a fresh
 	// collaboration_mode developer message (equality-gated in Codex core).
-	CollabResetNonce int `json:"collabResetNonce,omitempty"`
+	CollabResetNonce int    `json:"collabResetNonce,omitempty"`
 	WorkMode         string `json:"workMode"` // code | cowork
-	Name              string         `json:"name"`
-	Preview           string         `json:"preview"`
-	CreatedAt         int64          `json:"createdAt"`
-	UpdatedAt         int64          `json:"updatedAt"`
-	Archived          bool           `json:"archived"`
+	Name             string `json:"name"`
+	Preview          string `json:"preview"`
+	CreatedAt        int64  `json:"createdAt"`
+	UpdatedAt        int64  `json:"updatedAt"`
+	Archived         bool   `json:"archived"`
 	// Per-chat memory overrides (nil = inherit global config.toml settings).
-	UseMemories       *bool          `json:"useMemories,omitempty"`
-	GenerateMemories  *bool          `json:"generateMemories,omitempty"`
-	Turns             []externalTurn `json:"turns,omitempty"`
+	UseMemories      *bool          `json:"useMemories,omitempty"`
+	GenerateMemories *bool          `json:"generateMemories,omitempty"`
+	Turns            []externalTurn `json:"turns,omitempty"`
 }
 
 func sessionsPath(settingsPath string) string {
@@ -245,7 +245,7 @@ func isExternalSession(record *SessionRecord) bool {
 	if record == nil {
 		return false
 	}
-	return externalProviderKind(record.ProviderID) != "" || record.Provider == "claude" || record.Provider == "gemini" || record.Provider == "grok"
+	return externalProviderKind(record.ProviderID) != "" || record.Provider == "claude" || record.Provider == "gemini" || record.Provider == "grok" || record.Provider == "opencode"
 }
 
 func (s *AppService) sessionThreadMap(record *SessionRecord, includeTurns bool) map[string]any {

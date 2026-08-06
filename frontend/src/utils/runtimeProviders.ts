@@ -46,7 +46,7 @@ export function cleanModelDisplayName(model: string, displayName = ''): string {
     const first = parts[0] || model
     const last = parts[parts.length - 1] || model
     const firstOpenAI = /^(gpt|o\d|codex|sol)/i.test(first)
-    const lastOther = /(claude|gemini|grok|sonnet|opus|haiku|fable)/i.test(last)
+  const lastOther = /(claude|gemini|grok|opencode|sonnet|opus|haiku|fable)/i.test(last)
     cleaned = firstOpenAI && lastOther ? first : first
   }
   return formatModelLabel(cleaned)
@@ -86,7 +86,7 @@ function looksLikeOpenAI(text: string): boolean {
 }
 
 function looksLikeOtherRuntime(text: string): boolean {
-  return /\b(claude|anthropic|gemini|grok)\b/.test(text)
+  return /\b(claude|anthropic|gemini|grok|opencode)\b/.test(text)
     || /\b(sonnet|opus|haiku|fable)(-\d|\b)/.test(text)
     || /^(sonnet|opus|haiku|fable)$/.test(text)
 }

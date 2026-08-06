@@ -22,7 +22,6 @@ import {
   Search,
   Settings,
   SlidersHorizontal,
-  Sparkles,
   Trash2,
   X,
 } from '@lucide/vue'
@@ -33,6 +32,8 @@ import { useI18n } from 'vue-i18n'
 
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import GrokIcon from '@/components/icons/GrokIcon.vue'
+import GeminiIcon from '@/components/icons/GeminiIcon.vue'
+import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
 import OpenAIIcon from '@/components/icons/OpenAIIcon.vue'
 import { springPanel, springSnappy } from '@/lib/motion'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -122,7 +123,7 @@ watch(usagePopoverOpen, (open) => {
   if (!open) return
   usageLoading.value = true
   // Grok/Claude: local usage.json only. Codex may also seed from cloud after auth.
-  const localOnly = appStore.isGrokMode || appStore.isClaudeMode || !appStore.account.authenticated
+  const localOnly = !appStore.isCodexMode || !appStore.account.authenticated
   const refresh = localOnly
     ? appStore.loadLocalUsage()
     : appStore.refreshAccountData()
@@ -195,6 +196,7 @@ const threadCount = computed(() => {
 const groups = computed(() => codexStore.filteredThreadGroups)
 const grokGroups = computed(() => grokStore.sessionGroups)
 const claudeGroups = computed(() => claudeStore.sessionGroups)
+const usesCodexTimeline = computed(() => appStore.isCodexMode || appStore.isGeminiMode || appStore.isOpenCodeMode)
 const creatingInProject = shallowRef('')
 const renamingThreadId = shallowRef('')
 const renameDraft = shallowRef('')
@@ -227,7 +229,7 @@ function openCapabilities(): void {
 }
 
 async function setWorkMode(mode: 'code' | 'cowork'): Promise<void> {
-  if (appStore.isGrokMode) return
+  if (!appStore.isCodexMode) return
   if (appStore.settings.workMode === mode) return
   const previous = { ...appStore.settings }
   const next = {
@@ -247,13 +249,14 @@ async function setWorkMode(mode: 'code' | 'cowork'): Promise<void> {
   }
 }
 
-async function setActiveRuntime(runtime: 'codex' | 'claude' | 'grok'): Promise<void> {
+async function setActiveRuntime(runtime: WorkspaceRuntime): Promise<void> {
   if (appStore.activeRuntime === runtime) return
   // Only flip the flag here. App.vue watch defers hydrate/load so the tab animation isn't blocked.
   await appStore.setActiveRuntime(runtime)
 }
 
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
+const activeExternalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
 
 const recentWorkspacePaths = computed(() => {
   let paths: string[]
@@ -274,6 +277,8 @@ const recentWorkspacePaths = computed(() => {
 function runtimeSlideX(): string {
   if (appStore.isClaudeMode) return '100%'
   if (appStore.isGrokMode) return '200%'
+  if (appStore.isGeminiMode) return '300%'
+  if (appStore.isOpenCodeMode) return '400%'
   return '0%'
 }
 
@@ -495,8 +500,9 @@ function togglePin(thread: ThreadSummary, event?: Event): void {
 
 function providerIcon(thread: ThreadSummary): Component {
   const provider = `${thread.modelProvider} ${thread.model}`.toLocaleLowerCase()
+  if (provider.includes('opencode')) return OpenCodeIcon
+  if (provider.includes('google') || provider.includes('gemini')) return GeminiIcon
   if (provider.includes('anthropic') || provider.includes('claude')) return Bot
-  if (provider.includes('google') || provider.includes('gemini')) return Sparkles
   if (provider.includes('xai') || provider.includes('grok')) return Blocks
   return OpenAIIcon
 }
@@ -743,20 +749,20 @@ function formatGrokUpdated(value?: number | null): string {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <!-- Product runtime: Codex · Claude · Grok
-           Pill width/travel must use equal thirds of (100% - horizontal padding).
-           Using gap + calc(33.333%-2px) left a visible right inset on the last tab. -->
-      <div class="relative grid grid-cols-3 rounded-lg bg-foreground/[0.08] p-0.5 ring-1 ring-foreground/[0.06] dark:bg-white/10 dark:ring-white/10">
+      <!-- Product runtime tabs stay icon-first so all five providers remain
+           reachable without shrinking the hit targets. -->
+      <TooltipProvider>
+      <div class="relative grid grid-cols-5 rounded-lg bg-foreground/[0.08] p-0.5 ring-1 ring-foreground/[0.06] dark:bg-white/10 dark:ring-white/10">
         <Motion
-          class="pointer-events-none absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/3)] rounded-md bg-background shadow-sm dark:bg-card"
+          class="pointer-events-none absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/5)] rounded-md bg-background shadow-sm dark:bg-card"
           :initial="false"
           :animate="{ x: runtimeSlideX() }"
           :transition="springSnappy"
         />
-        <Button
+        <Tooltip><TooltipTrigger as-child><Button
           variant="ghost"
           size="sm"
-          class="relative z-[1] h-8 gap-1 rounded-md px-1 text-[10px] hover:bg-transparent sm:text-[11px]"
+          class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
           :class="appStore.isCodexMode
             ? 'font-medium text-foreground'
             : 'text-muted-foreground hover:text-foreground'"
@@ -764,12 +770,11 @@ function formatGrokUpdated(value?: number | null): string {
           @click="void setActiveRuntime('codex')"
         >
           <OpenAIIcon :size="13" class="shrink-0 opacity-90" />
-          <span class="truncate">Codex</span>
-        </Button>
-        <Button
+        </Button></TooltipTrigger><TooltipContent side="bottom">Codex</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger as-child><Button
           variant="ghost"
           size="sm"
-          class="relative z-[1] h-8 gap-1 rounded-md px-1 text-[10px] hover:bg-transparent sm:text-[11px]"
+          class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
           :class="appStore.isClaudeMode
             ? 'font-medium text-foreground'
             : 'text-muted-foreground hover:text-foreground'"
@@ -777,12 +782,11 @@ function formatGrokUpdated(value?: number | null): string {
           @click="void setActiveRuntime('claude')"
         >
           <ClaudeIcon :size="13" class="shrink-0 opacity-90" />
-          <span class="truncate">Claude</span>
-        </Button>
-        <Button
+        </Button></TooltipTrigger><TooltipContent side="bottom">Claude</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger as-child><Button
           variant="ghost"
           size="sm"
-          class="relative z-[1] h-8 gap-1 rounded-md px-1 text-[10px] hover:bg-transparent sm:text-[11px]"
+          class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
           :class="appStore.isGrokMode
             ? 'font-medium text-foreground'
             : 'text-muted-foreground hover:text-foreground'"
@@ -790,9 +794,29 @@ function formatGrokUpdated(value?: number | null): string {
           @click="void setActiveRuntime('grok')"
         >
           <GrokIcon :size="13" class="shrink-0 opacity-90" />
-          <span class="truncate">Grok</span>
-        </Button>
+        </Button></TooltipTrigger><TooltipContent side="bottom">Grok</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger as-child><Button
+          variant="ghost"
+          size="sm"
+          class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
+          :class="appStore.isGeminiMode ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
+          aria-label="Gemini"
+          @click="void setActiveRuntime('gemini')"
+        >
+          <GeminiIcon :size="13" class="shrink-0 opacity-90" />
+        </Button></TooltipTrigger><TooltipContent side="bottom">Gemini</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger as-child><Button
+          variant="ghost"
+          size="sm"
+          class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
+          :class="appStore.isOpenCodeMode ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
+          aria-label="OpenCode"
+          @click="void setActiveRuntime('opencode')"
+        >
+          <OpenCodeIcon :size="13" class="shrink-0 opacity-90" />
+        </Button></TooltipTrigger><TooltipContent side="bottom">OpenCode</TooltipContent></Tooltip>
       </div>
+      </TooltipProvider>
 
       <!-- Codex-only work mode (code / writing) — same equal-track math as runtime tabs. -->
       <div
@@ -849,9 +873,9 @@ function formatGrokUpdated(value?: number | null): string {
               ? claudeStore.newSession()
               : void codexStore.newThread()"
         >
-          <LoaderCircle v-if="appStore.isCodexMode && codexStore.creatingThread" :size="14" class="mr-1.5 animate-spin" />
+          <LoaderCircle v-if="usesCodexTimeline && codexStore.creatingThread" :size="14" class="mr-1.5 animate-spin" />
           <Plus v-else :size="14" class="mr-1.5" />
-          {{ appStore.isCodexMode && codexStore.creatingThread ? t('common.loading') : t('sidebar.newTask') }}
+          {{ usesCodexTimeline && codexStore.creatingThread ? t('common.loading') : t('sidebar.newTask') }}
         </Button>
       </Motion>
 
@@ -1123,7 +1147,7 @@ function formatGrokUpdated(value?: number | null): string {
         </template>
 
         <Collapsible
-          v-for="group in appStore.isCodexMode ? groups : []"
+          v-for="group in usesCodexTimeline ? groups : []"
           :key="group.path"
           :open="!isGroupCollapsed(group)"
           @update:open="(open) => setGroupCollapsed(group, !open)"
@@ -1622,14 +1646,16 @@ function formatGrokUpdated(value?: number | null): string {
         </template>
 
         <div
-          v-if="appStore.isCodexMode && groups.length === 0"
+          v-if="usesCodexTimeline && groups.length === 0"
           class="flex flex-col items-center gap-2 px-4 py-10 text-center text-[11px] text-muted-foreground"
         >
           <div class="grid size-10 place-items-center rounded-full bg-muted/60">
-            <MessageSquareText :size="16" class="opacity-70" />
+            <GeminiIcon v-if="appStore.isGeminiMode" :size="16" class="opacity-70" />
+            <OpenCodeIcon v-else-if="appStore.isOpenCodeMode" :size="16" class="opacity-70" />
+            <MessageSquareText v-else :size="16" class="opacity-70" />
           </div>
           <p>{{ search ? t('sidebar.noSearchResults') : t('sidebar.firstTask') }}</p>
-          <p v-if="!search" class="max-w-[200px] text-[10px] leading-4 text-muted-foreground/80">
+          <p v-if="!search && appStore.isCodexMode" class="max-w-[200px] text-[10px] leading-4 text-muted-foreground/80">
             {{
               appStore.settings.workMode === 'cowork'
                 ? t('sidebar.switchToCodeHint')
@@ -1637,7 +1663,7 @@ function formatGrokUpdated(value?: number | null): string {
             }}
           </p>
           <Button
-            v-if="!search"
+            v-if="!search && appStore.isCodexMode"
             type="button"
             variant="outline"
             class="h-7 rounded-md px-2.5 text-[11px]"
@@ -1893,6 +1919,23 @@ function formatGrokUpdated(value?: number | null): string {
               </div>
             </PopoverContent>
           </Popover>
+        </div>
+        <div
+          v-else-if="appStore.isGeminiMode || appStore.isOpenCodeMode"
+          class="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1"
+        >
+          <span class="grid size-6 shrink-0 place-items-center rounded-full border border-border/60 bg-panel/80">
+            <GeminiIcon v-if="appStore.isGeminiMode" :size="13" class="opacity-80" />
+            <OpenCodeIcon v-else :size="13" class="opacity-80" />
+          </span>
+          <div class="min-w-0 flex-1">
+            <p class="truncate text-[11px] font-medium">{{ appStore.isGeminiMode ? 'Gemini CLI' : 'OpenCode' }}</p>
+            <p class="truncate text-[9px] text-muted-foreground">
+              {{ activeExternalProvider?.runtimeReady
+                ? (activeExternalProvider.version || t('settings.runtimeReady'))
+                : t('settings.runtimeMissing') }}
+            </p>
+          </div>
         </div>
         <Button
           v-else-if="!appStore.account.authenticated"
