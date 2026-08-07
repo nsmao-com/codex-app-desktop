@@ -19,6 +19,7 @@ import (
 )
 
 var windowsProviderShimTargetPattern = regexp.MustCompile(`(?i)%(?:dp0%|~dp0)[\\/]+([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
+var windowsPowerShellShimTargetPattern = regexp.MustCompile(`(?i)\$basedir[\\/]+([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
 
 const providerProbeCacheTTL = 30 * time.Second
 
@@ -1008,9 +1009,17 @@ func knownCLIRoots() []string {
 	if local := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); local != "" {
 		roots = append(roots,
 			filepath.Join(local, "Programs"),
+			filepath.Join(local, "Programs", "nodejs"),
 			filepath.Join(local, "pnpm"),
 			filepath.Join(local, "Yarn", "bin"),
 		)
+	}
+	// A Wails process launched from Explorer does not inherit the interactive
+	// shell PATH. Node's MSI installer places node.exe here by default.
+	for _, programFiles := range []string{os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)")} {
+		if strings.TrimSpace(programFiles) != "" {
+			roots = append(roots, filepath.Join(programFiles, "nodejs"))
+		}
 	}
 	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
 		roots = append(roots, filepath.Join(appData, "npm"))
@@ -1036,7 +1045,7 @@ func findCommand(candidates []string) string {
 	codex.EnrichPathForLookups()
 	for _, candidate := range candidates {
 		path, err := exec.LookPath(candidate)
-		if err == nil {
+		if err == nil && usableCommandPath(path) {
 			absolute, absoluteErr := filepath.Abs(path)
 			if absoluteErr == nil {
 				return absolute
@@ -1049,7 +1058,7 @@ func findCommand(candidates []string) string {
 		for _, candidate := range candidates {
 			full := filepath.Join(root, candidate)
 			info, err := os.Stat(full)
-			if err != nil || info.IsDir() {
+			if err != nil || info.IsDir() || !usableCommandPath(full) {
 				continue
 			}
 			// Unix: require executable bit when present.
@@ -1064,6 +1073,57 @@ func findCommand(candidates []string) string {
 		}
 	}
 	return ""
+}
+
+func usableCommandPath(path string) bool {
+	if runtime.GOOS != "windows" {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".exe" || ext == "" {
+		return isWindowsExecutable(path)
+	}
+	if ext != ".cmd" && ext != ".bat" && ext != ".ps1" {
+		return true
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	pattern := windowsProviderShimTargetPattern
+	if ext == ".ps1" {
+		pattern = windowsPowerShellShimTargetPattern
+	}
+	matches := pattern.FindAllSubmatch(content, -1)
+	for index := len(matches) - 1; index >= 0; index-- {
+		if len(matches[index]) < 2 {
+			continue
+		}
+		relative := filepath.FromSlash(strings.ReplaceAll(string(matches[index][1]), `\`, "/"))
+		target := filepath.Clean(filepath.Join(filepath.Dir(path), relative))
+		if strings.EqualFold(filepath.Ext(target), ".exe") {
+			return isWindowsExecutable(target)
+		}
+		if info, statErr := os.Stat(target); statErr == nil && !info.IsDir() {
+			return true
+		}
+	}
+	// Non-package-manager batch/PowerShell scripts may not contain a relative
+	// target. Keep supporting them and let the normal probe report any error.
+	return len(matches) == 0
+}
+
+func isWindowsExecutable(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	var header [2]byte
+	if _, err := file.Read(header[:]); err != nil {
+		return false
+	}
+	return header[0] == 'M' && header[1] == 'Z'
 }
 
 func runProbeCommand(executable string, args []string, timeout time.Duration) (string, error) {

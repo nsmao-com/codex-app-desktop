@@ -32,6 +32,9 @@ type SessionRecord struct {
 	CreatedAt        int64  `json:"createdAt"`
 	UpdatedAt        int64  `json:"updatedAt"`
 	Archived         bool   `json:"archived"`
+	// Native marks a session imported from the provider's own history store.
+	// Its turns are read lazily from that store and are never duplicated into sessions.json.
+	Native bool `json:"native,omitempty"`
 	// Per-chat memory overrides (nil = inherit global config.toml settings).
 	UseMemories      *bool          `json:"useMemories,omitempty"`
 	GenerateMemories *bool          `json:"generateMemories,omitempty"`
@@ -310,4 +313,81 @@ func (s *AppService) sessionResponse(record *SessionRecord) map[string]any {
 		"modelProvider": providerID,
 		"workMode":      normalizeWorkMode(record.WorkMode),
 	}
+}
+
+// externalTurnPage maps only the requested page. External sessions can contain
+// thousands of turns; converting every persisted turn before slicing the page
+// makes switching sessions unnecessarily expensive.
+func externalTurnPage(turns []externalTurn, before int) map[string]any {
+	total := len(turns)
+	end := before
+	if end < 0 || end > total {
+		end = total
+	}
+	if end < 0 {
+		end = 0
+	}
+	start := end - conversationHistoryPageTurns
+	if start < 0 {
+		start = 0
+	}
+	page := make([]any, 0, end-start)
+	for _, turn := range turns[start:end] {
+		page = append(page, externalTurnMap(turn))
+	}
+	return map[string]any{
+		"turns":             page,
+		"historyStart":      start,
+		"historyTotal":      total,
+		"historyTurnOffset": start,
+		"hasEarlier":        start > 0,
+	}
+}
+
+func (s *AppService) externalSessionResponsePage(record *SessionRecord, before int) map[string]any {
+	providerID := record.ProviderID
+	if providerID == "" {
+		providerID = externalProviderID(record.Provider)
+	}
+	thread := s.sessionThreadMap(record, false)
+	page := externalTurnPage(record.Turns, before)
+	thread["turns"] = page["turns"]
+	return map[string]any{
+		"thread":            thread,
+		"model":             record.Model,
+		"modelProvider":     providerID,
+		"workMode":          normalizeWorkMode(record.WorkMode),
+		"historyStart":      page["historyStart"],
+		"historyTotal":      page["historyTotal"],
+		"historyTurnOffset": page["historyTurnOffset"],
+		"hasEarlier":        page["hasEarlier"],
+	}
+}
+
+func (s *AppService) nativeExternalSessionResponsePage(record *SessionRecord, page externalNativeHistoryPage) map[string]any {
+	providerID := record.ProviderID
+	if providerID == "" {
+		providerID = externalProviderID(record.Provider)
+	}
+	thread := s.sessionThreadMap(record, false)
+	turns := nativeExternalTurnMaps(page.Turns)
+	thread["turns"] = turns
+	return map[string]any{
+		"thread":            thread,
+		"model":             record.Model,
+		"modelProvider":     providerID,
+		"workMode":          normalizeWorkMode(record.WorkMode),
+		"historyStart":      page.Start,
+		"historyTotal":      page.Total,
+		"historyTurnOffset": page.Start,
+		"hasEarlier":        page.Start > 0,
+	}
+}
+
+func nativeExternalTurnMaps(turns []externalTurn) []any {
+	result := make([]any, 0, len(turns))
+	for _, turn := range turns {
+		result = append(result, externalTurnMap(turn))
+	}
+	return result
 }

@@ -33,15 +33,19 @@ type externalThreadRecord struct {
 }
 
 type externalTurn struct {
-	ID          string   `json:"id"`
-	UserText    string   `json:"userText"`
-	Images      []string `json:"images"`
-	AgentText   string   `json:"agentText"`
-	Status      string   `json:"status"`
-	Error       string   `json:"error,omitempty"`
-	StartedAt   int64    `json:"startedAt"`
-	CompletedAt int64    `json:"completedAt"`
-	DurationMS  int64    `json:"durationMs"`
+	ID        string   `json:"id"`
+	UserText  string   `json:"userText"`
+	Images    []string `json:"images"`
+	AgentText string   `json:"agentText"`
+	// Items preserves the provider event order (assistant text segments and
+	// tools). Older sessions omit this field and continue to render AgentText.
+	Items       []map[string]any `json:"items,omitempty"`
+	Status      string           `json:"status"`
+	Error       string           `json:"error,omitempty"`
+	StartedAt   int64            `json:"startedAt"`
+	CompletedAt int64            `json:"completedAt"`
+	DurationMS  int64            `json:"durationMs"`
+	Usage       map[string]any   `json:"usage,omitempty"`
 }
 
 type externalRun struct {
@@ -157,6 +161,12 @@ func (s *AppService) syncCodexThreadsIntoSessions(response map[string]any, works
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	changed := false
+	pendingAllocation := false
+	if pending := s.sessions[s.pendingCodexSessionID]; pending != nil &&
+		!pending.Archived && !isExternalSession(pending) &&
+		samePath(pending.Workspace, workspace) && strings.TrimSpace(pending.BackendRef) == "" {
+		pendingAllocation = true
+	}
 
 	// Prefer NiceCodex-owned UUID sessions (id != backendRef) over raw Codex-id mirrors.
 	findByBackend := func(backendID string) *SessionRecord {
@@ -213,6 +223,13 @@ func (s *AppService) syncCodexThreadsIntoSessions(response map[string]any, works
 		}
 		existing := findByBackend(id)
 		if existing == nil {
+			// thread/list can race the first thread/start before its backend id is
+			// written to the NiceCodex UUID. Importing a raw Codex-id mirror in that
+			// window creates two sidebar rows for one conversation. The allocation
+			// response/event will bind the UUID; a later list refresh can then update it.
+			if pendingAllocation {
+				continue
+			}
 			// Imported Codex history defaults to code mode so Cowork tab sync
 			// does not permanently hide sessions under the wrong work mode.
 			s.sessions[id] = &SessionRecord{
@@ -451,18 +468,40 @@ func externalTurnMap(turn externalTurn) map[string]any {
 	for _, path := range turn.Images {
 		content = append(content, map[string]any{"type": "localImage", "path": path})
 	}
-	items := []any{
-		map[string]any{"id": turn.ID + ":user", "type": "userMessage", "status": "completed", "content": content},
-		map[string]any{"id": turn.ID + ":agent", "type": "agentMessage", "status": turn.Status, "text": turn.AgentText},
+	items := []any{map[string]any{"id": turn.ID + ":user", "type": "userMessage", "status": "completed", "content": content}}
+	if len(turn.Items) > 0 {
+		for _, item := range turn.Items {
+			if item == nil {
+				continue
+			}
+			items = append(items, cloneExternalTimelineItem(item, turn.Status))
+		}
+	}
+	if len(items) == 1 {
+		items = append(items, map[string]any{"id": turn.ID + ":agent", "type": "agentMessage", "status": turn.Status, "text": turn.AgentText})
 	}
 	result := map[string]any{
 		"id": turn.ID, "status": turn.Status, "items": items,
 		"startedAt": turn.StartedAt, "completedAt": turn.CompletedAt, "durationMs": turn.DurationMS,
 	}
+	if len(turn.Usage) > 0 {
+		result["usage"] = turn.Usage
+	}
 	if turn.Error != "" {
 		result["error"] = map[string]any{"message": turn.Error}
 	}
 	return result
+}
+
+func cloneExternalTimelineItem(item map[string]any, turnStatus string) map[string]any {
+	clone := make(map[string]any, len(item)+1)
+	for key, value := range item {
+		clone[key] = value
+	}
+	if strings.TrimSpace(firstMapString(clone, "status")) == "" {
+		clone["status"] = turnStatus
+	}
+	return clone
 }
 
 func (s *AppService) runExternalTurn(threadID, provider, workspace string, settings UserSettings, text string, images []string) (map[string]any, error) {
@@ -475,6 +514,16 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	}
 	// Prefer session-locked model/effort over global defaults.
 	turnSettings := settings
+	switch provider {
+	case "claude":
+		turnSettings.Model, turnSettings.Effort = settings.ClaudeModel, settings.ClaudeEffort
+	case "gemini":
+		turnSettings.Model, turnSettings.Effort = settings.GeminiModel, settings.GeminiEffort
+	case "grok":
+		turnSettings.Model, turnSettings.Effort = settings.GrokBuildModel, settings.GrokEffort
+	case "opencode":
+		turnSettings.Model, turnSettings.Effort = settings.OpenCodeModel, settings.OpenCodeEffort
+	}
 	if record.Model != "" {
 		turnSettings.Model = record.Model
 	}
@@ -482,12 +531,13 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		turnSettings.Effort = record.Effort
 	}
 	turnID := "external-turn-" + newUUID()
-	itemID := turnID + ":agent"
 	started := time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
-	if prev := s.externalRuns[threadID]; prev != nil && prev.cancel != nil {
-		prev.cancel()
+	if s.externalRuns[threadID] != nil {
+		s.mu.Unlock()
+		cancel()
+		return nil, errors.New("an external provider turn is already running for this session")
 	}
 	s.externalRuns[threadID] = &externalRun{turnID: turnID, cancel: cancel}
 	s.mu.Unlock()
@@ -496,19 +546,138 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		"threadId": threadID,
 		"turn":     map[string]any{"id": turnID, "status": "inProgress", "startedAt": started.Unix()},
 	})
-	s.emitExternalNotification("item/started", map[string]any{
-		"threadId": threadID, "turnId": turnID,
-		"item": map[string]any{"id": itemID, "type": "agentMessage", "status": "inProgress", "text": ""},
-	})
+
+	// External CLIs can interleave assistant text, reasoning and tools. Keep a
+	// separate timeline item for every text/reasoning segment so a later tool is
+	// rendered at its actual position instead of being appended after the whole
+	// assistant response.
+	var timelineItems []map[string]any
+	timelineIndexes := make(map[string]int)
+	segmentNumber := 0
+	activeAgentID := ""
+	activeAgentText := strings.Builder{}
+	activeReasoningID := ""
+	activeReasoningText := strings.Builder{}
+	recordTimelineItem := func(item map[string]any) {
+		if item == nil {
+			return
+		}
+		id := strings.TrimSpace(firstMapString(item, "id", "itemId"))
+		if id == "" {
+			return
+		}
+		if index, exists := timelineIndexes[id]; exists {
+			timelineItems[index] = cloneExternalTimelineItem(item, "inProgress")
+			return
+		}
+		timelineIndexes[id] = len(timelineItems)
+		timelineItems = append(timelineItems, cloneExternalTimelineItem(item, "inProgress"))
+	}
+	ensureAgentSegment := func() string {
+		if activeAgentID != "" {
+			return activeAgentID
+		}
+		if activeReasoningID != "" {
+			item := map[string]any{"id": activeReasoningID, "type": "reasoning", "status": "completed", "summary": activeReasoningText.String()}
+			recordTimelineItem(item)
+			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			activeReasoningID = ""
+			activeReasoningText.Reset()
+		}
+		activeAgentID = fmt.Sprintf("%s:agent:%d", turnID, segmentNumber)
+		segmentNumber++
+		activeAgentText.Reset()
+		item := map[string]any{"id": activeAgentID, "type": "agentMessage", "status": "inProgress", "text": ""}
+		recordTimelineItem(item)
+		s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+		return activeAgentID
+	}
+	ensureReasoningSegment := func() string {
+		if activeReasoningID != "" {
+			return activeReasoningID
+		}
+		if activeAgentID != "" {
+			item := map[string]any{"id": activeAgentID, "type": "agentMessage", "status": "completed", "text": activeAgentText.String()}
+			recordTimelineItem(item)
+			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			activeAgentID = ""
+			activeAgentText.Reset()
+		}
+		activeReasoningID = fmt.Sprintf("%s:reasoning:%d", turnID, segmentNumber)
+		segmentNumber++
+		activeReasoningText.Reset()
+		item := map[string]any{"id": activeReasoningID, "type": "reasoning", "status": "inProgress", "summary": ""}
+		recordTimelineItem(item)
+		s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+		return activeReasoningID
+	}
+	completeSegments := func(status string) {
+		if activeReasoningID != "" {
+			item := map[string]any{"id": activeReasoningID, "type": "reasoning", "status": status, "summary": activeReasoningText.String()}
+			recordTimelineItem(item)
+			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			activeReasoningID = ""
+			activeReasoningText.Reset()
+		}
+		if activeAgentID != "" {
+			item := map[string]any{"id": activeAgentID, "type": "agentMessage", "status": status, "text": activeAgentText.String()}
+			recordTimelineItem(item)
+			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			activeAgentID = ""
+			activeAgentText.Reset()
+		}
+	}
 
 	output, sessionID, usage, runErr := s.executeExternalTurn(ctx, provider, record.BackendRef, workspace, turnSettings, text, images, func(kind, delta string) {
+		if kind == "tool" {
+			completeSegments("completed")
+			if item, ok := decodeExternalToolTimelineItem(delta); ok {
+				recordTimelineItem(item)
+				s.emitExternalToolNotification(threadID, turnID, delta)
+			}
+			return
+		}
+		if kind == "thought" {
+			itemID := ensureReasoningSegment()
+			activeReasoningText.WriteString(delta)
+			s.emitExternalNotification("item/reasoning/summaryTextDelta", map[string]any{
+				"threadId": threadID, "turnId": turnID, "itemId": itemID, "delta": delta,
+			})
+			return
+		}
+		if kind == "replace" {
+			itemID := ensureAgentSegment()
+			activeAgentText.Reset()
+			activeAgentText.WriteString(delta)
+			item := map[string]any{"id": itemID, "type": "agentMessage", "status": "inProgress", "text": delta}
+			recordTimelineItem(item)
+			s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			return
+		}
 		if kind != "" && kind != "text" {
 			return
 		}
+		itemID := ensureAgentSegment()
+		activeAgentText.WriteString(delta)
 		s.emitExternalNotification("item/agentMessage/delta", map[string]any{
 			"threadId": threadID, "turnId": turnID, "itemId": itemID, "delta": delta,
 		})
 	})
+	// Gemini/OpenCode can omit usage on stdout. OpenCode also emits one usage
+	// record per tool step, while this stream loop only retains the latest map.
+	// Their native stores are authoritative, but only for messages written since
+	// this turn began; using a whole-session snapshot would duplicate old turns.
+	home, _ := os.UserHomeDir()
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "gemini":
+		if nativeUsage := collectGeminiSessionUsage(filepath.Join(home, ".gemini"), sessionID, started.UnixMilli()); nativeUsage != nil {
+			usage = nativeUsage
+		}
+	case "opencode":
+		if nativeUsage := collectOpenCodeSessionUsage(home, sessionID, started.UnixMilli()); nativeUsage != nil {
+			usage = nativeUsage
+		}
+	}
 	cancel()
 	s.mu.Lock()
 	currentRun := s.externalRuns[threadID]
@@ -526,7 +695,63 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		status = "failed"
 		errorText = runErr.Error()
 	}
+	// A provider may emit a tool start/update without a final result. Once the
+	// process has reached a terminal turn state, close those rows explicitly so
+	// the UI cannot keep showing a tool as running until the session is reopened.
+	for index, item := range timelineItems {
+		if item == nil || firstMapString(item, "type") != "dynamicToolCall" {
+			continue
+		}
+		itemStatus := strings.ToLower(strings.TrimSpace(firstMapString(item, "status")))
+		if itemStatus != "" && itemStatus != "inprogress" && itemStatus != "running" && itemStatus != "pending" {
+			continue
+		}
+		closed := cloneExternalTimelineItem(item, status)
+		closed["status"] = status
+		closed["success"] = status == "completed"
+		timelineItems[index] = closed
+		encoded, _ := json.Marshal(closed)
+		s.emitExternalToolNotification(threadID, turnID, string(encoded))
+	}
+	// A provider may only send a final full snapshot (or omit text events
+	// entirely). Reconcile it into the current segment before closing items.
+	if output != "" {
+		rendered := ""
+		for _, item := range timelineItems {
+			if firstMapString(item, "type") == "agentMessage" {
+				rendered += firstMapString(item, "text")
+			}
+		}
+		if rendered != output {
+			itemID := ensureAgentSegment()
+			if strings.HasPrefix(output, rendered) {
+				suffix := strings.TrimPrefix(output, rendered)
+				if suffix != "" {
+					activeAgentText.WriteString(suffix)
+					s.emitExternalNotification("item/agentMessage/delta", map[string]any{"threadId": threadID, "turnId": turnID, "itemId": itemID, "delta": suffix})
+				}
+			} else {
+				activeAgentText.Reset()
+				activeAgentText.WriteString(output)
+				item := map[string]any{"id": itemID, "type": "agentMessage", "status": "inProgress", "text": output}
+				recordTimelineItem(item)
+				s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			}
+		}
+	}
+	completeSegments(status)
+	if len(timelineItems) == 0 && output != "" {
+		item := map[string]any{"id": turnID + ":agent:0", "type": "agentMessage", "status": status, "text": output}
+		recordTimelineItem(item)
+		s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+	}
 	completed := time.Now()
+	if normalizedProvider := strings.ToLower(strings.TrimSpace(provider)); normalizedProvider == "gemini" || normalizedProvider == "opencode" {
+		// The native session database may contain the authoritative usage even
+		// when a CLI stream omits its final usage event.
+		s.invalidateExternalUsageCache(normalizedProvider)
+		s.invalidateNativeHistoryCache(normalizedProvider, sessionID)
+	}
 	if b := breakdownFromUsageMap(usage); b.valid() {
 		// Attribute usage to the active native runtime. The Codex bucket is only
 		// the fallback for legacy sessions without an external provider ID.
@@ -554,7 +779,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	}
 	turn := externalTurn{
 		ID: turnID, UserText: strings.TrimSpace(text), Images: append([]string(nil), images...),
-		AgentText: output, Status: status, Error: errorText,
+		AgentText: output, Items: timelineItems, Status: status, Error: errorText,
 		StartedAt: started.Unix(), CompletedAt: completed.Unix(), DurationMS: completed.Sub(started).Milliseconds(),
 	}
 	nameChanged := false
@@ -580,11 +805,6 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	}
 	s.mu.Unlock()
 
-	s.emitExternalNotification("item/completed", map[string]any{
-		"threadId": threadID, "turnId": turnID,
-		"item":        map[string]any{"id": itemID, "type": "agentMessage", "status": status, "text": output},
-		"startedAtMs": started.UnixMilli(), "completedAtMs": completed.UnixMilli(),
-	})
 	turnResult := externalTurnMap(turn)
 	s.emitExternalNotification("turn/completed", map[string]any{"threadId": threadID, "turn": turnResult})
 	if finishedRunStillOwnsThread {
@@ -594,6 +814,49 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		s.emitExternalNotification("thread/name/updated", map[string]any{"threadId": threadID, "name": truncateRunes(turn.UserText, 56)})
 	}
 	return map[string]any{"turn": turnResult}, nil
+}
+
+// emitExternalToolNotification maps native CLI tool lifecycle events onto the
+// app-server item protocol already consumed by the Codex timeline store. The
+// same item id is reused for running/completed updates, so a long tool call is
+// updated in place instead of being appended again at the end of the turn.
+func (s *AppService) emitExternalToolNotification(threadID, turnID, encoded string) {
+	tool, ok := decodeExternalToolTimelineItem(encoded)
+	if !ok {
+		return
+	}
+	itemID := strings.TrimSpace(firstMapString(tool, "id", "itemId", "callId"))
+	if itemID == "" {
+		return
+	}
+	status := strings.TrimSpace(firstMapString(tool, "status"))
+	if status == "" {
+		status = "inProgress"
+	}
+	item := cloneExternalTimelineItem(tool, status)
+	item["id"] = itemID
+	item["type"] = "dynamicToolCall"
+	item["status"] = status
+	method := "item/started"
+	if status == "completed" || status == "failed" || status == "interrupted" {
+		method = "item/completed"
+	}
+	s.emitExternalNotification(method, map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+		"item":     item,
+	})
+}
+
+func decodeExternalToolTimelineItem(encoded string) (map[string]any, bool) {
+	var item map[string]any
+	if json.Unmarshal([]byte(encoded), &item) != nil || item == nil {
+		return nil, false
+	}
+	if strings.TrimSpace(firstMapString(item, "id", "itemId", "callId")) == "" {
+		return nil, false
+	}
+	return item, true
 }
 
 func (s *AppService) executeExternalTurn(
@@ -671,6 +934,16 @@ func (s *AppService) executeExternalTurn(
 		// so kind/final alone is not enough; also catch mid-stream usage if present.
 		if next := extractExternalUsage(event); next != nil {
 			usage = next
+		}
+		if kind == "tool" {
+			// Flush text accumulated before the tool first. Without this barrier a
+			// coalesced text delta can cross the bridge after the tool-start event,
+			// making the tool appear below the assistant reply.
+			stream.Flush()
+			if onStream != nil {
+				onStream(kind, chunk)
+			}
+			continue
 		}
 		if kind == "error" {
 			if chunk != "" {
@@ -1014,7 +1287,7 @@ func extractExternalUsage(event map[string]any) map[string]any {
 		}
 	}
 	if raw == nil {
-		for _, containerKey := range []string{"part", "message", "data", "result"} {
+		for _, containerKey := range []string{"part", "message", "data", "result", "state"} {
 			container, ok := event[containerKey].(map[string]any)
 			if !ok {
 				continue
@@ -1022,6 +1295,24 @@ func extractExternalUsage(event map[string]any) map[string]any {
 			for _, key := range []string{"tokens", "usageMetadata", "usage_metadata", "tokenUsage", "token_usage", "stats"} {
 				if nested, exists := container[key]; exists {
 					raw = nested
+					break
+				}
+			}
+			if raw != nil {
+				break
+			}
+			for _, nestedKey := range []string{"data", "state", "part", "message"} {
+				nested, ok := container[nestedKey].(map[string]any)
+				if !ok {
+					continue
+				}
+				for _, key := range []string{"tokens", "usage", "usageMetadata", "usage_metadata", "tokenUsage", "token_usage", "stats"} {
+					if value, exists := nested[key]; exists {
+						raw = value
+						break
+					}
+				}
+				if raw != nil {
 					break
 				}
 			}
@@ -1037,6 +1328,15 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	raw, ok := value.(map[string]any)
 	if !ok || raw == nil {
 		return nil
+	}
+	// OpenCode and some Gemini bridges wrap the actual counters in a `tokens`
+	// object. Unwrap those envelopes before reading the provider-specific field
+	// aliases below; otherwise a valid step_finish event is silently discarded.
+	for _, key := range []string{"tokens", "usageMetadata", "usage_metadata", "tokenUsage", "token_usage", "stats"} {
+		if nested, exists := raw[key].(map[string]any); exists && nested != nil {
+			raw = nested
+			break
+		}
 	}
 
 	// Detect source shape before normalizing.
@@ -1090,6 +1390,14 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	}
 	if cached <= 0 {
 		cached = anyToFloat(raw["cacheRead"])
+	}
+	if cached <= 0 {
+		if cache, ok := raw["cache"].(map[string]any); ok {
+			cached = anyToFloat(cache["read"])
+			if cached <= 0 {
+				cached = anyToFloat(cache["cached"])
+			}
+		}
 	}
 	// Claude prompt caching reports newly-written prompt tokens separately from
 	// cache reads. Both occupy the active request context.
@@ -1221,10 +1529,15 @@ func tokenTotalFromUsage(usage map[string]any) int64 {
 }
 
 // parseExternalEvent returns (chunk, sessionID, final, kind).
-// kind is "text" | "thought" | "".
+// kind is "text" | "thought" | "tool" | "error" | "".
 func parseExternalEvent(provider string, event map[string]any) (string, string, bool, string) {
 	sessionID := firstMapString(event, "session_id", "sessionId", "sessionID")
 	eventType := strings.ToLower(firstMapString(event, "type", "event"))
+	eventType = strings.ReplaceAll(eventType, "-", "_")
+	if tool, ok := parseExternalToolEvent(provider, event); ok {
+		encoded, _ := json.Marshal(tool)
+		return string(encoded), sessionID, false, "tool"
+	}
 	if provider == "claude" {
 		// Claude Code stream-json — Anthropic-native AND proxy backends (GPT / GLM / etc.):
 		//   {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"…"}}}
@@ -1444,6 +1757,137 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 		return text, sessionID, false, "thought"
 	}
 	return "", sessionID, false, ""
+}
+
+// parseExternalToolEvent accepts the JSON event variants emitted by Gemini CLI
+// and OpenCode's `run --format json`. Both have changed field nesting between
+// releases, so the parser intentionally looks through part/data/state/tool
+// envelopes instead of relying on one exact version.
+func parseExternalToolEvent(provider string, event map[string]any) (map[string]any, bool) {
+	if provider != "gemini" && provider != "opencode" {
+		return nil, false
+	}
+	eventType := strings.ToLower(firstMapString(event, "type", "event", "kind"))
+	eventType = strings.ReplaceAll(eventType, "-", "_")
+	if !strings.Contains(eventType, "tool") && !strings.Contains(eventType, "function") {
+		// OpenCode puts the lifecycle type on `part` for some releases.
+		part, _ := event["part"].(map[string]any)
+		partType := strings.ToLower(firstMapString(part, "type", "kind"))
+		if !strings.Contains(partType, "tool") && !strings.Contains(partType, "function") {
+			return nil, false
+		}
+	}
+	part, _ := event["part"].(map[string]any)
+	data, _ := event["data"].(map[string]any)
+	tool, _ := event["tool"].(map[string]any)
+	if tool == nil {
+		tool, _ = event["toolCall"].(map[string]any)
+	}
+	if tool == nil {
+		tool, _ = event["tool_call"].(map[string]any)
+	}
+	if tool == nil {
+		tool = part
+	}
+	if tool == nil {
+		tool = data
+	}
+	if tool == nil {
+		tool = event
+	}
+	state, _ := tool["state"].(map[string]any)
+	if state == nil {
+		state, _ = event["state"].(map[string]any)
+	}
+	id := firstMapString(tool, "callID", "callId", "toolCallId", "tool_call_id", "id")
+	if id == "" {
+		id = firstMapString(event, "callID", "callId", "toolCallId", "tool_call_id", "itemId")
+	}
+	name := firstMapString(tool, "tool", "toolName", "tool_name", "name", "title")
+	if name == "" {
+		name = firstMapString(event, "tool", "toolName", "tool_name", "name", "title")
+	}
+	if id == "" || name == "" {
+		return nil, false
+	}
+	status := strings.ToLower(firstMapString(state, "status", "phase"))
+	if status == "" {
+		status = strings.ToLower(firstMapString(tool, "status", "phase"))
+	}
+	if status == "" {
+		status = strings.ToLower(firstMapString(event, "status", "phase"))
+	}
+	if status == "" {
+		status = "inProgress"
+	}
+	switch status {
+	case "running", "pending", "started", "in_progress", "inprogress", "executing":
+		status = "inProgress"
+	case "success", "succeeded", "done", "complete", "completed", "finished":
+		status = "completed"
+	case "error", "failed", "failure":
+		status = "failed"
+	case "cancelled", "canceled", "interrupted":
+		status = "interrupted"
+	default:
+		status = "inProgress"
+	}
+	input := state["input"]
+	if input == nil {
+		input = state["arguments"]
+	}
+	if input == nil {
+		input = tool["input"]
+	}
+	if input == nil {
+		input = tool["arguments"]
+	}
+	if input == nil {
+		input = tool["args"]
+	}
+	output := state["output"]
+	if output == nil {
+		output = state["result"]
+	}
+	if output == nil {
+		output = tool["output"]
+	}
+	if output == nil {
+		output = tool["result"]
+	}
+	if output == nil {
+		output = event["output"]
+	}
+	item := map[string]any{
+		"id":           id,
+		"type":         "dynamicToolCall",
+		"tool":         name,
+		"status":       status,
+		"arguments":    input,
+		"contentItems": externalToolContentItems(output),
+	}
+	if status == "completed" {
+		item["success"] = true
+	} else if status == "failed" {
+		item["success"] = false
+	}
+	return item, true
+}
+
+func externalToolContentItems(value any) []any {
+	if value == nil {
+		return []any{}
+	}
+	if text, ok := value.(string); ok {
+		if strings.TrimSpace(text) == "" {
+			return []any{}
+		}
+		return []any{map[string]any{"type": "text", "text": text}}
+	}
+	if values, ok := value.([]any); ok {
+		return values
+	}
+	return []any{value}
 }
 
 func firstMapString(value map[string]any, keys ...string) string {

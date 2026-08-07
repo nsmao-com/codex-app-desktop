@@ -26,7 +26,7 @@ import {
 } from '@lucide/vue'
 import { Motion } from 'motion-v'
 import { useRouter } from 'vue-router'
-import { computed, nextTick, onBeforeUnmount, shallowRef, watch, type Component } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, shallowRef, watch, type Component } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
@@ -103,14 +103,47 @@ const usagePopoverOpen = shallowRef(false)
 const usageRangeDays = shallowRef<UsageRangeDays>(7)
 const usageLoading = shallowRef(false)
 
+function openUsageFromCommand(event: Event): void {
+  usagePopoverOpen.value = true
+  const range = (event as CustomEvent<{ range?: string }>).detail?.range
+  if (range === 'today') usageRangeDays.value = 1
+  else if (range === 'week') usageRangeDays.value = 7
+  else if (range === 'cumulative') usageRangeDays.value = 'cumulative'
+}
+
+onMounted(() => {
+  window.addEventListener('nice-codex:open-usage', openUsageFromCommand)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('nice-codex:open-usage', openUsageFromCommand)
+})
+
 const usageRanges = computed(() => ([
   { days: 1 as const, label: t('sidebar.usageToday') },
   { days: 7 as const, label: t('sidebar.usageWeek') },
   { days: 14 as const, label: t('sidebar.usageTwoWeeks') },
   { days: 30 as const, label: t('sidebar.usageMonth') },
+  { days: 'cumulative' as const, label: t('sidebar.usageCumulative') },
 ]))
 
 const usageRangeView = computed(() => buildUsageRangeView(appStore.accountUsage, usageRangeDays.value))
+const usageRangeTotalLabel = computed(() => usageRangeDays.value === 'cumulative'
+  ? formatTokenCount(appStore.accountUsage?.lifetimeTokens)
+  : usageRangeView.value.dayCount
+    ? formatTokenCount(usageRangeView.value.totalTokens)
+    : formatTokenCount(appStore.accountUsage?.lifetimeTokens))
+const usageRangeMeta = computed(() => usageRangeDays.value === 'cumulative'
+  ? t('sidebar.usageAggregateMeta', { count: formatTokenCount(appStore.accountUsage?.lifetimeTokens) })
+  : usageRangeView.value.dayCount
+    ? t('sidebar.usageRangeMeta', {
+      days: usageRangeView.value.days,
+      avg: formatTokenCount(usageRangeView.value.averageTokens),
+      count: usageRangeView.value.dayCount,
+    })
+    : appStore.accountUsage?.lifetimeTokens != null
+      ? t('sidebar.usageAggregateMeta', { count: formatTokenCount(appStore.accountUsage.lifetimeTokens) })
+      : t('sidebar.usageRangeMeta', { days: usageRangeView.value.days, avg: '—', count: 0 }))
 const usageLocale = computed(() => (locale.value === 'zh-CN' ? 'zh-CN' : 'en-US'))
 const usageSubtitle = computed(() => {
   if (appStore.isGrokMode) return t('sidebar.usageSubtitleGrok')
@@ -268,6 +301,14 @@ const recentWorkspacePaths = computed(() => {
   } else if (appStore.isClaudeMode) {
     paths = (appStore.settings.claudeRecentWorkspaces?.length
       ? appStore.settings.claudeRecentWorkspaces
+      : appStore.settings.recentWorkspaces) ?? []
+  } else if (appStore.isGeminiMode) {
+    paths = (appStore.settings.geminiRecentWorkspaces?.length
+      ? appStore.settings.geminiRecentWorkspaces
+      : appStore.settings.recentWorkspaces) ?? []
+  } else if (appStore.isOpenCodeMode) {
+    paths = (appStore.settings.openCodeRecentWorkspaces?.length
+      ? appStore.settings.openCodeRecentWorkspaces
       : appStore.settings.recentWorkspaces) ?? []
   } else {
     paths = appStore.settings.recentWorkspaces ?? []
@@ -1749,16 +1790,10 @@ function formatGrokUpdated(value?: number | null): string {
               <div class="mb-3 rounded-lg border bg-muted/30 px-3 py-2.5">
                 <p class="text-[10px] text-muted-foreground">{{ t('sidebar.usageRangeTotal') }}</p>
                 <p class="mt-0.5 text-lg font-semibold tabular-nums tracking-tight">
-                  {{ usageRangeView.dayCount ? formatTokenCount(usageRangeView.totalTokens) : '—' }}
+                  {{ usageRangeTotalLabel }}
                   <span class="text-[11px] font-normal text-muted-foreground">tokens</span>
                 </p>
-                <p class="mt-1 text-[10px] text-muted-foreground">
-                  {{ t('sidebar.usageRangeMeta', {
-                    days: usageRangeView.days,
-                    avg: formatTokenCount(usageRangeView.averageTokens),
-                    count: usageRangeView.dayCount,
-                  }) }}
-                </p>
+                <p class="mt-1 text-[10px] text-muted-foreground">{{ usageRangeMeta }}</p>
               </div>
 
               <div v-if="usageRangeView.buckets.length" class="mb-3 max-h-36 space-y-1.5 overflow-y-auto pr-0.5">
@@ -1870,16 +1905,10 @@ function formatGrokUpdated(value?: number | null): string {
               <div class="mb-3 rounded-lg border bg-muted/30 px-3 py-2.5">
                 <p class="text-[10px] text-muted-foreground">{{ t('sidebar.usageRangeTotal') }}</p>
                 <p class="mt-0.5 text-lg font-semibold tabular-nums tracking-tight">
-                  {{ usageRangeView.dayCount ? formatTokenCount(usageRangeView.totalTokens) : '—' }}
+                  {{ usageRangeTotalLabel }}
                   <span class="text-[11px] font-normal text-muted-foreground">tokens</span>
                 </p>
-                <p class="mt-1 text-[10px] text-muted-foreground">
-                  {{ t('sidebar.usageRangeMeta', {
-                    days: usageRangeView.days,
-                    avg: formatTokenCount(usageRangeView.averageTokens),
-                    count: usageRangeView.dayCount,
-                  }) }}
-                </p>
+                <p class="mt-1 text-[10px] text-muted-foreground">{{ usageRangeMeta }}</p>
               </div>
 
               <div v-if="usageRangeView.buckets.length" class="mb-3 max-h-36 space-y-1.5 overflow-y-auto pr-0.5">
@@ -1992,16 +2021,10 @@ function formatGrokUpdated(value?: number | null): string {
               <div class="mb-3 rounded-lg border bg-muted/30 px-3 py-2.5">
                 <p class="text-[10px] text-muted-foreground">{{ t('sidebar.usageRangeTotal') }}</p>
                 <p class="mt-0.5 text-lg font-semibold tabular-nums tracking-tight">
-                  {{ usageRangeView.dayCount ? formatTokenCount(usageRangeView.totalTokens) : '—' }}
+                  {{ usageRangeTotalLabel }}
                   <span class="text-[11px] font-normal text-muted-foreground">tokens</span>
                 </p>
-                <p class="mt-1 text-[10px] text-muted-foreground">
-                  {{ t('sidebar.usageRangeMeta', {
-                    days: usageRangeView.days,
-                    avg: formatTokenCount(usageRangeView.averageTokens),
-                    count: usageRangeView.dayCount,
-                  }) }}
-                </p>
+                <p class="mt-1 text-[10px] text-muted-foreground">{{ usageRangeMeta }}</p>
               </div>
 
               <div v-if="usageRangeView.buckets.length" class="mb-3 max-h-36 space-y-1.5 overflow-y-auto pr-0.5">
@@ -2120,16 +2143,10 @@ function formatGrokUpdated(value?: number | null): string {
               <div class="mb-3 rounded-lg border bg-muted/30 px-3 py-2.5">
                 <p class="text-[10px] text-muted-foreground">{{ t('sidebar.usageRangeTotal') }}</p>
                 <p class="mt-0.5 text-lg font-semibold tabular-nums tracking-tight">
-                  {{ usageRangeView.dayCount ? formatTokenCount(usageRangeView.totalTokens) : '—' }}
+                  {{ usageRangeTotalLabel }}
                   <span class="text-[11px] font-normal text-muted-foreground">tokens</span>
                 </p>
-                <p class="mt-1 text-[10px] text-muted-foreground">
-                  {{ t('sidebar.usageRangeMeta', {
-                    days: usageRangeView.days,
-                    avg: formatTokenCount(usageRangeView.averageTokens),
-                    count: usageRangeView.dayCount,
-                  }) }}
-                </p>
+                <p class="mt-1 text-[10px] text-muted-foreground">{{ usageRangeMeta }}</p>
               </div>
 
               <div v-if="usageRangeView.buckets.length" class="mb-3 max-h-36 space-y-1.5 overflow-y-auto pr-0.5">

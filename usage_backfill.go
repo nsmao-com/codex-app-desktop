@@ -18,7 +18,7 @@ type rolloutTokenHit struct {
 	At        time.Time
 }
 
-// backfillLocalUsageFromRollouts rebuilds the *codex* runtime bucket from ~/.codex
+// backfillLocalUsageFromRollouts enriches the *codex* runtime bucket from ~/.codex
 // session rollouts (token_count.last_token_usage). Runs when the codex bucket is
 // empty OR has totals but no input/output/cache breakdown (legacy total-only rows).
 func (s *AppService) backfillLocalUsageFromRollouts() bool {
@@ -53,11 +53,6 @@ func (s *AppService) backfillLocalUsageFromRollouts() bool {
 		return false
 	}
 
-	// Drop legacy total-only codex rows so we do not double-count when re-importing.
-	if needsDetail && !emptyCodex {
-		clearRuntimeUsage(usage, "codex")
-	}
-
 	changed := false
 	now := time.Now()
 	for _, hit := range hits {
@@ -75,22 +70,6 @@ func (s *AppService) backfillLocalUsageFromRollouts() bool {
 	pruneLocalUsageTurns(usage, now)
 	s.scheduleLocalUsagePersistLocked()
 	return true
-}
-
-// clearRuntimeUsage removes one runtime's bucket + turns (used before detailed re-import).
-func clearRuntimeUsage(usage *localUsageFile, runtime string) {
-	if usage == nil {
-		return
-	}
-	runtime = normalizeUsageRuntime(runtime)
-	if usage.ByRuntime != nil {
-		usage.ByRuntime[runtime] = emptyRuntimeBucket()
-	}
-	for key, turn := range usage.Turns {
-		if normalizeUsageRuntime(turn.Runtime) == runtime || (turn.Runtime == "" && runtime == "codex") {
-			delete(usage.Turns, key)
-		}
-	}
 }
 
 func scanCodexRolloutTokenUsage(codexHome string) []rolloutTokenHit {

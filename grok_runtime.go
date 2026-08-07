@@ -266,13 +266,7 @@ func (s *AppService) SetActiveRuntime(runtimeID string) (map[string]any, error) 
 	}
 	s.settings = settings
 	s.mu.Unlock()
-	workspace := settings.Workspace
-	switch runtimeID {
-	case "grok":
-		workspace = settings.GrokWorkspace
-	case "claude":
-		workspace = settings.ClaudeWorkspace
-	}
+	workspace := activeWorkspaceForRuntime(settings)
 	result := map[string]any{"runtime": runtimeID}
 	if strings.TrimSpace(workspace) != "" {
 		result["workspace"] = inspectWorkspace(workspace)

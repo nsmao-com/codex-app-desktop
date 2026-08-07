@@ -128,9 +128,35 @@ function findGroupIndexForItem(groups: MessageGroup[], itemIndex: number): numbe
 const groups = computed<MessageGroup[]>(() => {
   const items = timelineItems.value
   let firstChanged = 0
+  let usedTailFastPath = false
+
+  // During a live turn provider stores replace/append the tail item. Avoid
+  // scanning every historical item on each 48 ms flush, but only when the
+  // unchanged boundary proves this is a real tail operation. Tools may be
+  // inserted before the current assistant item, which must use the full prefix
+  // comparison or the old group order would be retained incorrectly.
+  if (timelineTurnRunning.value && previousTimelineItems.length > 0) {
+    const previousLength = previousTimelineItems.length
+    if (
+      items.length > previousLength
+      && items[previousLength - 1] === previousTimelineItems[previousLength - 1]
+    ) {
+      firstChanged = previousTimelineItems.length
+      usedTailFastPath = true
+    } else if (
+      items.length === previousLength
+      && items[previousLength - 1] !== previousTimelineItems[previousLength - 1]
+      && (previousLength === 1 || items[previousLength - 2] === previousTimelineItems[previousLength - 2])
+    ) {
+      firstChanged = items.length - 1
+      usedTailFastPath = true
+    }
+  }
   const sharedLength = Math.min(items.length, previousTimelineItems.length)
-  while (firstChanged < sharedLength && items[firstChanged] === previousTimelineItems[firstChanged]) {
-    firstChanged += 1
+  if (!usedTailFastPath) {
+    while (firstChanged < sharedLength && items[firstChanged] === previousTimelineItems[firstChanged]) {
+      firstChanged += 1
+    }
   }
   if (firstChanged === items.length && firstChanged === previousTimelineItems.length) {
     return previousGroups
@@ -826,6 +852,11 @@ watch(
   },
 )
 watch(timelineThreadId, () => {
+  // A thread switch is a new timeline, not an edit to the previous one. Clear
+  // the grouping cache synchronously so a long old thread is never compared
+  // item-by-item with the newly selected thread during the switch render.
+  previousTimelineItems = []
+  previousGroups = []
   renderWindowStart.value = 0
   renderWindowEnd.value = 0
   stickToBottom.value = true
@@ -833,7 +864,7 @@ watch(timelineThreadId, () => {
   scheduleLoadRecovery()
   // Do not pin to skeleton/mid-layout: wait for load, then long settle + follow-ups.
   void settleToBottom({ waitForLoad: true, maxFrames: 48, followUp: true })
-}, { flush: 'post' })
+}, { flush: 'sync' })
 watch(isLoading, (loading, wasLoading) => {
   if (loading) scheduleLoadRecovery()
   else {

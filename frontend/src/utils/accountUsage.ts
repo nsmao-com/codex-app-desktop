@@ -2,10 +2,10 @@ import type { AccountUsageDailyBucket, AccountUsageSummary, ThreadTokenUsage } f
 
 export const CODEX_CONTEXT_BASELINE_TOKENS = 12_000
 
-export type UsageRangeDays = 1 | 7 | 14 | 30
+export type UsageRangeDays = 1 | 7 | 14 | 30 | 'cumulative'
 
 export type UsageRangeView = {
-  days: UsageRangeDays
+  days: number
   totalTokens: number
   dayCount: number
   averageTokens: number
@@ -103,12 +103,12 @@ export function buildUsageRangeView(
 ): UsageRangeView {
   const buckets = usage?.dailyBuckets ?? []
   const cutoff = startOfLocalDay(new Date())
-  cutoff.setDate(cutoff.getDate() - (days - 1))
+  if (days !== 'cumulative') cutoff.setDate(cutoff.getDate() - (days - 1))
 
   const filtered = buckets
     .map((bucket) => ({ bucket, date: parseBucketDate(bucket.startDate) }))
     .filter((item): item is { bucket: AccountUsageDailyBucket; date: Date } => Boolean(item.date))
-    .filter((item) => item.date.getTime() >= cutoff.getTime())
+    .filter((item) => days === 'cumulative' || item.date.getTime() >= cutoff.getTime())
     .sort((a, b) => b.date.getTime() - a.date.getTime())
     .map((item) => item.bucket)
 
@@ -116,7 +116,7 @@ export function buildUsageRangeView(
   const maxTokens = filtered.reduce((max, item) => Math.max(max, item.tokens), 0)
   const dayCount = filtered.length
   return {
-    days,
+    days: days === 'cumulative' ? dayCount : days,
     totalTokens,
     dayCount,
     averageTokens: dayCount ? Math.round(totalTokens / dayCount) : 0,

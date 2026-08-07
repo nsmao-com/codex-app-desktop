@@ -28,6 +28,11 @@ let runtimeSwitchReady = false
 let runtimeActivationSequence = 0
 let bootstrapActivationRuntime: WorkspaceRuntime | null = null
 let bootstrapActivationCompleted = false
+const lastCodexTimelineThreadByRuntime = new Map<WorkspaceRuntime, string>()
+
+function usesCodexTimeline(runtime: WorkspaceRuntime): boolean {
+  return runtime === 'codex' || runtime === 'gemini' || runtime === 'opencode'
+}
 
 useNavigationHistory()
 
@@ -55,6 +60,14 @@ function openMemoriesDialog(): void {
 async function activateRuntime(runtime: WorkspaceRuntime): Promise<void> {
   const sequence = ++runtimeActivationSequence
   if (!await appStore.ensureActiveRuntimeSynced(runtime)) return
+  if (sequence !== runtimeActivationSequence || appStore.activeRuntime !== runtime) return
+  // Codex, Gemini and OpenCode share one timeline store. Clear only the
+  // selected pointer when entering the independent providers so composer
+  // actions can never target a stale Codex session; background turns remain in
+  // their per-thread maps and continue to receive events.
+  if (runtime === 'grok' || runtime === 'claude') {
+    await codexStore.clearActiveSession()
+  }
   await workspaceStore.hydrateActiveRuntimeWorkspace()
   if (sequence !== runtimeActivationSequence || appStore.activeRuntime !== runtime) return
   if (runtime === 'grok') {
@@ -68,17 +81,43 @@ async function activateRuntime(runtime: WorkspaceRuntime): Promise<void> {
   // Gemini/OpenCode share Codex's event bridge and timeline/FIFO store, but do
   // not require a Codex app-server connection.
   if (runtime === 'gemini' || runtime === 'opencode') {
+    // The Codex store is shared by the three timeline runtimes. Never leave a
+    // Codex thread active while an external runtime is selected: composer model
+    // edits and queued messages would otherwise target the wrong provider.
+    await codexStore.clearActiveSession()
     await Promise.all([
       codexStore.loadModels(),
       codexStore.loadThreads(),
     ])
+    // External runtimes do not start the Codex connection, so the usual
+    // account-insights refresh is not reached. Warm the runtime-scoped native
+    // usage snapshot here so the sidebar shows totals without requiring the
+    // user to open the usage popover first.
+    void appStore.loadLocalUsage().catch(() => undefined)
+    const rememberedID = lastCodexTimelineThreadByRuntime.get(runtime) || ''
+    const remembered = rememberedID
+      ? codexStore.threadGroups.flatMap((group) => group.threads).find((thread) => thread.id === rememberedID)
+      : undefined
+    if (remembered && sequence === runtimeActivationSequence && appStore.activeRuntime === runtime) {
+      await codexStore.openThread(remembered.id)
+    }
     return
+  }
+  if (runtime === 'codex') {
+    await codexStore.clearActiveSession()
   }
   await Promise.all([
     codexStore.loadModels(),
     codexStore.loadModelProviders(),
     codexStore.loadThreads(),
   ])
+  const rememberedID = lastCodexTimelineThreadByRuntime.get('codex') || ''
+  const remembered = rememberedID
+    ? codexStore.threadGroups.flatMap((group) => group.threads).find((thread) => thread.id === rememberedID)
+    : undefined
+  if (remembered && sequence === runtimeActivationSequence && appStore.activeRuntime === runtime) {
+    await codexStore.openThread(remembered.id)
+  }
   if (
     !codexStore.isReady
     && appStore.settings.workspace
@@ -112,8 +151,11 @@ onMounted(() => {
 // Defer heavy work until after the tab paint. Bootstrap owns the first activation.
 watch(
   () => appStore.activeRuntime,
-  (runtime, _previous, onCleanup) => {
+  (runtime, previous, onCleanup) => {
     if (!runtimeSwitchReady) return
+    if (previous && usesCodexTimeline(previous) && codexStore.activeThreadId) {
+      lastCodexTimelineThreadByRuntime.set(previous, codexStore.activeThreadId)
+    }
     const timer = window.setTimeout(() => {
       void activateRuntime(runtime)
     }, 0)

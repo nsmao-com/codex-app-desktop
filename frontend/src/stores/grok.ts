@@ -981,8 +981,8 @@ export const useGrokStore = defineStore('grok', () => {
     const sessionId = activeSessionId.value
     // Persisted history keeps stable object references while only the live tail
     // changes. This prevents every Grok delta from rebuilding old timeline rows.
-    const items = [...activeHistoryItems.value]
-    const turn = Math.max(activeHistoryTurnCount.value, items.length ? 1 : 0)
+    const historyItems = activeHistoryItems.value
+    const turn = Math.max(activeHistoryTurnCount.value, historyItems.length ? 1 : 0)
 
     const turnRef = turnForSession(sessionId)
     const liveOnActive = Boolean(
@@ -990,6 +990,9 @@ export const useGrokStore = defineStore('grok', () => {
       && sessionId
       && sameGrokSession(turnRef.sessionId, sessionId),
     )
+    if (!liveOnActive || !turnRef) return historyItems
+
+    const items = [...historyItems]
     if (liveOnActive && turnRef) {
       const liveKeys = [sessionId, turnRef.sessionId, resolveSessionId(turnRef.sessionId)].filter(Boolean)
       let liveRaw = ''
@@ -2070,12 +2073,12 @@ export const useGrokStore = defineStore('grok', () => {
       model?: string
       effort?: string
     },
-  ): Promise<boolean> {
+  ): Promise<'sent' | 'failed' | 'deferred'> {
     const turnBackend = options?.backend || backendId.value
     const workspace = options?.workspace || workspacePath.value
     if (!workspace) {
       notify('warning', translate('app.needWorkspace'), translate('app.needWorkspaceHintReady'))
-      return false
+      return 'failed'
     }
     const lockedTurn = turnForSession(sessionId)
     const pendingTurnId = options?.alreadyLocked && lockedTurn?.turnId?.startsWith('grok-turn-pending-')
@@ -2142,7 +2145,7 @@ export const useGrokStore = defineStore('grok', () => {
         )) {
           clearTurnState(targetSessionId, finalizedTurn.turnId)
         }
-        return true
+        return 'sent'
       }
       if (ownsPendingTurn) {
         setSessionTurn(targetSessionId, {
@@ -2151,7 +2154,7 @@ export const useGrokStore = defineStore('grok', () => {
           turnId: nextTurnId,
         })
       }
-      return true
+      return 'sent'
     } catch (error) {
       const acceptedTurn = turnForSession(sessionId)
       const latestStartedTurnId = latestStartedTurnForSession(sessionId)
@@ -2167,13 +2170,15 @@ export const useGrokStore = defineStore('grok', () => {
         // events prove the prompt was accepted; removing it here causes the
         // "message vanished while thinking, then reappeared" flicker and a retry
         // would duplicate the task.
-        return true
+        return 'sent'
       }
+      const failure = errorMessage(error)
       rememberFinalizedGrokTurn(pendingTurnId)
       clearTurnState(sessionId, pendingTurnId)
       if (options?.localMessageId) removeLocalMessage(sessionId, options.localMessageId)
-      notify('error', translate('notifications.messageNotSent'), errorMessage(error))
-      return false
+      if (/Grok turn is already running/i.test(failure)) return 'deferred'
+      notify('error', translate('notifications.messageNotSent'), failure)
+      return 'failed'
     }
   }
 
@@ -2192,10 +2197,10 @@ export const useGrokStore = defineStore('grok', () => {
         }
       }
     }
-    const next = list[0]
-    // Preserve FIFO across failures. A later prompt must not leap over the
-    // failed head until the user retries, removes, or explicitly sends it now.
-    if (!next || next.state !== 'queued') return
+    // Failed requests remain visible for retry, but a provider HTTP/stream
+    // failure must not make every later prompt unsendable.
+    const next = list.find((item) => item.state === 'queued')
+    if (!next) return
     if (next.blockedByTurnId && !finalizedTurnIds.has(next.blockedByTurnId)) return
     if (isSessionBusy(id)) return
 
@@ -2211,7 +2216,7 @@ export const useGrokStore = defineStore('grok', () => {
       )
       patchQueuedMessage(queueSessionId, next.id, { localAppended: true })
     }
-    const ok = await dispatchTurn(
+    const outcome = await dispatchTurn(
       resolveSessionId(queueSessionId) || queueSessionId,
       next.text,
       next.images,
@@ -2223,7 +2228,7 @@ export const useGrokStore = defineStore('grok', () => {
         localMessageId,
       },
     )
-    if (ok) {
+    if (outcome === 'sent') {
       removeQueuedMessageFromSession(queueSessionId, next.id)
       // Completion may have beaten the send Promise; resume FIFO now that the
       // sending item has been removed from its (possibly promoted) queue bucket.
@@ -2231,11 +2236,18 @@ export const useGrokStore = defineStore('grok', () => {
       if (!isSessionBusy(targetSessionId)) await drainQueue(targetSessionId)
       return
     }
+    if (outcome === 'deferred') {
+      patchQueuedMessage(queueSessionId, next.id, { state: 'queued', error: '' })
+      return
+    }
     patchQueuedMessage(queueSessionId, next.id, {
       state: 'failed',
       error: translate('notifications.messageNotSent'),
       localAppended: localMessageId ? false : next.localAppended,
     })
+    if (!isSessionBusy(resolveSessionId(queueSessionId) || queueSessionId)) {
+      await drainQueue(queueSessionId)
+    }
   }
 
   async function sendQueuedMessageNow(messageId: string): Promise<void> {

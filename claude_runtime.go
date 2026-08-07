@@ -1294,7 +1294,39 @@ func activeWorkspaceForRuntime(settings UserSettings) string {
 		return settings.GrokWorkspace
 	case "claude":
 		return settings.ClaudeWorkspace
+	case "gemini":
+		if strings.TrimSpace(settings.GeminiWorkspace) != "" {
+			return settings.GeminiWorkspace
+		}
+		return settings.Workspace
+	case "opencode":
+		if strings.TrimSpace(settings.OpenCodeWorkspace) != "" {
+			return settings.OpenCodeWorkspace
+		}
+		return settings.Workspace
 	default:
 		return settings.Workspace
 	}
+}
+
+func recentWorkspacesForRuntime(settings UserSettings) []string {
+	switch normalizeRuntime(settings.ActiveRuntime) {
+	case "grok":
+		if len(settings.GrokRecentWorkspaces) > 0 {
+			return settings.GrokRecentWorkspaces
+		}
+	case "claude":
+		if len(settings.ClaudeRecentWorkspaces) > 0 {
+			return settings.ClaudeRecentWorkspaces
+		}
+	case "gemini":
+		if len(settings.GeminiRecentWorkspaces) > 0 {
+			return settings.GeminiRecentWorkspaces
+		}
+	case "opencode":
+		if len(settings.OpenCodeRecentWorkspaces) > 0 {
+			return settings.OpenCodeRecentWorkspaces
+		}
+	}
+	return settings.RecentWorkspaces
 }

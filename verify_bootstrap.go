@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -77,6 +78,21 @@ func main() {
 		"model":          boot.Settings.Model,
 		"sessions":       len(service.sessions),
 		"agentProviders": summarizeAgents(boot.AgentProviders),
+	}
+	home, _ := os.UserHomeDir()
+	codexHits := scanCodexRolloutTokenUsage(resolveCodexHome())
+	codexUsage := tokenBreakdown{}
+	for _, hit := range codexHits {
+		codexUsage.Input += hit.Breakdown.Input
+		codexUsage.Cached += hit.Breakdown.Cached
+		codexUsage.Output += hit.Breakdown.Output
+		codexUsage.Reasoning += hit.Breakdown.Reasoning
+		codexUsage.Total += hit.Breakdown.Total
+	}
+	result["usageProbe"] = map[string]any{
+		"codex": codexUsage,
+		"gemini": collectGeminiUsage(filepath.Join(home, ".gemini"), ""),
+		"opencode": collectOpenCodeUsage(home, "", 0),
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

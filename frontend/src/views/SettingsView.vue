@@ -22,6 +22,7 @@ import {
   Settings2,
   Smile,
   Keyboard,
+  LoaderCircle,
   Trash2,
   UserRound,
   Zap,
@@ -171,14 +172,6 @@ const terminalProfile = shallowRef(appStore.settings.terminalProfile)
 const language = shallowRef(appStore.settings.language)
 const autoConnect = shallowRef(appStore.settings.autoConnect)
 const sendWithModifier = shallowRef(Boolean(appStore.settings.sendWithModifier))
-const followUpBehavior = shallowRef<'steer' | 'queue'>(
-  appStore.settings.followUpBehavior === 'steer' ? 'steer' : 'queue',
-)
-watch(followUpBehavior, (value) => {
-  if (appStore.settings.followUpBehavior === value) return
-  // This control affects the active composer immediately; Save persists the same value.
-  appStore.patchSettings({ followUpBehavior: value })
-})
 const notifyOnTurnComplete = shallowRef(appStore.settings.notifyOnTurnComplete !== false)
 const preventSleepWhileRunning = shallowRef(Boolean(appStore.settings.preventSleepWhileRunning))
 const alwaysOnTop = shallowRef(Boolean(appStore.settings.alwaysOnTop))
@@ -272,11 +265,27 @@ const activeRuntimeName = computed(() => {
   return 'Codex'
 })
 const activeRuntimeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+
+function syncExternalActiveSession(modelValue: string, effortValue: string): void {
+  const thread = codexStore.activeThread
+  if (!thread || (!isGeminiSettings.value && !isOpenCodeSettings.value)) return
+  const model = modelValue.trim()
+  const effort = effortValue.trim()
+  codexStore.patchActiveSessionPreferences(model, effort)
+  void codexStore.updateSessionPreferences({
+    sessionId: thread.id,
+    model,
+    effort,
+    collaborationMode: thread.collaborationMode || 'default',
+  }).catch(() => undefined)
+}
+
 const externalModel = computed({
   get: () => isGeminiSettings.value ? appStore.settings.geminiModel : appStore.settings.openCodeModel,
   set: (value: string) => {
     if (isGeminiSettings.value) {
       appStore.patchSettings({ geminiModel: value })
+      syncExternalActiveSession(value, appStore.settings.geminiEffort)
       return
     }
     const provider = value.includes('/') ? value.slice(0, value.indexOf('/')).trim() : ''
@@ -284,11 +293,15 @@ const externalModel = computed({
       openCodeModel: value,
       ...(provider ? { openCodeProvider: provider } : {}),
     })
+    syncExternalActiveSession(value, appStore.settings.openCodeEffort)
   },
 })
 const externalEffort = computed({
   get: () => isGeminiSettings.value ? appStore.settings.geminiEffort : appStore.settings.openCodeEffort,
-  set: (value: string) => appStore.patchSettings(isGeminiSettings.value ? { geminiEffort: value } : { openCodeEffort: value }),
+  set: (value: string) => {
+    appStore.patchSettings(isGeminiSettings.value ? { geminiEffort: value } : { openCodeEffort: value })
+    syncExternalActiveSession(externalModel.value, value)
+  },
 })
 const externalSandbox = computed({
   get: () => isGeminiSettings.value ? geminiSandbox.value : openCodeSandbox.value,
@@ -314,17 +327,59 @@ const externalCustomModels = computed(() => isGeminiSettings.value
   : (appStore.settings.openCodeCustomModels ?? []))
 const externalProviderSelection = computed({
   get: () => appStore.settings.openCodeProvider || '',
-  set: (value: string) => appStore.patchSettings({ openCodeProvider: value }),
+  set: (value: string) => {
+    const catalog = externalCatalog.value?.models?.length
+      ? externalCatalog.value.models
+      : (externalRuntimeProvider.value?.models || [])
+    const models = catalog.filter((item) => item.providerId === value || item.model.startsWith(`${value}/`))
+    const current = appStore.settings.openCodeModel
+    const nextModel = models.some((item) => item.model === current)
+      ? current
+      : (models.find((item) => item.isDefault)?.model || models[0]?.model || current)
+    appStore.patchSettings({ openCodeProvider: value, openCodeModel: nextModel })
+    if (nextModel) syncExternalActiveSession(nextModel, appStore.settings.openCodeEffort)
+  },
 })
-const externalProviderOptions = computed(() => (externalCatalog.value?.providers || []).map((provider) => ({
+const externalCatalogError = shallowRef('')
+const externalProviderOptions = computed(() => (externalCatalog.value?.providers?.length
+  ? externalCatalog.value.providers
+  : (externalRuntimeProvider.value?.providers || [])).map((provider) => ({
   value: provider.id,
   label: provider.name,
   description: t('settings.externalProviderMeta', { id: provider.id, count: provider.models?.length || 0 }),
 })))
+
+function syncOpenCodeCatalogSelection(catalog: ExternalRuntimeCatalog): void {
+  if (!isOpenCodeSettings.value) return
+  const providers = catalog.providers?.length
+    ? catalog.providers
+    : (externalRuntimeProvider.value?.providers || [])
+  const providerIDs = new Set(providers.map((provider) => provider.id).filter(Boolean))
+  const currentProvider = appStore.settings.openCodeProvider.trim()
+  const activeProvider = catalog.activeProvider?.trim() || ''
+  const defaultProvider = catalog.models?.find((item) => item.isDefault)?.providerId?.trim() || ''
+  const nextProvider = currentProvider && providerIDs.has(currentProvider)
+    ? currentProvider
+    : [activeProvider, defaultProvider, providers[0]?.id || ''].find((value) => value && providerIDs.has(value)) || ''
+  const models = (catalog.models?.length ? catalog.models : (externalRuntimeProvider.value?.models || []))
+    .filter((item) => !nextProvider || item.providerId === nextProvider || item.model.startsWith(`${nextProvider}/`))
+  const currentModel = appStore.settings.openCodeModel.trim()
+  const nextModel = models.some((item) => item.model === currentModel)
+    ? currentModel
+    : (models.find((item) => item.isDefault)?.model || models[0]?.model || '')
+  if (nextProvider !== currentProvider || nextModel !== currentModel) {
+    appStore.patchSettings({ openCodeProvider: nextProvider, openCodeModel: nextModel })
+    if (nextModel) syncExternalActiveSession(nextModel, appStore.settings.openCodeEffort)
+  }
+}
 const externalModelOptions = computed(() => {
-  const catalog = externalCatalog.value?.models?.length
+  const fullCatalog = externalCatalog.value?.models?.length
     ? externalCatalog.value.models
     : externalRuntimeProvider.value?.models || []
+  const selectedProvider = isOpenCodeSettings.value ? appStore.settings.openCodeProvider : ''
+  const catalog = selectedProvider
+    ? fullCatalog.filter((item) => item.providerId === selectedProvider || item.model.startsWith(`${selectedProvider}/`))
+    : fullCatalog
   const options = catalog.map((item) => ({ value: item.model, label: item.displayName || item.model, description: item.description, badge: item.isDefault ? t('common.recommended') : '' }))
   for (const model of externalCustomModels.value) {
     if (!options.some((item) => item.value.toLocaleLowerCase() === model.toLocaleLowerCase())) {
@@ -337,17 +392,24 @@ const externalModelOptions = computed(() => {
 async function loadExternalSettingsCatalog(): Promise<void> {
   if (!isGeminiSettings.value && !isOpenCodeSettings.value) return
   externalCatalogLoading.value = true
+  externalCatalogError.value = ''
   try {
-    externalCatalog.value = await backend.ReadExternalRuntimeCatalog(
-      isGeminiSettings.value ? 'gemini' : 'opencode',
-      appStore.settings.workspace || '',
+    const runtime = isGeminiSettings.value ? 'gemini' : 'opencode'
+    const catalog = await backend.ReadExternalRuntimeCatalog(
+      runtime,
+      appStore.currentWorkspacePath || '',
     )
+    if (runtime !== (isGeminiSettings.value ? 'gemini' : 'opencode')) return
+    externalCatalog.value = catalog
+    if (runtime === 'opencode') syncOpenCodeCatalogSelection(catalog)
     const info = externalInstructionScope.value === 'global'
-      ? externalCatalog.value.globalInstructions
-      : externalCatalog.value.projectInstructions
+      ? catalog.globalInstructions
+      : catalog.projectInstructions
     externalInstructionDraft.value = info?.content || ''
-  } catch {
-    externalCatalog.value = null
+  } catch (error) {
+    externalCatalogError.value = error instanceof Error ? error.message : String(error || t('common.unavailable'))
+    // Keep the bootstrap runtime catalog as a usable fallback instead of
+    // turning a transient CLI/configuration error into an empty form.
   } finally {
     externalCatalogLoading.value = false
   }
@@ -364,7 +426,7 @@ async function saveExternalInstructionsSettings(): Promise<void> {
   try {
     await backend.SaveExternalRuntimeInstructions({
       runtime: isGeminiSettings.value ? 'gemini' : 'opencode',
-      workspace: appStore.settings.workspace || '',
+      workspace: appStore.currentWorkspacePath || '',
       scope: externalInstructionScope.value,
       content: externalInstructionDraft.value,
     })
@@ -542,11 +604,6 @@ const personalityOptions = computed<SelectOption[]>(() => [
 const multiAgentOptions = computed<SelectOption[]>(() => [
   { value: 'explicitRequestOnly', label: t('settings.explicitAgents'), description: t('settings.explicitAgentsHint') },
   { value: 'proactive', label: t('settings.proactiveAgents'), description: t('settings.proactiveAgentsHint') },
-])
-
-const followUpOptions = computed<SelectOption[]>(() => [
-  { value: 'queue', label: t('settings.followUpQueue'), description: t('settings.followUpQueueHint') },
-  { value: 'steer', label: t('settings.followUpSteer'), description: t('settings.followUpSteerHint') },
 ])
 
 /** Official client identities accepted by most Codex reverse-proxy channels. */
@@ -786,7 +843,7 @@ watch([theme, accentColor, fontFamily, translucentSidebar, highContrast, pointer
 })
 
 watch(
-  () => appStore.settings.workspace,
+  () => appStore.currentWorkspacePath,
   () => {
     void loadProjectInstructions()
   },
@@ -909,7 +966,6 @@ function syncFromStore(): void {
   language.value = settings.language
   autoConnect.value = settings.autoConnect
   sendWithModifier.value = Boolean(settings.sendWithModifier)
-  followUpBehavior.value = settings.followUpBehavior === 'steer' ? 'steer' : 'queue'
   notifyOnTurnComplete.value = settings.notifyOnTurnComplete !== false
   preventSleepWhileRunning.value = Boolean(settings.preventSleepWhileRunning)
   alwaysOnTop.value = Boolean(settings.alwaysOnTop)
@@ -971,7 +1027,7 @@ async function saveScheduledDraft(): Promise<void> {
       id: '',
       title: scheduledDraftTitle.value.trim(),
       prompt: scheduledDraftPrompt.value.trim(),
-      workspace: appStore.settings.workspace || '',
+      workspace: appStore.currentWorkspacePath || '',
       enabled: true,
       intervalMin: Math.max(5, Number(scheduledDraftInterval.value) || 60),
       useWorktree: scheduledDraftWorktree.value,
@@ -1099,7 +1155,7 @@ async function loadProjectInstructions(): Promise<void> {
       ? (appStore.settings.grokWorkspace || '')
       : isClaudeSettings.value
         ? (appStore.settings.claudeWorkspace || '')
-        : (appStore.settings.workspace || '')
+        : (appStore.currentWorkspacePath || '')
     projectInstructionsWorkspaceName.value = ''
     projectInstructions.value = ''
   }
@@ -1560,7 +1616,7 @@ async function save(): Promise<void> {
       language: language.value,
       autoConnect: autoConnect.value,
       sendWithModifier: sendWithModifier.value,
-      followUpBehavior: followUpBehavior.value,
+      followUpBehavior: 'queue',
       notifyOnTurnComplete: notifyOnTurnComplete.value,
       preventSleepWhileRunning: preventSleepWhileRunning.value,
       alwaysOnTop: alwaysOnTop.value,
@@ -1820,22 +1876,6 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                       :aria-label="t('settings.sendWithModifier', { key: sendModifierLabel })"
                       @update:checked="sendWithModifier = $event"
                     />
-                  </div>
-                  <div class="flex items-center justify-between gap-4 px-4 py-3">
-                    <div class="min-w-0">
-                      <p class="text-[13px]">{{ t('settings.followUpBehavior') }}</p>
-                      <p class="text-[11px] text-muted-foreground">{{ t('settings.followUpBehaviorHint') }}</p>
-                    </div>
-                    <Select v-model="followUpBehavior">
-                      <SelectTrigger class="h-8 w-[190px] text-xs" :aria-label="t('settings.followUpBehavior')">
-                        <SelectValue>{{ selectedOptionLabel(followUpOptions, followUpBehavior) }}</SelectValue>
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="option in followUpOptions" :key="option.value" :value="option.value">
-                          {{ option.label }}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
                   </div>
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
@@ -2384,14 +2424,26 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   <div v-if="isOpenCodeSettings" class="space-y-1">
                      <Label class="text-xs">{{ t('settings.externalProvider') }}</Label>
                      <Select v-model="externalProviderSelection">
-                       <SelectTrigger class="h-9 text-xs"><SelectValue :placeholder="t('settings.externalProviderPlaceholder')" /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="option in externalProviderOptions" :key="option.value" :value="option.value">
+                      <SelectTrigger class="h-9 text-xs"><SelectValue :placeholder="t('settings.externalProviderPlaceholder')" /></SelectTrigger>
+                       <SelectContent>
+                         <SelectItem v-if="!externalProviderOptions.length" value="__no_provider__" disabled>
+                           {{ t('settings.externalProviderEmpty') }}
+                         </SelectItem>
+                         <SelectItem v-for="option in externalProviderOptions" :key="option.value" :value="option.value">
                           <span class="flex items-center gap-2"><span>{{ option.label }}</span><span class="text-[10px] text-muted-foreground">{{ option.description }}</span></span>
                         </SelectItem>
                       </SelectContent>
-                    </Select>
+                     </Select>
                      <p class="text-[10px] text-muted-foreground">{{ t('settings.openCodeProviderHint') }}</p>
+                     <div v-if="externalCatalogLoading" class="flex items-center gap-2 text-[10px] text-muted-foreground">
+                       <LoaderCircle :size="12" class="animate-spin" />{{ t('common.loading') }}
+                     </div>
+                     <div v-else-if="externalCatalogError" class="flex items-center justify-between gap-2 text-[10px] text-destructive">
+                       <span class="min-w-0 truncate" :title="externalCatalogError">{{ externalCatalogError }}</span>
+                       <Button type="button" variant="ghost" size="sm" class="h-6 shrink-0 px-2 text-[10px]" @click="loadExternalSettingsCatalog">
+                         <RefreshCw :size="11" class="mr-1" />{{ t('common.retry') }}
+                       </Button>
+                     </div>
                   </div>
                   <div class="space-y-2">
                      <Label class="text-xs">{{ t('settings.externalCustomModelTitle') }}</Label>
@@ -2801,7 +2853,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                 </div>
               </section>
               <section
-                v-if="appStore.account.authenticated && appStore.accountUsage"
+                v-if="appStore.accountUsage"
                 class="overflow-hidden rounded-xl border bg-card"
               >
                 <div class="border-b px-4 py-3">
@@ -3125,7 +3177,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   <div class="flex items-center justify-between gap-3 px-4 py-3">
                     <p class="text-[13px]">{{ t('settings.gitWorkspace') }}</p>
                     <span class="max-w-[60%] truncate text-[12px] text-muted-foreground">
-                      {{ workspaceStore.workspace?.path || appStore.settings.workspace || t('sidebar.chooseFolder') }}
+                      {{ workspaceStore.workspace?.path || appStore.currentWorkspacePath || t('sidebar.chooseFolder') }}
                     </span>
                   </div>
                   <div class="flex items-center justify-between gap-3 px-4 py-3">

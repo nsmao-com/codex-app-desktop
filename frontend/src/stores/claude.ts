@@ -182,14 +182,21 @@ function mergeClaudeLiveActivity(
 ): TimelineItem[] {
   const replaceable = (item: TimelineItem) =>
     item.turnId === turnId && (item.type === 'agentMessage' || item.type === 'reasoning')
-  const firstIndex = base.findIndex(replaceable)
+  let firstIndex = -1
+  let currentAgent: TimelineItem | undefined
+  let currentReasoning: TimelineItem | undefined
+  for (let index = base.length - 1; index >= 0; index -= 1) {
+    const item = base[index]
+    if (!item) continue
+    if (item.turnId !== turnId) {
+      if (firstIndex >= 0) break
+      continue
+    }
+    if (replaceable(item)) firstIndex = index
+    if (!currentAgent && item.type === 'agentMessage') currentAgent = item
+    if (!currentReasoning && item.type === 'reasoning') currentReasoning = item
+  }
   const insertionIndex = firstIndex >= 0 ? firstIndex : base.length
-  const currentAgent = [...base].reverse().find((item) =>
-    item.turnId === turnId && item.type === 'agentMessage',
-  )
-  const currentReasoning = [...base].reverse().find((item) =>
-    item.turnId === turnId && item.type === 'reasoning',
-  )
   const hasNativeReasoning = activity.some((message) =>
     (message.role || '').toLowerCase() === 'reasoning',
   )
@@ -377,7 +384,7 @@ export const useClaudeStore = defineStore('claude', () => {
   )
   const activeItems = computed(() => {
     const sessionId = activeSessionId.value
-    const base = [...(itemsBySession.value[sessionId] || [])]
+    const base = itemsBySession.value[sessionId] || []
     const turn = activeTurnBySession.value[sessionId]
     if (!turn?.turnId) return base
     const activity = liveActivityBySession.value[sessionId] || []
@@ -1561,9 +1568,9 @@ export const useClaudeStore = defineStore('claude', () => {
     content: string,
     images: string[],
     options?: { workspace?: string; model?: string; effort?: string },
-  ): Promise<boolean> {
+  ): Promise<'sent' | 'failed' | 'deferred'> {
     const workspace = options?.workspace || workspacePath.value
-    if (!workspace) return false
+    if (!workspace) return 'failed'
     markSending(sessionId, true)
     // Mark busy BEFORE await so a second sendMessage cannot also dispatch.
     markRunning(sessionId, true)
@@ -1635,7 +1642,7 @@ export const useClaudeStore = defineStore('claude', () => {
           delete nextTurns[nextSessionId]
           activeTurnBySession.value = nextTurns
         }
-        return true
+        return 'sent'
       }
       markRunning(nextSessionId, true)
       activeTurnBySession.value = {
@@ -1663,8 +1670,18 @@ export const useClaudeStore = defineStore('claude', () => {
         }
       }
       void loadSessions()
-      return true
+      return 'sent'
     } catch (error) {
+      const failure = errorMessage(error)
+      if (/Claude turn already running/i.test(failure)) {
+        markRunning(sessionId, true)
+        const list = itemsBySession.value[sessionId] || []
+        itemsBySession.value = {
+          ...itemsBySession.value,
+          [sessionId]: list.filter((item) => item.turnId !== localTurnId),
+        }
+        return 'deferred'
+      }
       const acceptedRef = turnRefForSession(sessionId)
       const latestStartedTurnId = latestStartedTurnForSession(sessionId)
       const acceptedDuringSend = Boolean(
@@ -1678,7 +1695,7 @@ export const useClaudeStore = defineStore('claude', () => {
         // JavaScript. The event is proof that this prompt was accepted; retrying
         // it would duplicate the turn.
         attachedTurn = true
-        return true
+        return 'sent'
       }
       if (!attachedTurn) {
         markRunning(sessionId, false)
@@ -1690,7 +1707,7 @@ export const useClaudeStore = defineStore('claude', () => {
         }
       }
       notify('error', translate('notifications.sendFailed'), errorMessage(error))
-      return false
+      return 'failed'
     } finally {
       markSending(sessionId, false)
     }
@@ -1791,10 +1808,10 @@ export const useClaudeStore = defineStore('claude', () => {
 
   async function flushQueue(sessionId: string): Promise<void> {
     const list = queueBySession.value[sessionId] || []
-    const next = list[0]
-    // A failed head stays in place until retry/remove/send-now. Skipping it would
-    // silently send later prompts out of order.
-    if (!next || next.state !== 'queued') return
+    // Keep failed rows available for explicit retry without parking every later
+    // prompt behind a request that never reached Claude.
+    const next = list.find((item) => item.state === 'queued')
+    if (!next) return
     await dispatchQueuedMessage(next.id, false)
   }
 
@@ -1957,7 +1974,7 @@ export const useClaudeStore = defineStore('claude', () => {
       ),
     }
     // Use dispatchTurn — never sendMessage (which would re-enqueue while busy).
-    const ok = await dispatchTurn(found.sessionId, found.item.text, found.item.images, {
+    const outcome = await dispatchTurn(found.sessionId, found.item.text, found.item.images, {
       workspace: found.item.workspace,
       model: found.item.model,
       effort: found.item.effort,
@@ -1968,13 +1985,23 @@ export const useClaudeStore = defineStore('claude', () => {
     if (!currentEntry) return
     const [currentSessionId, currentList] = currentEntry
     const remaining = currentList.filter((row) => row.id !== messageId)
-    if (!ok) {
+    if (outcome === 'deferred') {
+      queueBySession.value = {
+        ...queueBySession.value,
+        [currentSessionId]: currentList.map((row) => row.id === messageId
+          ? { ...row, sessionId: currentSessionId, state: 'queued', error: '' }
+          : row),
+      }
+      return
+    }
+    if (outcome === 'failed') {
       queueBySession.value = {
         ...queueBySession.value,
         [currentSessionId]: currentList.map((row) => row.id === messageId
           ? { ...row, sessionId: currentSessionId, state: 'failed', error: translate('notifications.sendFailed') }
           : row),
       }
+      if (!isSessionBusy(currentSessionId)) await flushQueue(currentSessionId)
       return
     }
     const nextQueues = { ...queueBySession.value }

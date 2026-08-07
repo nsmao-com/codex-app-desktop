@@ -790,12 +790,16 @@ export interface UserSettings {
      * Gemini/OpenCode preferences stay separate from Codex/Claude/Grok so a
      * runtime switch never changes another provider's default model.
      */
+    "geminiWorkspace": string;
+    "geminiRecentWorkspaces": string[] | null;
     "geminiModel": string;
     "geminiEffort": string;
     "geminiSandbox": string;
     "geminiApprovalPolicy": string;
     "geminiCustomModels": string[] | null;
     "openCodeModel": string;
+    "openCodeWorkspace": string;
+    "openCodeRecentWorkspaces": string[] | null;
     "openCodeEffort": string;
     "openCodeSandbox": string;
     "openCodeApprovalPolicy": string;

@@ -7,6 +7,7 @@ package main
 // maps those values into Codex's model-provider settings.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -22,6 +23,20 @@ import (
 	"sync"
 	"time"
 )
+
+// externalNativeHistoryPage is the provider-neutral page returned to the
+// frontend. Native transcripts stay in their own stores; only this bounded
+// slice is converted into the Codex-compatible response shape.
+type externalNativeHistoryPage struct {
+	Turns []externalTurn
+	Start int
+	Total int
+}
+
+type nativeHistoryCacheEntry struct {
+	page      externalNativeHistoryPage
+	touchedAt time.Time
+}
 
 var openCodeCatalogCache = struct {
 	sync.Mutex
@@ -190,11 +205,24 @@ func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCu
 		catalog.ProviderSource = "OpenCode providers/models CLI and opencode.json"
 		catalog.Models, _, catalog.Providers = discoverOpenCodeCatalog(home)
 		catalog.ActiveProvider, catalog.DefaultModel, catalog.ConfigInstructions = readOpenCodeConfig(catalog.ConfigPath)
+		if catalog.DefaultModel == "" {
+			for _, model := range catalog.Models {
+				if model.IsDefault {
+					catalog.DefaultModel = model.Model
+					break
+				}
+			}
+		}
+		if catalog.ActiveProvider == "" {
+			catalog.ActiveProvider = providerFromModelReference(catalog.DefaultModel)
+		}
 		catalog.MCP = readExternalMCPByScope("opencode", catalog.ConfigPath, workspace)
 		catalog.GlobalInstructions = readInstructionFile(filepath.Join(catalog.NativeHome, "AGENTS.md"), "opencode-global", "OpenCode global AGENTS.md")
 		catalog.ProjectInstructions = readOpenCodeProjectInstructions(workspace)
 		catalog.Sessions = listOpenCodeNativeSessions(workspace)
-		catalog.Usage = collectOpenCodeUsage(home, workspace, 30)
+		// The catalog and the usage panel both present native lifetime totals.
+		// Applying a 30-day filter here made the two screens disagree.
+		catalog.Usage = collectOpenCodeUsage(home, workspace, 0)
 		catalog.ReadOnlyNotice = "provider、model、MCP、指令、历史和 usage 均来自 OpenCode 原生配置/数据库。"
 	}
 	return catalog, nil
@@ -203,9 +231,127 @@ func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCu
 func (s *AppService) currentRuntimeWorkspace(runtime string) string {
 	settings := s.Settings()
 	if runtime == "gemini" || runtime == "opencode" {
-		return strings.TrimSpace(settings.Workspace)
+		return strings.TrimSpace(activeWorkspaceForRuntime(settings))
 	}
 	return ""
+}
+
+// syncNativeExternalSessions imports only lightweight summaries into the local
+// sidebar index. Full turns remain in Gemini JSONL/OpenCode SQLite and are
+// loaded lazily when a session is opened. A short TTL prevents repeated
+// sidebar refreshes from rescanning the native stores.
+func (s *AppService) syncNativeExternalSessions(runtime, workspace string) {
+	runtime = normalizeExternalRuntime(runtime)
+	if runtime == "" {
+		return
+	}
+	key := runtime + "|" + strings.ToLower(filepath.ToSlash(filepath.Clean(strings.TrimSpace(workspace))))
+	now := time.Now()
+	s.mu.Lock()
+	if last := s.nativeSessionsSyncedAt[key]; !last.IsZero() && now.Sub(last) < 15*time.Second {
+		s.mu.Unlock()
+		return
+	}
+	s.nativeSessionsSyncedAt[key] = now
+	s.mu.Unlock()
+
+	home, _ := os.UserHomeDir()
+	var views []ExternalSessionView
+	switch runtime {
+	case "gemini":
+		views = listGeminiNativeSessions(filepath.Join(home, ".gemini"), workspace)
+	case "opencode":
+		views = listOpenCodeNativeSessions(workspace)
+	}
+	if len(views) == 0 {
+		return
+	}
+
+	s.mu.Lock()
+	changed := false
+	invalidated := make([]string, 0, 4)
+	for _, view := range views {
+		backendRef := strings.TrimSpace(view.ID)
+		if backendRef == "" {
+			continue
+		}
+		viewWorkspace := strings.TrimSpace(view.Workspace)
+		if viewWorkspace == "" {
+			viewWorkspace = workspace
+		}
+		var existing *SessionRecord
+		for _, record := range s.sessions {
+			if record == nil || record.Provider != runtime || !samePath(record.Workspace, viewWorkspace) {
+				continue
+			}
+			if record.BackendRef == backendRef || (record.Native && record.ID == "native-"+runtime+"-"+backendRef) {
+				existing = record
+				break
+			}
+		}
+		if existing == nil {
+			createdAt := view.CreatedAt
+			if createdAt <= 0 {
+				createdAt = view.UpdatedAt
+			}
+			if createdAt <= 0 {
+				createdAt = now.Unix()
+			}
+			updatedAt := view.UpdatedAt
+			if updatedAt <= 0 {
+				updatedAt = createdAt
+			}
+			name := strings.TrimSpace(view.Title)
+			if name == "" {
+				name = "New task"
+			}
+			existing = &SessionRecord{
+				ID:        "native-" + runtime + "-" + backendRef,
+				Workspace: viewWorkspace, Provider: runtime,
+				ProviderID: externalProviderID(runtime), BackendRef: backendRef,
+				Model: view.Model, WorkMode: "code", Name: name,
+				Preview: view.Preview, CreatedAt: createdAt, UpdatedAt: updatedAt,
+				Native: true, Turns: []externalTurn{},
+			}
+			s.sessions[existing.ID] = existing
+			changed = true
+		} else if !existing.Archived && existing.Native {
+			name := strings.TrimSpace(view.Title)
+			if name == "" {
+				name = existing.Name
+			}
+			updatedAt := view.UpdatedAt
+			if updatedAt <= 0 {
+				updatedAt = existing.UpdatedAt
+			}
+			if existing.Name != name || existing.Preview != view.Preview || existing.Model != view.Model || existing.UpdatedAt != updatedAt {
+				existing.Name, existing.Preview, existing.Model, existing.UpdatedAt = name, view.Preview, view.Model, updatedAt
+				changed = true
+				invalidated = append(invalidated, backendRef)
+			}
+		}
+	}
+	if changed {
+		s.persistSessionsLocked()
+	}
+	s.mu.Unlock()
+	for _, backendRef := range invalidated {
+		s.invalidateNativeHistoryCache(runtime, backendRef)
+	}
+}
+
+func (s *AppService) invalidateNativeHistoryCache(runtime, backendRef string) {
+	prefix := normalizeExternalRuntime(runtime) + "\x00" + strings.TrimSpace(backendRef) + "\x00"
+	if prefix == "\x00\x00" {
+		return
+	}
+	s.historyMu.Lock()
+	for key := range s.nativeHistoryCache {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.nativeHistoryCache, key)
+		}
+	}
+	s.historyMu.Unlock()
 }
 
 func (s *AppService) SaveExternalRuntimeInstructions(request ExternalInstructionsSaveRequest) error {
@@ -642,13 +788,15 @@ func discoverOpenCodeCatalog(home string) ([]AgentProviderModel, []AgentProvider
 		return models, efforts, providers
 	}
 	openCodeCatalogCache.Unlock()
+	configPath := openCodeConfigPath(home)
+	var config map[string]any
+	readLimitedJSON(configPath, &config)
 	executable := findCommand(commandCandidates("opencode"))
-	if executable == "" {
-		return nil, nil, nil
-	}
-	output, err := runExternalCLIOutput(executable, nil, []string{"models", "--verbose"}, "", 8*time.Second)
-	if err != nil {
-		return nil, nil, nil
+	output := ""
+	if executable != "" {
+		if value, err := runExternalCLIOutput(executable, nil, []string{"models", "--verbose"}, "", 8*time.Second); err == nil {
+			output = value
+		}
 	}
 	var models []AgentProviderModel
 	seen := map[string]bool{}
@@ -675,8 +823,39 @@ func discoverOpenCodeCatalog(home string) ([]AgentProviderModel, []AgentProvider
 		models = append(models, model)
 		providerModels[item.ProviderID] = append(providerModels[item.ProviderID], model)
 	}
-	if len(models) == 0 {
-		return nil, nil, nil
+	// Packaged/remote OpenCode installations may not allow the CLI catalog
+	// command. Fall back to the native provider.models map so configured
+	// providers remain selectable in Settings.
+	if provider, ok := config["provider"].(map[string]any); ok {
+		for providerID, raw := range provider {
+			entry, _ := raw.(map[string]any)
+			modelsRaw, _ := entry["models"].(map[string]any)
+			for modelID, rawModel := range modelsRaw {
+				modelID = strings.TrimSpace(modelID)
+				if modelID == "" {
+					continue
+				}
+				model := AgentProviderModel{
+					Model:       strings.TrimSpace(providerID) + "/" + modelID,
+					ProviderID:  strings.TrimSpace(providerID),
+					DisplayName: modelID,
+					Description: "OpenCode " + strings.TrimSpace(providerID) + " model",
+				}
+				if modelConfig, ok := rawModel.(map[string]any); ok {
+					if name := strings.TrimSpace(stringFromAny(modelConfig["name"])); name != "" {
+						model.DisplayName = name
+					}
+					if limit, ok := modelConfig["limit"].(map[string]any); ok {
+						model.ContextWindow = int64FromAny(limit["context"])
+					}
+				}
+				if strings.TrimSpace(model.ProviderID) != "" && !seen[strings.ToLower(model.Model)] {
+					seen[strings.ToLower(model.Model)] = true
+					models = append(models, model)
+					providerModels[model.ProviderID] = append(providerModels[model.ProviderID], model)
+				}
+			}
+		}
 	}
 	active, configuredDefault, _ := readOpenCodeConfig(openCodeConfigPath(home))
 	if configuredDefault != "" {
@@ -694,7 +873,7 @@ func discoverOpenCodeCatalog(home string) ([]AgentProviderModel, []AgentProvider
 			}
 		}
 	}
-	if !hasDefaultModel(models) {
+	if !hasDefaultModel(models) && len(models) > 0 {
 		models[0].IsDefault = true
 	}
 	efforts := make([]AgentProviderReasoningEffort, 0, 8)
@@ -720,19 +899,16 @@ func discoverOpenCodeCatalog(home string) ([]AgentProviderModel, []AgentProvider
 	}
 	configuredProviders := map[string]bool{}
 	providerBaseURLs := map[string]string{}
-	var config map[string]any
-	if readLimitedJSON(openCodeConfigPath(home), &config) {
-		if provider, ok := config["provider"].(map[string]any); ok {
-			for id, raw := range provider {
-				configuredProviders[id] = true
-				if entry, ok := raw.(map[string]any); ok {
-					if value, ok := entry["baseURL"].(string); ok {
+	if provider, ok := config["provider"].(map[string]any); ok {
+		for id, raw := range provider {
+			configuredProviders[id] = true
+			if entry, ok := raw.(map[string]any); ok {
+				if value, ok := entry["baseURL"].(string); ok {
+					providerBaseURLs[id] = sanitizeExternalBaseURL(value)
+				}
+				if options, ok := entry["options"].(map[string]any); ok {
+					if value, ok := options["baseURL"].(string); ok && providerBaseURLs[id] == "" {
 						providerBaseURLs[id] = sanitizeExternalBaseURL(value)
-					}
-					if options, ok := entry["options"].(map[string]any); ok {
-						if value, ok := options["baseURL"].(string); ok && providerBaseURLs[id] == "" {
-							providerBaseURLs[id] = sanitizeExternalBaseURL(value)
-						}
 					}
 				}
 			}
@@ -747,9 +923,16 @@ func discoverOpenCodeCatalog(home string) ([]AgentProviderModel, []AgentProvider
 			configuredProviders["opencode"] = true
 		}
 	}
-	providerIDs := make([]string, 0, len(providerModels))
+	providerIDs := make([]string, 0, len(providerModels)+len(configuredProviders))
+	providerSeen := make(map[string]bool, len(providerModels)+len(configuredProviders))
 	for id := range providerModels {
+		providerSeen[id] = true
 		providerIDs = append(providerIDs, id)
+	}
+	for id := range configuredProviders {
+		if !providerSeen[id] {
+			providerIDs = append(providerIDs, id)
+		}
 	}
 	sort.Strings(providerIDs)
 	providers := make([]ExternalProviderView, 0, len(providerIDs))
@@ -761,7 +944,7 @@ func discoverOpenCodeCatalog(home string) ([]AgentProviderModel, []AgentProvider
 		case "opencode-go":
 			name = "OpenCode Go"
 		}
-		providers = append(providers, ExternalProviderView{ID: id, Name: name, Source: "opencode models --verbose", Configured: configuredProviders[id], Authenticated: configuredProviders[id], BaseURL: providerBaseURLs[id], Models: providerModels[id]})
+		providers = append(providers, ExternalProviderView{ID: id, Name: name, Source: "opencode models --verbose / opencode.json", Configured: configuredProviders[id], Authenticated: configuredProviders[id], BaseURL: providerBaseURLs[id], Models: providerModels[id]})
 	}
 	openCodeCatalogCache.Lock()
 	openCodeCatalogCache.models = append([]AgentProviderModel(nil), models...)
@@ -800,13 +983,47 @@ func int64FromAny(value any) int64 {
 	switch typed := value.(type) {
 	case float64:
 		return int64(typed)
+	case float32:
+		return int64(typed)
 	case int64:
 		return typed
+	case int32:
+		return int64(typed)
 	case int:
 		return int64(typed)
-	default:
-		return 0
+	case uint64:
+		if typed > uint64(^uint64(0)>>1) {
+			return int64(^uint64(0) >> 1)
+		}
+		return int64(typed)
+	case uint32:
+		return int64(typed)
+	case json.Number:
+		parsed, err := strconv.ParseInt(string(typed), 10, 64)
+		if err == nil {
+			return parsed
+		}
+		if floatValue, floatErr := strconv.ParseFloat(string(typed), 64); floatErr == nil {
+			return int64(floatValue)
+		}
+	case string:
+		if parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64); err == nil {
+			return parsed
+		}
+		if floatValue, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil {
+			return int64(floatValue)
+		}
 	}
+	return 0
+}
+
+func firstPositiveInt64(values map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		if value := int64FromAny(values[key]); value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func listOpenCodeNativeSessions(workspace string) []ExternalSessionView {
@@ -888,16 +1105,631 @@ func collectOpenCodeUsage(home, workspace string, days int64) ExternalUsageSumma
 		var rows []map[string]any
 		if json.Unmarshal([]byte(modelOutput), &rows) == nil {
 			for _, row := range rows {
-				item := ExternalUsageModelView{Model: stringFromAny(row["model"]), Sessions: int64FromAny(row["sessions"]), InputTokens: int64FromAny(row["inputTokens"]), OutputTokens: int64FromAny(row["outputTokens"]), Reasoning: int64FromAny(row["reasoningTokens"]), CachedTokens: int64FromAny(row["cachedTokens"]), Cost: float64FromAny(row["cost"])}
-				item.TotalTokens = item.InputTokens + item.CachedTokens + item.OutputTokens + item.Reasoning
-				if parsed, ok := mapFromJSON(item.Model); ok {
-					item.Provider = stringFromAny(parsed["providerID"])
+				modelValue := stringFromAny(row["model"])
+				providerID, modelID := normalizeOpenCodeModelReference(modelValue)
+				item := ExternalUsageModelView{Model: modelValue, Provider: providerID, Sessions: int64FromAny(row["sessions"]), InputTokens: int64FromAny(row["inputTokens"]), OutputTokens: int64FromAny(row["outputTokens"]), Reasoning: int64FromAny(row["reasoningTokens"]), CachedTokens: int64FromAny(row["cachedTokens"]), Cost: float64FromAny(row["cost"])}
+				if modelID != "" {
+					item.Model = modelID
 				}
+				item.TotalTokens = item.InputTokens + item.CachedTokens + item.OutputTokens + item.Reasoning
 				result.ByModel = append(result.ByModel, item)
 			}
 		}
 	}
 	return result
+}
+
+func normalizeOpenCodeModelReference(value string) (provider, model string) {
+	value = strings.TrimSpace(value)
+	if parsed, ok := mapFromJSON(value); ok {
+		provider = strings.TrimSpace(stringFromAny(parsed["providerID"]))
+		modelID := strings.TrimSpace(stringFromAny(parsed["id"]))
+		if provider != "" && modelID != "" {
+			return provider, provider + "/" + modelID
+		}
+	}
+	if index := strings.IndexByte(value, '/'); index > 0 {
+		return strings.TrimSpace(value[:index]), value
+	}
+	return "", value
+}
+
+// collectOpenCodeSessionUsage reads usage from assistant messages created by
+// the current run. A turn can contain several tool-call assistant messages, so
+// keeping only the final stream event undercounts it; reading the whole session
+// would instead count previous turns again.
+func collectOpenCodeSessionUsage(home, sessionID string, startedAtMillis int64) map[string]any {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	quoted := strings.ReplaceAll(sessionID, "'", "''")
+	query := "select data from message where session_id='" + quoted + "'"
+	if startedAtMillis > 0 {
+		query += " and time_created >= " + strconv.FormatInt(startedAtMillis, 10)
+	}
+	query += " order by time_created asc"
+	output, err := runOpenCodeDatabaseQuery(home, query)
+	if err != nil {
+		return nil
+	}
+	var rows []map[string]any
+	if json.Unmarshal([]byte(output), &rows) != nil {
+		return nil
+	}
+	var input, outputTokens, cached, reasoning, total int64
+	for _, row := range rows {
+		data, ok := row["data"].(string)
+		if !ok || strings.TrimSpace(data) == "" {
+			continue
+		}
+		var message map[string]any
+		if json.Unmarshal([]byte(data), &message) != nil {
+			continue
+		}
+		if !strings.EqualFold(stringFromAny(message["role"]), "assistant") {
+			continue
+		}
+		collectNativeUsage(message, &input, &outputTokens, &cached, &reasoning, &total)
+	}
+	if input == 0 && outputTokens == 0 && cached == 0 && reasoning == 0 && total == 0 {
+		return nil
+	}
+	if total <= 0 {
+		total = input + cached + outputTokens + reasoning
+	}
+	return map[string]any{
+		"inputTokens":           input,
+		"cachedInputTokens":     cached,
+		"outputTokens":          outputTokens,
+		"reasoningOutputTokens": reasoning,
+		"totalTokens":           total,
+	}
+}
+
+func nativeSQLQuote(value string) string {
+	return "'" + strings.ReplaceAll(strings.TrimSpace(value), "'", "''") + "'"
+}
+
+// readOpenCodeNativeHistoryPage converts only the selected user-turn window
+// from SQLite. Messages and parts are queried by timestamp after locating the
+// page boundaries, so a huge OpenCode session never crosses the bridge at once.
+func readOpenCodeNativeHistoryPage(record *SessionRecord, before int) (externalNativeHistoryPage, error) {
+	page := externalNativeHistoryPage{Turns: []externalTurn{}}
+	if record == nil || strings.TrimSpace(record.BackendRef) == "" {
+		return page, errors.New("OpenCode native session id is missing")
+	}
+	home, _ := os.UserHomeDir()
+	sessionID := nativeSQLQuote(record.BackendRef)
+	countOutput, err := runOpenCodeDatabaseQuery(home, "select count(*) as total from message where session_id="+sessionID+" and json_extract(data, '$.role')='user'")
+	if err != nil {
+		return page, err
+	}
+	var countRows []map[string]any
+	if json.Unmarshal([]byte(countOutput), &countRows) != nil || len(countRows) == 0 {
+		return page, nil
+	}
+	total := int(int64FromAny(countRows[0]["total"]))
+	if total < 0 {
+		total = 0
+	}
+	page.Total = total
+	end := before
+	if end < 0 || end > total {
+		end = total
+	}
+	start := end - conversationHistoryPageTurns
+	if start < 0 {
+		start = 0
+	}
+	page.Start = start
+	if end <= start {
+		return page, nil
+	}
+
+	boundaryOutput, err := runOpenCodeDatabaseQuery(home, "select id,time_created,data from message where session_id="+sessionID+" and json_extract(data, '$.role')='user' order by time_created asc,id asc limit "+strconv.Itoa(end-start)+" offset "+strconv.Itoa(start))
+	if err != nil {
+		return page, err
+	}
+	var boundaries []map[string]any
+	if json.Unmarshal([]byte(boundaryOutput), &boundaries) != nil || len(boundaries) == 0 {
+		return page, nil
+	}
+	lower := int64FromAny(boundaries[0]["time_created"])
+	upper := int64(0)
+	if end < total {
+		upperOutput, upperErr := runOpenCodeDatabaseQuery(home, "select time_created from message where session_id="+sessionID+" and json_extract(data, '$.role')='user' order by time_created asc,id asc limit 1 offset "+strconv.Itoa(end))
+		if upperErr == nil {
+			var upperRows []map[string]any
+			if json.Unmarshal([]byte(upperOutput), &upperRows) == nil && len(upperRows) > 0 {
+				upper = int64FromAny(upperRows[0]["time_created"])
+			}
+		}
+	}
+	messageQuery := "select id,time_created,data from message where session_id=" + sessionID + " and time_created >= " + strconv.FormatInt(lower, 10)
+	if upper > lower {
+		messageQuery += " and time_created < " + strconv.FormatInt(upper, 10)
+	}
+	messageQuery += " order by time_created asc,id asc"
+	messageOutput, err := runOpenCodeDatabaseQuery(home, messageQuery)
+	if err != nil {
+		return page, err
+	}
+	var messages []map[string]any
+	if json.Unmarshal([]byte(messageOutput), &messages) != nil {
+		return page, nil
+	}
+	partQuery := "select id,message_id,time_created,data from part where session_id=" + sessionID + " and time_created >= " + strconv.FormatInt(lower, 10)
+	if upper > lower {
+		partQuery += " and time_created < " + strconv.FormatInt(upper, 10)
+	}
+	partQuery += " order by time_created asc,id asc"
+	partOutput, partErr := runOpenCodeDatabaseQuery(home, partQuery)
+	if partErr != nil {
+		return page, partErr
+	}
+	var parts []map[string]any
+	_ = json.Unmarshal([]byte(partOutput), &parts)
+	partsByMessage := make(map[string][]map[string]any, len(parts))
+	for _, part := range parts {
+		messageID := stringFromAny(part["message_id"])
+		if messageID != "" {
+			partsByMessage[messageID] = append(partsByMessage[messageID], part)
+		}
+	}
+	for _, message := range messages {
+		messageID := stringFromAny(message["id"])
+		data := asStringKeyMap(parseNativeJSONValue(message["data"]))
+		role := strings.ToLower(strings.TrimSpace(stringFromAny(data["role"])))
+		if role == "user" {
+			started := int64FromAny(message["time_created"]) / 1000
+			turn := externalTurn{ID: "opencode-turn-" + messageID, Status: "completed", StartedAt: started}
+			page.Turns = append(page.Turns, turn)
+		}
+		if len(page.Turns) == 0 {
+			continue
+		}
+		turn := &page.Turns[len(page.Turns)-1]
+		completedAt := int64FromAny(message["time_created"]) / 1000
+		if role == "assistant" {
+			mergeNativeUsage(turn, data)
+			if completedAt > turn.CompletedAt {
+				turn.CompletedAt = completedAt
+			}
+		}
+		for _, part := range partsByMessage[messageID] {
+			partData := asStringKeyMap(parseNativeJSONValue(part["data"]))
+			partType := strings.ToLower(strings.TrimSpace(stringFromAny(partData["type"])))
+			partID := stringFromAny(part["id"])
+			if partID == "" {
+				partID = messageID + "-part"
+			}
+			switch partType {
+			case "text":
+				text := stringFromAny(partData["text"])
+				if role == "user" {
+					turn.UserText = strings.TrimSpace(strings.TrimSpace(turn.UserText) + "\n" + strings.TrimSpace(text))
+				} else if text != "" {
+					turn.AgentText += text
+					turn.Items = append(turn.Items, map[string]any{"id": partID, "type": "agentMessage", "status": "completed", "text": text})
+				}
+			case "reasoning":
+				text := stringFromAny(partData["text"])
+				if text == "" {
+					text = stringFromAny(partData["reasoning"])
+				}
+				if text != "" {
+					turn.Items = append(turn.Items, map[string]any{"id": partID, "type": "reasoning", "status": "completed", "summary": text, "content": text})
+				}
+			case "tool":
+				if item, ok := parseExternalToolEvent("opencode", partData); ok {
+					failed := strings.EqualFold(firstMapString(item, "status"), "failed")
+					item["id"] = partID
+					item["status"] = "completed"
+					item["success"] = !failed
+					turn.Items = append(turn.Items, item)
+				}
+			}
+			partAt := int64FromAny(part["time_created"]) / 1000
+			if partAt > turn.CompletedAt && role == "assistant" {
+				turn.CompletedAt = partAt
+			}
+		}
+	}
+	for index := range page.Turns {
+		turn := &page.Turns[index]
+		if turn.CompletedAt == 0 {
+			turn.CompletedAt = turn.StartedAt
+		}
+		if turn.CompletedAt >= turn.StartedAt && turn.StartedAt > 0 {
+			turn.DurationMS = (turn.CompletedAt - turn.StartedAt) * 1000
+		}
+		if turn.UserText == "" {
+			turn.UserText = "OpenCode session turn"
+		}
+	}
+	return page, nil
+}
+
+func parseNativeJSONValue(value any) any {
+	if text, ok := value.(string); ok {
+		var parsed any
+		if json.Unmarshal([]byte(text), &parsed) == nil {
+			return parsed
+		}
+	}
+	return value
+}
+
+func mergeNativeUsage(turn *externalTurn, value any) {
+	if turn == nil {
+		return
+	}
+	var input, output, cached, reasoning, total int64
+	collectNativeUsage(value, &input, &output, &cached, &reasoning, &total)
+	if input == 0 && output == 0 && cached == 0 && reasoning == 0 && total == 0 {
+		return
+	}
+	usage := asStringKeyMap(turn.Usage)
+	usage["inputTokens"] = int64FromAny(usage["inputTokens"]) + input
+	usage["cachedInputTokens"] = int64FromAny(usage["cachedInputTokens"]) + cached
+	usage["outputTokens"] = int64FromAny(usage["outputTokens"]) + output
+	usage["reasoningOutputTokens"] = int64FromAny(usage["reasoningOutputTokens"]) + reasoning
+	if total <= 0 {
+		total = input + cached + output + reasoning
+	}
+	usage["totalTokens"] = int64FromAny(usage["totalTokens"]) + total
+	turn.Usage = usage
+}
+
+func (s *AppService) readNativeExternalHistoryPage(record *SessionRecord, before int) (externalNativeHistoryPage, error) {
+	if record == nil {
+		return externalNativeHistoryPage{}, errors.New("native session is missing")
+	}
+	cacheKey := normalizeExternalRuntime(record.Provider) + "\x00" + strings.TrimSpace(record.BackendRef) + "\x00" + strconv.Itoa(before)
+	now := time.Now()
+	s.historyMu.Lock()
+	if cached, ok := s.nativeHistoryCache[cacheKey]; ok && now.Sub(cached.touchedAt) < 20*time.Second {
+		page := cached.page
+		page.Turns = append([]externalTurn(nil), cached.page.Turns...)
+		s.historyMu.Unlock()
+		return page, nil
+	}
+	s.historyMu.Unlock()
+
+	page, err := s.readNativeExternalHistoryPageUncached(record, before)
+	if err != nil {
+		return page, err
+	}
+	s.historyMu.Lock()
+	if s.nativeHistoryCache == nil {
+		s.nativeHistoryCache = make(map[string]nativeHistoryCacheEntry)
+	}
+	if len(s.nativeHistoryCache) >= conversationHistoryCacheLimit*4 {
+		oldestKey := ""
+		oldestAt := now
+		for key, entry := range s.nativeHistoryCache {
+			if oldestKey == "" || entry.touchedAt.Before(oldestAt) {
+				oldestKey, oldestAt = key, entry.touchedAt
+			}
+		}
+		delete(s.nativeHistoryCache, oldestKey)
+	}
+	cachedPage := page
+	cachedPage.Turns = append([]externalTurn(nil), page.Turns...)
+	s.nativeHistoryCache[cacheKey] = nativeHistoryCacheEntry{page: cachedPage, touchedAt: now}
+	s.historyMu.Unlock()
+	return page, nil
+}
+
+func (s *AppService) readNativeExternalHistoryPageUncached(record *SessionRecord, before int) (externalNativeHistoryPage, error) {
+	if record == nil {
+		return externalNativeHistoryPage{}, errors.New("native session is missing")
+	}
+	switch normalizeExternalRuntime(record.Provider) {
+	case "opencode":
+		return readOpenCodeNativeHistoryPage(record, before)
+	case "gemini":
+		return readGeminiNativeHistoryPage(record, before)
+	default:
+		return externalNativeHistoryPage{}, errors.New("unsupported native session provider")
+	}
+}
+
+func readGeminiNativeHistoryPage(record *SessionRecord, before int) (externalNativeHistoryPage, error) {
+	page := externalNativeHistoryPage{Turns: []externalTurn{}}
+	home, _ := os.UserHomeDir()
+	path := findGeminiNativeSessionFile(filepath.Join(home, ".gemini"), record.BackendRef)
+	if path == "" {
+		return page, errors.New("Gemini native session file was not found")
+	}
+	turns, err := loadGeminiNativeTurns(path)
+	if err != nil {
+		return page, err
+	}
+	total := len(turns)
+	end := before
+	if end < 0 || end > total {
+		end = total
+	}
+	start := end - conversationHistoryPageTurns
+	if start < 0 {
+		start = 0
+	}
+	page.Total = total
+	page.Start = start
+	page.Turns = append(page.Turns, turns[start:end]...)
+	return page, nil
+}
+
+func loadGeminiNativeTurns(path string) ([]externalTurn, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// A single JSONL session can be large, but keep an upper bound so a corrupt
+	// file cannot exhaust the desktop process while opening a conversation.
+	if len(payload) > 64*1024*1024 {
+		return nil, errors.New("Gemini native session is too large to open")
+	}
+	lines := strings.Split(string(payload), "\n")
+	incremental := make([]map[string]any, 0, 64)
+	var snapshotMessages []any
+	hasIncrementalUser := false
+	for _, line := range lines {
+		var value map[string]any
+		if json.Unmarshal([]byte(line), &value) != nil || value == nil {
+			continue
+		}
+		if snapshot, ok := value["$set"].(map[string]any); ok {
+			if messages, exists := snapshot["messages"].([]any); exists {
+				snapshotMessages = messages
+			}
+			continue
+		}
+		kind := strings.ToLower(strings.TrimSpace(stringFromAny(value["type"])))
+		if kind == "user" || kind == "gemini" || kind == "assistant" {
+			incremental = append(incremental, value)
+			if kind == "user" {
+				hasIncrementalUser = true
+			}
+		}
+	}
+	if !hasIncrementalUser {
+		incremental = make([]map[string]any, 0, len(snapshotMessages))
+		for _, raw := range snapshotMessages {
+			if message, ok := raw.(map[string]any); ok {
+				incremental = append(incremental, message)
+			}
+		}
+	}
+	return geminiTurnsFromMessages(incremental), nil
+}
+
+func geminiTurnsFromMessages(messages []map[string]any) []externalTurn {
+	turns := make([]externalTurn, 0, len(messages)/2)
+	toolIndexes := make(map[string]int)
+	for index, message := range messages {
+		kind := strings.ToLower(strings.TrimSpace(stringFromAny(message["type"])))
+		if kind == "assistant" {
+			kind = "gemini"
+		}
+		if kind == "user" {
+			text := geminiMessageText(message["content"])
+			if isGeminiContextMessage(text) || strings.TrimSpace(text) == "" {
+				continue
+			}
+			turnID := stringFromAny(message["id"])
+			if turnID == "" {
+				turnID = "message-" + strconv.Itoa(index)
+			}
+			started := parseTimeSeconds(stringFromAny(message["timestamp"]))
+			turns = append(turns, externalTurn{ID: "gemini-turn-" + turnID, UserText: text, Status: "completed", StartedAt: started})
+			toolIndexes = make(map[string]int)
+			continue
+		}
+		if kind != "gemini" || len(turns) == 0 {
+			continue
+		}
+		turn := &turns[len(turns)-1]
+		completed := parseTimeSeconds(stringFromAny(message["timestamp"]))
+		if completed > turn.CompletedAt {
+			turn.CompletedAt = completed
+		}
+		mergeNativeUsage(turn, message)
+		for thoughtIndex, thought := range nativeAnySlice(message["thoughts"]) {
+			thoughtMap := asStringKeyMap(thought)
+			text := stringFromAny(thoughtMap["description"])
+			if text == "" {
+				text = stringFromAny(thoughtMap["text"])
+			}
+			if text != "" {
+				turn.Items = append(turn.Items, map[string]any{"id": turn.ID + ":reasoning:" + strconv.Itoa(thoughtIndex), "type": "reasoning", "status": "completed", "summary": text, "content": text})
+			}
+		}
+		for contentIndex, raw := range nativeAnySlice(message["content"]) {
+			content := asStringKeyMap(raw)
+			if text := stringFromAny(content["text"]); text != "" {
+				turn.AgentText += text
+				turn.Items = append(turn.Items, map[string]any{"id": turn.ID + ":agent:" + strconv.Itoa(contentIndex), "type": "agentMessage", "status": "completed", "text": text})
+			}
+			if call, ok := content["functionCall"].(map[string]any); ok {
+				name := stringFromAny(call["name"])
+				if name == "" {
+					name = "Gemini function"
+				}
+				callID := firstMapString(call, "id", "callId", "callID")
+				if callID == "" {
+					callID = name + ":" + strconv.Itoa(contentIndex)
+				}
+				item := map[string]any{"id": turn.ID + ":tool:" + callID, "type": "dynamicToolCall", "tool": name, "status": "completed", "arguments": call["args"], "contentItems": []any{}, "success": true}
+				turn.Items = append(turn.Items, item)
+				toolIndexes[callID] = len(turn.Items) - 1
+				toolIndexes[name] = len(turn.Items) - 1
+			}
+			if response, ok := content["functionResponse"].(map[string]any); ok {
+				name := stringFromAny(response["name"])
+				callID := firstMapString(response, "id", "callId", "callID")
+				itemIndex, exists := toolIndexes[callID]
+				if !exists {
+					itemIndex, exists = toolIndexes[name]
+				}
+				if !exists {
+					callID = name + ":response:" + strconv.Itoa(contentIndex)
+					itemIndex = len(turn.Items)
+					turn.Items = append(turn.Items, map[string]any{"id": turn.ID + ":tool:" + callID, "type": "dynamicToolCall", "tool": name, "status": "completed", "arguments": nil, "contentItems": []any{}, "success": true})
+				}
+				item := turn.Items[itemIndex]
+				item["status"] = "completed"
+				item["contentItems"] = externalToolContentItems(response["response"])
+				if response["error"] != nil {
+					item["success"] = false
+				}
+			}
+		}
+	}
+	for index := range turns {
+		turn := &turns[index]
+		if turn.CompletedAt == 0 {
+			turn.CompletedAt = turn.StartedAt
+		}
+		if turn.CompletedAt >= turn.StartedAt && turn.StartedAt > 0 {
+			turn.DurationMS = (turn.CompletedAt - turn.StartedAt) * 1000
+		}
+		if turn.UserText == "" {
+			turn.UserText = "Gemini session turn"
+		}
+	}
+	return turns
+}
+
+func geminiMessageText(value any) string {
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	texts := make([]string, 0, 2)
+	for _, raw := range nativeAnySlice(value) {
+		entry := asStringKeyMap(raw)
+		if text := strings.TrimSpace(stringFromAny(entry["text"])); text != "" {
+			texts = append(texts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(texts, "\n"))
+}
+
+func nativeAnySlice(value any) []any {
+	if values, ok := value.([]any); ok {
+		return values
+	}
+	return []any{}
+}
+
+func findGeminiNativeSessionFile(home, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	root := filepath.Join(home, "tmp")
+	entries, _ := os.ReadDir(root)
+	for _, project := range entries {
+		if !project.IsDir() {
+			continue
+		}
+		files, _ := os.ReadDir(filepath.Join(root, project.Name(), "chats"))
+		for _, file := range files {
+			if file.IsDir() || !strings.HasSuffix(strings.ToLower(file.Name()), ".jsonl") {
+				continue
+			}
+			path := filepath.Join(root, project.Name(), "chats", file.Name())
+			if stringFromAny(readFirstGeminiSessionMeta(path)["sessionId"]) == sessionID {
+				return path
+			}
+		}
+	}
+	return ""
+}
+
+func readFirstGeminiSessionMeta(path string) map[string]any {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	// Session metadata is a small first-line record. The explicit ceiling keeps
+	// a corrupt file from allocating without bound while allowing long JSONL
+	// transcripts to be located without loading the whole conversation.
+	scanner.Buffer(make([]byte, 16*1024), 1024*1024)
+	if !scanner.Scan() {
+		return nil
+	}
+	return firstGeminiSessionMeta(scanner.Bytes())
+}
+
+// collectGeminiSessionUsage handles Gemini JSONL transcripts whose usage is
+// persisted on messages rather than emitted on stdout. Only messages written
+// by this run are counted so resumed sessions do not duplicate prior turns.
+func collectGeminiSessionUsage(home, sessionID string, startedAtMillis int64) map[string]any {
+	path := findGeminiNativeSessionFile(home, sessionID)
+	if path == "" {
+		return nil
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil || len(payload) > 16*1024*1024 {
+		return nil
+	}
+	var input, output, cached, reasoning, total int64
+	var latestSnapshot map[string]any
+	for _, line := range strings.Split(string(payload), "\n") {
+		var value map[string]any
+		if json.Unmarshal([]byte(line), &value) != nil {
+			continue
+		}
+		if snapshot, ok := value["$set"].(map[string]any); ok {
+			latestSnapshot = snapshot
+			continue
+		}
+		if !geminiMessageAtOrAfter(value, startedAtMillis) {
+			continue
+		}
+		collectNativeUsage(value, &input, &output, &cached, &reasoning, &total)
+	}
+	if input == 0 && output == 0 && cached == 0 && reasoning == 0 && total == 0 && latestSnapshot != nil {
+		if messages, ok := latestSnapshot["messages"].([]any); ok {
+			for _, raw := range messages {
+				message, _ := raw.(map[string]any)
+				if !geminiMessageAtOrAfter(message, startedAtMillis) {
+					continue
+				}
+				collectNativeUsage(message, &input, &output, &cached, &reasoning, &total)
+			}
+		}
+	}
+	if input == 0 && output == 0 && cached == 0 && reasoning == 0 && total == 0 {
+		return nil
+	}
+	if total <= 0 {
+		total = input + cached + output + reasoning
+	}
+	return map[string]any{
+		"inputTokens":           input,
+		"cachedInputTokens":     cached,
+		"outputTokens":          output,
+		"reasoningOutputTokens": reasoning,
+		"totalTokens":           total,
+	}
+}
+
+func geminiMessageAtOrAfter(message map[string]any, startedAtMillis int64) bool {
+	if startedAtMillis <= 0 {
+		return true
+	}
+	timestamp := strings.TrimSpace(stringFromAny(message["timestamp"]))
+	if timestamp == "" {
+		return false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, timestamp)
+	return err == nil && parsed.UnixMilli() >= startedAtMillis
 }
 
 func openCodeDatabasePaths(home string) []string {
@@ -1067,9 +1899,45 @@ func parseGeminiSessionFile(path, workspace string) (ExternalSessionView, bool) 
 }
 
 func collectGeminiUsage(home, workspace string) ExternalUsageSummary {
-	result := ExternalUsageSummary{RangeDays: 30, Source: "Gemini CLI native chat history", ByModel: []ExternalUsageModelView{}}
-	cutoff := time.Now().Add(-time.Duration(result.RangeDays) * 24 * time.Hour).Unix()
+	// The usage card labels the aggregate as lifetime. Keep the native history
+	// scan consistent with that label instead of silently dropping older turns.
+	result := ExternalUsageSummary{RangeDays: 0, Source: "Gemini CLI native chat history", ByModel: []ExternalUsageModelView{}}
+	cutoff := int64(0)
 	byModel := make(map[string]*ExternalUsageModelView)
+	addUsage := func(value any, modelHint string) bool {
+		var input, output, cached, reasoning, reportedTotal int64
+		collectNativeUsage(value, &input, &output, &cached, &reasoning, &reportedTotal)
+		if input == 0 && output == 0 && cached == 0 && reasoning == 0 && reportedTotal == 0 {
+			return false
+		}
+		result.InputTokens += input
+		result.OutputTokens += output
+		result.CachedTokens += cached
+		result.Reasoning += reasoning
+		total := input + cached + output + reasoning
+		if reportedTotal > 0 {
+			total = reportedTotal
+		}
+		result.TotalTokens += total
+		model := strings.TrimSpace(modelHint)
+		if model == "" {
+			model = strings.TrimSpace(firstMapString(asStringKeyMap(value), "model", "modelVersion"))
+		}
+		if model == "" {
+			model = "gemini"
+		}
+		item := byModel[model]
+		if item == nil {
+			item = &ExternalUsageModelView{Model: model, Provider: "gemini"}
+			byModel[model] = item
+		}
+		item.InputTokens += input
+		item.OutputTokens += output
+		item.CachedTokens += cached
+		item.Reasoning += reasoning
+		item.TotalTokens += total
+		return true
+	}
 	root := filepath.Join(home, "tmp")
 	entries, _ := os.ReadDir(root)
 	for _, project := range entries {
@@ -1099,48 +1967,30 @@ func collectGeminiUsage(home, workspace string) ExternalUsageSummary {
 				continue
 			}
 			result.Sessions++
+			var latestSnapshot map[string]any
+			fileHasUsage := false
 			for _, line := range strings.Split(string(payload), "\n") {
 				var value map[string]any
 				if json.Unmarshal([]byte(line), &value) != nil {
 					continue
 				}
-				// $set is a full document snapshot and repeats prior messages;
-				// counting it would multiply usage on every write.
-				if value["$set"] != nil {
+				// $set is a full document snapshot. Retain only the latest snapshot
+				// and use it as a fallback when the file has no incremental token
+				// records; counting every snapshot would multiply usage.
+				if snapshot, ok := value["$set"].(map[string]any); ok {
+					latestSnapshot = snapshot
 					continue
 				}
 				kind := strings.ToLower(stringFromAny(value["type"]))
 				if kind == "user" || kind == "gemini" {
 					result.Messages++
 				}
-				var input, output, cached, reasoning, reportedTotal int64
-				collectNativeUsage(value, &input, &output, &cached, &reasoning, &reportedTotal)
-				if input == 0 && output == 0 && cached == 0 && reasoning == 0 {
-					continue
+				if addUsage(value, firstMapString(value, "model", "modelVersion")) {
+					fileHasUsage = true
 				}
-				result.InputTokens += input
-				result.OutputTokens += output
-				result.CachedTokens += cached
-				result.Reasoning += reasoning
-				total := input + cached + output + reasoning
-				if reportedTotal > 0 {
-					total = reportedTotal
-				}
-				result.TotalTokens += total
-				model := strings.TrimSpace(firstMapString(value, "model", "modelVersion"))
-				if model == "" {
-					model = "gemini"
-				}
-				item := byModel[model]
-				if item == nil {
-					item = &ExternalUsageModelView{Model: model, Provider: "gemini"}
-					byModel[model] = item
-				}
-				item.InputTokens += input
-				item.OutputTokens += output
-				item.CachedTokens += cached
-				item.Reasoning += reasoning
-				item.TotalTokens += total
+			}
+			if !fileHasUsage && latestSnapshot != nil {
+				_ = addUsage(latestSnapshot, firstMapString(latestSnapshot, "model", "modelVersion"))
 			}
 		}
 	}
@@ -1170,10 +2020,15 @@ func collectNativeUsage(value any, input, output, cached, reasoning, total *int6
 			normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
 			if normalized == "tokens" {
 				if tokenMap, ok := nested.(map[string]any); ok {
-					*input += int64FromAny(tokenMap["input"])
-					*output += int64FromAny(tokenMap["output"])
-					*cached += int64FromAny(tokenMap["cached"])
-					*reasoning += int64FromAny(tokenMap["thoughts"])
+					*input += firstPositiveInt64(tokenMap, "input", "input_tokens", "prompt", "prompt_tokens")
+					*output += firstPositiveInt64(tokenMap, "output", "output_tokens", "completion", "completion_tokens")
+					*reasoning += firstPositiveInt64(tokenMap, "reasoning", "reasoning_tokens", "thoughts", "thoughts_tokens")
+					*total += firstPositiveInt64(tokenMap, "total", "total_tokens", "totalTokenCount")
+					if cache, ok := tokenMap["cache"].(map[string]any); ok {
+						*cached += firstPositiveInt64(cache, "read", "cached", "input", "tokens")
+					} else {
+						*cached += firstPositiveInt64(tokenMap, "cached", "cached_tokens", "cache_read", "cache_read_input_tokens")
+					}
 				}
 				continue
 			}

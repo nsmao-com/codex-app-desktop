@@ -32,6 +32,7 @@ import type {
   ThreadSummary,
   TimelineItem,
   TimelineItemType,
+  TokenUsageBreakdown,
   TurnFeedback,
   TurnMetrics,
 } from '../types/codex'
@@ -168,6 +169,7 @@ export const useCodexStore = defineStore('codex', () => {
   const sessionPreferenceWrites = new Map<string, Promise<void>>()
   const planOfferRetryTimers = new Map<string, number[]>()
   const idleReconcileTimers = new Map<string, number>()
+  const recentCompactionByThread = new Map<string, number>()
   const trackedTimeouts = new Set<number>()
 
   let unsubscribeEvent: (() => void) | null = null
@@ -246,21 +248,35 @@ export const useCodexStore = defineStore('codex', () => {
   const activeTurnMetrics = computed(() => turnMetricsByThread.value[activeThreadId.value] ?? {})
   const pendingRequest = computed(() => pendingRequests.value[0] ?? null)
 
+  function activeRuntimeRecentWorkspaces(): string[] {
+    if (appStore.isGeminiMode) {
+      return appStore.settings.geminiRecentWorkspaces?.length
+        ? appStore.settings.geminiRecentWorkspaces
+        : (appStore.settings.recentWorkspaces ?? [])
+    }
+    if (appStore.isOpenCodeMode) {
+      return appStore.settings.openCodeRecentWorkspaces?.length
+        ? appStore.settings.openCodeRecentWorkspaces
+        : (appStore.settings.recentWorkspaces ?? [])
+    }
+    return appStore.settings.recentWorkspaces ?? []
+  }
+
   const threadGroups = computed<ThreadGroup[]>(() => {
-    const recent = appStore.settings.recentWorkspaces ?? []
+    const recent = activeRuntimeRecentWorkspaces()
     const paths = appStore.orderWorkspacePaths(
       appStore.activeRuntime,
-      uniqueWorkspacePaths(appStore.settings.workspace, recent),
+      uniqueWorkspacePaths(appStore.currentWorkspacePath, recent),
       recent,
     )
     return paths.map((path) => ({
       path,
       name: workspaceName(path),
-      active: sameWorkspace(path, appStore.settings.workspace),
+      active: sameWorkspace(path, appStore.currentWorkspacePath),
       loading: loadingProjects.value.some((loadingPath) => sameWorkspace(loadingPath, path)),
       error: projectErrors.value[path] ?? '',
       threads: sortThreadsByPin(
-        sameWorkspace(path, appStore.settings.workspace)
+        sameWorkspace(path, appStore.currentWorkspacePath)
           ? threads.value
           : projectThreadsForPath(path) ?? [],
       ),
@@ -344,7 +360,7 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function connect(
-    path = appStore.settings.workspace,
+    path = appStore.currentWorkspacePath,
     options: { forceRestart?: boolean } = {},
   ): Promise<boolean> {
     if (!path || busy.value) return false
@@ -428,14 +444,14 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
-  async function loadThreads(path = appStore.settings.workspace): Promise<void> {
+  async function loadThreads(path = appStore.currentWorkspacePath): Promise<void> {
     const requestedPath = path
     const requestedRuntime = appStore.activeRuntime
     if (!requestedPath) return
     try {
       const [list, archivedResponse] = await Promise.all([
-        loadProjectThreads(requestedPath, sameWorkspace(requestedPath, appStore.settings.workspace)),
-        sameWorkspace(requestedPath, appStore.settings.workspace)
+        loadProjectThreads(requestedPath, sameWorkspace(requestedPath, appStore.currentWorkspacePath)),
+        sameWorkspace(requestedPath, appStore.currentWorkspacePath)
           ? backend.ListArchivedThreads('').catch(() => ({ data: [] }))
           : Promise.resolve({ data: [] }),
       ])
@@ -444,12 +460,12 @@ export const useCodexStore = defineStore('codex', () => {
       if (requestedRuntime !== appStore.activeRuntime) return
       if (list === null) return
       const archived = normalizeThreadList(asRecord(archivedResponse).data)
-      if (sameWorkspace(requestedPath, appStore.settings.workspace)) {
+      if (sameWorkspace(requestedPath, appStore.currentWorkspacePath)) {
         threads.value = list
         archivedThreads.value = archived
       }
     } catch (error) {
-      if (sameWorkspace(requestedPath, appStore.settings.workspace)) {
+      if (sameWorkspace(requestedPath, appStore.currentWorkspacePath)) {
         notify('error', translate('sidebar.projectLoadFailed'), errorMessage(error))
       }
     }
@@ -457,9 +473,9 @@ export const useCodexStore = defineStore('codex', () => {
 
   async function loadRecentProjectThreads(): Promise<void> {
     const sequence = ++projectLoadSequence
-    const current = appStore.settings.workspace
-    const recent = appStore.settings.recentWorkspaces ?? []
-    const paths = appStore.orderWorkspacePaths('codex', uniqueWorkspacePaths(current, recent), recent)
+    const current = appStore.currentWorkspacePath
+    const recent = activeRuntimeRecentWorkspaces()
+    const paths = appStore.orderWorkspacePaths(appStore.activeRuntime, uniqueWorkspacePaths(current, recent), recent)
       .filter((path) => !sameWorkspace(path, current))
     loadingProjects.value = paths
     await mapWithConcurrency(paths, 3, (path) => loadProjectThreads(path))
@@ -472,7 +488,7 @@ export const useCodexStore = defineStore('codex', () => {
 
   async function reloadProject(path: string): Promise<void> {
     if (!path) return
-    if (sameWorkspace(path, appStore.settings.workspace)) {
+    if (sameWorkspace(path, appStore.currentWorkspacePath)) {
       try {
         await loadThreads()
       } catch (error) {
@@ -541,7 +557,7 @@ export const useCodexStore = defineStore('codex', () => {
       let catalog = provider?.models ?? []
       let nativeActiveProvider = ''
       try {
-        const nativeCatalog = await backend.ReadExternalRuntimeCatalog(requestedRuntime, appStore.settings.workspace || '')
+        const nativeCatalog = await backend.ReadExternalRuntimeCatalog(requestedRuntime, appStore.currentWorkspacePath || '')
         if (requestedRuntime !== appStore.activeRuntime) return
         if (nativeCatalog.models?.length) catalog = nativeCatalog.models
         nativeActiveProvider = nativeCatalog.activeProvider || ''
@@ -709,11 +725,11 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function newThread(): Promise<ThreadSummary | null> {
-    if (workspaceStore.switchingWorkspace || !isReady.value || !appStore.settings.workspace) return null
+    if (workspaceStore.switchingWorkspace || !isReady.value || !appStore.currentWorkspacePath) return null
     const currentDraft = activeThread.value
     if (
       currentDraft?.id.startsWith('pending-thread-')
-      && sameWorkspace(currentDraft.cwd, appStore.settings.workspace)
+      && sameWorkspace(currentDraft.cwd, appStore.currentWorkspacePath)
       && !(itemsByThread.value[currentDraft.id] ?? []).length
       && !(queuedMessagesByThread.value[currentDraft.id] ?? []).length
     ) {
@@ -741,7 +757,7 @@ export const useCodexStore = defineStore('codex', () => {
       id: pendingID,
       name: translate('sidebar.newTask'),
       preview: '',
-      cwd: appStore.settings.workspace,
+      cwd: appStore.currentWorkspacePath,
       createdAt: now,
       updatedAt: now,
       status: 'idle',
@@ -757,17 +773,17 @@ export const useCodexStore = defineStore('codex', () => {
     setActiveThread(optimistic, [])
     setThreadMetrics(pendingID, [])
     rememberLoadedThread(pendingID)
-    rememberProjectThread(appStore.settings.workspace, pendingID)
+    rememberProjectThread(appStore.currentWorkspacePath, pendingID)
     addOrUpdateThread(optimistic)
     return optimistic
   }
 
   async function newThreadInProject(path: string): Promise<ThreadSummary | null> {
     if (!path) return null
-    if (!sameWorkspace(path, appStore.settings.workspace)) {
+    if (!sameWorkspace(path, appStore.currentWorkspacePath)) {
       await switchProject(path)
     }
-    if (!sameWorkspace(path, appStore.settings.workspace)) return null
+    if (!sameWorkspace(path, appStore.currentWorkspacePath)) return null
     if (!isReady.value) {
       const connected = await connect(path)
       if (!connected) return null
@@ -819,7 +835,7 @@ export const useCodexStore = defineStore('codex', () => {
       const hasQueue = (queuedMessagesByThread.value[thread.id] ?? []).length > 0
       return hasItems || hasQueue
     })
-    const path = appStore.settings.workspace
+    const path = appStore.currentWorkspacePath
     if (path) setProjectThreads(path, threads.value)
   }
 
@@ -841,7 +857,7 @@ export const useCodexStore = defineStore('codex', () => {
     } else if (activeThread.value?.id !== threadID) {
       activeThread.value = null
     }
-    rememberProjectThread(appStore.settings.workspace, threadID)
+    rememberProjectThread(appStore.currentWorkspacePath, threadID)
     const cachedTimeline = Object.prototype.hasOwnProperty.call(itemsByThread.value, threadID)
     const cachedHistory = historyByThread.value[threadID]
     const cachedUpdatedAt = cachedHistory?.loadedUpdatedAt ?? 0
@@ -941,6 +957,7 @@ export const useCodexStore = defineStore('codex', () => {
         })
       }
       setThreadMetrics(thread.id, rawThread.turns, split.prefix.length > 0)
+      syncThreadContextWindow(thread.id, rawThread)
       rememberLoadedThread(thread.id)
       if (threadID !== thread.id) {
         loadedThreadIDs.delete(threadID)
@@ -1028,7 +1045,7 @@ export const useCodexStore = defineStore('codex', () => {
   async function openProjectThread(path: string, threadID: string): Promise<void> {
     if (!path || !threadID) return
     if (
-      sameWorkspace(path, appStore.settings.workspace)
+      sameWorkspace(path, appStore.currentWorkspacePath)
       && !workspaceStore.switchingWorkspace
     ) {
       await openThread(threadID)
@@ -1072,7 +1089,7 @@ export const useCodexStore = defineStore('codex', () => {
 
   async function switchProject(path: string, preferredThreadID = ''): Promise<void> {
     if (!path) return
-    const currentPath = appStore.settings.workspace
+    const currentPath = appStore.currentWorkspacePath
     if (activeThreadId.value && currentPath) rememberProjectThread(currentPath, activeThreadId.value)
     const knownTarget = preferredThreadID
       || projectThreadForPath(path)
@@ -1093,7 +1110,7 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function selectProject(): Promise<void> {
-    const currentPath = appStore.settings.workspace
+    const currentPath = appStore.currentWorkspacePath
     if (activeThreadId.value && currentPath) rememberProjectThread(currentPath, activeThreadId.value)
     const path = await workspaceStore.selectWorkspace()
     if (!path) return
@@ -1130,7 +1147,7 @@ export const useCodexStore = defineStore('codex', () => {
     trackedTimeout(() => {
       if (
         appStore.activeRuntime === requestedRuntime
-        && sameWorkspace(path, appStore.settings.workspace)
+        && sameWorkspace(path, appStore.currentWorkspacePath)
       ) void loadThreads(path).catch(() => undefined)
     }, 600)
   }
@@ -1175,6 +1192,7 @@ export const useCodexStore = defineStore('codex', () => {
       const items = timelineFromTurns(rawThread.turns)
       setActiveThread(thread, items)
       setThreadMetrics(thread.id, rawThread.turns)
+      syncThreadContextWindow(thread.id, rawThread)
       rememberLoadedThread(thread.id)
       addOrUpdateThread(thread)
       notify('success', translate('threadActions.forked'), thread.name)
@@ -1422,7 +1440,7 @@ export const useCodexStore = defineStore('codex', () => {
           id: reviewThreadID,
           name: translate('threadActions.reviewThreadName'),
           preview: '',
-          cwd: appStore.settings.workspace,
+          cwd: appStore.currentWorkspacePath,
           createdAt: Date.now() / 1000,
           updatedAt: Date.now() / 1000,
           status: 'active',
@@ -1466,6 +1484,7 @@ export const useCodexStore = defineStore('codex', () => {
       if (!thread) throw new Error(translate('notifications.taskOpenFailed'))
       setActiveThread(thread, timelineFromTurns(rawThread.turns))
       setThreadMetrics(thread.id, rawThread.turns)
+      syncThreadContextWindow(thread.id, rawThread)
       workspaceStore.clearDiff()
       notify('warning', translate('timeline.rolledBack'), translate('timeline.rollbackFilesWarning'))
     } catch (error) {
@@ -1476,9 +1495,6 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function sendMessage(text: string, images: string[] = []): Promise<boolean> {
-    // Steer only when ownership is unambiguous. Loading, submitting, approvals,
-    // pending ids, or an existing FIFO queue all fall back to safe queue admission.
-    if (canSteerActiveTurn.value) return steerMessage(text, images)
     return enqueueMessage(text, '', images)
   }
 
@@ -1511,8 +1527,9 @@ export const useCodexStore = defineStore('codex', () => {
     const selectedThreadID = activeThreadId.value
     const selectedThread = activeThread.value?.id === selectedThreadID ? activeThread.value : null
     const threadID = selectedThreadID || `pending-thread-${now}-${sequence}`
-    const workspace = selectedThread?.cwd || findThreadSummary(threadID)?.cwd || appStore.settings.workspace
+    const workspace = selectedThread?.cwd || findThreadSummary(threadID)?.cwd || appStore.currentWorkspacePath
     if (!threadID || !workspace) return false
+    const waitInQueue = threadIsBusy(threadID) || (queuedMessagesByThread.value[threadID]?.length ?? 0) > 0
     if (!selectedThreadID) activeThreadId.value = threadID
     // User continued chatting — dismiss implement prompt (official dismisses on follow-up).
     if (planImplementPrompt.value?.threadId === threadID) planImplementPrompt.value = null
@@ -1540,22 +1557,26 @@ export const useCodexStore = defineStore('codex', () => {
       ...queuedMessagesByThread.value,
       [threadID]: [...(queuedMessagesByThread.value[threadID] ?? []), queuedMessage],
     }
-    // Drain re-checks every ownership signal. Scheduling here also reclaims a
-    // genuinely stale feedback marker without weakening a live turn's blocker.
-    scheduleThreadQueueDrain(threadID)
+    // Start an idle send in the same task so the transient `queued` row cannot
+    // flash in the UI. Busy threads keep the row queued until their terminal
+    // event releases it.
+    if (waitInQueue) scheduleThreadQueueDrain(threadID)
+    else void drainThreadQueue(threadID)
     return true
   }
 
   async function drainThreadQueue(threadID: string): Promise<void> {
     if (!threadID || !isReady.value || threadIsBusy(threadID)) return
-    const queuedMessage = queuedMessagesByThread.value[threadID]?.[0]
-    // Only the queued head may start. A sending/failed head must be recovered or
-    // retried explicitly; dispatching it again can duplicate an accepted turn.
-    if (!queuedMessage || queuedMessage.state !== 'queued') return
+    // Failed rows remain visible/retryable, but they did not reach the provider
+    // and must not permanently block later messages after a 403/429/500 or a
+    // broken stream. A sending row is still protected by threadIsBusy above.
+    const queuedMessage = queuedMessagesByThread.value[threadID]
+      ?.find((message) => message.state === 'queued')
+    if (!queuedMessage) return
     // A transient status/alias update must not release a follow-up before the
     // exact turn that accepted it as queued has reached a terminal event.
     if (queuedMessage.blockedByTurnId && !completedTurns.has(queuedMessage.blockedByTurnId)) return
-    if (!sameWorkspace(queuedMessage.workspace, appStore.settings.workspace)) return
+    if (!sameWorkspace(queuedMessage.workspace, appStore.currentWorkspacePath)) return
 
     const submission = beginPendingThreadSubmission(threadID, queuedMessage.id)
     if (!submission) return
@@ -1687,7 +1708,7 @@ export const useCodexStore = defineStore('codex', () => {
         }
         if (!submissionStillOwnsThread(resolvedThreadID)) return
       }
-      if (!sameWorkspace(queuedMessage.workspace, appStore.settings.workspace)) {
+      if (!sameWorkspace(queuedMessage.workspace, appStore.currentWorkspacePath)) {
         patchQueuedMessage(resolvedThreadID, queuedMessage.id, { state: 'queued', error: '' })
         clearTurnFeedback(resolvedThreadID)
         return
@@ -1849,6 +1870,18 @@ export const useCodexStore = defineStore('codex', () => {
     } catch (error) {
       const message = errorMessage(error)
       const currentSubmission = pendingThreadSubmissionOwner(submission)
+      // External runtimes reject a second process-level send while the native
+      // turn is still running. Treat that response as a queue admission race,
+      // not as a failed user message; the terminal event of the original turn
+      // will release the queue.
+      if (/external provider turn is already running|Codex turn is already running/i.test(message)) {
+        const items = (itemsByThread.value[resolvedThreadID] ?? []).filter((item) => item.id !== queuedMessage.localItemId)
+        itemsByThread.value = { ...itemsByThread.value, [resolvedThreadID]: items }
+        patchQueuedMessage(resolvedThreadID, queuedMessage.id, { state: 'queued', error: '', blockedByTurnId: undefined })
+        setLocalThreadStatus(resolvedThreadID, 'active')
+        setTurnFeedback(resolvedThreadID, { state: 'running', message: '', turnId: '' })
+        return
+      }
       // A reset/reconnect may already have re-dispatched this row. Ignore the old
       // rejection instead of marking the newer owner failed.
       if (!currentSubmission && !submission.turnId) return
@@ -2314,9 +2347,17 @@ export const useCodexStore = defineStore('codex', () => {
         break
       }
       case 'thread/compacted':
-        notify('info', translate('notifications.contextCompacted'), translate('notifications.contextCompactedRuntimeHint', {
-          runtime: runtimeNameForThread(asString(payload.threadId)),
-        }))
+        {
+          const compactedThreadID = asString(payload.threadId)
+          const compactedTurnID = asString(payload.turnId) || threadTurnID(compactedThreadID)
+          const compactedUsage = payload.tokenUsage ?? payload.usage ?? payload.token_usage
+          handleContextCompaction(
+            compactedThreadID,
+            compactedTurnID,
+            compactedUsage,
+            normalizeLocalUsageRuntime(payload.runtime),
+          )
+        }
         break
       case 'turn/started':
         {
@@ -2419,6 +2460,11 @@ export const useCodexStore = defineStore('codex', () => {
         // Interrupt often omits item/completed — force orphan tools off the busy path.
         finalizeOrphanedActiveItems(threadID)
         loadThreads().catch(() => undefined)
+        // Gemini/OpenCode can persist authoritative usage only after their CLI
+        // process exits. Refresh even when the stream omitted a token event.
+        if (runtimeIDForThread(threadID) !== 'codex') {
+          void appStore.loadLocalUsage()
+        }
         workspaceStore.refreshWorkspace()
         // Drain now and once more shortly after late item/status events settle.
         clearStaleBusyState(threadID)
@@ -2451,6 +2497,16 @@ export const useCodexStore = defineStore('codex', () => {
           item.completedAt = typeof payload.completedAtMs === 'number' ? payload.completedAtMs : item.completedAt
           upsertItem(threadID, item)
           if (method === 'item/completed') {
+            if (item.type === 'contextCompaction') {
+              const rawItem = asRecord(payload.item)
+              handleContextCompaction(
+                threadID,
+                turnID || item.turnId || threadTurnID(threadID),
+                payload.tokenUsage ?? payload.usage ?? payload.token_usage
+                  ?? rawItem.tokenUsage ?? rawItem.usage ?? rawItem.token_usage,
+                normalizeLocalUsageRuntime(payload.runtime ?? rawItem.runtime),
+              )
+            }
             rememberPlanCandidate(threadID, turnID, item)
             // turn/completed may arrive before the final plan / agentMessage item.
             if (completedTurns.has(turnID) && !isThreadSubmitting(threadID)) {
@@ -2703,12 +2759,19 @@ export const useCodexStore = defineStore('codex', () => {
         appStore.accountRateLimits = normalizeAccountRateLimits(payload.rateLimits, appStore.accountRateLimits)
         break
       case 'thread/tokenUsage/updated':
+        {
+          const threadID = asString(payload.threadId)
+          const turnID = asString(payload.turnId)
+            || threadTurnID(threadID)
+            || liveFeedbackTurnID(threadFeedback(threadID))
+          const rawUsage = payload.tokenUsage ?? payload.usage ?? payload.token_usage ?? payload
         queueTokenUsage(
-          asString(payload.threadId),
-          asString(payload.turnId),
-          payload.tokenUsage,
+          threadID,
+          turnID,
+          rawUsage,
           normalizeLocalUsageRuntime(payload.runtime),
         )
+        }
         break
       case 'skills/changed':
       case 'app/list/updated':
@@ -2751,6 +2814,34 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
+  function handleContextCompaction(
+    threadID: string,
+    turnID: string,
+    usage: unknown,
+    runtime: LocalUsageRuntime | '' = '',
+  ): void {
+    if (!threadID) return
+    if (usage !== undefined) queueTokenUsage(threadID, turnID, usage, runtime)
+
+    // Some app-server versions emit both the legacy thread event and the
+    // contextCompaction item lifecycle for one compaction.
+    const now = Date.now()
+    const duplicate = now - (recentCompactionByThread.get(threadID) ?? 0) < 5_000
+    recentCompactionByThread.set(threadID, now)
+    if (duplicate) return
+
+    // Refresh the persisted snapshot after upstream compaction so the context
+    // window and historical token metrics survive reopening this conversation.
+    if (activeThreadId.value === threadID) {
+      loadedThreadIDs.delete(threadID)
+      void openThread(threadID)
+    }
+    void appStore.loadLocalUsage()
+    notify('info', translate('notifications.contextCompacted'), translate('notifications.contextCompactedRuntimeHint', {
+      runtime: runtimeNameForThread(threadID),
+    }))
+  }
+
   function queueTokenUsage(
     threadID: string,
     turnID: string,
@@ -2759,6 +2850,19 @@ export const useCodexStore = defineStore('codex', () => {
   ): void {
     if (!threadID) return
     const usage = normalizeThreadTokenUsage(value)
+    const hasTokens = [
+      usage.total.totalTokens,
+      usage.total.inputTokens,
+      usage.total.cachedInputTokens,
+      usage.total.outputTokens,
+      usage.total.reasoningOutputTokens,
+      usage.last.totalTokens,
+      usage.last.inputTokens,
+      usage.last.cachedInputTokens,
+      usage.last.outputTokens,
+      usage.last.reasoningOutputTokens,
+    ].some((item) => item > 0)
+    if (!hasTokens && usage.modelContextWindow == null) return
     pendingTokenUsage.set(`${threadID}:${turnID}`, { threadId: threadID, turnId: turnID, runtime, usage })
     if (!tokenUsageTimer) tokenUsageTimer = trackedTimeout(flushTokenUsage, 250)
   }
@@ -2790,20 +2894,21 @@ export const useCodexStore = defineStore('codex', () => {
         if (tokens > 0) {
           // Always persist full breakdown when available (input/cache/output/reasoning).
           const usageRuntime = runtime || runtimeIDForThread(threadId)
-          persistJobs.push(
-            Promise.resolve(
-              (backend as {
-                RecordLocalTurnUsageDetailed?: (
-                  runtime: string,
-                  threadID: string,
-                  turnID: string,
-                  input: number,
-                  cached: number,
-                  output: number,
-                  reasoning: number,
-                  total: number,
-                ) => Promise<void>
-              }).RecordLocalTurnUsageDetailed?.(
+          const detailedRecorder = (backend as {
+            RecordLocalTurnUsageDetailed?: (
+              runtime: string,
+              threadID: string,
+              turnID: string,
+              input: number,
+              cached: number,
+              output: number,
+              reasoning: number,
+              total: number,
+            ) => Promise<void>
+          }).RecordLocalTurnUsageDetailed
+          if (detailedRecorder) {
+            persistJobs.push(
+              detailedRecorder(
                 usageRuntime,
                 threadId,
                 turnId,
@@ -2812,17 +2917,14 @@ export const useCodexStore = defineStore('codex', () => {
                 last?.outputTokens || 0,
                 last?.reasoningOutputTokens || 0,
                 tokens,
-              ),
+              )
+                .catch(() => usageRuntime === 'codex'
+                  ? backend.RecordLocalTurnUsage(threadId, turnId, tokens).catch(() => undefined)
+                  : undefined),
             )
-              .then((result) => {
-                if (result !== undefined) return result
-                if (usageRuntime === 'codex') return backend.RecordLocalTurnUsage(threadId, turnId, tokens)
-                return undefined
-              })
-              .catch(() => usageRuntime === 'codex'
-                ? backend.RecordLocalTurnUsage(threadId, turnId, tokens).catch(() => undefined)
-                : undefined),
-          )
+          } else if (usageRuntime === 'codex') {
+            persistJobs.push(backend.RecordLocalTurnUsage(threadId, turnId, tokens).catch(() => undefined))
+          }
         }
       }
     }
@@ -3321,6 +3423,53 @@ export const useCodexStore = defineStore('codex', () => {
       ...turnMetricsByThread.value,
       [threadID]: merge ? { ...existing, ...historical } : historical,
     }
+    const metrics = turnMetricsByThread.value[threadID] ?? {}
+    const usageEntries = Object.values(metrics)
+      .filter((item): item is TurnMetrics & { tokenUsage: TokenUsageBreakdown } => Boolean(item.tokenUsage))
+    if (!usageEntries.length) return
+    const total: TokenUsageBreakdown = usageEntries.reduce((sum, item) => ({
+      inputTokens: sum.inputTokens + item.tokenUsage.inputTokens,
+      cachedInputTokens: sum.cachedInputTokens + item.tokenUsage.cachedInputTokens,
+      outputTokens: sum.outputTokens + item.tokenUsage.outputTokens,
+      reasoningOutputTokens: sum.reasoningOutputTokens + item.tokenUsage.reasoningOutputTokens,
+      totalTokens: sum.totalTokens + item.tokenUsage.totalTokens,
+    }), {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 0,
+    })
+    const last = [...usageEntries].sort((a, b) => (
+      (a.completedAt ?? a.startedAt ?? 0) - (b.completedAt ?? b.startedAt ?? 0)
+    )).at(-1)?.tokenUsage ?? usageEntries.at(-1)?.tokenUsage
+    if (!last) return
+    const previous = tokenUsageByThread.value[threadID]
+    tokenUsageByThread.value = {
+      ...tokenUsageByThread.value,
+      [threadID]: {
+        total,
+        last,
+        modelContextWindow: previous?.modelContextWindow ?? null,
+      },
+    }
+  }
+
+  function syncThreadContextWindow(threadID: string, rawThread: unknown): void {
+    if (!threadID) return
+    const thread = asRecord(rawThread)
+    const usageValue = thread.tokenUsage ?? thread.token_usage ?? thread.usage
+    const usage = normalizeThreadTokenUsage(usageValue)
+    if (usage.modelContextWindow == null) return
+    const current = tokenUsageByThread.value[threadID] ?? {
+      total: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      last: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
+      modelContextWindow: null,
+    }
+    tokenUsageByThread.value = {
+      ...tokenUsageByThread.value,
+      [threadID]: { ...current, modelContextWindow: usage.modelContextWindow },
+    }
   }
 
   function setThreadHistoryState(threadID: string, value: unknown): void {
@@ -3416,9 +3565,11 @@ export const useCodexStore = defineStore('codex', () => {
   function rememberLoadedThread(threadID: string): void {
     loadedThreadIDs.delete(threadID)
     loadedThreadIDs.add(threadID)
-    while (loadedThreadIDs.size > 12 || cachedConversationWeight() > 32_000_000) {
+    while (loadedThreadIDs.size > 12 || cachedConversationWeight() > 64_000_000) {
+      const recentlyOpened = [...loadedThreadIDs].slice(-2)
       const evicted = [...loadedThreadIDs].find((id) =>
         id !== threadID
+        && !recentlyOpened.includes(id)
         && id !== activeThreadId.value
         && !threadIsBusy(id)
         && !(queuedMessagesByThread.value[id] ?? []).length,
@@ -3468,14 +3619,14 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   function addOrUpdateThread(thread: ThreadSummary): void {
-    const path = thread.cwd || appStore.settings.workspace
-    const currentItems = sameWorkspace(path, appStore.settings.workspace)
+    const path = thread.cwd || appStore.currentWorkspacePath
+    const currentItems = sameWorkspace(path, appStore.currentWorkspacePath)
       ? threads.value
       : projectThreadsForPath(path) ?? []
     const remaining = currentItems.filter((item) => item.id !== thread.id)
     const nextItems = [thread, ...remaining].sort((a, b) => b.updatedAt - a.updatedAt)
     setProjectThreads(path, nextItems)
-    if (sameWorkspace(path, appStore.settings.workspace)) threads.value = nextItems
+    if (sameWorkspace(path, appStore.currentWorkspacePath)) threads.value = nextItems
   }
 
   function setProjectThreads(path: string, nextThreads: ThreadSummary[]): void {
@@ -3620,6 +3771,7 @@ export const useCodexStore = defineStore('codex', () => {
       && !ownerIDs.includes(id)
       && !sameThreadSession(id, ownerID),
     )
+    if (!accepted) scheduleThreadQueueDrain(ownerID)
   }
 
   function settleAcceptedPendingThreadSubmission(threadID: string, turnID: string): void {
@@ -4254,7 +4406,7 @@ export const useCodexStore = defineStore('codex', () => {
       return [{ ...pending, id: threadID }, ...withoutPending]
     }
     threads.value = replacePending(threads.value)
-    const path = appStore.settings.workspace
+    const path = appStore.currentWorkspacePath
     if (path) {
       const projectItems = projectThreadsForPath(path)
       if (projectItems) setProjectThreads(path, replacePending(projectItems))

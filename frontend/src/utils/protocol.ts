@@ -205,11 +205,36 @@ export function normalizeAccount(value: unknown): AccountInfo {
 }
 
 export function normalizeThreadTokenUsage(value: unknown): ThreadTokenUsage {
-  const record = asRecord(value)
+  const outer = asRecord(value)
+  const nested = asRecord(outer.usage ?? outer.tokenUsage ?? outer.token_usage)
+  const record = Object.keys(nested).length ? nested : outer
+  const totalValue = Object.keys(asRecord(record.total)).length
+    ? record.total
+    : Object.keys(asRecord(record.totalUsage)).length
+      ? record.totalUsage
+      : Object.keys(asRecord(record.cumulative)).length
+        ? record.cumulative
+        : record
+  const lastValue = Object.keys(asRecord(record.last)).length
+    ? record.last
+    : Object.keys(asRecord(record.latest)).length
+      ? record.latest
+      : Object.keys(asRecord(record.current)).length
+        ? record.current
+        : Object.keys(asRecord(record.turn)).length
+          ? record.turn
+          : totalValue
   return {
-    total: normalizeTokenBreakdown(record.total),
-    last: normalizeTokenBreakdown(record.last),
-    modelContextWindow: nullableNumber(record.modelContextWindow),
+    total: normalizeTokenBreakdown(totalValue),
+    last: normalizeTokenBreakdown(lastValue),
+    modelContextWindow: nullableNumber(
+      record.modelContextWindow
+      ?? record.model_context_window
+      ?? record.contextWindow
+      ?? record.context_window
+      ?? outer.modelContextWindow
+      ?? outer.contextWindow,
+    ),
   }
 }
 
@@ -244,13 +269,18 @@ export function normalizeAccountUsage(value: unknown): AccountUsageSummary | nul
   const bucketsRaw = response.dailyUsageBuckets ?? response.daily_usage_buckets
   const dailyBuckets = asArray(bucketsRaw).map((item) => {
     const record = asRecord(item)
+    const inputTokens = asNumber(record.inputTokens ?? record.input_tokens)
+    const cachedInputTokens = asNumber(record.cachedInputTokens ?? record.cached_input_tokens)
+    const outputTokens = asNumber(record.outputTokens ?? record.output_tokens)
+    const reasoningOutputTokens = asNumber(record.reasoningOutputTokens ?? record.reasoning_output_tokens)
+    const tokens = asNumber(record.tokens) || inputTokens + cachedInputTokens + outputTokens + reasoningOutputTokens
     return {
       startDate: asString(record.startDate, asString(record.start_date)),
-      tokens: asNumber(record.tokens),
-      inputTokens: asNumber(record.inputTokens ?? record.input_tokens),
-      cachedInputTokens: asNumber(record.cachedInputTokens ?? record.cached_input_tokens),
-      outputTokens: asNumber(record.outputTokens ?? record.output_tokens),
-      reasoningOutputTokens: asNumber(record.reasoningOutputTokens ?? record.reasoning_output_tokens),
+      tokens,
+      inputTokens,
+      cachedInputTokens,
+      outputTokens,
+      reasoningOutputTokens,
     }
   }).filter((item) => item.startDate && item.tokens > 0)
 
@@ -276,7 +306,15 @@ export function normalizeAccountUsage(value: unknown): AccountUsageSummary | nul
     longestStreakDays,
     longestRunningTurnSec,
   ].some((item) => item != null && item > 0)
-  if (!hasSummary && !dailyBuckets.length) return null
+  const hasExternalZeroSummary = (runtime === 'gemini' || runtime === 'opencode')
+    && [
+      lifetimeTokens,
+      lifetimeInputTokens,
+      lifetimeCachedInputTokens,
+      lifetimeOutputTokens,
+      lifetimeReasoningTokens,
+    ].some((item) => item != null)
+  if (!hasSummary && !hasExternalZeroSummary && !dailyBuckets.length) return null
 
   return {
     lifetimeTokens,
@@ -295,23 +333,30 @@ export function normalizeAccountUsage(value: unknown): AccountUsageSummary | nul
 
 function normalizeTokenBreakdown(value: unknown): TokenUsageBreakdown {
   const record = asRecord(value)
+  const cache = asRecord(record.cache)
   // Codex app-server / rollouts use snake_case; Grok may use either.
-  const inputTokens = asNumber(record.inputTokens ?? record.input_tokens ?? record.prompt_tokens)
+  const inputTokens = asNumber(record.inputTokens ?? record.input_tokens ?? record.prompt_tokens ?? record.input ?? record.promptTokenCount)
   const cachedInputTokens = asNumber(
     record.cachedInputTokens
     ?? record.cached_input_tokens
     ?? record.cache_read_input_tokens
+    ?? record.cache_read_tokens
+    ?? record.cached_tokens
     ?? record.cachedReadTokens
-    ?? record.cacheReadInputTokens,
+    ?? record.cacheReadInputTokens
+    ?? record.cached
+    ?? record.cacheRead
+    ?? cache.read
+    ?? cache.cached,
   )
-  const outputTokens = asNumber(record.outputTokens ?? record.output_tokens ?? record.completion_tokens)
+  const outputTokens = asNumber(record.outputTokens ?? record.output_tokens ?? record.completion_tokens ?? record.output ?? record.completionTokenCount)
   const reasoningOutputTokens = asNumber(
     record.reasoningOutputTokens
     ?? record.reasoning_output_tokens
     ?? record.reasoning_tokens
     ?? record.reasoningTokens,
   )
-  let totalTokens = asNumber(record.totalTokens ?? record.total_tokens)
+  let totalTokens = asNumber(record.totalTokens ?? record.total_tokens ?? record.total ?? record.totalTokenCount)
   if (totalTokens <= 0) {
     totalTokens = inputTokens + cachedInputTokens + outputTokens + reasoningOutputTokens
   }
@@ -582,8 +627,22 @@ export function metricsFromTurns(value: unknown): Record<string, TurnMetrics> {
     if (!turnId) continue
     const startedAt = nullableNumber(turn.startedAt)
     const completedAt = nullableNumber(turn.completedAt)
+    const rawUsage = turn.usage ?? turn.tokenUsage
+    const usageRecord = asRecord(rawUsage)
+    const normalizedUsage = Object.keys(usageRecord).length > 0
+      ? normalizeThreadTokenUsage(usageRecord)
+      : null
+    const tokenUsage = normalizedUsage && (
+      normalizedUsage.last.totalTokens > 0
+      || normalizedUsage.last.inputTokens > 0
+      || normalizedUsage.last.outputTokens > 0
+      || normalizedUsage.last.cachedInputTokens > 0
+      || normalizedUsage.last.reasoningOutputTokens > 0
+    )
+      ? normalizedUsage.last
+      : null
     result[turnId] = {
-      tokenUsage: null,
+      tokenUsage,
       startedAt: startedAt === null ? null : startedAt * 1000,
       completedAt: completedAt === null ? null : completedAt * 1000,
       durationMs: nullableNumber(turn.durationMs),

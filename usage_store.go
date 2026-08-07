@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const localUsageVersion = 3
+const localUsageVersion = 4
 const localUsageTurnRetentionDays = 60
 const localUsagePersistDelay = 400 * time.Millisecond
 
@@ -190,6 +190,78 @@ func migrateLocalUsage(usage *localUsageFile) bool {
 		if bucket.Days == nil {
 			bucket.Days = make(map[string]localDayStats)
 			changed = true
+		}
+	}
+	// Aggregate buckets can outlive the retained turn index, but they must never
+	// be smaller than the turns that are still present. Older builds could keep a
+	// cloud/total-only lifetime while later backfill populated detailed turns,
+	// leaving Codex lifetime totals far below the visible breakdown.
+	if repairUsageBucketsFromTurns(usage) {
+		changed = true
+	}
+	return changed
+}
+
+func repairUsageBucketsFromTurns(usage *localUsageFile) bool {
+	if usage == nil || len(usage.Turns) == 0 {
+		return false
+	}
+	expected := make(map[string]*localRuntimeBucket)
+	for _, turn := range usage.Turns {
+		runtime := normalizeUsageRuntime(turn.Runtime)
+		bucket := expected[runtime]
+		if bucket == nil {
+			bucket = emptyRuntimeBucket()
+			expected[runtime] = bucket
+		}
+		addUsageTurnContribution(bucket, turn)
+	}
+
+	changed := false
+	for runtime, minimum := range expected {
+		bucket := usage.ensureRuntime(runtime)
+		if bucket.LifetimeTokens < minimum.LifetimeTokens {
+			bucket.LifetimeTokens = minimum.LifetimeTokens
+			changed = true
+		}
+		if bucket.LifetimeInput < minimum.LifetimeInput {
+			bucket.LifetimeInput = minimum.LifetimeInput
+			changed = true
+		}
+		if bucket.LifetimeCached < minimum.LifetimeCached {
+			bucket.LifetimeCached = minimum.LifetimeCached
+			changed = true
+		}
+		if bucket.LifetimeOutput < minimum.LifetimeOutput {
+			bucket.LifetimeOutput = minimum.LifetimeOutput
+			changed = true
+		}
+		if bucket.LifetimeReasoning < minimum.LifetimeReasoning {
+			bucket.LifetimeReasoning = minimum.LifetimeReasoning
+			changed = true
+		}
+		for day, minimumDay := range minimum.Days {
+			current := bucket.Days[day]
+			next := current
+			if next.Tokens < minimumDay.Tokens {
+				next.Tokens = minimumDay.Tokens
+			}
+			if next.Input < minimumDay.Input {
+				next.Input = minimumDay.Input
+			}
+			if next.Cached < minimumDay.Cached {
+				next.Cached = minimumDay.Cached
+			}
+			if next.Output < minimumDay.Output {
+				next.Output = minimumDay.Output
+			}
+			if next.Reasoning < minimumDay.Reasoning {
+				next.Reasoning = minimumDay.Reasoning
+			}
+			if next != current {
+				bucket.Days[day] = next
+				changed = true
+			}
 		}
 	}
 	return changed
@@ -566,6 +638,18 @@ func applyTurnToUsageDetailed(
 	b.normalize()
 	day := localDayKey(at)
 	key := turnUsageKey(runtime, threadID, turnID)
+	// Rollout backfill uses the native Codex session id while live Wails events
+	// may already be remapped to a NiceCodex UUID. The turn id is authoritative
+	// and globally unique, so reuse an existing runtime+turn entry instead of
+	// counting the same request twice under two thread ids.
+	if _, exists := usage.Turns[key]; !exists {
+		for existingKey, existing := range usage.Turns {
+			if normalizeUsageRuntime(existing.Runtime) == runtime && strings.TrimSpace(existing.TurnID) == turnID {
+				key = existingKey
+				break
+			}
+		}
+	}
 	bucket := usage.ensureRuntime(runtime)
 
 	prev, hadPrev := usage.Turns[key]
@@ -620,9 +704,13 @@ func applyTurnToUsageDetailed(
 	bucket.LifetimeReasoning += b.Reasoning
 	clampRuntimeBucket(bucket)
 
+	storedThreadID := threadID
+	if hadPrev && strings.TrimSpace(prev.ThreadID) != "" {
+		storedThreadID = prev.ThreadID
+	}
 	usage.Turns[key] = localTurnUsage{
 		Runtime:   runtime,
-		ThreadID:  threadID,
+		ThreadID:  storedThreadID,
 		TurnID:    turnID,
 		Tokens:    b.Total,
 		Input:     b.Input,
@@ -978,10 +1066,18 @@ func extractTurnTokenBreakdown(data map[string]any) (threadID, turnID string, b 
 		tokenUsage, _ = data["token_usage"].(map[string]any)
 	}
 	if tokenUsage == nil {
-		return threadID, turnID, tokenBreakdown{}, false
+		tokenUsage, _ = data["usage"].(map[string]any)
+	}
+	if tokenUsage == nil {
+		// Some app-server builds put the counters directly on the notification
+		// payload. normalizeTokenUsageMap ignores unrelated lifecycle fields.
+		tokenUsage = data
 	}
 	// Prefer per-turn "last" so session cumulative "total" never double-counts.
 	last, _ := tokenUsage["last"].(map[string]any)
+	if last == nil {
+		last, _ = tokenUsage["latest"].(map[string]any)
+	}
 	if last == nil {
 		last = tokenUsage
 	}

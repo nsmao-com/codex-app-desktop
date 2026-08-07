@@ -125,6 +125,32 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       }
       return
     }
+	if (runtime === 'gemini') {
+		const settings = {
+			...appStore.settings,
+			geminiWorkspace: selected.path,
+			geminiRecentWorkspaces: rememberWorkspacePath(
+				appStore.settings.geminiRecentWorkspaces ?? [],
+				selected.path,
+			),
+		}
+		appStore.settings = settings
+		await appStore.savePreferences(settings, { silent: true })
+		return
+	}
+	if (runtime === 'opencode') {
+		const settings = {
+			...appStore.settings,
+			openCodeWorkspace: selected.path,
+			openCodeRecentWorkspaces: rememberWorkspacePath(
+				appStore.settings.openCodeRecentWorkspaces ?? [],
+				selected.path,
+			),
+		}
+		appStore.settings = settings
+		await appStore.savePreferences(settings, { silent: true })
+		return
+	}
     const settings = {
       ...appStore.settings,
       workspace: selected.path,

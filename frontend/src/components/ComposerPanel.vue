@@ -118,6 +118,21 @@ type SlashCommand = {
   run: () => void | Promise<void>
 }
 
+type UsageCommandRange = 'today' | 'week' | 'cumulative'
+
+function runUsageCommand(range?: UsageCommandRange): void {
+  // Open immediately. The popover owns its loading state and refresh, so a
+  // slow native CLI/database read never makes the slash command look inert.
+  window.dispatchEvent(new CustomEvent('nice-codex:open-usage', { detail: { range } }))
+}
+
+async function runAddCommand(): Promise<void> {
+  // Native Codex calls this flow /mention. Nice Codex already has a validated
+  // attachment picker, so /add and /mention share it and keep the files on the
+  // next message instead of silently sending the slash text upstream.
+  await attachImages()
+}
+
 const slashCommands = computed<SlashCommand[]>(() => {
   if (appStore.isGrokMode) {
     return [
@@ -172,6 +187,24 @@ const slashCommands = computed<SlashCommand[]>(() => {
   if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
     return [
       {
+        id: 'usage',
+        label: '/usage',
+        description: t('slash.usage'),
+        run: () => runUsageCommand(),
+      },
+      {
+        id: 'add',
+        label: '/add',
+        description: t('slash.add'),
+        run: () => runAddCommand(),
+      },
+      {
+        id: 'mention',
+        label: '/mention',
+        description: t('slash.add'),
+        run: () => runAddCommand(),
+      },
+      {
         id: 'compact',
         label: '/compact',
         description: t('slash.compact'),
@@ -204,6 +237,24 @@ const slashCommands = computed<SlashCommand[]>(() => {
     ]
   }
   return [
+  {
+    id: 'usage',
+    label: '/usage',
+    description: t('slash.usage'),
+    run: () => runUsageCommand(),
+  },
+  {
+    id: 'add',
+    label: '/add',
+    description: t('slash.add'),
+    run: () => runAddCommand(),
+  },
+  {
+    id: 'mention',
+    label: '/mention',
+    description: t('slash.add'),
+    run: () => runAddCommand(),
+  },
   {
     id: 'review',
     label: '/review',
@@ -263,10 +314,10 @@ const slashCommands = computed<SlashCommand[]>(() => {
 
 const slashQuery = computed(() => {
   const text = modelValue.value
-  if (!text.startsWith('/') || text.includes('\n') || text.includes(' ')) return ''
-  return text.slice(1).toLocaleLowerCase()
+  if (!text.startsWith('/') || text.includes('\n')) return ''
+  return text.slice(1).split(/\s+/, 1)[0].toLocaleLowerCase()
 })
-const slashOpen = computed(() => modelValue.value.startsWith('/') && !modelValue.value.includes('\n') && !modelValue.value.slice(1).includes(' '))
+const slashOpen = computed(() => modelValue.value.startsWith('/') && !modelValue.value.includes('\n'))
 const filteredSlashCommands = computed(() => {
   const query = slashQuery.value
   if (!query) return slashCommands.value
@@ -622,9 +673,7 @@ function removeQueued(messageId: string): void {
   else codexStore.removeQueuedMessage(messageId)
 }
 
-const canSteer = computed(() => appStore.isCodexMode && codexStore.canSteerActiveTurn)
 const willQueueOnSend = computed(() => {
-  if (canSteer.value) return false
   if (appStore.isGrokMode) {
     const loadingActiveSession = Boolean(
       grokStore.activeSessionId && grokStore.loadingSessionId === grokStore.activeSessionId,
@@ -656,7 +705,6 @@ const stopDisabled = computed(() => {
   return codexStore.interruptingTurn
 })
 const sendButtonLabel = computed(() => {
-  if (canSteer.value) return t('chat.steer')
   if (willQueueOnSend.value) return t('chat.queueSend')
   return t('chat.send')
 })
@@ -668,7 +716,6 @@ const composerPlaceholder = computed(() => {
   if ((appStore.isGeminiMode || appStore.isOpenCodeMode) && willQueueOnSend.value) return t('chat.queuePlaceholder')
   if (appStore.isGeminiMode) return t('chat.runtimePlaceholder', { runtime: 'Gemini CLI' })
   if (appStore.isOpenCodeMode) return t('chat.runtimePlaceholder', { runtime: 'OpenCode' })
-  if (canSteer.value) return t('chat.steerPlaceholder')
   if (willQueueOnSend.value) return t('chat.queuePlaceholder')
   return t('chat.placeholder')
 })
@@ -859,6 +906,12 @@ function onKeydown(event: KeyboardEvent): void {
       return
     }
   }
+  if (slashOpen.value && event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    notify('warning', t('slash.title'), `${t('slash.unknown')}: ${modelValue.value}`)
+    modelValue.value = ''
+    return
+  }
   if (event.key === 'Escape' && sentHistoryIndex.value >= 0) {
     restoreSentHistoryDraft(event)
     return
@@ -910,7 +963,23 @@ function insertPlugin(name?: string): void {
 
 async function runSlashCommand(command?: SlashCommand): Promise<void> {
   if (!command) return
+  const args = modelValue.value.trim().split(/\s+/).slice(1)
   modelValue.value = ''
+  if (command.id === 'usage' && args.length) {
+    const range = args[0].toLocaleLowerCase()
+    if (args.length > 1 || !['daily', 'today', 'weekly', 'week', 'cumulative', 'lifetime', 'all'].includes(range)) {
+      notify('warning', t('slash.title'), t('slash.usageSyntax'))
+      return
+    }
+    await runUsageCommand(
+      range === 'daily' || range === 'today'
+        ? 'today'
+        : range === 'weekly' || range === 'week'
+          ? 'week'
+          : 'cumulative',
+    )
+    return
+  }
   await command.run()
 }
 

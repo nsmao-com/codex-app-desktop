@@ -15,6 +15,7 @@ import { useAppearance } from '../composables/useAppearance'
 import type { AppAccent } from '../lib/accents'
 import { notify } from '../utils/notify'
 import {
+  asNumber,
   asRecord,
   asString,
   normalizeAccount,
@@ -25,7 +26,7 @@ import { translate } from '../i18n'
 import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.2.1'
+const AppVersionFallback = '1.2.2'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -54,12 +55,16 @@ const defaultSettings: UserSettings = {
   claudeSandbox: 'workspace-write',
   claudeApprovalPolicy: 'on-request',
   claudePermissionMode: 'acceptEdits',
+  geminiWorkspace: '',
+  geminiRecentWorkspaces: [],
   geminiModel: 'gemini-2.5-pro',
   geminiEffort: 'auto',
   geminiSandbox: 'workspace-write',
   geminiApprovalPolicy: 'on-request',
   geminiCustomModels: [],
   openCodeModel: 'anthropic/claude-sonnet-4-6',
+  openCodeWorkspace: '',
+  openCodeRecentWorkspaces: [],
   openCodeEffort: 'high',
   openCodeSandbox: 'workspace-write',
   openCodeApprovalPolicy: 'on-request',
@@ -137,7 +142,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.2.1')
+  const appVersion = shallowRef('1.2.2')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -166,6 +171,7 @@ export const useAppStore = defineStore('app', () => {
   const account = shallowRef<AccountInfo>({ ...emptyAccount })
   const accountRateLimits = shallowRef<ReturnType<typeof normalizeAccountRateLimits>>(null)
   const accountUsage = shallowRef<ReturnType<typeof normalizeAccountUsage>>(null)
+  let usageLoadSequence = 0
   const models = shallowRef<import('../types/codex').ModelOption[]>([])
   const modelProviders = shallowRef<import('../types/codex').ModelProviderOption[]>([])
   const agentProviders = shallowRef<AgentProviderRuntime[]>([])
@@ -173,6 +179,8 @@ export const useAppStore = defineStore('app', () => {
   const currentWorkspacePath = computed(() => {
     if (isGrokMode.value) return settings.value.grokWorkspace || settings.value.workspace
     if (isClaudeMode.value) return settings.value.claudeWorkspace || settings.value.workspace
+    if (isGeminiMode.value) return settings.value.geminiWorkspace || settings.value.workspace
+    if (isOpenCodeMode.value) return settings.value.openCodeWorkspace || settings.value.workspace
     return settings.value.workspace
   })
   const currentTheme = computed(() => settings.value.theme)
@@ -281,19 +289,23 @@ export const useAppStore = defineStore('app', () => {
       claudeSandbox: data.settings.claudeSandbox || 'workspace-write',
       claudeApprovalPolicy: data.settings.claudeApprovalPolicy || 'on-request',
       claudePermissionMode: data.settings.claudePermissionMode || 'acceptEdits',
+      geminiWorkspace: data.settings.geminiWorkspace ?? '',
+      geminiRecentWorkspaces: data.settings.geminiRecentWorkspaces ?? [],
       geminiModel: data.settings.geminiModel || 'gemini-2.5-pro',
       geminiEffort: data.settings.geminiEffort || 'auto',
       geminiSandbox: data.settings.geminiSandbox || 'workspace-write',
       geminiApprovalPolicy: data.settings.geminiApprovalPolicy || 'on-request',
       geminiCustomModels: data.settings.geminiCustomModels ?? [],
       openCodeModel: data.settings.openCodeModel || 'anthropic/claude-sonnet-4-6',
+      openCodeWorkspace: data.settings.openCodeWorkspace ?? '',
+      openCodeRecentWorkspaces: data.settings.openCodeRecentWorkspaces ?? [],
       openCodeEffort: data.settings.openCodeEffort || 'high',
       openCodeSandbox: data.settings.openCodeSandbox || 'workspace-write',
       openCodeApprovalPolicy: data.settings.openCodeApprovalPolicy || 'on-request',
       openCodeProvider: data.settings.openCodeProvider ?? '',
       openCodeCustomModels: data.settings.openCodeCustomModels ?? [],
       customModels: data.settings.customModels ?? [],
-      followUpBehavior: data.settings.followUpBehavior === 'steer' ? 'steer' : 'queue',
+      followUpBehavior: 'queue',
       notifyOnTurnComplete: data.settings.notifyOnTurnComplete !== false,
       customInstructions: data.settings.customInstructions ?? '',
       sendWithModifier: Boolean(data.settings.sendWithModifier),
@@ -347,6 +359,7 @@ export const useAppStore = defineStore('app', () => {
     if (activeRuntime.value !== nextRuntime) {
       // Instant UI switch — backend persistence continues in the returned promise.
       settings.value = { ...settings.value, activeRuntime: nextRuntime }
+      accountUsage.value = null
       setRuntime(nextRuntime)
       patchSettings({ activeRuntime: nextRuntime })
     }
@@ -359,6 +372,10 @@ export const useAppStore = defineStore('app', () => {
     runtimeSync = request
     try {
       await request
+      // The runtime switch is persisted before reading the runtime-scoped
+      // usage store. This prevents the old provider's snapshot from winning a
+      // fast tab switch.
+      void loadLocalUsage()
       return activeRuntime.value === nextRuntime
     } catch (error) {
       if (activeRuntime.value === nextRuntime) {
@@ -414,12 +431,16 @@ export const useAppStore = defineStore('app', () => {
       claudeSandbox: saved.claudeSandbox || next.claudeSandbox || 'workspace-write',
       claudeApprovalPolicy: saved.claudeApprovalPolicy || next.claudeApprovalPolicy || 'on-request',
       claudePermissionMode: saved.claudePermissionMode || next.claudePermissionMode || 'acceptEdits',
+      geminiWorkspace: saved.geminiWorkspace ?? next.geminiWorkspace ?? '',
+      geminiRecentWorkspaces: saved.geminiRecentWorkspaces ?? next.geminiRecentWorkspaces ?? [],
       geminiModel: saved.geminiModel || next.geminiModel || 'gemini-2.5-pro',
       geminiEffort: saved.geminiEffort || next.geminiEffort || 'auto',
       geminiSandbox: saved.geminiSandbox || next.geminiSandbox || 'workspace-write',
       geminiApprovalPolicy: saved.geminiApprovalPolicy || next.geminiApprovalPolicy || 'on-request',
       geminiCustomModels: saved.geminiCustomModels ?? next.geminiCustomModels ?? [],
       openCodeModel: saved.openCodeModel || next.openCodeModel || 'anthropic/claude-sonnet-4-6',
+      openCodeWorkspace: saved.openCodeWorkspace ?? next.openCodeWorkspace ?? '',
+      openCodeRecentWorkspaces: saved.openCodeRecentWorkspaces ?? next.openCodeRecentWorkspaces ?? [],
       openCodeEffort: saved.openCodeEffort || next.openCodeEffort || 'high',
       openCodeSandbox: saved.openCodeSandbox || next.openCodeSandbox || 'workspace-write',
       openCodeApprovalPolicy: saved.openCodeApprovalPolicy || next.openCodeApprovalPolicy || 'on-request',
@@ -689,9 +710,43 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function loadLocalUsage(): Promise<void> {
+    const sequence = ++usageLoadSequence
+    const requestedRuntime = activeRuntime.value
     try {
       const usage = await backend.ReadAccountUsage()
-      accountUsage.value = normalizeAccountUsage(usage)
+      if (sequence !== usageLoadSequence || requestedRuntime !== activeRuntime.value) return
+      let normalized = normalizeAccountUsage(usage)
+      // Keep a second read path for packaged builds where the generated
+      // ReadAccountUsage bridge can return an empty snapshot while the native
+      // Gemini/OpenCode catalog is already available. This is deliberately a
+      // fallback; Codex/Claude/Grok continue to use their normal usage store.
+      if (!normalized && (requestedRuntime === 'gemini' || requestedRuntime === 'opencode')) {
+        try {
+          const catalog = await backend.ReadExternalRuntimeCatalog(
+            requestedRuntime,
+            requestedRuntime === activeRuntime.value ? currentWorkspacePath.value : '',
+          )
+          const native = asRecord(catalog.usage)
+          normalized = normalizeAccountUsage({
+            runtime: requestedRuntime,
+            summary: {
+              lifetimeTokens: asNumber(native.totalTokens),
+              lifetimeInputTokens: asNumber(native.inputTokens),
+              lifetimeCachedInputTokens: asNumber(native.cachedTokens),
+              lifetimeOutputTokens: asNumber(native.outputTokens),
+              lifetimeReasoningTokens: asNumber(native.reasoningTokens),
+            },
+            dailyUsageBuckets: [],
+          })
+        } catch {
+          // The native CLI/database is optional; keep the empty state.
+        }
+      }
+      const responseRuntime = normalized?.runtime
+      // A request issued just before SetActiveRuntime completes can return the
+      // previous provider's usage. Do not show it under the new provider.
+      if (responseRuntime && responseRuntime !== requestedRuntime) return
+      accountUsage.value = normalized
     } catch {
       // Keep previous snapshot if the local store is temporarily unavailable.
     }

@@ -22,41 +22,44 @@ import (
 )
 
 type AppService struct {
-	app                   *application.App
-	pluginAssets          *pluginAssetServer
-	mu                    sync.Mutex
-	historyMu             sync.Mutex
-	usageMu               sync.Mutex
-	usagePersistMu        sync.Mutex
-	client                *codex.Client
-	settings              UserSettings
-	settingsPath          string
-	allowedThreads        map[string]string
-	allowedImages         map[string]struct{}
-	terminalSessions      map[string]*terminalSession
-	agentProviders        []AgentProviderRuntime
-	sessions              map[string]*SessionRecord
-	externalRuns          map[string]*externalRun
-	grokAPISessions       map[string]*GrokAPISession
-	grokApprovals         map[string]*grokPendingApproval
-	claudeSessions        map[string]*claudeStoredSession
-	scheduledTasks        *scheduledTaskStore
-	schedulerStop         chan struct{}
-	shutdownOnce          sync.Once
-	usageCache            *localUsageFile
-	usageFlushTimer       *time.Timer
-	usageFlushGen         uint64
-	usageBackfillAt       map[string]time.Time
-	externalUsageCache    map[string]map[string]any
-	externalUsageCachedAt map[string]time.Time
-	updateState           updateDownloadState
-	codexLifecycleMu      sync.Mutex
-	codexThreadStartMu    sync.Mutex
-	pendingCodexSessionID string
-	codexHistoryCache     map[string]*codexHistorySnapshot
-	claudeHistoryCache    map[string]*claudeHistorySnapshot
-	grokHistoryCache      map[string]*grokHistorySnapshot
-	providerRouter        *providerRouter
+	app                    *application.App
+	pluginAssets           *pluginAssetServer
+	mu                     sync.Mutex
+	historyMu              sync.Mutex
+	usageMu                sync.Mutex
+	usagePersistMu         sync.Mutex
+	client                 *codex.Client
+	settings               UserSettings
+	settingsPath           string
+	allowedThreads         map[string]string
+	allowedImages          map[string]struct{}
+	terminalSessions       map[string]*terminalSession
+	agentProviders         []AgentProviderRuntime
+	sessions               map[string]*SessionRecord
+	externalRuns           map[string]*externalRun
+	grokAPISessions        map[string]*GrokAPISession
+	grokApprovals          map[string]*grokPendingApproval
+	claudeSessions         map[string]*claudeStoredSession
+	scheduledTasks         *scheduledTaskStore
+	schedulerStop          chan struct{}
+	shutdownOnce           sync.Once
+	usageCache             *localUsageFile
+	usageFlushTimer        *time.Timer
+	usageFlushGen          uint64
+	usageBackfillAt        map[string]time.Time
+	externalUsageCache     map[string]map[string]any
+	externalUsageCachedAt  map[string]time.Time
+	nativeSessionsSyncedAt map[string]time.Time
+	updateState            updateDownloadState
+	codexLifecycleMu       sync.Mutex
+	codexThreadStartMu     sync.Mutex
+	codexActiveTurns       map[string]string
+	pendingCodexSessionID  string
+	codexHistoryCache      map[string]*codexHistorySnapshot
+	claudeHistoryCache     map[string]*claudeHistorySnapshot
+	grokHistoryCache       map[string]*grokHistorySnapshot
+	nativeHistoryCache     map[string]nativeHistoryCacheEntry
+	providerRouter         *providerRouter
 }
 
 const defaultCodexModel = "gpt-5.6-sol"
@@ -138,12 +141,16 @@ type UserSettings struct {
 	ClaudePermissionMode string `json:"claudePermissionMode"`
 	// Gemini/OpenCode preferences stay separate from Codex/Claude/Grok so a
 	// runtime switch never changes another provider's default model.
+	GeminiWorkspace          string   `json:"geminiWorkspace"`
+	GeminiRecentWorkspaces   []string `json:"geminiRecentWorkspaces"`
 	GeminiModel              string   `json:"geminiModel"`
 	GeminiEffort             string   `json:"geminiEffort"`
 	GeminiSandbox            string   `json:"geminiSandbox"`
 	GeminiApprovalPolicy     string   `json:"geminiApprovalPolicy"`
 	GeminiCustomModels       []string `json:"geminiCustomModels"`
 	OpenCodeModel            string   `json:"openCodeModel"`
+	OpenCodeWorkspace        string   `json:"openCodeWorkspace"`
+	OpenCodeRecentWorkspaces []string `json:"openCodeRecentWorkspaces"`
 	OpenCodeEffort           string   `json:"openCodeEffort"`
 	OpenCodeSandbox          string   `json:"openCodeSandbox"`
 	OpenCodeApprovalPolicy   string   `json:"openCodeApprovalPolicy"`
@@ -284,24 +291,27 @@ func NewAppService(app *application.App, pluginAssets *pluginAssetServer) *AppSe
 	}
 
 	service := &AppService{
-		app:                app,
-		pluginAssets:       pluginAssets,
-		settings:           settings,
-		settingsPath:       settingsPath,
-		allowedThreads:     make(map[string]string),
-		allowedImages:      make(map[string]struct{}),
-		terminalSessions:   make(map[string]*terminalSession),
-		sessions:           loadSessions(settingsPath),
-		externalRuns:       make(map[string]*externalRun),
-		grokAPISessions:    loadGrokAPISessions(settingsPath),
-		grokApprovals:      make(map[string]*grokPendingApproval),
-		claudeSessions:     loadClaudeSessions(settingsPath),
-		codexHistoryCache:  make(map[string]*codexHistorySnapshot),
-		claudeHistoryCache: make(map[string]*claudeHistorySnapshot),
-		grokHistoryCache:   make(map[string]*grokHistorySnapshot),
-		scheduledTasks:     newScheduledTaskStore(settingsPath),
-		schedulerStop:      make(chan struct{}),
-		providerRouter:     newProviderRouter(),
+		app:                    app,
+		pluginAssets:           pluginAssets,
+		settings:               settings,
+		settingsPath:           settingsPath,
+		allowedThreads:         make(map[string]string),
+		allowedImages:          make(map[string]struct{}),
+		terminalSessions:       make(map[string]*terminalSession),
+		sessions:               loadSessions(settingsPath),
+		externalRuns:           make(map[string]*externalRun),
+		nativeSessionsSyncedAt: make(map[string]time.Time),
+		grokAPISessions:        loadGrokAPISessions(settingsPath),
+		grokApprovals:          make(map[string]*grokPendingApproval),
+		claudeSessions:         loadClaudeSessions(settingsPath),
+		codexHistoryCache:      make(map[string]*codexHistorySnapshot),
+		claudeHistoryCache:     make(map[string]*claudeHistorySnapshot),
+		grokHistoryCache:       make(map[string]*grokHistorySnapshot),
+		nativeHistoryCache:     make(map[string]nativeHistoryCacheEntry),
+		scheduledTasks:         newScheduledTaskStore(settingsPath),
+		schedulerStop:          make(chan struct{}),
+		providerRouter:         newProviderRouter(),
+		codexActiveTurns:       make(map[string]string),
 	}
 	if routerConfig, err := loadProviderRouterConfig(settingsPath); err != nil {
 		service.providerRouter.setError(err.Error())
@@ -311,6 +321,7 @@ func NewAppService(app *application.App, pluginAssets *pluginAssetServer) *AppSe
 	_ = service.scheduledTasks.load()
 	service.client = codex.NewClient(func(event codex.Event) {
 		service.remapCodexEvent(&event)
+		service.trackCodexActivity(event)
 		service.maybeRecordLocalUsage(event)
 		app.Event.Emit("codex:event", event)
 	})
@@ -342,17 +353,7 @@ func (s *AppService) Bootstrap() BootstrapData {
 	}
 	s.applyAlwaysOnTop(settings.AlwaysOnTop)
 	// Surface the workspace for the currently active product runtime.
-	activePath := strings.TrimSpace(settings.Workspace)
-	switch normalizeRuntime(settings.ActiveRuntime) {
-	case "grok":
-		if gw := strings.TrimSpace(settings.GrokWorkspace); gw != "" {
-			activePath = gw
-		}
-	case "claude":
-		if cw := strings.TrimSpace(settings.ClaudeWorkspace); cw != "" {
-			activePath = cw
-		}
-	}
+	activePath := strings.TrimSpace(activeWorkspaceForRuntime(settings))
 	if activePath != "" {
 		workspace := inspectWorkspace(activePath)
 		data.Workspace = &workspace
@@ -384,6 +385,8 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	settings.GrokEffort = normalizeGrokEffort(settings.GrokEffort)
 	settings.ClaudeModel = sanitizeShortText(settings.ClaudeModel, 160)
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
+	settings.GeminiWorkspace = strings.TrimSpace(settings.GeminiWorkspace)
+	settings.GeminiRecentWorkspaces = sanitizeRecentWorkspaces(settings.GeminiRecentWorkspaces)
 	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
 	settings.GeminiCustomModels = sanitizeCustomModels(settings.GeminiCustomModels)
 	if !isAllowed(settings.GeminiSandbox, "read-only", "workspace-write", "danger-full-access") {
@@ -396,6 +399,8 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 		settings.GeminiEffort = "auto"
 	}
 	settings.OpenCodeModel = sanitizeShortText(settings.OpenCodeModel, 160)
+	settings.OpenCodeWorkspace = strings.TrimSpace(settings.OpenCodeWorkspace)
+	settings.OpenCodeRecentWorkspaces = sanitizeRecentWorkspaces(settings.OpenCodeRecentWorkspaces)
 	settings.OpenCodeEffort = sanitizeShortText(settings.OpenCodeEffort, 32)
 	if !isAllowed(settings.OpenCodeSandbox, "read-only", "workspace-write", "danger-full-access") {
 		settings.OpenCodeSandbox = "workspace-write"
@@ -495,6 +500,10 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	settings.GrokRecentWorkspaces = latest.GrokRecentWorkspaces
 	settings.ClaudeWorkspace = latest.ClaudeWorkspace
 	settings.ClaudeRecentWorkspaces = latest.ClaudeRecentWorkspaces
+	settings.GeminiWorkspace = latest.GeminiWorkspace
+	settings.GeminiRecentWorkspaces = latest.GeminiRecentWorkspaces
+	settings.OpenCodeWorkspace = latest.OpenCodeWorkspace
+	settings.OpenCodeRecentWorkspaces = latest.OpenCodeRecentWorkspaces
 	settings.ActiveRuntime = latest.ActiveRuntime
 	// Onboarding completion is monotonic — concurrent preference saves must not reopen the wizard.
 	if latest.OnboardingCompleted || settings.OnboardingCompleted || strings.TrimSpace(settings.Workspace) != "" {
@@ -519,7 +528,7 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 }
 
 func (s *AppService) SelectWorkspace() (WorkspaceInfo, error) {
-	current := s.Settings().Workspace
+	current := s.activeWorkspacePath()
 	path, err := s.app.Dialog.OpenFileWithOptions(&application.OpenFileDialogOptions{
 		Title:                "Choose a workspace",
 		Message:              "Select the project folder Nice Codex can work in.",
@@ -634,8 +643,17 @@ func (s *AppService) UseWorkspace(path string) (WorkspaceInfo, error) {
 
 	s.mu.Lock()
 	updated := cloneSettings(s.settings)
-	updated.Workspace = cleanPath
-	updated.RecentWorkspaces = rememberWorkspace(updated.RecentWorkspaces, cleanPath)
+	switch normalizeRuntime(updated.ActiveRuntime) {
+	case "gemini":
+		updated.GeminiWorkspace = cleanPath
+		updated.GeminiRecentWorkspaces = rememberWorkspace(updated.GeminiRecentWorkspaces, cleanPath)
+	case "opencode":
+		updated.OpenCodeWorkspace = cleanPath
+		updated.OpenCodeRecentWorkspaces = rememberWorkspace(updated.OpenCodeRecentWorkspaces, cleanPath)
+	default:
+		updated.Workspace = cleanPath
+		updated.RecentWorkspaces = rememberWorkspace(updated.RecentWorkspaces, cleanPath)
+	}
 	err = writeSettings(s.settingsPath, updated)
 	if err == nil {
 		s.settings = updated
@@ -709,6 +727,9 @@ func (s *AppService) StopCodex() error {
 	if client == nil {
 		return nil
 	}
+	s.mu.Lock()
+	s.codexActiveTurns = make(map[string]string)
+	s.mu.Unlock()
 	return client.Stop()
 }
 
@@ -724,7 +745,7 @@ func (s *AppService) CodexStatus() codex.Status {
 
 func (s *AppService) ListThreads(search string) (map[string]any, error) {
 	settings := s.Settings()
-	return s.listThreadsForWorkspace(settings.Workspace, search)
+	return s.listThreadsForWorkspace(activeWorkspaceForRuntime(settings), search)
 }
 
 func (s *AppService) ListWorkspaceThreads(workspace string, search string) (map[string]any, error) {
@@ -733,9 +754,10 @@ func (s *AppService) ListWorkspaceThreads(workspace string, search string) (map[
 		return nil, err
 	}
 	settings := s.Settings()
-	allowed := samePath(cleanWorkspace, settings.Workspace)
+	activeWorkspace := activeWorkspaceForRuntime(settings)
+	allowed := samePath(cleanWorkspace, activeWorkspace)
 	if !allowed {
-		for _, recent := range settings.RecentWorkspaces {
+		for _, recent := range recentWorkspacesForRuntime(settings) {
 			if samePath(cleanWorkspace, recent) {
 				allowed = true
 				break
@@ -751,10 +773,11 @@ func (s *AppService) ListWorkspaceThreads(workspace string, search string) (map[
 func (s *AppService) listThreadsForWorkspace(workspace string, search string) (map[string]any, error) {
 	settings := s.Settings()
 	workMode := normalizeWorkMode(settings.WorkMode)
+	activeRuntime := normalizeRuntime(settings.ActiveRuntime)
 	// Only Codex owns an app-server thread index. External runtimes use the
 	// NiceCodex session store and must not probe a stopped Codex process during
 	// every runtime/workspace switch (which otherwise adds a long timeout).
-	if normalizeRuntime(settings.ActiveRuntime) == "codex" {
+	if activeRuntime == "codex" {
 		// Sync Codex app-server history into the NiceCodex index so the sidebar
 		// shows real past threads (names/previews), not just empty local stubs.
 		// useStateDbOnly keeps this fast; a timeout must not block the local index.
@@ -769,6 +792,9 @@ func (s *AppService) listThreadsForWorkspace(workspace string, search string) (m
 			s.syncCodexThreadsIntoSessions(response, workspace, workMode)
 		}
 	}
+	if activeRuntime == "gemini" || activeRuntime == "opencode" {
+		s.syncNativeExternalSessions(activeRuntime, workspace)
+	}
 	return s.listSessionsForWorkspace(workspace, search, workMode), nil
 }
 
@@ -780,7 +806,7 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 	if strings.HasPrefix(sessionID, "pending-thread-") {
 		return nil
 	}
-	workspace, err := validateWorkspace(s.Settings().Workspace)
+	workspace, err := validateWorkspace(s.activeWorkspacePath())
 	if err != nil {
 		return err
 	}
@@ -827,7 +853,7 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 
 func (s *AppService) CreateThread() (map[string]any, error) {
 	settings := s.Settings()
-	workspace, err := validateWorkspace(settings.Workspace)
+	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
 	if err != nil {
 		return nil, err
 	}
@@ -882,7 +908,7 @@ func (s *AppService) ResumeThread(threadID string) (map[string]any, error) {
 		return nil, errors.New("thread id is required")
 	}
 	settings := s.Settings()
-	workspace := settings.Workspace
+	workspace := activeWorkspaceForRuntime(settings)
 	session := s.sessionFor(threadID, workspace)
 	if session != nil && isExternalSession(session) {
 		s.rememberThread(threadID, workspace)
@@ -911,7 +937,7 @@ func (s *AppService) ResumeThread(threadID string) (map[string]any, error) {
 func (s *AppService) ForkThread(threadID string) (map[string]any, error) {
 	threadID = strings.TrimSpace(threadID)
 	settings := s.Settings()
-	workspace, err := validateWorkspace(settings.Workspace)
+	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
 	if err != nil {
 		return nil, err
 	}
@@ -961,7 +987,7 @@ func (s *AppService) ForkThread(threadID string) (map[string]any, error) {
 
 func (s *AppService) ArchiveThread(threadID string) error {
 	threadID = strings.TrimSpace(threadID)
-	workspace := s.Settings().Workspace
+	workspace := s.activeWorkspacePath()
 	session := s.sessionFor(threadID, workspace)
 	// Local directory is authoritative.
 	s.markSessionArchived(threadID)
@@ -983,7 +1009,7 @@ func (s *AppService) UnarchiveThread(threadID string) (map[string]any, error) {
 	if threadID == "" {
 		return nil, errors.New("thread id is required")
 	}
-	workspace := s.Settings().Workspace
+	workspace := s.activeWorkspacePath()
 	session := s.sessionForAny(threadID, workspace)
 	if session == nil {
 		return nil, errors.New("session not found")
@@ -1014,7 +1040,7 @@ func (s *AppService) DeleteThread(threadID string) error {
 	if threadID == "" {
 		return errors.New("thread id is required")
 	}
-	workspace := s.Settings().Workspace
+	workspace := s.activeWorkspacePath()
 	session := s.sessionForAny(threadID, workspace)
 	deleted := s.deleteSession(threadID)
 	if deleted == nil && session == nil {
@@ -1045,7 +1071,7 @@ func (s *AppService) SetThreadName(threadID string, name string) (map[string]any
 	if name == "" {
 		return nil, errors.New("thread name is required")
 	}
-	workspace := s.Settings().Workspace
+	workspace := s.activeWorkspacePath()
 	session := s.sessionFor(threadID, workspace)
 	if session == nil {
 		return nil, errors.New("session not found")
@@ -1079,7 +1105,7 @@ func (s *AppService) StartReview(request ReviewStartRequest) (map[string]any, er
 	if threadID == "" {
 		return nil, errors.New("thread id is required")
 	}
-	workspace := s.Settings().Workspace
+	workspace := s.activeWorkspacePath()
 	session := s.sessionFor(threadID, workspace)
 	if session != nil && isExternalSession(session) {
 		return nil, errors.New("change review is available only for Codex sessions")
@@ -1170,7 +1196,7 @@ func (s *AppService) StartReview(request ReviewStartRequest) (map[string]any, er
 
 func (s *AppService) ListArchivedThreads(search string) (map[string]any, error) {
 	settings := s.Settings()
-	workspace, err := validateWorkspace(settings.Workspace)
+	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
 	if err != nil {
 		return map[string]any{"data": []any{}}, nil
 	}
@@ -1179,7 +1205,7 @@ func (s *AppService) ListArchivedThreads(search string) (map[string]any, error) 
 
 func (s *AppService) CompactThread(threadID string) error {
 	threadID = strings.TrimSpace(threadID)
-	workspace := s.Settings().Workspace
+	workspace := s.activeWorkspacePath()
 	if session := s.sessionFor(threadID, workspace); session != nil && isExternalSession(session) {
 		return s.compactExternalSession(session)
 	}
@@ -1199,7 +1225,7 @@ func (s *AppService) RollbackThread(threadID string, numTurns int) (map[string]a
 	if numTurns < 1 || numTurns > 1000 {
 		return nil, errors.New("rollback turn count must be between 1 and 1000")
 	}
-	workspace := s.Settings().Workspace
+	workspace := s.activeWorkspacePath()
 	if session := s.sessionFor(threadID, workspace); session != nil && isExternalSession(session) {
 		return s.rollbackExternalSession(session, numTurns)
 	}
@@ -1218,11 +1244,18 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 		return nil, errors.New("thread id is required")
 	}
 	settings := s.Settings()
-	workspace := settings.Workspace
+	workspace := activeWorkspaceForRuntime(settings)
 	session := s.sessionFor(threadID, workspace)
 	if session != nil && isExternalSession(session) {
 		s.rememberThread(threadID, workspace)
-		return paginateCodexThreadResponse(s.sessionResponse(session), -1), nil
+		if session.Native {
+			page, err := s.readNativeExternalHistoryPage(session, -1)
+			if err != nil {
+				return nil, err
+			}
+			return s.nativeExternalSessionResponsePage(session, page), nil
+		}
+		return s.externalSessionResponsePage(session, -1), nil
 	}
 	if session != nil && session.BackendRef == "" {
 		s.rememberThread(threadID, workspace)
@@ -1273,13 +1306,26 @@ func (s *AppService) ReadThreadHistory(threadID string, before int) (map[string]
 		return nil, errors.New("thread id is required")
 	}
 	settings := s.Settings()
-	workspace := settings.Workspace
+	workspace := activeWorkspaceForRuntime(settings)
 	session := s.sessionFor(threadID, workspace)
 	if session == nil && !s.threadAllowed(threadID, workspace) {
 		return nil, errors.New("open this thread in the current workspace before reading its history")
 	}
 	if session != nil && isExternalSession(session) {
-		return codexTurnsPage(codexThreadTurns(s.sessionResponse(session)), before), nil
+		if session.Native {
+			page, err := s.readNativeExternalHistoryPage(session, before)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"turns":             nativeExternalTurnMaps(page.Turns),
+				"historyStart":      page.Start,
+				"historyTotal":      page.Total,
+				"historyTurnOffset": page.Start,
+				"hasEarlier":        page.Start > 0,
+			}, nil
+		}
+		return externalTurnPage(session.Turns, before), nil
 	}
 	if session != nil && session.BackendRef == "" {
 		return codexTurnsPage(nil, before), nil
@@ -1583,7 +1629,7 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 		return nil, errors.New("thread id is required")
 	}
 	settings := s.Settings()
-	workspace, err := validateWorkspace(settings.Workspace)
+	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
 	if err != nil {
 		return nil, err
 	}
@@ -1610,6 +1656,12 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 		backendID = ensured
 	} else if ref := s.codexBackendID(request.ThreadID, workspace); ref != "" {
 		backendID = ref
+	}
+	// The frontend normally serializes turns from event state, but an event can
+	// be delayed or lost on a busy WebView. The backend registry is authoritative
+	// at the dispatch boundary and prevents a second parallel turn/start.
+	if busyTurnID := s.codexActiveTurnID(request.ThreadID, backendID); busyTurnID != "" {
+		return nil, fmt.Errorf("Codex turn is already running (turn %s); message was kept in queue", busyTurnID)
 	}
 
 	// App-server process restarts drop in-memory threads; turn/start then 422s
@@ -1730,6 +1782,19 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 	}
 	if err != nil {
 		return nil, err
+	}
+	if turn, ok := result["turn"].(map[string]any); ok {
+		if turnID := strings.TrimSpace(stringFromAny(turn["id"])); turnID != "" {
+			s.mu.Lock()
+			if s.codexActiveTurns == nil {
+				s.codexActiveTurns = make(map[string]string)
+			}
+			// remapCodexEvent rewrites lifecycle events to the NiceCodex session id.
+			// Keep the dispatch guard under that same id so terminal events always
+			// remove the exact entry that was registered here.
+			s.codexActiveTurns[request.ThreadID] = turnID
+			s.mu.Unlock()
+		}
 	}
 	s.touchSessionPreview(request.ThreadID, request.Text)
 	return result, nil
@@ -2413,16 +2478,23 @@ func (s *AppService) ReadAccountUsage() (map[string]any, error) {
 	// Gemini CLI and OpenCode own their historical usage outside usage.json.
 	// Read the native catalog so the usage panel reflects completed sessions even
 	// when the streaming event did not include a usage payload.
+	var externalUsage map[string]any
 	if runtime == "gemini" || runtime == "opencode" {
 		// Native usage is account-wide. Session/catalog lists remain project-scoped,
 		// but an empty active workspace must not make the usage panel look empty.
-		if native := s.readExternalUsageCached(runtime, ""); native != nil {
-			return native, nil
+		externalUsage = s.readExternalUsageCached(runtime, "")
+		if externalUsage != nil && !localUsageResponseEmpty(externalUsage) {
+			return externalUsage, nil
 		}
 	}
 
 	if local := s.localUsageSummaryFor(runtime); !localUsageResponseEmpty(local) {
 		return local, nil
+	}
+	if externalUsage != nil {
+		// A reachable native store with zero counters is still a valid result. It
+		// lets the UI distinguish "no recorded tokens yet" from a failed read.
+		return externalUsage, nil
 	}
 
 	// Cloud seed is Codex-only (ChatGPT account usage).
@@ -2466,7 +2538,9 @@ func (s *AppService) readExternalUsageCached(runtimeName, workspace string) map[
 	case "gemini":
 		usage = collectGeminiUsage(filepath.Join(home, ".gemini"), workspace)
 	case "opencode":
-		usage = collectOpenCodeUsage(home, workspace, 30)
+		// The usage summary is presented as lifetime totals. The native SQLite
+		// query is already aggregated, so do not silently discard older sessions.
+		usage = collectOpenCodeUsage(home, workspace, 0)
 	default:
 		return nil
 	}
@@ -2485,10 +2559,25 @@ func (s *AppService) readExternalUsageCached(runtimeName, workspace string) map[
 	return response
 }
 
-func externalUsageResponse(runtime string, usage ExternalUsageSummary) map[string]any {
-	if usage.TotalTokens <= 0 && usage.InputTokens <= 0 && usage.OutputTokens <= 0 && usage.CachedTokens <= 0 && usage.Reasoning <= 0 {
-		return nil
+// invalidateExternalUsageCache drops native usage snapshots after a turn has
+// been persisted. The next UI refresh must observe the provider's latest
+// database/session totals instead of serving the 30-second read cache.
+func (s *AppService) invalidateExternalUsageCache(runtimeName string) {
+	runtimeName = normalizeExternalRuntime(runtimeName)
+	if runtimeName == "" {
+		return
 	}
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
+	for key := range s.externalUsageCache {
+		if strings.HasPrefix(key, runtimeName+"\x00") {
+			delete(s.externalUsageCache, key)
+			delete(s.externalUsageCachedAt, key)
+		}
+	}
+}
+
+func externalUsageResponse(runtime string, usage ExternalUsageSummary) map[string]any {
 	total := usage.TotalTokens
 	if total <= 0 {
 		total = usage.InputTokens + usage.CachedTokens + usage.OutputTokens + usage.Reasoning
@@ -2552,7 +2641,15 @@ func localUsageResponseEmpty(summary map[string]any) bool {
 	meta, _ := summary["summary"].(map[string]any)
 	var lifetime int64
 	if meta != nil {
-		lifetime = int64(anyToFloat(meta["lifetimeTokens"]))
+		for _, key := range []string{
+			"lifetimeTokens",
+			"lifetimeInputTokens",
+			"lifetimeCachedInputTokens",
+			"lifetimeOutputTokens",
+			"lifetimeReasoningTokens",
+		} {
+			lifetime += int64(anyToFloat(meta[key]))
+		}
 	}
 	if lifetime > 0 {
 		return false
@@ -2582,6 +2679,88 @@ func (s *AppService) maybeRecordLocalUsage(event codex.Event) {
 	}
 	// Official Codex app-server events always belong to the codex runtime.
 	s.persistTurnUsage("codex", threadID, turnID, b, time.Now())
+}
+
+// trackCodexActivity mirrors app-server lifecycle notifications into a small
+// backend registry. It deliberately stores only the active turn id, not the
+// conversation, so the lock stays cheap during long streams.
+func (s *AppService) trackCodexActivity(event codex.Event) {
+	if event.Type == "status" {
+		if status, ok := event.Data.(codex.Status); ok && !status.Running {
+			s.mu.Lock()
+			s.codexActiveTurns = make(map[string]string)
+			s.mu.Unlock()
+		}
+		return
+	}
+	if event.Type != "notification" || event.Data == nil {
+		return
+	}
+	data, ok := event.Data.(map[string]any)
+	if !ok {
+		return
+	}
+	threadID := strings.TrimSpace(stringFromAny(data["threadId"]))
+	if threadID == "" {
+		if thread, ok := data["thread"].(map[string]any); ok {
+			threadID = strings.TrimSpace(stringFromAny(thread["id"]))
+		}
+	}
+	if threadID == "" {
+		return
+	}
+	turnID := ""
+	if turn, ok := data["turn"].(map[string]any); ok {
+		turnID = strings.TrimSpace(stringFromAny(turn["id"]))
+		if turnID == "" {
+			turnID = strings.TrimSpace(stringFromAny(turn["turnId"]))
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.codexActiveTurns == nil {
+		s.codexActiveTurns = make(map[string]string)
+	}
+	switch event.Method {
+	case "turn/started":
+		if turnID == "" {
+			turnID = "active"
+		}
+		s.codexActiveTurns[threadID] = turnID
+	case "turn/completed", "turn/failed", "turn/aborted", "turn/cancelled", "turn/interrupted":
+		if current := s.codexActiveTurns[threadID]; current == "" || turnID == "" || current == turnID || current == "active" {
+			delete(s.codexActiveTurns, threadID)
+		}
+	case "thread/status/changed":
+		status := ""
+		if rawStatus, ok := data["status"].(map[string]any); ok {
+			status = strings.ToLower(strings.TrimSpace(firstMapString(rawStatus, "type", "status")))
+		} else {
+			status = strings.ToLower(strings.TrimSpace(stringFromAny(data["status"])))
+		}
+		if status == "idle" || status == "completed" || status == "failed" || status == "error" {
+			delete(s.codexActiveTurns, threadID)
+		} else if status == "active" || status == "running" || status == "inprogress" {
+			if _, exists := s.codexActiveTurns[threadID]; !exists {
+				s.codexActiveTurns[threadID] = "active"
+			}
+		}
+	}
+}
+
+func (s *AppService) codexActiveTurnID(threadIDs ...string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, threadID := range threadIDs {
+		threadID = strings.TrimSpace(threadID)
+		if threadID == "" {
+			continue
+		}
+		if turnID := strings.TrimSpace(s.codexActiveTurns[threadID]); turnID != "" {
+			return turnID
+		}
+	}
+	return ""
 }
 
 func (s *AppService) StartChatGPTLogin() (map[string]any, error) {
@@ -2822,6 +3001,7 @@ func (s *AppService) shutdown() {
 		s.codexHistoryCache = nil
 		s.claudeHistoryCache = nil
 		s.grokHistoryCache = nil
+		s.nativeHistoryCache = nil
 		s.historyMu.Unlock()
 		s.flushLocalUsage()
 		if s.schedulerStop != nil {
@@ -2829,6 +3009,7 @@ func (s *AppService) shutdown() {
 		}
 		s.mu.Lock()
 		client := s.client
+		s.codexActiveTurns = make(map[string]string)
 		s.mu.Unlock()
 		_ = client.Stop()
 	})
@@ -2888,12 +3069,16 @@ func defaultSettings() UserSettings {
 		ClaudeSandbox:            "workspace-write",
 		ClaudeApprovalPolicy:     "on-request",
 		ClaudePermissionMode:     "acceptEdits",
+		GeminiWorkspace:          "",
+		GeminiRecentWorkspaces:   []string{},
 		GeminiModel:              "gemini-2.5-pro",
 		GeminiEffort:             "auto",
 		GeminiSandbox:            "workspace-write",
 		GeminiApprovalPolicy:     "on-request",
 		GeminiCustomModels:       []string{},
 		OpenCodeModel:            "anthropic/claude-sonnet-4-6",
+		OpenCodeWorkspace:        "",
+		OpenCodeRecentWorkspaces: []string{},
 		OpenCodeEffort:           "high",
 		OpenCodeSandbox:          "workspace-write",
 		OpenCodeApprovalPolicy:   "on-request",
@@ -2981,6 +3166,8 @@ func readSettings(path string) (UserSettings, error) {
 	}
 	settings.RecentWorkspaces = sanitizeRecentWorkspaces(settings.RecentWorkspaces)
 	settings.GrokRecentWorkspaces = sanitizeRecentWorkspaces(settings.GrokRecentWorkspaces)
+	settings.GeminiRecentWorkspaces = sanitizeRecentWorkspaces(settings.GeminiRecentWorkspaces)
+	settings.OpenCodeRecentWorkspaces = sanitizeRecentWorkspaces(settings.OpenCodeRecentWorkspaces)
 	settings.CustomModels = sanitizeCustomModels(settings.CustomModels)
 	if settings.MultiAgentMode == "proactiveAgents" {
 		settings.MultiAgentMode = "proactive"
@@ -3009,6 +3196,7 @@ func readSettings(path string) (UserSettings, error) {
 	settings.ClaudeModel = sanitizeShortText(settings.ClaudeModel, 160)
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
 	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
+	settings.GeminiWorkspace = strings.TrimSpace(settings.GeminiWorkspace)
 	settings.GeminiCustomModels = sanitizeCustomModels(settings.GeminiCustomModels)
 	if !isAllowed(settings.GeminiSandbox, "read-only", "workspace-write", "danger-full-access") {
 		settings.GeminiSandbox = "workspace-write"
@@ -3020,6 +3208,7 @@ func readSettings(path string) (UserSettings, error) {
 		settings.GeminiEffort = "auto"
 	}
 	settings.OpenCodeModel = sanitizeShortText(settings.OpenCodeModel, 160)
+	settings.OpenCodeWorkspace = strings.TrimSpace(settings.OpenCodeWorkspace)
 	settings.OpenCodeEffort = sanitizeShortText(settings.OpenCodeEffort, 32)
 	if !isAllowed(settings.OpenCodeSandbox, "read-only", "workspace-write", "danger-full-access") {
 		settings.OpenCodeSandbox = "workspace-write"
@@ -3058,6 +3247,12 @@ func readSettings(path string) (UserSettings, error) {
 	}
 	if _, err := validateWorkspace(settings.GrokWorkspace); err != nil {
 		settings.GrokWorkspace = ""
+	}
+	if _, err := validateWorkspace(settings.GeminiWorkspace); err != nil {
+		settings.GeminiWorkspace = ""
+	}
+	if _, err := validateWorkspace(settings.OpenCodeWorkspace); err != nil {
+		settings.OpenCodeWorkspace = ""
 	}
 	// Persist the migration so a later empty/invalid workspace can't reopen the wizard.
 	if migratedOnboarding {
@@ -3245,9 +3440,7 @@ func cloneSettings(settings UserSettings) UserSettings {
 }
 
 func normalizeFollowUpBehavior(value string) string {
-	if strings.EqualFold(strings.TrimSpace(value), "steer") {
-		return "steer"
-	}
+	_ = value
 	return "queue"
 }
 
