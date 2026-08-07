@@ -862,6 +862,9 @@ func asStringKeyMap(value any) map[string]any {
 		return map[string]any{}
 	}
 	if typed, ok := value.(map[string]any); ok {
+		if typed == nil {
+			return map[string]any{}
+		}
 		return typed
 	}
 	raw, err := json.Marshal(value)

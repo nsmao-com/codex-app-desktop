@@ -279,15 +279,38 @@ func (s *AppService) syncNativeExternalSessions(runtime, workspace string) {
 		if viewWorkspace == "" {
 			viewWorkspace = workspace
 		}
+		viewTitle := strings.TrimSpace(view.Title)
+		// A local external session is allocated before the CLI creates its
+		// native session. Prefer that pending record over a native mirror so a
+		// refresh during the first turn cannot create a second sidebar row.
 		var existing *SessionRecord
+		var pending *SessionRecord
+		var nativeMirror *SessionRecord
 		for _, record := range s.sessions {
 			if record == nil || record.Provider != runtime || !samePath(record.Workspace, viewWorkspace) {
 				continue
 			}
-			if record.BackendRef == backendRef || (record.Native && record.ID == "native-"+runtime+"-"+backendRef) {
+			if record.BackendRef == backendRef && !record.Native {
 				existing = record
 				break
 			}
+			if record.Native && record.ID == "native-"+runtime+"-"+backendRef {
+				nativeMirror = record
+			}
+			recordName := strings.TrimSpace(record.Name)
+			recordPreview := strings.TrimSpace(record.Preview)
+			titleMatches := viewTitle != "" && ((recordName != "" && (strings.EqualFold(recordName, viewTitle) || strings.HasPrefix(recordName, viewTitle) || strings.HasPrefix(viewTitle, recordName))) || (recordPreview != "" && (strings.EqualFold(recordPreview, viewTitle) || strings.HasPrefix(recordPreview, viewTitle) || strings.HasPrefix(viewTitle, recordPreview))))
+			if !record.Archived && !record.Native && strings.TrimSpace(record.BackendRef) == "" && ((len(record.Turns) == 0 && strings.TrimSpace(record.Preview) == "") || titleMatches) {
+				if pending == nil || record.UpdatedAt > pending.UpdatedAt || (record.UpdatedAt == pending.UpdatedAt && record.CreatedAt > pending.CreatedAt) {
+					pending = record
+				}
+			}
+		}
+		if existing == nil {
+			existing = pending
+		}
+		if existing == nil {
+			existing = nativeMirror
 		}
 		if existing == nil {
 			createdAt := view.CreatedAt
@@ -315,6 +338,32 @@ func (s *AppService) syncNativeExternalSessions(runtime, workspace string) {
 			}
 			s.sessions[existing.ID] = existing
 			changed = true
+		} else if existing == pending && strings.TrimSpace(existing.BackendRef) == "" {
+			existing.BackendRef = backendRef
+			existing.Provider = runtime
+			existing.ProviderID = externalProviderID(runtime)
+			if strings.TrimSpace(view.Model) != "" {
+				existing.Model = view.Model
+			}
+			if view.UpdatedAt > existing.UpdatedAt {
+				existing.UpdatedAt = view.UpdatedAt
+			}
+			changed = true
+			// Remove any mirror imported before this pending record was bound.
+			for id, record := range s.sessions {
+				if record == nil || record.ID == existing.ID || !record.Native || record.Provider != runtime || !samePath(record.Workspace, viewWorkspace) || record.BackendRef != backendRef {
+					continue
+				}
+				delete(s.sessions, id)
+			}
+		} else if !existing.Archived && !existing.Native && existing.BackendRef == backendRef {
+			for id, record := range s.sessions {
+				if record == nil || record.ID == existing.ID || !record.Native || record.Provider != runtime || !samePath(record.Workspace, viewWorkspace) || record.BackendRef != backendRef {
+					continue
+				}
+				delete(s.sessions, id)
+				changed = true
+			}
 		} else if !existing.Archived && existing.Native {
 			name := strings.TrimSpace(view.Title)
 			if name == "" {

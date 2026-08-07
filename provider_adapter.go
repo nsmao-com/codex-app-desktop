@@ -637,6 +637,10 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 			}
 			return
 		}
+		if kind == "session" {
+			s.bindExternalSession(threadID, provider, delta)
+			return
+		}
 		if kind == "thought" {
 			itemID := ensureReasoningSegment()
 			activeReasoningText.WriteString(delta)
@@ -928,6 +932,9 @@ func (s *AppService) executeExternalTurn(
 		}
 		chunk, nextSessionID, final, kind := parseExternalEvent(provider, event)
 		if nextSessionID != "" {
+			if sessionID == "" && onStream != nil {
+				onStream("session", nextSessionID)
+			}
 			sessionID = nextSessionID
 		}
 		// Always try to capture spend fields — Grok end events often have empty text
@@ -1528,10 +1535,79 @@ func tokenTotalFromUsage(usage map[string]any) int64 {
 		int64(anyToFloat(usage["reasoningOutputTokens"]))
 }
 
+// externalEventSessionID accepts both top-level ids and the nested `part` /
+// `data` envelopes emitted by OpenCode's JSON runner. The native id is the
+// stable key used to join the CLI turn with the NiceCodex sidebar record.
+func externalEventSessionID(event map[string]any) string {
+	var visit func(any, int) string
+	visit = func(value any, depth int) string {
+		if depth > 3 || value == nil {
+			return ""
+		}
+		if raw, ok := value.(string); ok && strings.TrimSpace(raw) != "" {
+			var nested map[string]any
+			if json.Unmarshal([]byte(raw), &nested) == nil {
+				return visit(nested, depth+1)
+			}
+		}
+		if record, ok := value.(map[string]any); ok {
+			if id := firstMapString(record, "session_id", "sessionId", "sessionID"); id != "" {
+				return id
+			}
+			for _, key := range []string{"part", "data", "message", "result", "state", "event"} {
+				if id := visit(record[key], depth+1); id != "" {
+					return id
+				}
+			}
+		}
+		return ""
+	}
+	return visit(event, 0)
+}
+
+// bindExternalSession records the native provider id as soon as the CLI emits
+// it. This closes the window in which native history sync could import a
+// second mirror for the same first turn.
+func (s *AppService) bindExternalSession(threadID, provider, backendRef string) {
+	threadID = strings.TrimSpace(threadID)
+	provider = normalizeExternalRuntime(provider)
+	backendRef = strings.TrimSpace(backendRef)
+	if threadID == "" || provider == "" || backendRef == "" {
+		return
+	}
+	s.mu.Lock()
+	record := s.sessions[threadID]
+	if record == nil || !isExternalSession(record) || normalizeExternalRuntime(record.Provider) != provider {
+		s.mu.Unlock()
+		return
+	}
+	current := strings.TrimSpace(record.BackendRef)
+	if current != "" && current != backendRef {
+		s.mu.Unlock()
+		return
+	}
+	changed := current != backendRef
+	record.BackendRef = backendRef
+	record.Provider = provider
+	record.ProviderID = externalProviderID(provider)
+	for id, other := range s.sessions {
+		if other == nil || id == threadID || !other.Native || normalizeExternalRuntime(other.Provider) != provider || !samePath(other.Workspace, record.Workspace) || strings.TrimSpace(other.BackendRef) != backendRef {
+			continue
+		}
+		delete(s.sessions, id)
+		changed = true
+	}
+	if changed {
+		record.UpdatedAt = time.Now().Unix()
+		s.persistSessionsLocked()
+	}
+	s.mu.Unlock()
+}
+
 // parseExternalEvent returns (chunk, sessionID, final, kind).
 // kind is "text" | "thought" | "tool" | "error" | "".
 func parseExternalEvent(provider string, event map[string]any) (string, string, bool, string) {
-	sessionID := firstMapString(event, "session_id", "sessionId", "sessionID")
+	sessionID := externalEventSessionID(event)
 	eventType := strings.ToLower(firstMapString(event, "type", "event"))
 	eventType = strings.ReplaceAll(eventType, "-", "_")
 	if tool, ok := parseExternalToolEvent(provider, event); ok {
