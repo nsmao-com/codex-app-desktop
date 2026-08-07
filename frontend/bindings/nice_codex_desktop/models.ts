@@ -370,6 +370,15 @@ export interface ExternalSessionView {
     "native": boolean;
 }
 
+export interface ExternalUsageDailyBucket {
+    "startDate": string;
+    "tokens": number;
+    "inputTokens"?: number;
+    "cachedInputTokens"?: number;
+    "outputTokens"?: number;
+    "reasoningOutputTokens"?: number;
+}
+
 export interface ExternalUsageModelView {
     "model": string;
     "provider": string;
@@ -393,6 +402,7 @@ export interface ExternalUsageSummary {
     "totalTokens": number;
     "cost": number;
     "byModel": ExternalUsageModelView[] | null;
+    "dailyUsageBuckets": ExternalUsageDailyBucket[] | null;
     "source": string;
 }
 

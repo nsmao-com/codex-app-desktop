@@ -2582,9 +2582,17 @@ func externalUsageResponse(runtime string, usage ExternalUsageSummary) map[strin
 	if total <= 0 {
 		total = usage.InputTokens + usage.CachedTokens + usage.OutputTokens + usage.Reasoning
 	}
-	// Native catalogs expose a range total rather than per-day buckets. Keep the
-	// exact lifetime breakdown and leave the chart empty instead of pretending
-	// the whole range happened today.
+	daily := make([]any, 0, len(usage.DailyBuckets))
+	for _, bucket := range usage.DailyBuckets {
+		daily = append(daily, map[string]any{
+			"startDate":             bucket.StartDate,
+			"tokens":                bucket.Tokens,
+			"inputTokens":           bucket.InputTokens,
+			"cachedInputTokens":     bucket.CachedInputTokens,
+			"outputTokens":          bucket.OutputTokens,
+			"reasoningOutputTokens": bucket.ReasoningOutputTokens,
+		})
+	}
 	return map[string]any{
 		"runtime": runtime,
 		"source":  usage.Source,
@@ -2599,7 +2607,7 @@ func externalUsageResponse(runtime string, usage ExternalUsageSummary) map[strin
 			"longestStreakDays":         nil,
 			"longestRunningTurnSec":     nil,
 		},
-		"dailyUsageBuckets": []any{},
+		"dailyUsageBuckets": daily,
 	}
 }
 

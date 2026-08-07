@@ -67,6 +67,46 @@ type externalStreamCoalescer struct {
 	lastFlush time.Time
 }
 
+// openCodeTextDeduper handles the snapshot-shaped text parts emitted by
+// `opencode run --format json`. A part may be reported more than once, and
+// later reports can contain the complete text rather than a delta.
+type openCodeTextDeduper struct {
+	parts     map[string]string
+	anonymous string
+}
+
+func newOpenCodeTextDeduper() *openCodeTextDeduper {
+	return &openCodeTextDeduper{parts: make(map[string]string)}
+}
+
+func (d *openCodeTextDeduper) next(event map[string]any, text string) string {
+	if d == nil || strings.TrimSpace(text) == "" {
+		return ""
+	}
+	id := openCodeEventPartID(event)
+	if id == "" {
+		previous := d.anonymous
+		d.anonymous = text
+		return openCodeTextSuffix(previous, text)
+	}
+	previous := d.parts[id]
+	d.parts[id] = text
+	return openCodeTextSuffix(previous, text)
+}
+
+func openCodeTextSuffix(previous, next string) string {
+	if previous == "" {
+		return next
+	}
+	if next == previous || strings.HasPrefix(previous, next) {
+		return ""
+	}
+	if strings.HasPrefix(next, previous) {
+		return next[len(previous):]
+	}
+	return next
+}
+
 func newExternalStreamCoalescer(onStream func(kind, chunk string)) *externalStreamCoalescer {
 	return &externalStreamCoalescer{onStream: onStream}
 }
@@ -915,6 +955,7 @@ func (s *AppService) executeExternalTurn(
 	var streamErr string
 	emitted := false
 	stream := newExternalStreamCoalescer(onStream)
+	openCodeText := newOpenCodeTextDeduper()
 	// Claude stream-json has two live channels:
 	//  1) stream_event content_block_delta (true increments) → append
 	//  2) type=assistant partial messages (--include-partial-messages) → full snapshots
@@ -963,6 +1004,9 @@ func (s *AppService) executeExternalTurn(
 		if kind == "thought" {
 			stream.Push("thought", chunk)
 			continue
+		}
+		if provider == "opencode" && kind == "text" {
+			chunk = openCodeText.next(event, chunk)
 		}
 		if chunk == "" {
 			continue
@@ -1563,6 +1607,26 @@ func externalEventSessionID(event map[string]any) string {
 		return ""
 	}
 	return visit(event, 0)
+}
+
+func openCodeEventPartID(event map[string]any) string {
+	if event == nil {
+		return ""
+	}
+	if id := firstMapString(event, "partId", "part_id"); id != "" {
+		return id
+	}
+	for _, key := range []string{"part", "data", "message", "result"} {
+		if nested, ok := event[key].(map[string]any); ok {
+			if id := firstMapString(nested, "id", "partId", "part_id"); id != "" {
+				return id
+			}
+		}
+	}
+	if eventType := strings.ToLower(firstMapString(event, "type", "event")); eventType == "text" || strings.Contains(eventType, "text_delta") {
+		return firstMapString(event, "id")
+	}
+	return ""
 }
 
 // bindExternalSession records the native provider id as soon as the CLI emits

@@ -26,17 +26,6 @@ func (s *AppService) backfillGrokUsageFromSessions() bool {
 		return false
 	}
 
-	s.usageMu.Lock()
-	usage := s.localUsageLocked()
-	// Only backfill when the grok bucket has no breakdown yet (empty or total-only legacy).
-	bucket := usage.ensureRuntime("grok")
-	hasBreakdown := bucket.LifetimeInput > 0 || bucket.LifetimeCached > 0 || bucket.LifetimeOutput > 0 || bucket.LifetimeReasoning > 0
-	if hasBreakdown && bucket.LifetimeTokens > 0 {
-		s.usageMu.Unlock()
-		return false
-	}
-	s.usageMu.Unlock()
-
 	hits := scanGrokSessionTurnUsage(root)
 	if len(hits) == 0 {
 		return false
@@ -44,15 +33,8 @@ func (s *AppService) backfillGrokUsageFromSessions() bool {
 
 	s.usageMu.Lock()
 	defer s.usageMu.Unlock()
-	usage = s.localUsageLocked()
-	// Re-check under lock.
-	bucket = usage.ensureRuntime("grok")
-	hasBreakdown = bucket.LifetimeInput > 0 || bucket.LifetimeCached > 0 || bucket.LifetimeOutput > 0 || bucket.LifetimeReasoning > 0
-	if hasBreakdown && bucket.LifetimeTokens > 0 {
-		return false
-	}
-
-	changed := false
+	usage := s.localUsageLocked()
+	changed := resetRuntimeUsage(usage, "grok")
 	now := time.Now()
 	for _, hit := range hits {
 		if applyTurnToUsageDetailed(usage, "grok", hit.SessionID, hit.TurnID, hit.Breakdown, hit.At) {

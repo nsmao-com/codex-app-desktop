@@ -18,21 +18,10 @@ type rolloutTokenHit struct {
 	At        time.Time
 }
 
-// backfillLocalUsageFromRollouts enriches the *codex* runtime bucket from ~/.codex
-// session rollouts (token_count.last_token_usage). Runs when the codex bucket is
-// empty OR has totals but no input/output/cache breakdown (legacy total-only rows).
+// backfillLocalUsageFromRollouts rebuilds the *codex* runtime bucket from ~/.codex
+// session rollouts (token_count.last_token_usage). The native rollout history is
+// the source of truth, so an existing stale aggregate must be replaced too.
 func (s *AppService) backfillLocalUsageFromRollouts() bool {
-	s.usageMu.Lock()
-	usage := s.localUsageLocked()
-	bucket := usage.ensureRuntime("codex")
-	needsDetail := bucket.LifetimeInput <= 0 && bucket.LifetimeCached <= 0 &&
-		bucket.LifetimeOutput <= 0 && bucket.LifetimeReasoning <= 0
-	emptyCodex := bucket.LifetimeTokens <= 0 && len(bucket.Days) == 0
-	s.usageMu.Unlock()
-	if !emptyCodex && !needsDetail {
-		return false
-	}
-
 	home := resolveCodexHome()
 	if strings.TrimSpace(home) == "" {
 		return false
@@ -44,16 +33,8 @@ func (s *AppService) backfillLocalUsageFromRollouts() bool {
 
 	s.usageMu.Lock()
 	defer s.usageMu.Unlock()
-	usage = s.localUsageLocked()
-	bucket = usage.ensureRuntime("codex")
-	needsDetail = bucket.LifetimeInput <= 0 && bucket.LifetimeCached <= 0 &&
-		bucket.LifetimeOutput <= 0 && bucket.LifetimeReasoning <= 0
-	emptyCodex = bucket.LifetimeTokens <= 0 && len(bucket.Days) == 0
-	if !emptyCodex && !needsDetail {
-		return false
-	}
-
-	changed := false
+	usage := s.localUsageLocked()
+	changed := resetRuntimeUsage(usage, "codex")
 	now := time.Now()
 	for _, hit := range hits {
 		b := hit.Breakdown
@@ -104,11 +85,6 @@ func scanCodexRolloutTokenUsage(codexHome string) []rolloutTokenHit {
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].modTime.After(files[j].modTime)
 	})
-	const maxFiles = 120
-	if len(files) > maxFiles {
-		files = files[:maxFiles]
-	}
-
 	hits := make([]rolloutTokenHit, 0, 256)
 	for _, item := range files {
 		hits = append(hits, parseRolloutTokenHits(item.path)...)
@@ -196,15 +172,15 @@ func parseRolloutTokenHits(path string) []rolloutTokenHit {
 				if turnID == "" {
 					turnID = strings.TrimSpace(stringFromAny(payload["turnId"]))
 				}
-				if turnID == "" {
-					turnID = "line-" + strconv.Itoa(lineNo)
-				}
 				at := ts
 				if at.IsZero() {
 					at = pendingAt
 				}
 				if strings.TrimSpace(sessionID) == "" {
 					sessionID = sessionIDFromRolloutPath(path)
+				}
+				if turnID == "" {
+					turnID = "codex-turn-" + sessionID + "-" + strconv.Itoa(lineNo)
 				}
 				hits = append(hits, rolloutTokenHit{
 					SessionID: sessionID,
@@ -225,7 +201,7 @@ func parseRolloutTokenHits(path string) []rolloutTokenHit {
 		}
 		hits = append(hits, rolloutTokenHit{
 			SessionID: sessionID,
-			TurnID:    "flush-" + strconv.Itoa(lineNo),
+			TurnID:    "codex-flush-" + sessionID + "-" + strconv.Itoa(lineNo),
 			Breakdown: pending,
 			At:        pendingAt,
 		})

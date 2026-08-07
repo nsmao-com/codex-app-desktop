@@ -382,6 +382,34 @@ func (u *localUsageFile) ensureRuntime(runtime string) *localRuntimeBucket {
 	return bucket
 }
 
+// resetRuntimeUsage removes the cached aggregate and turn index for one runtime
+// before rebuilding it from that runtime's native history. Native sources are
+// authoritative for their own totals; retaining an older bucket would preserve
+// stale or duplicated usage forever.
+func resetRuntimeUsage(usage *localUsageFile, runtime string) bool {
+	if usage == nil {
+		return false
+	}
+	runtime = normalizeUsageRuntime(runtime)
+	changed := false
+	for key, turn := range usage.Turns {
+		if normalizeUsageRuntime(turn.Runtime) != runtime {
+			continue
+		}
+		delete(usage.Turns, key)
+		changed = true
+	}
+	if bucket := usage.ByRuntime[runtime]; bucket != nil {
+		changed = changed || bucket.LifetimeTokens > 0 || bucket.LifetimeInput > 0 ||
+			bucket.LifetimeCached > 0 || bucket.LifetimeOutput > 0 || bucket.LifetimeReasoning > 0 || len(bucket.Days) > 0
+	}
+	if usage.ByRuntime == nil {
+		usage.ByRuntime = make(map[string]*localRuntimeBucket)
+	}
+	usage.ByRuntime[runtime] = emptyRuntimeBucket()
+	return changed
+}
+
 func normalizeUsageRuntime(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "grok":

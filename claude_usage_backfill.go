@@ -23,16 +23,6 @@ func (s *AppService) backfillClaudeUsageFromProjects() bool {
 		return false
 	}
 
-	s.usageMu.Lock()
-	usage := s.localUsageLocked()
-	bucket := usage.ensureRuntime("claude")
-	hasBreakdown := bucket.LifetimeInput > 0 || bucket.LifetimeCached > 0 || bucket.LifetimeOutput > 0 || bucket.LifetimeReasoning > 0
-	if hasBreakdown && bucket.LifetimeTokens > 0 {
-		s.usageMu.Unlock()
-		return false
-	}
-	s.usageMu.Unlock()
-
 	hits := scanClaudeProjectTurnUsage(root)
 	if len(hits) == 0 {
 		return false
@@ -40,14 +30,8 @@ func (s *AppService) backfillClaudeUsageFromProjects() bool {
 
 	s.usageMu.Lock()
 	defer s.usageMu.Unlock()
-	usage = s.localUsageLocked()
-	bucket = usage.ensureRuntime("claude")
-	hasBreakdown = bucket.LifetimeInput > 0 || bucket.LifetimeCached > 0 || bucket.LifetimeOutput > 0 || bucket.LifetimeReasoning > 0
-	if hasBreakdown && bucket.LifetimeTokens > 0 {
-		return false
-	}
-
-	changed := false
+	usage := s.localUsageLocked()
+	changed := resetRuntimeUsage(usage, "claude")
 	now := time.Now()
 	for _, hit := range hits {
 		if applyTurnToUsageDetailed(usage, "claude", hit.SessionID, hit.TurnID, hit.Breakdown, hit.At) {
@@ -64,8 +48,6 @@ func (s *AppService) backfillClaudeUsageFromProjects() bool {
 
 func scanClaudeProjectTurnUsage(root string) []claudeTurnUsageHit {
 	result := make([]claudeTurnUsageHit, 0, 256)
-	const maxFiles = 200
-	files := 0
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil || entry == nil || entry.IsDir() {
 			return nil
@@ -73,10 +55,6 @@ func scanClaudeProjectTurnUsage(root string) []claudeTurnUsageHit {
 		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
 			return nil
 		}
-		if files >= maxFiles {
-			return filepath.SkipAll
-		}
-		files++
 		sessionID := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 		hits := collectClaudeNativeTurnUsage(path, sessionID)
 		if len(hits) > 0 {

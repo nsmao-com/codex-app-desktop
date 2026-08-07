@@ -35,6 +35,7 @@ export type {
     ExternalProviderView,
     ExternalRuntimeCatalog,
     ExternalSessionView,
+    ExternalUsageDailyBucket,
     ExternalUsageModelView,
     ExternalUsageSummary,
     GitActionResult,

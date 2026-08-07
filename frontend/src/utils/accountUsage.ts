@@ -103,12 +103,15 @@ export function buildUsageRangeView(
 ): UsageRangeView {
   const buckets = usage?.dailyBuckets ?? []
   const cutoff = startOfLocalDay(new Date())
+  const endExclusive = startOfLocalDay(new Date())
+  endExclusive.setDate(endExclusive.getDate() + 1)
   if (days !== 'cumulative') cutoff.setDate(cutoff.getDate() - (days - 1))
 
   const filtered = buckets
     .map((bucket) => ({ bucket, date: parseBucketDate(bucket.startDate) }))
     .filter((item): item is { bucket: AccountUsageDailyBucket; date: Date } => Boolean(item.date))
-    .filter((item) => days === 'cumulative' || item.date.getTime() >= cutoff.getTime())
+    .filter((item) => days === 'cumulative'
+      || (item.date.getTime() >= cutoff.getTime() && item.date.getTime() < endExclusive.getTime()))
     .sort((a, b) => b.date.getTime() - a.date.getTime())
     .map((item) => item.bucket)
 

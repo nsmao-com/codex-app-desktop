@@ -92,18 +92,28 @@ type ExternalUsageModelView struct {
 	Cost         float64 `json:"cost"`
 }
 
+type ExternalUsageDailyBucket struct {
+	StartDate             string `json:"startDate"`
+	Tokens                int64  `json:"tokens"`
+	InputTokens           int64  `json:"inputTokens,omitempty"`
+	CachedInputTokens     int64  `json:"cachedInputTokens,omitempty"`
+	OutputTokens          int64  `json:"outputTokens,omitempty"`
+	ReasoningOutputTokens int64  `json:"reasoningOutputTokens,omitempty"`
+}
+
 type ExternalUsageSummary struct {
-	RangeDays    int64                    `json:"rangeDays"`
-	Sessions     int64                    `json:"sessions"`
-	Messages     int64                    `json:"messages"`
-	InputTokens  int64                    `json:"inputTokens"`
-	OutputTokens int64                    `json:"outputTokens"`
-	Reasoning    int64                    `json:"reasoningTokens"`
-	CachedTokens int64                    `json:"cachedTokens"`
-	TotalTokens  int64                    `json:"totalTokens"`
-	Cost         float64                  `json:"cost"`
-	ByModel      []ExternalUsageModelView `json:"byModel"`
-	Source       string                   `json:"source"`
+	RangeDays    int64                      `json:"rangeDays"`
+	Sessions     int64                      `json:"sessions"`
+	Messages     int64                      `json:"messages"`
+	InputTokens  int64                      `json:"inputTokens"`
+	OutputTokens int64                      `json:"outputTokens"`
+	Reasoning    int64                      `json:"reasoningTokens"`
+	CachedTokens int64                      `json:"cachedTokens"`
+	TotalTokens  int64                      `json:"totalTokens"`
+	Cost         float64                    `json:"cost"`
+	ByModel      []ExternalUsageModelView   `json:"byModel"`
+	DailyBuckets []ExternalUsageDailyBucket `json:"dailyUsageBuckets"`
+	Source       string                     `json:"source"`
 }
 
 type ExternalRuntimeCatalog struct {
@@ -1112,7 +1122,7 @@ func listOpenCodeNativeSessions(workspace string) []ExternalSessionView {
 }
 
 func collectOpenCodeUsage(home, workspace string, days int64) ExternalUsageSummary {
-	result := ExternalUsageSummary{RangeDays: days, Source: "OpenCode session database", ByModel: []ExternalUsageModelView{}}
+	result := ExternalUsageSummary{RangeDays: days, Source: "OpenCode session database", ByModel: []ExternalUsageModelView{}, DailyBuckets: []ExternalUsageDailyBucket{}}
 	where := ""
 	if workspace != "" {
 		directory := filepath.ToSlash(filepath.Clean(workspace))
@@ -1163,6 +1173,65 @@ func collectOpenCodeUsage(home, workspace string, days int64) ExternalUsageSumma
 				item.TotalTokens = item.InputTokens + item.CachedTokens + item.OutputTokens + item.Reasoning
 				result.ByModel = append(result.ByModel, item)
 			}
+		}
+	}
+
+	// Session totals are lifetime counters, while the range selector needs real
+	// local calendar days. OpenCode stores the per-assistant-message breakdown in
+	// message.data.tokens, so aggregate those messages by their creation time.
+	dailyWhere := " where json_extract(m.data, '$.role')='assistant'"
+	if workspace != "" {
+		directory := filepath.ToSlash(filepath.Clean(workspace))
+		dailyWhere += " and s.directory='" + strings.ReplaceAll(directory, "'", "''") + "'"
+	}
+	if days > 0 {
+		dailyWhere += " and m.time_created >= " + strconv.FormatInt(time.Now().Add(-time.Duration(days)*24*time.Hour).UnixMilli(), 10)
+	}
+	dailyQuery := "select m.time_created as timeCreated,m.data,s.model from message m left join session s on s.id=m.session_id" + dailyWhere + " order by m.time_created asc"
+	dailyOutput, dailyErr := runOpenCodeDatabaseQuery(home, dailyQuery)
+	if dailyErr != nil && executable != "" {
+		dailyOutput, dailyErr = runExternalCLIOutput(executable, nil, []string{"db", dailyQuery, "--format", "json"}, workspace, 5*time.Second)
+	}
+	if dailyErr == nil {
+		var rows []map[string]any
+		if json.Unmarshal([]byte(dailyOutput), &rows) == nil {
+			byDay := make(map[string]*ExternalUsageDailyBucket)
+			for _, row := range rows {
+				data := asStringKeyMap(parseNativeJSONValue(row["data"]))
+				if len(data) == 0 {
+					continue
+				}
+				result.Messages++
+				var input, outputTokens, cached, reasoning, total int64
+				collectNativeUsage(data, &input, &outputTokens, &cached, &reasoning, &total)
+				if total <= 0 {
+					total = input + cached + outputTokens + reasoning
+				}
+				if total <= 0 {
+					continue
+				}
+				at := time.UnixMilli(int64FromAny(row["timeCreated"])).In(time.Local)
+				if at.IsZero() || at.Unix() <= 0 {
+					continue
+				}
+				day := at.Format("2006-01-02")
+				bucket := byDay[day]
+				if bucket == nil {
+					bucket = &ExternalUsageDailyBucket{StartDate: day}
+					byDay[day] = bucket
+				}
+				bucket.Tokens += total
+				bucket.InputTokens += input
+				bucket.CachedInputTokens += cached
+				bucket.OutputTokens += outputTokens
+				bucket.ReasoningOutputTokens += reasoning
+			}
+			for _, bucket := range byDay {
+				result.DailyBuckets = append(result.DailyBuckets, *bucket)
+			}
+			sort.Slice(result.DailyBuckets, func(i, j int) bool {
+				return result.DailyBuckets[i].StartDate > result.DailyBuckets[j].StartDate
+			})
 		}
 	}
 	return result

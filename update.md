@@ -2,6 +2,14 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.2.4 - 2026-08-07
+
+### 修复
+
+- 修复 OpenCode、Claude Code、Grok 和 Codex 用量回填沿用旧错误桶、日期范围显示相同的问题。
+- OpenCode 用量改为从原生 SQLite 消息按本地日期重建日桶，Codex 回溯改为扫描全部 active/archived rollout。
+- 修复 OpenCode JSON part 快照重复追加；保留 CLI JSON 模式的原生分段输出语义。
+
 ## 1.2.3 - 2026-08-07
 
 ### 修复

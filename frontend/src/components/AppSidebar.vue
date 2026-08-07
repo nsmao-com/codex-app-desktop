@@ -130,9 +130,7 @@ const usageRanges = computed(() => ([
 const usageRangeView = computed(() => buildUsageRangeView(appStore.accountUsage, usageRangeDays.value))
 const usageRangeTotalLabel = computed(() => usageRangeDays.value === 'cumulative'
   ? formatTokenCount(appStore.accountUsage?.lifetimeTokens)
-  : usageRangeView.value.dayCount
-    ? formatTokenCount(usageRangeView.value.totalTokens)
-    : formatTokenCount(appStore.accountUsage?.lifetimeTokens))
+  : formatTokenCount(usageRangeView.value.totalTokens))
 const usageRangeMeta = computed(() => usageRangeDays.value === 'cumulative'
   ? t('sidebar.usageAggregateMeta', { count: formatTokenCount(appStore.accountUsage?.lifetimeTokens) })
   : usageRangeView.value.dayCount
@@ -141,9 +139,7 @@ const usageRangeMeta = computed(() => usageRangeDays.value === 'cumulative'
       avg: formatTokenCount(usageRangeView.value.averageTokens),
       count: usageRangeView.value.dayCount,
     })
-    : appStore.accountUsage?.lifetimeTokens != null
-      ? t('sidebar.usageAggregateMeta', { count: formatTokenCount(appStore.accountUsage.lifetimeTokens) })
-      : t('sidebar.usageRangeMeta', { days: usageRangeView.value.days, avg: '—', count: 0 }))
+    : t('sidebar.usageRangeMeta', { days: usageRangeView.value.days, avg: '—', count: 0 }))
 const usageLocale = computed(() => (locale.value === 'zh-CN' ? 'zh-CN' : 'en-US'))
 const usageSubtitle = computed(() => {
   if (appStore.isGrokMode) return t('sidebar.usageSubtitleGrok')
