@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+const localUsageVersion = 3
 const localUsageTurnRetentionDays = 60
 const localUsagePersistDelay = 400 * time.Millisecond
 
@@ -45,7 +46,7 @@ type localTurnUsage struct {
 	UpdatedAt int64  `json:"updatedAt"`
 }
 
-// localUsageFile version 2 stores spend per runtime so Grok and Codex never share totals.
+// localUsageFile version 3 stores spend per runtime and canonicalizes external turn ownership.
 // Legacy v1 fields (top-level lifetimeTokens/days) are migrated into byRuntime.codex on load.
 type localUsageFile struct {
 	Version         int                            `json:"version"`
@@ -70,7 +71,7 @@ func usagePath(settingsPath string) string {
 
 func emptyLocalUsage() *localUsageFile {
 	return &localUsageFile{
-		Version:   2,
+		Version:   localUsageVersion,
 		Turns:     make(map[string]localTurnUsage),
 		ByRuntime: make(map[string]*localRuntimeBucket),
 	}
@@ -95,14 +96,19 @@ func loadLocalUsage(settingsPath string) *localUsageFile {
 	if result.ByRuntime == nil {
 		result.ByRuntime = make(map[string]*localRuntimeBucket)
 	}
-	migrateLocalUsage(result)
+	if migrateLocalUsage(result) {
+		// Persist the one-time repair immediately so a restart cannot reintroduce
+		// the legacy runtime mismatch or stale aggregate buckets.
+		persistLocalUsage(settingsPath, result)
+	}
 	return result
 }
 
-func migrateLocalUsage(usage *localUsageFile) {
+func migrateLocalUsage(usage *localUsageFile) bool {
 	if usage == nil {
-		return
+		return false
 	}
+	changed := false
 	// Promote legacy v1 top-level days/lifetime into the codex bucket once.
 	if usage.Version < 2 || (len(usage.ByRuntime) == 0 && (usage.LifetimeTokens > 0 || len(usage.Days) > 0)) {
 		bucket := usage.ensureRuntime("codex")
@@ -124,20 +130,57 @@ func migrateLocalUsage(usage *localUsageFile) {
 		usage.LifetimeTokens = 0
 		usage.Days = nil
 		usage.Version = 2
+		changed = true
 	}
 	if usage.Version < 2 {
 		usage.Version = 2
+		changed = true
 	}
-	// Normalize turn runtimes and re-aggregate buckets from turns when possible.
+	// Older builds could write an external turn into a Codex bucket while keeping
+	// the external prefix in the map key. Canonicalize both the key and runtime
+	// before rebuilding aggregate buckets.
+	if usage.Version < localUsageVersion {
+		originalTurns := usage.Turns
+		canonical := make(map[string]localTurnUsage, len(usage.Turns))
+		for key, turn := range usage.Turns {
+			runtime := usageRuntimeForTurn(key, turn)
+			turn.Runtime = runtime
+			if turn.Tokens <= 0 {
+				turn.Tokens = turn.Input + turn.Cached + turn.Output + turn.Reasoning
+			}
+			canonicalKey := turnUsageKey(runtime, turn.ThreadID, turn.TurnID)
+			if strings.TrimSpace(turn.ThreadID) == "" || strings.TrimSpace(turn.TurnID) == "" {
+				continue
+			}
+			if previous, exists := canonical[canonicalKey]; !exists || usageTurnShouldReplace(previous, turn) {
+				canonical[canonicalKey] = turn
+			}
+			if canonicalKey != key || normalizeUsageRuntime(turn.Runtime) != normalizeUsageRuntime(usage.Turns[key].Runtime) {
+				changed = true
+			}
+		}
+		if len(canonical) != len(usage.Turns) {
+			changed = true
+		}
+		usage.Turns = canonical
+		if rebuildUsageBucketsFromTurns(usage, originalTurns) {
+			changed = true
+		}
+		usage.Version = localUsageVersion
+		changed = true
+	}
+	// Normalize remaining turn fields for files already at the current version.
 	for key, turn := range usage.Turns {
 		runtime := normalizeUsageRuntime(turn.Runtime)
-		if turn.Runtime == "" {
+		if turn.Runtime != runtime {
 			turn.Runtime = runtime
 			usage.Turns[key] = turn
+			changed = true
 		}
 		if turn.Tokens <= 0 {
 			turn.Tokens = turn.Input + turn.Cached + turn.Output + turn.Reasoning
 			usage.Turns[key] = turn
+			changed = true
 		}
 	}
 	for _, bucket := range usage.ByRuntime {
@@ -146,7 +189,108 @@ func migrateLocalUsage(usage *localUsageFile) {
 		}
 		if bucket.Days == nil {
 			bucket.Days = make(map[string]localDayStats)
+			changed = true
 		}
+	}
+	return changed
+}
+
+func usageRuntimeForTurn(key string, turn localTurnUsage) string {
+	prefix := ""
+	if index := strings.IndexByte(key, ':'); index > 0 {
+		prefix = strings.TrimSpace(key[:index])
+	}
+	if runtime := normalizeUsageRuntime(prefix); strings.EqualFold(prefix, runtime) && runtime != "codex" {
+		return runtime
+	}
+	turnID := strings.ToLower(strings.TrimSpace(turn.TurnID))
+	switch {
+	case strings.HasPrefix(turnID, "claude-turn-"):
+		return "claude"
+	case strings.HasPrefix(turnID, "grok-turn-"):
+		return "grok"
+	case strings.HasPrefix(turnID, "gemini-turn-"):
+		return "gemini"
+	case strings.HasPrefix(turnID, "opencode-turn-"):
+		return "opencode"
+	default:
+		return normalizeUsageRuntime(turn.Runtime)
+	}
+}
+
+func usageTurnShouldReplace(previous, next localTurnUsage) bool {
+	if next.UpdatedAt != previous.UpdatedAt {
+		return next.UpdatedAt > previous.UpdatedAt
+	}
+	return next.Tokens >= previous.Tokens
+}
+
+// rebuildUsageBucketsFromTurns removes every retained legacy turn from its
+// original bucket, then adds the canonical set back. Totals older than the
+// 60-day turn index remain untouched.
+func rebuildUsageBucketsFromTurns(usage *localUsageFile, originalTurns map[string]localTurnUsage) bool {
+	if usage == nil {
+		return false
+	}
+	for _, turn := range originalTurns {
+		removeUsageTurnContribution(usage.ensureRuntime(turn.Runtime), turn)
+	}
+	for _, turn := range usage.Turns {
+		addUsageTurnContribution(usage.ensureRuntime(turn.Runtime), turn)
+	}
+	return len(originalTurns) > 0 || len(usage.Turns) > 0
+}
+
+func removeUsageTurnContribution(bucket *localRuntimeBucket, turn localTurnUsage) {
+	if bucket == nil {
+		return
+	}
+	bucket.LifetimeTokens -= turn.Tokens
+	bucket.LifetimeInput -= turn.Input
+	bucket.LifetimeCached -= turn.Cached
+	bucket.LifetimeOutput -= turn.Output
+	bucket.LifetimeReasoning -= turn.Reasoning
+	if strings.TrimSpace(turn.Day) != "" {
+		day := bucket.Days[turn.Day]
+		day.Tokens -= turn.Tokens
+		day.Input -= turn.Input
+		day.Cached -= turn.Cached
+		day.Output -= turn.Output
+		day.Reasoning -= turn.Reasoning
+		if day.Tokens <= 0 && day.Input <= 0 && day.Cached <= 0 && day.Output <= 0 && day.Reasoning <= 0 {
+			delete(bucket.Days, turn.Day)
+		} else {
+			bucket.Days[turn.Day] = clampDayStats(day)
+		}
+	}
+	clampRuntimeBucket(bucket)
+}
+
+func addUsageTurnContribution(bucket *localRuntimeBucket, turn localTurnUsage) {
+	if bucket == nil {
+		return
+	}
+	b := tokenBreakdown{
+		Input: turn.Input, Cached: turn.Cached, Output: turn.Output,
+		Reasoning: turn.Reasoning, Total: turn.Tokens,
+	}
+	b.normalize()
+	if !b.valid() {
+		return
+	}
+	bucket.LifetimeTokens += b.Total
+	bucket.LifetimeInput += b.Input
+	bucket.LifetimeCached += b.Cached
+	bucket.LifetimeOutput += b.Output
+	bucket.LifetimeReasoning += b.Reasoning
+	if strings.TrimSpace(turn.Day) != "" {
+		day := bucket.Days[turn.Day]
+		day.Tokens += b.Total
+		day.Input += b.Input
+		day.Cached += b.Cached
+		day.Output += b.Output
+		day.Reasoning += b.Reasoning
+		bucket.Days[turn.Day] = day
 	}
 }
 
@@ -185,7 +329,7 @@ func persistLocalUsage(settingsPath string, usage *localUsageFile) {
 	if usage == nil {
 		return
 	}
-	usage.Version = 2
+	usage.Version = localUsageVersion
 	payload, err := json.MarshalIndent(usage, "", "  ")
 	if err != nil {
 		return

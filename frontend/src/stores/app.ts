@@ -25,7 +25,7 @@ import { translate } from '../i18n'
 import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.2.0'
+const AppVersionFallback = '1.2.1'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -56,9 +56,13 @@ const defaultSettings: UserSettings = {
   claudePermissionMode: 'acceptEdits',
   geminiModel: 'gemini-2.5-pro',
   geminiEffort: 'auto',
+  geminiSandbox: 'workspace-write',
+  geminiApprovalPolicy: 'on-request',
   geminiCustomModels: [],
   openCodeModel: 'anthropic/claude-sonnet-4-6',
   openCodeEffort: 'high',
+  openCodeSandbox: 'workspace-write',
+  openCodeApprovalPolicy: 'on-request',
   openCodeProvider: '',
   openCodeCustomModels: [],
   model: DEFAULT_CODEX_MODEL,
@@ -133,7 +137,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.2.0')
+  const appVersion = shallowRef('1.2.1')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -279,9 +283,13 @@ export const useAppStore = defineStore('app', () => {
       claudePermissionMode: data.settings.claudePermissionMode || 'acceptEdits',
       geminiModel: data.settings.geminiModel || 'gemini-2.5-pro',
       geminiEffort: data.settings.geminiEffort || 'auto',
+      geminiSandbox: data.settings.geminiSandbox || 'workspace-write',
+      geminiApprovalPolicy: data.settings.geminiApprovalPolicy || 'on-request',
       geminiCustomModels: data.settings.geminiCustomModels ?? [],
       openCodeModel: data.settings.openCodeModel || 'anthropic/claude-sonnet-4-6',
       openCodeEffort: data.settings.openCodeEffort || 'high',
+      openCodeSandbox: data.settings.openCodeSandbox || 'workspace-write',
+      openCodeApprovalPolicy: data.settings.openCodeApprovalPolicy || 'on-request',
       openCodeProvider: data.settings.openCodeProvider ?? '',
       openCodeCustomModels: data.settings.openCodeCustomModels ?? [],
       customModels: data.settings.customModels ?? [],
@@ -408,8 +416,15 @@ export const useAppStore = defineStore('app', () => {
       claudePermissionMode: saved.claudePermissionMode || next.claudePermissionMode || 'acceptEdits',
       geminiModel: saved.geminiModel || next.geminiModel || 'gemini-2.5-pro',
       geminiEffort: saved.geminiEffort || next.geminiEffort || 'auto',
+      geminiSandbox: saved.geminiSandbox || next.geminiSandbox || 'workspace-write',
+      geminiApprovalPolicy: saved.geminiApprovalPolicy || next.geminiApprovalPolicy || 'on-request',
+      geminiCustomModels: saved.geminiCustomModels ?? next.geminiCustomModels ?? [],
       openCodeModel: saved.openCodeModel || next.openCodeModel || 'anthropic/claude-sonnet-4-6',
       openCodeEffort: saved.openCodeEffort || next.openCodeEffort || 'high',
+      openCodeSandbox: saved.openCodeSandbox || next.openCodeSandbox || 'workspace-write',
+      openCodeApprovalPolicy: saved.openCodeApprovalPolicy || next.openCodeApprovalPolicy || 'on-request',
+      openCodeProvider: saved.openCodeProvider ?? next.openCodeProvider ?? '',
+      openCodeCustomModels: saved.openCodeCustomModels ?? next.openCodeCustomModels ?? [],
       customModels: saved.customModels ?? next.customModels ?? [],
       onboardingCompleted: Boolean(saved.onboardingCompleted)
         || Boolean(next.onboardingCompleted)

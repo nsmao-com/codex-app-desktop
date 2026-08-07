@@ -560,7 +560,7 @@ export const useGrokStore = defineStore('grok', () => {
       if (sameGrokSession(cached, id)) loadedSessionIds.delete(cached)
     }
     loadedSessionIds.add(id)
-    while (loadedSessionIds.size > 12 || cachedGrokConversationWeight() > 8_000_000) {
+    while (loadedSessionIds.size > 12 || cachedGrokConversationWeight() > 32_000_000) {
       const evicted = [...loadedSessionIds].find((candidate) =>
         !sameGrokSession(candidate, id)
         && !sameGrokSession(candidate, activeSessionId.value)

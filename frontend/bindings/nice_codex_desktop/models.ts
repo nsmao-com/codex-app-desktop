@@ -792,9 +792,13 @@ export interface UserSettings {
      */
     "geminiModel": string;
     "geminiEffort": string;
+    "geminiSandbox": string;
+    "geminiApprovalPolicy": string;
     "geminiCustomModels": string[] | null;
     "openCodeModel": string;
     "openCodeEffort": string;
+    "openCodeSandbox": string;
+    "openCodeApprovalPolicy": string;
     "openCodeProvider": string;
     "openCodeCustomModels": string[] | null;
     "model": string;

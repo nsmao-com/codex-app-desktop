@@ -150,6 +150,10 @@ const grokAPIModel = shallowRef(appStore.settings.grokAPIModel || 'grok-4.5')
 const grokEffort = shallowRef(appStore.settings.grokEffort || 'high')
 const grokSandbox = shallowRef(appStore.settings.grokSandbox || 'workspace-write')
 const grokApprovalPolicy = shallowRef(appStore.settings.grokApprovalPolicy || 'on-request')
+const geminiSandbox = shallowRef(appStore.settings.geminiSandbox || 'workspace-write')
+const geminiApprovalPolicy = shallowRef(appStore.settings.geminiApprovalPolicy || 'on-request')
+const openCodeSandbox = shallowRef(appStore.settings.openCodeSandbox || 'workspace-write')
+const openCodeApprovalPolicy = shallowRef(appStore.settings.openCodeApprovalPolicy || 'on-request')
 const grokWebSearch = shallowRef(appStore.settings.grokWebSearch !== false)
 const grokXSearch = shallowRef(Boolean(appStore.settings.grokXSearch))
 const grokAPIKey = shallowRef(appStore.settings.grokAPIKey || '')
@@ -251,7 +255,15 @@ const isGrokSettings = computed(() => appStore.isGrokMode)
 const isClaudeSettings = computed(() => appStore.isClaudeMode)
 const isGeminiSettings = computed(() => appStore.isGeminiMode)
 const isOpenCodeSettings = computed(() => appStore.isOpenCodeMode)
+const isCodexSettings = computed(() => appStore.isCodexMode)
 const externalRuntimeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+const agentSettingsIcon = computed(() => {
+  if (appStore.isClaudeMode) return ClaudeIcon
+  if (appStore.isGrokMode) return GrokIcon
+  if (appStore.isGeminiMode) return GeminiIcon
+  if (appStore.isOpenCodeMode) return OpenCodeIcon
+  return OpenAIIcon
+})
 const activeRuntimeName = computed(() => {
   if (appStore.isClaudeMode) return 'Claude Code'
   if (appStore.isGrokMode) return 'Grok'
@@ -277,6 +289,20 @@ const externalModel = computed({
 const externalEffort = computed({
   get: () => isGeminiSettings.value ? appStore.settings.geminiEffort : appStore.settings.openCodeEffort,
   set: (value: string) => appStore.patchSettings(isGeminiSettings.value ? { geminiEffort: value } : { openCodeEffort: value }),
+})
+const externalSandbox = computed({
+  get: () => isGeminiSettings.value ? geminiSandbox.value : openCodeSandbox.value,
+  set: (value: string) => {
+    if (isGeminiSettings.value) geminiSandbox.value = value
+    else openCodeSandbox.value = value
+  },
+})
+const externalApprovalPolicy = computed({
+  get: () => isGeminiSettings.value ? geminiApprovalPolicy.value : openCodeApprovalPolicy.value,
+  set: (value: string) => {
+    if (isGeminiSettings.value) geminiApprovalPolicy.value = value
+    else openCodeApprovalPolicy.value = value
+  },
 })
 const externalCustomModelDraft = shallowRef('')
 const externalCatalog = shallowRef<ExternalRuntimeCatalog | null>(null)
@@ -354,14 +380,12 @@ function addExternalCustomModel(): void {
   if (!value || value.length > 160 || externalCustomModels.value.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) return
   const next = [...externalCustomModels.value, value].slice(0, 64)
   appStore.patchSettings(isGeminiSettings.value ? { geminiCustomModels: next } : { openCodeCustomModels: next })
-  void codexStore.loadModels()
   externalCustomModelDraft.value = ''
 }
 
 function removeExternalCustomModel(value: string): void {
   const next = externalCustomModels.value.filter((item) => item !== value)
   appStore.patchSettings(isGeminiSettings.value ? { geminiCustomModels: next } : { openCodeCustomModels: next })
-  void codexStore.loadModels()
 }
 const claudeStatus = computed(() => {
   const fromProviders = appStore.agentProviders.find((provider) => provider.kind === 'claude')
@@ -478,8 +502,20 @@ const approvalOptions = computed<SelectOption[]>(() => [
 
 /** Exclusive permission levels — bind to Codex or Grok fields by active runtime. */
 const permissionLevel = computed<'default' | 'autoReview' | 'full' | 'strict'>(() => {
-  const box = isGrokSettings.value ? grokSandbox.value : sandbox.value
-  const approval = isGrokSettings.value ? grokApprovalPolicy.value : approvalPolicy.value
+  const box = isGrokSettings.value
+    ? grokSandbox.value
+    : isGeminiSettings.value
+      ? geminiSandbox.value
+      : isOpenCodeSettings.value
+        ? openCodeSandbox.value
+        : sandbox.value
+  const approval = isGrokSettings.value
+    ? grokApprovalPolicy.value
+    : isGeminiSettings.value
+      ? geminiApprovalPolicy.value
+      : isOpenCodeSettings.value
+        ? openCodeApprovalPolicy.value
+        : approvalPolicy.value
   if (box === 'danger-full-access' && approval === 'never') return 'full'
   if (box === 'workspace-write' && approval === 'never') return 'autoReview'
   if (box === 'read-only') return 'strict'
@@ -623,7 +659,7 @@ const navGroups = computed<NavGroup[]>(() => [
       { id: 'general', label: t('settings.navGeneral'), icon: Settings2, keywords: 'general permission language terminal notify send follow-up always on top 常规 权限 语言 终端 通知 发送 跟进 置顶' },
       { id: 'appearance', label: t('settings.navAppearance'), icon: Palette, keywords: 'appearance theme font 外观 主题 字体' },
       { id: 'shortcuts', label: t('settings.navShortcuts'), icon: Keyboard, keywords: 'keyboard shortcuts hotkeys 快捷键' },
-      { id: 'agent', label: t('settings.navAgent'), icon: OpenAIIcon, keywords: 'agent model codex 配置 模型' },
+      { id: 'agent', label: t('settings.navAgent'), icon: agentSettingsIcon.value, keywords: 'agent model codex claude gemini grok opencode 配置 模型' },
       { id: 'personalization', label: t('settings.navPersonalization'), icon: Smile, keywords: 'personality collaboration instructions AGENTS memories 个性化 记忆 全局提示词 项目提示词' },
       { id: 'account', label: t('settings.navAccount'), icon: UserRound, keywords: 'account login usage token 账户 登录 用量' },
       { id: 'archived', label: t('settings.navArchived'), icon: Archive, keywords: 'archived restore conversations 已归档 恢复 对话' },
@@ -847,6 +883,10 @@ function syncFromStore(): void {
   grokEffort.value = settings.grokEffort || 'high'
   grokSandbox.value = settings.grokSandbox || 'workspace-write'
   grokApprovalPolicy.value = settings.grokApprovalPolicy || 'on-request'
+  geminiSandbox.value = settings.geminiSandbox || 'workspace-write'
+  geminiApprovalPolicy.value = settings.geminiApprovalPolicy || 'on-request'
+  openCodeSandbox.value = settings.openCodeSandbox || 'workspace-write'
+  openCodeApprovalPolicy.value = settings.openCodeApprovalPolicy || 'on-request'
   grokWebSearch.value = settings.grokWebSearch !== false
   grokXSearch.value = Boolean(settings.grokXSearch)
   grokAPIKey.value = settings.grokAPIKey || ''
@@ -1120,6 +1160,24 @@ function applyPermissionLevel(level: 'default' | 'autoReview' | 'full' | 'strict
     }
     grokSandbox.value = 'workspace-write'
     grokApprovalPolicy.value = 'on-request'
+    return
+  }
+  if (isGeminiSettings.value || isOpenCodeSettings.value) {
+    const box = isGeminiSettings.value ? geminiSandbox : openCodeSandbox
+    const approval = isGeminiSettings.value ? geminiApprovalPolicy : openCodeApprovalPolicy
+    if (level === 'full') {
+      box.value = 'danger-full-access'
+      approval.value = 'never'
+    } else if (level === 'autoReview') {
+      box.value = 'workspace-write'
+      approval.value = 'never'
+    } else if (level === 'strict') {
+      box.value = 'read-only'
+      approval.value = 'on-request'
+    } else {
+      box.value = 'workspace-write'
+      approval.value = 'on-request'
+    }
     return
   }
   if (level === 'full') {
@@ -1453,36 +1511,40 @@ async function save(): Promise<void> {
       ...appStore.settings,
       activeRuntime: appStore.settings.activeRuntime,
       recentWorkspaces: appStore.settings.recentWorkspaces ?? [],
-      model: model.value,
-      modelProvider: '',
-      customModels: customModels.value,
-      effort: effort.value,
-      serviceTier: serviceTier.value,
-      collaborationMode: collaborationMode.value,
-      personality: personality.value,
-      multiAgentMode: multiAgentMode.value,
-      sandbox: sandbox.value,
-      approvalPolicy: approvalPolicy.value,
-      grokBackend: grokBackend.value === 'api' ? 'api' : 'build',
-      grokBuildModel: grokBuildModel.value.trim(),
-      grokAPIModel: grokAPIModel.value.trim() || 'grok-4.5',
-      grokAPIKey: grokAPIKey.value.trim(),
-      grokAPIBaseURL: grokAPIBaseURL.value.trim(),
-      grokEffort: grokEffort.value || 'high',
-      grokSandbox: grokSandbox.value || 'workspace-write',
-      grokApprovalPolicy: grokApprovalPolicy.value || 'on-request',
-      grokWebSearch: grokWebSearch.value,
-      grokXSearch: grokXSearch.value,
-      claudeModel: claudeModel.value.trim() || 'sonnet',
-      claudeEffort: claudeEffort.value || 'high',
-      claudeSandbox: claudeSandbox.value || 'workspace-write',
-      claudeApprovalPolicy: claudeApprovalPolicy.value || 'on-request',
-      claudePermissionMode: claudePermissionMode.value || 'acceptEdits',
+      model: isCodexSettings.value ? model.value : appStore.settings.model,
+      modelProvider: appStore.settings.modelProvider,
+      customModels: isCodexSettings.value ? customModels.value : (appStore.settings.customModels ?? []),
+      effort: isCodexSettings.value ? effort.value : appStore.settings.effort,
+      serviceTier: isCodexSettings.value ? serviceTier.value : appStore.settings.serviceTier,
+      collaborationMode: isCodexSettings.value ? collaborationMode.value : appStore.settings.collaborationMode,
+      personality: isCodexSettings.value ? personality.value : appStore.settings.personality,
+      multiAgentMode: isCodexSettings.value ? multiAgentMode.value : appStore.settings.multiAgentMode,
+      sandbox: isCodexSettings.value ? sandbox.value : appStore.settings.sandbox,
+      approvalPolicy: isCodexSettings.value ? approvalPolicy.value : appStore.settings.approvalPolicy,
+      grokBackend: isGrokSettings.value ? (grokBackend.value === 'api' ? 'api' : 'build') : appStore.settings.grokBackend,
+      grokBuildModel: isGrokSettings.value ? grokBuildModel.value.trim() : appStore.settings.grokBuildModel,
+      grokAPIModel: isGrokSettings.value ? (grokAPIModel.value.trim() || 'grok-4.5') : appStore.settings.grokAPIModel,
+      grokAPIKey: isGrokSettings.value ? grokAPIKey.value.trim() : appStore.settings.grokAPIKey,
+      grokAPIBaseURL: isGrokSettings.value ? grokAPIBaseURL.value.trim() : appStore.settings.grokAPIBaseURL,
+      grokEffort: isGrokSettings.value ? (grokEffort.value || 'high') : appStore.settings.grokEffort,
+      grokSandbox: isGrokSettings.value ? (grokSandbox.value || 'workspace-write') : appStore.settings.grokSandbox,
+      grokApprovalPolicy: isGrokSettings.value ? (grokApprovalPolicy.value || 'on-request') : appStore.settings.grokApprovalPolicy,
+      grokWebSearch: isGrokSettings.value ? grokWebSearch.value : appStore.settings.grokWebSearch,
+      grokXSearch: isGrokSettings.value ? grokXSearch.value : appStore.settings.grokXSearch,
+      claudeModel: isClaudeSettings.value ? (claudeModel.value.trim() || 'sonnet') : appStore.settings.claudeModel,
+      claudeEffort: isClaudeSettings.value ? (claudeEffort.value || 'high') : appStore.settings.claudeEffort,
+      claudeSandbox: isClaudeSettings.value ? (claudeSandbox.value || 'workspace-write') : appStore.settings.claudeSandbox,
+      claudeApprovalPolicy: isClaudeSettings.value ? (claudeApprovalPolicy.value || 'on-request') : appStore.settings.claudeApprovalPolicy,
+      claudePermissionMode: isClaudeSettings.value ? (claudePermissionMode.value || 'acceptEdits') : appStore.settings.claudePermissionMode,
       geminiModel: appStore.settings.geminiModel || 'gemini-2.5-pro',
       geminiEffort: appStore.settings.geminiEffort || 'auto',
+      geminiSandbox: isGeminiSettings.value ? (geminiSandbox.value || 'workspace-write') : appStore.settings.geminiSandbox,
+      geminiApprovalPolicy: isGeminiSettings.value ? (geminiApprovalPolicy.value || 'on-request') : appStore.settings.geminiApprovalPolicy,
       geminiCustomModels: appStore.settings.geminiCustomModels ?? [],
       openCodeModel: appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6',
       openCodeEffort: appStore.settings.openCodeEffort || 'high',
+      openCodeSandbox: isOpenCodeSettings.value ? (openCodeSandbox.value || 'workspace-write') : appStore.settings.openCodeSandbox,
+      openCodeApprovalPolicy: isOpenCodeSettings.value ? (openCodeApprovalPolicy.value || 'on-request') : appStore.settings.openCodeApprovalPolicy,
       openCodeProvider: appStore.settings.openCodeProvider || '',
       openCodeCustomModels: appStore.settings.openCodeCustomModels ?? [],
       theme: theme.value,
@@ -1520,7 +1582,7 @@ async function save(): Promise<void> {
       customInstructions: customInstructions.value,
       onboardingCompleted: true,
     })
-    if (!isGrokSettings.value) {
+    if (isCodexSettings.value) {
       await backend.SaveCodexFeatureFlags({
         memoriesEnabled: memoriesEnabled.value,
         memoriesGenerate: memoriesGenerate.value,
@@ -1531,7 +1593,7 @@ async function save(): Promise<void> {
       })
     }
     saved.value = true
-    if (!isGrokSettings.value) await codexStore.loadModels()
+    if (isCodexSettings.value || isGeminiSettings.value || isOpenCodeSettings.value) await codexStore.loadModels()
 
     if (!isGrokSettings.value && identityChanged && reconnectAfterSave) {
       const ok = await reconnectCodexRuntime({ silent: true })
@@ -2078,8 +2140,8 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                     <Input v-model="claudeModel" class="h-9 font-mono text-xs" placeholder="sonnet" maxlength="160" />
                     <p class="text-[10px] text-muted-foreground">{{ t('settings.claudeModelHint') }}</p>
                   </div>
-                  <div class="space-y-1">
-                    <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
+                   <div class="space-y-1">
+                     <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
                     <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
                       <Button
                         v-for="option in ['low', 'medium', 'high', 'xhigh', 'max']"
@@ -2350,10 +2412,31 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                         @click="externalEffort = option.effort"
                       >
                         {{ option.displayName || option.effort }}
-                      </Button>
-                    </div>
-                  </div>
-                  <p class="rounded-lg border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">
+                       </Button>
+                     </div>
+                   </div>
+                   <div class="grid gap-3 sm:grid-cols-2">
+                     <div class="space-y-1">
+                       <Label class="text-xs">{{ t('settings.sandbox') }}</Label>
+                       <Select v-model="externalSandbox">
+                         <SelectTrigger class="h-8 text-xs"><SelectValue /></SelectTrigger>
+                         <SelectContent>
+                           <SelectItem v-for="option in sandboxOptions" :key="option.value" :value="option.value">{{ option.label }}</SelectItem>
+                         </SelectContent>
+                       </Select>
+                     </div>
+                     <div class="space-y-1">
+                       <Label class="text-xs">{{ t('settings.approvals') }}</Label>
+                       <Select v-model="externalApprovalPolicy">
+                         <SelectTrigger class="h-8 text-xs"><SelectValue /></SelectTrigger>
+                         <SelectContent>
+                           <SelectItem value="on-request">{{ t('settings.onRequest') }}</SelectItem>
+                           <SelectItem value="never">{{ t('settings.never') }}</SelectItem>
+                         </SelectContent>
+                       </Select>
+                     </div>
+                   </div>
+                   <p class="rounded-lg border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">
                      {{ isGeminiSettings ? t('settings.geminiNativeConfigHint') : t('settings.openCodeNativeConfigHint', { refreshing: externalCatalogLoading ? t('common.loading') : '' }) }}
                   </p>
                 </div>
@@ -2459,7 +2542,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.grokInstructionsHint') }}</p>
                 </div>
               </section>
-              <section v-if="!isGrokSettings && !isGeminiSettings && !isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="isCodexSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="divide-y">
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
@@ -2617,7 +2700,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   <p class="text-[10px] text-muted-foreground">{{ t('settings.projectInstructionsSync') }}</p>
                 </div>
               </section>
-              <section v-if="!isGrokSettings" class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="isCodexSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="border-b px-4 py-3">
                   <h2 class="text-[13px] font-semibold">{{ t('settings.multiAgent') }}</h2>
                 </div>
@@ -2640,7 +2723,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   </Button>
                 </div>
               </section>
-              <section v-if="!isGrokSettings" class="overflow-hidden rounded-xl border bg-card">
+              <section v-if="isCodexSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="border-b px-4 py-3">
                   <h2 class="text-[13px] font-semibold">{{ t('settings.memories') }}</h2>
                   <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.memoriesHint') }}</p>

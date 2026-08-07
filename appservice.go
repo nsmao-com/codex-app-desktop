@@ -47,6 +47,8 @@ type AppService struct {
 	usageFlushTimer       *time.Timer
 	usageFlushGen         uint64
 	usageBackfillAt       map[string]time.Time
+	externalUsageCache    map[string]map[string]any
+	externalUsageCachedAt map[string]time.Time
 	updateState           updateDownloadState
 	codexLifecycleMu      sync.Mutex
 	codexThreadStartMu    sync.Mutex
@@ -61,10 +63,10 @@ const defaultCodexModel = "gpt-5.6-sol"
 
 const (
 	conversationHistoryPageTurns        = 24
-	conversationHistoryCacheLimit       = 8
-	codexHistoryCacheLimit              = 2
-	conversationHistoryCacheBytes int64 = 24 << 20
-	conversationHistoryEntryBytes int64 = 12 << 20
+	conversationHistoryCacheLimit       = 12
+	codexHistoryCacheLimit              = 12
+	conversationHistoryCacheBytes int64 = 64 << 20
+	conversationHistoryEntryBytes int64 = 32 << 20
 )
 
 type codexHistorySnapshot struct {
@@ -138,9 +140,13 @@ type UserSettings struct {
 	// runtime switch never changes another provider's default model.
 	GeminiModel              string   `json:"geminiModel"`
 	GeminiEffort             string   `json:"geminiEffort"`
+	GeminiSandbox            string   `json:"geminiSandbox"`
+	GeminiApprovalPolicy     string   `json:"geminiApprovalPolicy"`
 	GeminiCustomModels       []string `json:"geminiCustomModels"`
 	OpenCodeModel            string   `json:"openCodeModel"`
 	OpenCodeEffort           string   `json:"openCodeEffort"`
+	OpenCodeSandbox          string   `json:"openCodeSandbox"`
+	OpenCodeApprovalPolicy   string   `json:"openCodeApprovalPolicy"`
 	OpenCodeProvider         string   `json:"openCodeProvider"`
 	OpenCodeCustomModels     []string `json:"openCodeCustomModels"`
 	Model                    string   `json:"model"`
@@ -380,11 +386,23 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
 	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
 	settings.GeminiCustomModels = sanitizeCustomModels(settings.GeminiCustomModels)
+	if !isAllowed(settings.GeminiSandbox, "read-only", "workspace-write", "danger-full-access") {
+		settings.GeminiSandbox = "workspace-write"
+	}
+	if !isAllowed(settings.GeminiApprovalPolicy, "on-request", "never") {
+		settings.GeminiApprovalPolicy = "on-request"
+	}
 	if settings.GeminiEffort == "" {
 		settings.GeminiEffort = "auto"
 	}
 	settings.OpenCodeModel = sanitizeShortText(settings.OpenCodeModel, 160)
 	settings.OpenCodeEffort = sanitizeShortText(settings.OpenCodeEffort, 32)
+	if !isAllowed(settings.OpenCodeSandbox, "read-only", "workspace-write", "danger-full-access") {
+		settings.OpenCodeSandbox = "workspace-write"
+	}
+	if !isAllowed(settings.OpenCodeApprovalPolicy, "on-request", "never") {
+		settings.OpenCodeApprovalPolicy = "on-request"
+	}
 	settings.OpenCodeProvider = sanitizeShortText(settings.OpenCodeProvider, 160)
 	settings.OpenCodeCustomModels = sanitizeCustomModels(settings.OpenCodeCustomModels)
 	if settings.OpenCodeEffort == "" {
@@ -834,6 +852,12 @@ func (s *AppService) CreateThread() (map[string]any, error) {
 		provider, providerID = "opencode", externalProviderID("opencode")
 		model, effort = settings.OpenCodeModel, settings.OpenCodeEffort
 	}
+	if provider != "" {
+		// Collaboration/work modes are Codex concepts. External runtimes keep
+		// their own native execution mode and must not inherit a Codex Plan state.
+		collaborationMode = "default"
+		workMode = "code"
+	}
 	if model == "" || effort == "" {
 		models, efforts := discoverProviderCatalog(provider)
 		if model == "" && len(models) > 0 {
@@ -1205,8 +1229,28 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 		return paginateCodexThreadResponse(s.sessionResponse(session), -1), nil
 	}
 	backendID := s.codexBackendID(threadID, workspace)
-	// After app-server restart, thread/read fails until thread/resume reloads history.
-	result, err := s.loadBackendThread(backendID, workspace, settings, session)
+	// Switching projects while another long turn is running should not force a
+	// second full thread/resume round-trip. The Go history cache already contains
+	// the complete snapshot from the previous open and the frontend will merge
+	// any newer in-flight items on top of this page.
+	if session != nil {
+		if turns, ok := s.cachedCodexHistory(backendID); ok {
+			response := s.sessionResponse(session)
+			if thread, ok := response["thread"].(map[string]any); ok {
+				thread["turns"] = turns
+			}
+			return paginateCodexThreadResponse(response, -1), nil
+		}
+	}
+	// Opening history does not need to mutate app-server thread state. A read-only
+	// snapshot is substantially faster while another project owns a long running
+	// turn; SendMessage still resumes the backend thread immediately before send.
+	result, err := s.readBackendThreadSnapshot(backendID, workspace)
+	if err != nil {
+		// Older app-server versions can reject includeTurns. Preserve the proven
+		// resume path as a compatibility fallback.
+		result, err = s.loadBackendThread(backendID, workspace, settings, session)
+	}
 	if err != nil {
 		if session != nil {
 			s.rememberThread(threadID, workspace)
@@ -2366,6 +2410,16 @@ func (s *AppService) ReadAccountUsage() (map[string]any, error) {
 	if runtime == "codex" && s.shouldRunUsageBackfill(runtime) {
 		_ = s.backfillLocalUsageFromRollouts()
 	}
+	// Gemini CLI and OpenCode own their historical usage outside usage.json.
+	// Read the native catalog so the usage panel reflects completed sessions even
+	// when the streaming event did not include a usage payload.
+	if runtime == "gemini" || runtime == "opencode" {
+		// Native usage is account-wide. Session/catalog lists remain project-scoped,
+		// but an empty active workspace must not make the usage panel look empty.
+		if native := s.readExternalUsageCached(runtime, ""); native != nil {
+			return native, nil
+		}
+	}
 
 	if local := s.localUsageSummaryFor(runtime); !localUsageResponseEmpty(local) {
 		return local, nil
@@ -2385,6 +2439,79 @@ func (s *AppService) ReadAccountUsage() (map[string]any, error) {
 
 	// Empty object => frontend normalizeAccountUsage(null); do not return fake zeros.
 	return map[string]any{"runtime": runtime, "source": "local"}, nil
+}
+
+func (s *AppService) readExternalUsageCached(runtimeName, workspace string) map[string]any {
+	runtimeName = normalizeExternalRuntime(runtimeName)
+	if runtimeName == "" {
+		return nil
+	}
+	workspace = strings.TrimSpace(workspace)
+	cacheKey := runtimeName + "\x00" + strings.ToLower(filepath.Clean(workspace))
+	now := time.Now()
+	s.usageMu.Lock()
+	if s.externalUsageCache != nil {
+		cached := s.externalUsageCache[cacheKey]
+		cachedAt := s.externalUsageCachedAt[cacheKey]
+		if cached != nil && now.Sub(cachedAt) < 30*time.Second {
+			s.usageMu.Unlock()
+			return cached
+		}
+	}
+	s.usageMu.Unlock()
+
+	home, _ := os.UserHomeDir()
+	var usage ExternalUsageSummary
+	switch runtimeName {
+	case "gemini":
+		usage = collectGeminiUsage(filepath.Join(home, ".gemini"), workspace)
+	case "opencode":
+		usage = collectOpenCodeUsage(home, workspace, 30)
+	default:
+		return nil
+	}
+	response := externalUsageResponse(runtimeName, usage)
+	if response == nil {
+		return nil
+	}
+	s.usageMu.Lock()
+	if s.externalUsageCache == nil {
+		s.externalUsageCache = make(map[string]map[string]any)
+		s.externalUsageCachedAt = make(map[string]time.Time)
+	}
+	s.externalUsageCache[cacheKey] = response
+	s.externalUsageCachedAt[cacheKey] = now
+	s.usageMu.Unlock()
+	return response
+}
+
+func externalUsageResponse(runtime string, usage ExternalUsageSummary) map[string]any {
+	if usage.TotalTokens <= 0 && usage.InputTokens <= 0 && usage.OutputTokens <= 0 && usage.CachedTokens <= 0 && usage.Reasoning <= 0 {
+		return nil
+	}
+	total := usage.TotalTokens
+	if total <= 0 {
+		total = usage.InputTokens + usage.CachedTokens + usage.OutputTokens + usage.Reasoning
+	}
+	// Native catalogs expose a range total rather than per-day buckets. Keep the
+	// exact lifetime breakdown and leave the chart empty instead of pretending
+	// the whole range happened today.
+	return map[string]any{
+		"runtime": runtime,
+		"source":  usage.Source,
+		"summary": map[string]any{
+			"lifetimeTokens":            total,
+			"lifetimeInputTokens":       usage.InputTokens,
+			"lifetimeCachedInputTokens": usage.CachedTokens,
+			"lifetimeOutputTokens":      usage.OutputTokens,
+			"lifetimeReasoningTokens":   usage.Reasoning,
+			"peakDailyTokens":           nil,
+			"currentStreakDays":         nil,
+			"longestStreakDays":         nil,
+			"longestRunningTurnSec":     nil,
+		},
+		"dailyUsageBuckets": []any{},
+	}
 }
 
 // RecordLocalTurnUsage lets the frontend persist per-turn totals (belt-and-suspenders with event hook).
@@ -2763,9 +2890,13 @@ func defaultSettings() UserSettings {
 		ClaudePermissionMode:     "acceptEdits",
 		GeminiModel:              "gemini-2.5-pro",
 		GeminiEffort:             "auto",
+		GeminiSandbox:            "workspace-write",
+		GeminiApprovalPolicy:     "on-request",
 		GeminiCustomModels:       []string{},
 		OpenCodeModel:            "anthropic/claude-sonnet-4-6",
 		OpenCodeEffort:           "high",
+		OpenCodeSandbox:          "workspace-write",
+		OpenCodeApprovalPolicy:   "on-request",
 		OpenCodeProvider:         "",
 		OpenCodeCustomModels:     []string{},
 		Model:                    defaultCodexModel,
@@ -2879,11 +3010,23 @@ func readSettings(path string) (UserSettings, error) {
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
 	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
 	settings.GeminiCustomModels = sanitizeCustomModels(settings.GeminiCustomModels)
+	if !isAllowed(settings.GeminiSandbox, "read-only", "workspace-write", "danger-full-access") {
+		settings.GeminiSandbox = "workspace-write"
+	}
+	if !isAllowed(settings.GeminiApprovalPolicy, "on-request", "never") {
+		settings.GeminiApprovalPolicy = "on-request"
+	}
 	if settings.GeminiEffort == "" {
 		settings.GeminiEffort = "auto"
 	}
 	settings.OpenCodeModel = sanitizeShortText(settings.OpenCodeModel, 160)
 	settings.OpenCodeEffort = sanitizeShortText(settings.OpenCodeEffort, 32)
+	if !isAllowed(settings.OpenCodeSandbox, "read-only", "workspace-write", "danger-full-access") {
+		settings.OpenCodeSandbox = "workspace-write"
+	}
+	if !isAllowed(settings.OpenCodeApprovalPolicy, "on-request", "never") {
+		settings.OpenCodeApprovalPolicy = "on-request"
+	}
 	settings.OpenCodeProvider = sanitizeShortText(settings.OpenCodeProvider, 160)
 	settings.OpenCodeCustomModels = sanitizeCustomModels(settings.OpenCodeCustomModels)
 	if settings.OpenCodeEffort == "" {
@@ -3586,6 +3729,38 @@ func (s *AppService) loadBackendThread(backendID, workspace string, settings Use
 		return nil, err
 	}
 	s.rememberThread(backendID, cleanWorkspace)
+	return result, nil
+}
+
+// readBackendThreadSnapshot loads history without registering or resuming the
+// thread in the app-server. It is used only for display; SendMessage owns the
+// stateful resume needed before turn/start.
+func (s *AppService) readBackendThreadSnapshot(backendID, workspace string) (map[string]any, error) {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return nil, errors.New("thread id is required")
+	}
+	cleanWorkspace, err := validateWorkspace(workspace)
+	if err != nil {
+		return nil, err
+	}
+	result, err := s.call("thread/read", map[string]any{
+		"threadId":     backendID,
+		"includeTurns": true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	thread, ok := result["thread"].(map[string]any)
+	if !ok {
+		return nil, errors.New("Codex returned an invalid thread snapshot")
+	}
+	if _, ok := thread["turns"]; !ok {
+		return nil, errors.New("Codex thread snapshot did not include history")
+	}
+	if threadWorkspace, _ := thread["cwd"].(string); strings.TrimSpace(threadWorkspace) != "" && !samePath(threadWorkspace, cleanWorkspace) {
+		return nil, errors.New("this thread belongs to a different workspace")
+	}
 	return result, nil
 }
 

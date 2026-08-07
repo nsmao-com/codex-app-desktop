@@ -136,11 +136,18 @@ func normalizeExternalRuntime(runtime string) string {
 }
 
 func (s *AppService) ReadExternalRuntimeCatalog(runtime, workspace string) (ExternalRuntimeCatalog, error) {
+	return s.readExternalRuntimeCatalog(runtime, workspace, true)
+}
+
+// readExternalRuntimeCatalog lets callers explicitly control whether an empty
+// workspace should fall back to the active project. The public catalog keeps
+// that fallback for project-scoped history/configuration.
+func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCurrentWorkspace bool) (ExternalRuntimeCatalog, error) {
 	runtime = normalizeExternalRuntime(runtime)
 	if runtime == "" {
 		return ExternalRuntimeCatalog{}, errors.New("unsupported external runtime")
 	}
-	if strings.TrimSpace(workspace) == "" {
+	if useCurrentWorkspace && strings.TrimSpace(workspace) == "" {
 		workspace = s.currentRuntimeWorkspace(runtime)
 	}
 	workspace = strings.TrimSpace(workspace)
@@ -187,7 +194,7 @@ func (s *AppService) ReadExternalRuntimeCatalog(runtime, workspace string) (Exte
 		catalog.GlobalInstructions = readInstructionFile(filepath.Join(catalog.NativeHome, "AGENTS.md"), "opencode-global", "OpenCode global AGENTS.md")
 		catalog.ProjectInstructions = readOpenCodeProjectInstructions(workspace)
 		catalog.Sessions = listOpenCodeNativeSessions(workspace)
-		catalog.Usage = collectOpenCodeUsage(workspace, 30)
+		catalog.Usage = collectOpenCodeUsage(home, workspace, 30)
 		catalog.ReadOnlyNotice = "provider、model、MCP、指令、历史和 usage 均来自 OpenCode 原生配置/数据库。"
 	}
 	return catalog, nil
@@ -810,10 +817,12 @@ func listOpenCodeNativeSessions(workspace string) []ExternalSessionView {
 	}
 	query += " order by time_updated desc limit 100"
 	executable := findCommand(commandCandidates("opencode"))
-	if executable == "" {
-		return []ExternalSessionView{}
+	output := ""
+	home, _ := os.UserHomeDir()
+	output, err := runOpenCodeDatabaseQuery(home, query)
+	if err != nil && executable != "" {
+		output, err = runExternalCLIOutput(executable, nil, []string{"db", query, "--format", "json"}, workspace, 5*time.Second)
 	}
-	output, err := runExternalCLIOutput(executable, nil, []string{"db", query, "--format", "json"}, workspace, 5*time.Second)
 	if err != nil {
 		return []ExternalSessionView{}
 	}
@@ -836,7 +845,7 @@ func listOpenCodeNativeSessions(workspace string) []ExternalSessionView {
 	return result
 }
 
-func collectOpenCodeUsage(workspace string, days int64) ExternalUsageSummary {
+func collectOpenCodeUsage(home, workspace string, days int64) ExternalUsageSummary {
 	result := ExternalUsageSummary{RangeDays: days, Source: "OpenCode session database", ByModel: []ExternalUsageModelView{}}
 	where := ""
 	if workspace != "" {
@@ -851,12 +860,12 @@ func collectOpenCodeUsage(workspace string, days int64) ExternalUsageSummary {
 			where += " and " + condition
 		}
 	}
-	executable := findCommand(commandCandidates("opencode"))
-	if executable == "" {
-		return result
-	}
 	query := "select count(*) as sessions, coalesce(sum(tokens_input),0) as inputTokens, coalesce(sum(tokens_output),0) as outputTokens, coalesce(sum(tokens_reasoning),0) as reasoningTokens, coalesce(sum(tokens_cache_read),0) as cachedTokens, coalesce(sum(cost),0) as cost from session" + where
-	output, err := runExternalCLIOutput(executable, nil, []string{"db", query, "--format", "json"}, workspace, 5*time.Second)
+	executable := findCommand(commandCandidates("opencode"))
+	output, err := runOpenCodeDatabaseQuery(home, query)
+	if err != nil && executable != "" {
+		output, err = runExternalCLIOutput(executable, nil, []string{"db", query, "--format", "json"}, workspace, 5*time.Second)
+	}
 	if err == nil {
 		var rows []map[string]any
 		if json.Unmarshal([]byte(output), &rows) == nil && len(rows) > 0 {
@@ -866,17 +875,21 @@ func collectOpenCodeUsage(workspace string, days int64) ExternalUsageSummary {
 			result.OutputTokens = int64FromAny(row["outputTokens"])
 			result.Reasoning = int64FromAny(row["reasoningTokens"])
 			result.CachedTokens = int64FromAny(row["cachedTokens"])
-			result.TotalTokens = result.InputTokens + result.OutputTokens + result.Reasoning
+			result.TotalTokens = result.InputTokens + result.CachedTokens + result.OutputTokens + result.Reasoning
 			result.Cost = float64FromAny(row["cost"])
 		}
 	}
 	modelQuery := "select model, count(*) as sessions, coalesce(sum(tokens_input),0) as inputTokens, coalesce(sum(tokens_output),0) as outputTokens, coalesce(sum(tokens_reasoning),0) as reasoningTokens, coalesce(sum(tokens_cache_read),0) as cachedTokens, coalesce(sum(cost),0) as cost from session" + where + " group by model order by sessions desc"
-	if output, err := runExternalCLIOutput(executable, nil, []string{"db", modelQuery, "--format", "json"}, workspace, 5*time.Second); err == nil {
+	modelOutput, modelErr := runOpenCodeDatabaseQuery(home, modelQuery)
+	if modelErr != nil && executable != "" {
+		modelOutput, modelErr = runExternalCLIOutput(executable, nil, []string{"db", modelQuery, "--format", "json"}, workspace, 5*time.Second)
+	}
+	if modelErr == nil {
 		var rows []map[string]any
-		if json.Unmarshal([]byte(output), &rows) == nil {
+		if json.Unmarshal([]byte(modelOutput), &rows) == nil {
 			for _, row := range rows {
 				item := ExternalUsageModelView{Model: stringFromAny(row["model"]), Sessions: int64FromAny(row["sessions"]), InputTokens: int64FromAny(row["inputTokens"]), OutputTokens: int64FromAny(row["outputTokens"]), Reasoning: int64FromAny(row["reasoningTokens"]), CachedTokens: int64FromAny(row["cachedTokens"]), Cost: float64FromAny(row["cost"])}
-				item.TotalTokens = item.InputTokens + item.OutputTokens + item.Reasoning
+				item.TotalTokens = item.InputTokens + item.CachedTokens + item.OutputTokens + item.Reasoning
 				if parsed, ok := mapFromJSON(item.Model); ok {
 					item.Provider = stringFromAny(parsed["providerID"])
 				}
@@ -885,6 +898,76 @@ func collectOpenCodeUsage(workspace string, days int64) ExternalUsageSummary {
 		}
 	}
 	return result
+}
+
+func openCodeDatabasePaths(home string) []string {
+	paths := make([]string, 0, 6)
+	appendPath := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		for _, existing := range paths {
+			if samePath(existing, path) {
+				return
+			}
+		}
+		paths = append(paths, path)
+	}
+	if dataDir := strings.TrimSpace(os.Getenv("OPENCODE_DATA_DIR")); dataDir != "" {
+		appendPath(filepath.Join(dataDir, "opencode.db"))
+	}
+	if dataHome := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); dataHome != "" {
+		appendPath(filepath.Join(dataHome, "opencode", "opencode.db"))
+	}
+	if local := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); local != "" {
+		appendPath(filepath.Join(local, "opencode", "opencode.db"))
+	}
+	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+		appendPath(filepath.Join(appData, "opencode", "opencode.db"))
+	}
+	appendPath(filepath.Join(home, ".local", "share", "opencode", "opencode.db"))
+	appendPath(filepath.Join(home, ".config", "opencode", "opencode.db"))
+	return paths
+}
+
+// runOpenCodeDatabaseQuery handles installations where the native opencode
+// executable is missing or its postinstall wrapper is broken. OpenCode stores
+// usage in SQLite; Node 22+ ships node:sqlite and is already a runtime
+// prerequisite for the npm/pnpm distribution.
+func runOpenCodeDatabaseQuery(home, query string) (string, error) {
+	var databasePath string
+	for _, candidate := range openCodeDatabasePaths(home) {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			databasePath = candidate
+			break
+		}
+	}
+	if databasePath == "" {
+		return "", errors.New("OpenCode database was not found")
+	}
+	node := findCommand(commandCandidates("node"))
+	if node == "" {
+		return "", errors.New("Node.js was not found for OpenCode database access")
+	}
+	pathJSON, _ := json.Marshal(databasePath)
+	queryJSON, _ := json.Marshal(query)
+	script := fmt.Sprintf("const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(%s,{readOnly:true});const rows=db.prepare(%s).all();console.log(JSON.stringify(rows,(_,v)=>typeof v==='bigint'?Number(v):v));", pathJSON, queryJSON)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	commandPath, commandArgs, err := providerCommand(node, []string{"--no-warnings", "-e", script})
+	if err != nil {
+		return "", err
+	}
+	command := execCommandContext(ctx, commandPath, commandArgs...)
+	output, err := runManagedCombinedOutput(ctx, command)
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if err != nil {
+		return string(output), err
+	}
+	return string(output), nil
 }
 
 func listGeminiNativeSessions(home, workspace string) []ExternalSessionView {
@@ -1030,8 +1113,8 @@ func collectGeminiUsage(home, workspace string) ExternalUsageSummary {
 				if kind == "user" || kind == "gemini" {
 					result.Messages++
 				}
-				var input, output, cached, reasoning int64
-				collectNativeUsage(value, &input, &output, &cached, &reasoning)
+				var input, output, cached, reasoning, reportedTotal int64
+				collectNativeUsage(value, &input, &output, &cached, &reasoning, &reportedTotal)
 				if input == 0 && output == 0 && cached == 0 && reasoning == 0 {
 					continue
 				}
@@ -1039,7 +1122,11 @@ func collectGeminiUsage(home, workspace string) ExternalUsageSummary {
 				result.OutputTokens += output
 				result.CachedTokens += cached
 				result.Reasoning += reasoning
-				result.TotalTokens += input + output + reasoning
+				total := input + cached + output + reasoning
+				if reportedTotal > 0 {
+					total = reportedTotal
+				}
+				result.TotalTokens += total
 				model := strings.TrimSpace(firstMapString(value, "model", "modelVersion"))
 				if model == "" {
 					model = "gemini"
@@ -1053,7 +1140,7 @@ func collectGeminiUsage(home, workspace string) ExternalUsageSummary {
 				item.OutputTokens += output
 				item.CachedTokens += cached
 				item.Reasoning += reasoning
-				item.TotalTokens += input + output + reasoning
+				item.TotalTokens += total
 			}
 		}
 	}
@@ -1076,7 +1163,7 @@ func firstGeminiSessionMeta(payload []byte) map[string]any {
 	return meta
 }
 
-func collectNativeUsage(value any, input, output, cached, reasoning *int64) {
+func collectNativeUsage(value any, input, output, cached, reasoning, total *int64) {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, nested := range typed {
@@ -1108,12 +1195,16 @@ func collectNativeUsage(value any, input, output, cached, reasoning *int64) {
 				if number > 0 {
 					*reasoning += number
 				}
+			case "totaltokencount", "totaltokens":
+				if number > *total {
+					*total = number
+				}
 			}
-			collectNativeUsage(nested, input, output, cached, reasoning)
+			collectNativeUsage(nested, input, output, cached, reasoning, total)
 		}
 	case []any:
 		for _, nested := range typed {
-			collectNativeUsage(nested, input, output, cached, reasoning)
+			collectNativeUsage(nested, input, output, cached, reasoning, total)
 		}
 	}
 }
@@ -1184,7 +1275,10 @@ func runExternalCLIOutput(executable string, env []string, args []string, dir st
 	if len(env) > 0 {
 		command.Env = append(os.Environ(), env...)
 	}
-	output, err := command.CombinedOutput()
+	// External catalog/history probes must never create a visible console on
+	// Windows. Keep the same managed process wrapper used by streaming turns so
+	// PowerShell/npm shims inherit CREATE_NO_WINDOW and are cleaned up on timeout.
+	output, err := runManagedCombinedOutput(ctx, command)
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}

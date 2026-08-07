@@ -2,7 +2,6 @@
 import {
   Archive,
   Blocks,
-  Bot,
   ChevronDown,
   ChevronRight,
   Coins,
@@ -504,8 +503,8 @@ function providerIcon(thread: ThreadSummary): Component {
   const provider = `${thread.modelProvider} ${thread.model}`.toLocaleLowerCase()
   if (provider.includes('opencode')) return OpenCodeIcon
   if (provider.includes('google') || provider.includes('gemini')) return GeminiIcon
-  if (provider.includes('anthropic') || provider.includes('claude')) return Bot
-  if (provider.includes('xai') || provider.includes('grok')) return Blocks
+  if (provider.includes('anthropic') || provider.includes('claude')) return ClaudeIcon
+  if (provider.includes('xai') || provider.includes('grok')) return GrokIcon
   return OpenAIIcon
 }
 
@@ -1938,22 +1937,127 @@ function formatGrokUpdated(value?: number | null): string {
             </PopoverContent>
           </Popover>
         </div>
-        <div
-          v-else-if="appStore.isGeminiMode || appStore.isOpenCodeMode"
-          class="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1"
-        >
-          <span class="grid size-6 shrink-0 place-items-center rounded-full border border-border/60 bg-panel/80">
-            <GeminiIcon v-if="appStore.isGeminiMode" :size="13" class="opacity-80" />
-            <OpenCodeIcon v-else :size="13" class="opacity-80" />
-          </span>
-          <div class="min-w-0 flex-1">
-            <p class="truncate text-[11px] font-medium">{{ appStore.isGeminiMode ? 'Gemini CLI' : 'OpenCode' }}</p>
-            <p class="truncate text-[9px] text-muted-foreground">
-              {{ activeExternalProvider?.runtimeReady
-                ? (activeExternalProvider.version || t('settings.runtimeReady'))
-                : t('settings.runtimeMissing') }}
-            </p>
-          </div>
+        <div v-else-if="appStore.isGeminiMode || appStore.isOpenCodeMode" class="flex min-w-0 flex-1 items-center gap-1">
+          <Popover v-model:open="usagePopoverOpen">
+            <PopoverTrigger as-child>
+              <button
+                type="button"
+                class="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-muted/50"
+                :aria-label="t('sidebar.usageHint')"
+              >
+                <span class="grid size-6 shrink-0 place-items-center rounded-full border border-border/60 bg-panel/80">
+                  <GeminiIcon v-if="appStore.isGeminiMode" :size="13" class="opacity-80" />
+                  <OpenCodeIcon v-else :size="13" class="opacity-80" />
+                </span>
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-[11px] font-medium">{{ appStore.isGeminiMode ? 'Gemini CLI' : 'OpenCode' }}</p>
+                  <p class="truncate text-[9px] text-muted-foreground">
+                    <span v-if="appStore.accountUsage?.lifetimeTokens != null">
+                      {{ t('sidebar.usageLifetimeShort', { count: formatTokenCount(appStore.accountUsage.lifetimeTokens) }) }}
+                    </span>
+                    <span v-else>
+                      {{ activeExternalProvider?.runtimeReady
+                        ? (activeExternalProvider.version || t('settings.runtimeReady'))
+                        : t('settings.runtimeMissing') }}
+                    </span>
+                  </p>
+                </div>
+                <Coins :size="12" class="shrink-0 text-muted-foreground" />
+              </button>
+            </PopoverTrigger>
+            <PopoverContent side="top" align="start" class="w-80 p-3">
+              <div class="mb-2 flex items-start justify-between gap-2">
+                <div class="min-w-0">
+                  <p class="text-xs font-semibold">{{ t('sidebar.usageTitle') }}</p>
+                  <p class="mt-0.5 text-[10px] text-muted-foreground">{{ usageSubtitle }}</p>
+                </div>
+                <LoaderCircle v-if="usageLoading" :size="12" class="mt-0.5 animate-spin text-muted-foreground" />
+              </div>
+
+              <div class="mb-3 flex flex-wrap gap-1">
+                <button
+                  v-for="range in usageRanges"
+                  :key="range.days"
+                  type="button"
+                  class="h-6 rounded-md px-2 text-[10px] transition-colors"
+                  :class="usageRangeDays === range.days
+                    ? 'bg-foreground text-background'
+                    : 'bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground'"
+                  @click="usageRangeDays = range.days"
+                >
+                  {{ range.label }}
+                </button>
+              </div>
+
+              <div class="mb-3 rounded-lg border bg-muted/30 px-3 py-2.5">
+                <p class="text-[10px] text-muted-foreground">{{ t('sidebar.usageRangeTotal') }}</p>
+                <p class="mt-0.5 text-lg font-semibold tabular-nums tracking-tight">
+                  {{ usageRangeView.dayCount ? formatTokenCount(usageRangeView.totalTokens) : '—' }}
+                  <span class="text-[11px] font-normal text-muted-foreground">tokens</span>
+                </p>
+                <p class="mt-1 text-[10px] text-muted-foreground">
+                  {{ t('sidebar.usageRangeMeta', {
+                    days: usageRangeView.days,
+                    avg: formatTokenCount(usageRangeView.averageTokens),
+                    count: usageRangeView.dayCount,
+                  }) }}
+                </p>
+              </div>
+
+              <div v-if="usageRangeView.buckets.length" class="mb-3 max-h-36 space-y-1.5 overflow-y-auto pr-0.5">
+                <div
+                  v-for="bucket in usageRangeView.buckets"
+                  :key="bucket.startDate"
+                  class="grid grid-cols-[64px_1fr_40px] items-center gap-2 text-[10px]"
+                >
+                  <span class="truncate text-muted-foreground">{{ formatUsageDateLabel(bucket.startDate, usageLocale) }}</span>
+                  <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div
+                      class="h-full rounded-full bg-foreground/70"
+                      :style="{ width: `${usageRangeView.maxTokens ? Math.max(6, (bucket.tokens / usageRangeView.maxTokens) * 100) : 0}%` }"
+                    />
+                  </div>
+                  <span class="text-right tabular-nums text-foreground/80">{{ formatTokenCount(bucket.tokens) }}</span>
+                </div>
+              </div>
+              <p v-else class="mb-3 text-[11px] text-muted-foreground">
+                {{ t('sidebar.usageEmpty') }}
+              </p>
+
+              <div class="mb-2">
+                <p class="mb-1.5 text-[10px] font-medium text-muted-foreground">{{ t('sidebar.usageBreakdown') }}</p>
+                <div class="grid grid-cols-2 gap-2 text-[10px]">
+                  <div class="rounded-md border px-2 py-1.5">
+                    <p class="text-muted-foreground">{{ t('sidebar.usageInput') }}</p>
+                    <p class="mt-0.5 font-medium tabular-nums">{{ formatTokenCount(appStore.accountUsage?.lifetimeInputTokens) }}</p>
+                  </div>
+                  <div class="rounded-md border px-2 py-1.5">
+                    <p class="text-muted-foreground">{{ t('sidebar.usageCached') }}</p>
+                    <p class="mt-0.5 font-medium tabular-nums">{{ formatTokenCount(appStore.accountUsage?.lifetimeCachedInputTokens) }}</p>
+                  </div>
+                  <div class="rounded-md border px-2 py-1.5">
+                    <p class="text-muted-foreground">{{ t('sidebar.usageOutput') }}</p>
+                    <p class="mt-0.5 font-medium tabular-nums">{{ formatTokenCount(appStore.accountUsage?.lifetimeOutputTokens) }}</p>
+                  </div>
+                  <div class="rounded-md border px-2 py-1.5">
+                    <p class="text-muted-foreground">{{ t('sidebar.usageReasoning') }}</p>
+                    <p class="mt-0.5 font-medium tabular-nums">{{ formatTokenCount(appStore.accountUsage?.lifetimeReasoningTokens) }}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-2 gap-2 text-[10px]">
+                <div class="rounded-md border px-2 py-1.5">
+                  <p class="text-muted-foreground">{{ t('inspector.lifetimeTokens') }}</p>
+                  <p class="mt-0.5 font-medium tabular-nums">{{ formatTokenCount(appStore.accountUsage?.lifetimeTokens) }}</p>
+                </div>
+                <div class="rounded-md border px-2 py-1.5">
+                  <p class="text-muted-foreground">{{ t('sidebar.usagePeakDaily') }}</p>
+                  <p class="mt-0.5 font-medium tabular-nums">{{ formatTokenCount(appStore.accountUsage?.peakDailyTokens) }}</p>
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
         </div>
         <Button
           v-else-if="!appStore.account.authenticated"

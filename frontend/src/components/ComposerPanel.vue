@@ -147,7 +147,29 @@ const slashCommands = computed<SlashCommand[]>(() => {
       },
     ]
   }
-  if (appStore.isClaudeMode || appStore.isGeminiMode || appStore.isOpenCodeMode) {
+  if (appStore.isClaudeMode) {
+    return [
+      {
+        id: 'archive',
+        label: '/archive',
+        description: t('slash.archive'),
+        run: () => claudeStore.archiveActiveSession(),
+      },
+      {
+        id: 'rename',
+        label: '/rename',
+        description: t('slash.rename'),
+        run: () => claudeStore.renameActiveSession(),
+      },
+      {
+        id: 'delete',
+        label: '/delete',
+        description: t('slash.delete'),
+        run: () => claudeStore.deleteActiveSession(),
+      },
+    ]
+  }
+  if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
     return [
       {
         id: 'compact',
@@ -337,6 +359,41 @@ const sessionLocked = computed(() => Boolean(
 ))
 const grokProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'grok'))
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
+const externalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+const externalModelCatalog = computed(() => {
+  const custom = appStore.isGeminiMode
+    ? (appStore.settings.geminiCustomModels ?? [])
+    : (appStore.settings.openCodeCustomModels ?? [])
+  const catalog = (externalProvider.value?.models ?? []).map((item) => ({
+    model: item.model,
+    displayName: item.displayName || formatModelLabel(item.model),
+    description: item.description || item.model,
+    isDefault: item.isDefault,
+    supportedReasoningEfforts: (externalProvider.value?.reasoningEfforts ?? []).map((effort) => ({
+      effort: effort.effort,
+      description: effort.description,
+    })),
+    serviceTiers: [],
+    defaultReasoningEffort: externalProvider.value?.reasoningEfforts?.find((effort) => effort.isDefault)?.effort
+      || (appStore.isGeminiMode ? 'auto' : 'high'),
+    defaultServiceTier: '',
+  }))
+  for (const model of custom) {
+    const id = model.trim()
+    if (!id || catalog.some((item) => item.model.toLocaleLowerCase() === id.toLocaleLowerCase())) continue
+    catalog.push({
+      model: id,
+      displayName: formatModelLabel(id),
+      description: id,
+      isDefault: false,
+      supportedReasoningEfforts: [],
+      serviceTiers: [],
+      defaultReasoningEffort: appStore.isGeminiMode ? 'auto' : 'high',
+      defaultServiceTier: '',
+    })
+  }
+  return catalog
+})
 const displayModel = computed(() => {
   if (appStore.isGrokMode) {
     return appStore.settings.grokBackend === 'api'
@@ -361,7 +418,12 @@ const displayEffort = computed(() => {
     ? (codexStore.activeThread?.effort || appStore.settings.effort)
     : appStore.settings.effort
 })
-const selectedModel = computed(() => appStore.models.find((model) => model.model === displayModel.value))
+const selectedModel = computed(() => {
+  if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
+    return externalModelCatalog.value.find((model) => model.model === displayModel.value)
+  }
+  return appStore.models.find((model) => model.model === displayModel.value)
+})
 const selectableModels = computed(() => {
   if (appStore.isGrokMode) {
     return modelsForGrokRuntime(grokProvider.value?.models ?? [], displayModel.value)
@@ -383,6 +445,9 @@ const selectableModels = computed(() => {
       { model: 'haiku', displayName: 'Claude Haiku', description: 'alias `haiku` → latest Haiku', isDefault: false },
       { model: 'fable', displayName: 'Claude Fable', description: 'alias `fable` → latest Fable', isDefault: false },
     ]
+  }
+  if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
+    return externalModelCatalog.value
   }
   return modelsForRuntime(appStore.models, appStore.settings.customModels ?? []) ?? []
 })
@@ -447,11 +512,19 @@ const permissionPreset = computed((): 'ask' | 'auto' | 'strict' => {
     ? appStore.settings.grokSandbox
     : appStore.isClaudeMode
       ? appStore.settings.claudeSandbox
+      : appStore.isGeminiMode
+        ? appStore.settings.geminiSandbox
+        : appStore.isOpenCodeMode
+          ? appStore.settings.openCodeSandbox
       : appStore.settings.sandbox
   const approval = appStore.isGrokMode
     ? appStore.settings.grokApprovalPolicy
     : appStore.isClaudeMode
       ? appStore.settings.claudeApprovalPolicy
+      : appStore.isGeminiMode
+        ? appStore.settings.geminiApprovalPolicy
+        : appStore.isOpenCodeMode
+          ? appStore.settings.openCodeApprovalPolicy
       : appStore.settings.approvalPolicy
   if (sandbox === 'danger-full-access' && approval === 'never') return 'auto'
   if (sandbox === 'read-only') return 'strict'
@@ -797,7 +870,7 @@ function onKeydown(event: KeyboardEvent): void {
     && (event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'End')
   ) resetSentHistoryNavigation()
   // Official Codex: Shift+Tab toggles plan mode.
-  if (event.key === 'Tab' && event.shiftKey) {
+  if (appStore.isCodexMode && event.key === 'Tab' && event.shiftKey) {
     event.preventDefault()
     void togglePlanMode()
     return
@@ -849,6 +922,7 @@ const collaborationMode = computed(() => {
 const isPlanMode = computed(() => collaborationMode.value === 'plan')
 
 async function togglePlanMode(): Promise<void> {
+  if (!appStore.isCodexMode) return
   await codexStore.setCollaborationMode(isPlanMode.value ? 'default' : 'plan')
 }
 
@@ -1231,6 +1305,16 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
     appStore.updateGrokPreferences(values)
     return
   }
+  if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
+    const prefix = appStore.isGeminiMode ? 'gemini' : 'openCode'
+    const values = mode === 'auto'
+      ? { [`${prefix}Sandbox`]: 'danger-full-access', [`${prefix}ApprovalPolicy`]: 'never' }
+      : mode === 'strict'
+        ? { [`${prefix}Sandbox`]: 'read-only', [`${prefix}ApprovalPolicy`]: 'on-request' }
+        : { [`${prefix}Sandbox`]: 'workspace-write', [`${prefix}ApprovalPolicy`]: 'on-request' }
+    appStore.patchSettings(values as any)
+    return
+  }
   const values = mode === 'auto'
     ? { sandbox: 'danger-full-access', approvalPolicy: 'never' }
     : mode === 'strict'
@@ -1559,7 +1643,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <SimpleTooltip :content="t('chat.planModeToggleHint')">
+          <SimpleTooltip v-if="appStore.isCodexMode" :content="t('chat.planModeToggleHint')">
             <Button
               type="button"
               variant="ghost"

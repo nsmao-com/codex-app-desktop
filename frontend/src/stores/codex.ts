@@ -81,9 +81,11 @@ interface ThreadHistoryState {
   turnOffset: number
   hasEarlier: boolean
   loadingEarlier: boolean
+  loadedUpdatedAt: number
 }
 
 type CollaborationMode = 'default' | 'plan'
+type LocalUsageRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
 
 const PENDING_SUBMISSION_ERROR_GRACE_MS = 750
 
@@ -120,6 +122,10 @@ export const useCodexStore = defineStore('codex', () => {
   const projectThreads = shallowRef<Record<string, ThreadSummary[]>>({})
   const projectErrors = shallowRef<Record<string, string>>({})
   const loadingProjects = shallowRef<string[]>([])
+  // Share in-flight project list reads between the background recent-project
+  // scan and an explicit folder click. Without this, a click can observe the
+  // same path as "loading" and return before its sessions are available.
+  const projectLoadPromises = new Map<string, Promise<ThreadSummary[] | null>>()
   const threadSearch = shallowRef('')
   const activeThreadId = shallowRef('')
   const activeThread = shallowRef<ThreadSummary | null>(null)
@@ -176,7 +182,12 @@ export const useCodexStore = defineStore('codex', () => {
   const pendingDiffs = new Map<string, { threadId: string; turnId: string; diff: string }>()
   /** turnId → threadId for complete eviction of diffsByTurn. */
   const diffTurnOwners = new Map<string, string>()
-  const pendingTokenUsage = new Map<string, { threadId: string; turnId: string; usage: ReturnType<typeof normalizeThreadTokenUsage> }>()
+  const pendingTokenUsage = new Map<string, {
+    threadId: string
+    turnId: string
+    runtime: LocalUsageRuntime | ''
+    usage: ReturnType<typeof normalizeThreadTokenUsage>
+  }>()
   const threadModelIdentity: Record<string, ThreadModelIdentity> = loadThreadModelIdentity()
 
   const isReady = computed(() => {
@@ -251,7 +262,7 @@ export const useCodexStore = defineStore('codex', () => {
       threads: sortThreadsByPin(
         sameWorkspace(path, appStore.settings.workspace)
           ? threads.value
-          : projectThreads.value[path] ?? [],
+          : projectThreadsForPath(path) ?? [],
       ),
     }))
   })
@@ -308,6 +319,7 @@ export const useCodexStore = defineStore('codex', () => {
     completedTurns.clear()
     completedTurnStatus.clear()
     loadedThreadIDs.clear()
+    projectLoadPromises.clear()
   }
 
   function trackedTimeout(callback: () => void, delay: number): number {
@@ -418,17 +430,20 @@ export const useCodexStore = defineStore('codex', () => {
 
   async function loadThreads(path = appStore.settings.workspace): Promise<void> {
     const requestedPath = path
+    const requestedRuntime = appStore.activeRuntime
     if (!requestedPath) return
     try {
-      const [response, archivedResponse] = await Promise.all([
-        backend.ListWorkspaceThreads(requestedPath, ''),
+      const [list, archivedResponse] = await Promise.all([
+        loadProjectThreads(requestedPath, sameWorkspace(requestedPath, appStore.settings.workspace)),
         sameWorkspace(requestedPath, appStore.settings.workspace)
           ? backend.ListArchivedThreads('').catch(() => ({ data: [] }))
           : Promise.resolve({ data: [] }),
       ])
-      const list = normalizeThreadList(asRecord(response).data)
+      // A runtime switch can happen while the native history request is in
+      // flight. Never let the old runtime overwrite the newly selected list.
+      if (requestedRuntime !== appStore.activeRuntime) return
+      if (list === null) return
       const archived = normalizeThreadList(asRecord(archivedResponse).data)
-      if (requestedPath) setProjectThreads(requestedPath, list)
       if (sameWorkspace(requestedPath, appStore.settings.workspace)) {
         threads.value = list
         archivedThreads.value = archived
@@ -447,30 +462,16 @@ export const useCodexStore = defineStore('codex', () => {
     const paths = appStore.orderWorkspacePaths('codex', uniqueWorkspacePaths(current, recent), recent)
       .filter((path) => !sameWorkspace(path, current))
     loadingProjects.value = paths
-    const results = await mapWithConcurrency(paths, 3, async (path) => {
-      try {
-        const response = await backend.ListWorkspaceThreads(path, '')
-        return { path, threads: normalizeThreadList(asRecord(response).data), error: '' }
-      } catch (error) {
-        return { path, threads: null, error: errorMessage(error) }
-      }
-    })
+    await mapWithConcurrency(paths, 3, (path) => loadProjectThreads(path))
     if (sequence === projectLoadSequence) {
-      const nextThreads = { ...projectThreads.value }
-      const nextErrors = { ...projectErrors.value }
-      for (const result of results) {
-        if (result.threads) nextThreads[result.path] = result.threads
-        if (result.error) nextErrors[result.path] = result.error
-        else delete nextErrors[result.path]
-      }
-      projectThreads.value = nextThreads
-      projectErrors.value = nextErrors
-      loadingProjects.value = []
+      loadingProjects.value = loadingProjects.value.filter((loadingPath) =>
+        !paths.some((path) => sameWorkspace(path, loadingPath)),
+      )
     }
   }
 
   async function reloadProject(path: string): Promise<void> {
-    if (!path || loadingProjects.value.some((item) => sameWorkspace(item, path))) return
+    if (!path) return
     if (sameWorkspace(path, appStore.settings.workspace)) {
       try {
         await loadThreads()
@@ -479,38 +480,74 @@ export const useCodexStore = defineStore('codex', () => {
       }
       return
     }
+    await loadProjectThreads(path, true)
+  }
 
-    loadingProjects.value = [...loadingProjects.value, path]
-    const nextErrors = { ...projectErrors.value }
-    delete nextErrors[path]
-    projectErrors.value = nextErrors
+  async function loadProjectThreads(path: string, notifyOnError = false): Promise<ThreadSummary[] | null> {
+    if (!path) return null
+    const key = workspaceKey(path)
+    const inFlight = projectLoadPromises.get(key)
+    if (inFlight) {
+      const result = await inFlight
+      if (result === null && notifyOnError) notifyProjectLoadError(path)
+      return result
+    }
+
+    const request = (async (): Promise<ThreadSummary[] | null> => {
+      loadingProjects.value = loadingProjects.value.some((item) => sameWorkspace(item, path))
+        ? loadingProjects.value
+        : [...loadingProjects.value, path]
+      const nextErrors = { ...projectErrors.value }
+      delete nextErrors[key]
+      delete nextErrors[path]
+      projectErrors.value = nextErrors
+      try {
+        const response = await backend.ListWorkspaceThreads(path, '')
+        const list = normalizeThreadList(asRecord(response).data)
+        setProjectThreads(path, list)
+        return list
+      } catch (error) {
+        const message = errorMessage(error)
+        projectErrors.value = { ...projectErrors.value, [path]: message }
+        if (notifyOnError) notifyProjectLoadError(path, message)
+        return null
+      } finally {
+        loadingProjects.value = loadingProjects.value.filter((item) => !sameWorkspace(item, path))
+      }
+    })()
+    projectLoadPromises.set(key, request)
     try {
-      const response = await backend.ListWorkspaceThreads(path, '')
-      setProjectThreads(path, normalizeThreadList(asRecord(response).data))
-    } catch (error) {
-      const message = errorMessage(error)
-      projectErrors.value = { ...projectErrors.value, [path]: message }
-      notify('error', translate('sidebar.projectLoadFailed'), message, {
-        label: translate('sidebar.retryProject'),
-        onClick: () => reloadProject(path),
-      })
+      return await request
     } finally {
-      loadingProjects.value = loadingProjects.value.filter((item) => !sameWorkspace(item, path))
+      if (projectLoadPromises.get(key) === request) projectLoadPromises.delete(key)
     }
   }
 
+  function notifyProjectLoadError(path: string, detail = ''): void {
+    const message = detail
+      || projectErrors.value[path]
+      || Object.entries(projectErrors.value).find(([projectPath]) => sameWorkspace(projectPath, path))?.[1]
+      || translate('notifications.taskOpenFailed')
+    notify('error', translate('sidebar.projectLoadFailed'), message, {
+      label: translate('sidebar.retryProject'),
+      onClick: () => reloadProject(path),
+    })
+  }
+
   async function loadModels(): Promise<void> {
-    if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
-      let provider = appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime)
+    const requestedRuntime = appStore.activeRuntime
+    if (requestedRuntime === 'gemini' || requestedRuntime === 'opencode') {
+      let provider = appStore.agentProviders.find((item) => item.kind === requestedRuntime)
       let catalog = provider?.models ?? []
       let nativeActiveProvider = ''
       try {
-        const nativeCatalog = await backend.ReadExternalRuntimeCatalog(appStore.activeRuntime, appStore.settings.workspace || '')
+        const nativeCatalog = await backend.ReadExternalRuntimeCatalog(requestedRuntime, appStore.settings.workspace || '')
+        if (requestedRuntime !== appStore.activeRuntime) return
         if (nativeCatalog.models?.length) catalog = nativeCatalog.models
         nativeActiveProvider = nativeCatalog.activeProvider || ''
-        if (provider && nativeCatalog.providers?.length) {
+        if (provider && nativeCatalog.models?.length) {
           const nextProviders = [...appStore.agentProviders]
-          const index = nextProviders.findIndex((item) => item.kind === appStore.activeRuntime)
+          const index = nextProviders.findIndex((item) => item.kind === requestedRuntime)
           if (index >= 0) {
             nextProviders[index] = { ...nextProviders[index], models: catalog }
             appStore.agentProviders = nextProviders
@@ -520,7 +557,8 @@ export const useCodexStore = defineStore('codex', () => {
       } catch {
         // Bootstrap catalog remains a usable offline fallback.
       }
-      const custom = appStore.isGeminiMode
+      if (requestedRuntime !== appStore.activeRuntime) return
+      const custom = requestedRuntime === 'gemini'
         ? (appStore.settings.geminiCustomModels ?? [])
         : (appStore.settings.openCodeCustomModels ?? [])
       const merged = [...catalog]
@@ -529,25 +567,16 @@ export const useCodexStore = defineStore('codex', () => {
         if (!trimmed || merged.some((item) => item.model.toLocaleLowerCase() === trimmed.toLocaleLowerCase())) continue
         merged.push({ model: trimmed, displayName: trimmed, description: translate('settings.externalCustomModel'), isDefault: false, contextWindow: 0 } as typeof catalog[number])
       }
-      appStore.models = merged.map((model) => ({
-        id: model.model,
-        model: model.model,
-        displayName: model.displayName || model.model,
-        description: model.description || '',
-        isDefault: model.isDefault,
-        defaultReasoningEffort: provider?.reasoningEfforts?.find((item) => item.isDefault)?.effort || (appStore.isGeminiMode ? 'auto' : 'high'),
-        defaultServiceTier: '',
-        serviceTiers: [],
-        supportsPersonality: false,
-        supportedReasoningEfforts: (provider?.reasoningEfforts ?? []).map((item) => ({ effort: item.effort, description: item.description })),
-      }))
-      const configured = (appStore.isGeminiMode ? appStore.settings.geminiModel : appStore.settings.openCodeModel).trim()
+      // Keep the Codex catalog in appStore.models. External catalogs are owned
+      // by their AgentProvider entry and are consumed by the external composer
+      // branch, preventing OpenCode/Gemini models from leaking into Codex UI.
+      const configured = (requestedRuntime === 'gemini' ? appStore.settings.geminiModel : appStore.settings.openCodeModel).trim()
       const configuredCustom = custom.some((item) => item.toLocaleLowerCase() === configured.toLocaleLowerCase())
       const selected = merged.find((item) => item.model.toLocaleLowerCase() === configured.toLocaleLowerCase())
         ?? merged.find((item) => item.isDefault)
         ?? merged[0]
       if (selected && !configuredCustom && !merged.some((item) => item.model.toLocaleLowerCase() === configured.toLocaleLowerCase())) {
-        if (appStore.isGeminiMode) {
+        if (requestedRuntime === 'gemini') {
           appStore.patchSettings({ geminiModel: selected.model })
         } else {
           appStore.patchSettings({
@@ -555,7 +584,7 @@ export const useCodexStore = defineStore('codex', () => {
             openCodeProvider: appStore.settings.openCodeProvider || selected.providerId || '',
           })
         }
-      } else if (appStore.isOpenCodeMode && !configuredCustom) {
+      } else if (requestedRuntime === 'opencode' && !configuredCustom) {
         const modelProvider = selected?.providerId || nativeActiveProvider
         if (modelProvider && modelProvider !== appStore.settings.openCodeProvider) {
           appStore.patchSettings({ openCodeProvider: modelProvider })
@@ -563,6 +592,7 @@ export const useCodexStore = defineStore('codex', () => {
       }
       return
     }
+    if (requestedRuntime !== 'codex') return
     // Codex-only: clear any leftover Claude/Gemini/Grok workbench provider.
     if (appStore.settings.modelProvider) {
       appStore.patchSettings({ modelProvider: '' })
@@ -706,6 +736,7 @@ export const useCodexStore = defineStore('codex', () => {
       : appStore.isOpenCodeMode
         ? (appStore.settings.openCodeEffort || 'high')
         : appStore.settings.effort
+    const externalRuntime = appStore.isGeminiMode || appStore.isOpenCodeMode
     const optimistic: ThreadSummary = {
       id: pendingID,
       name: translate('sidebar.newTask'),
@@ -718,8 +749,8 @@ export const useCodexStore = defineStore('codex', () => {
       model: externalModel,
       modelProvider: externalProvider,
       effort: externalEffort,
-      collaborationMode: appStore.settings.collaborationMode,
-      workMode: appStore.settings.workMode || 'code',
+      collaborationMode: externalRuntime ? 'default' : appStore.settings.collaborationMode,
+      workMode: externalRuntime ? 'code' : (appStore.settings.workMode || 'code'),
     }
     // Show the empty composer immediately. Real Codex/external session is created
     // on the first send via the existing pending-thread drain path.
@@ -811,7 +842,12 @@ export const useCodexStore = defineStore('codex', () => {
       activeThread.value = null
     }
     rememberProjectThread(appStore.settings.workspace, threadID)
-    if (loadedThreadIDs.has(threadID)) {
+    const cachedTimeline = Object.prototype.hasOwnProperty.call(itemsByThread.value, threadID)
+    const cachedHistory = historyByThread.value[threadID]
+    const cachedUpdatedAt = cachedHistory?.loadedUpdatedAt ?? 0
+    const cacheIsCurrent = cachedTimeline
+      && (!summary?.updatedAt || !cachedUpdatedAt || summary.updatedAt <= cachedUpdatedAt)
+    if (loadedThreadIDs.has(threadID) || (cacheIsCurrent && !isActiveStatus(summary?.status || activeThread.value?.status || ''))) {
       rememberLoadedThread(threadID)
       // Cache hit used to skip running-turn reconcile — switching Code/Cowork
       // (or reopening a background turn) left composer thinking the thread was idle.
@@ -1065,6 +1101,7 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function activateProject(path: string, preferredThreadID = ''): Promise<void> {
+    const requestedRuntime = appStore.activeRuntime
     const cached = projectThreadsForPath(path)
     if (cached) {
       threads.value = [...cached]
@@ -1087,10 +1124,15 @@ export const useCodexStore = defineStore('codex', () => {
       activeThread.value = null
       activeThreadId.value = ''
     }
-    // Keep the cached conversation visible while refreshing the target project.
-    // The explicit path prevents an older project refresh from querying the new
-    // active workspace after a rapid switch.
-    void loadThreads(path).catch(() => undefined)
+    // Do not let a background thread/list compete with the history read for the
+    // next folder click. Refresh only after the selected conversation is visible,
+    // and discard the task when the user has already moved to another project.
+    trackedTimeout(() => {
+      if (
+        appStore.activeRuntime === requestedRuntime
+        && sameWorkspace(path, appStore.settings.workspace)
+      ) void loadThreads(path).catch(() => undefined)
+    }, 600)
   }
 
   function findThreadSummary(threadID: string): ThreadSummary | undefined {
@@ -2661,7 +2703,12 @@ export const useCodexStore = defineStore('codex', () => {
         appStore.accountRateLimits = normalizeAccountRateLimits(payload.rateLimits, appStore.accountRateLimits)
         break
       case 'thread/tokenUsage/updated':
-        queueTokenUsage(asString(payload.threadId), asString(payload.turnId), payload.tokenUsage)
+        queueTokenUsage(
+          asString(payload.threadId),
+          asString(payload.turnId),
+          payload.tokenUsage,
+          normalizeLocalUsageRuntime(payload.runtime),
+        )
         break
       case 'skills/changed':
       case 'app/list/updated':
@@ -2704,10 +2751,15 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
-  function queueTokenUsage(threadID: string, turnID: string, value: unknown): void {
+  function queueTokenUsage(
+    threadID: string,
+    turnID: string,
+    value: unknown,
+    runtime: LocalUsageRuntime | '' = '',
+  ): void {
     if (!threadID) return
     const usage = normalizeThreadTokenUsage(value)
-    pendingTokenUsage.set(`${threadID}:${turnID}`, { threadId: threadID, turnId: turnID, usage })
+    pendingTokenUsage.set(`${threadID}:${turnID}`, { threadId: threadID, turnId: turnID, runtime, usage })
     if (!tokenUsageTimer) tokenUsageTimer = trackedTimeout(flushTokenUsage, 250)
   }
 
@@ -2717,7 +2769,7 @@ export const useCodexStore = defineStore('codex', () => {
     const next = { ...tokenUsageByThread.value }
     const nextMetrics = { ...turnMetricsByThread.value }
     const persistJobs: Array<Promise<unknown>> = []
-    for (const { threadId, turnId, usage } of pendingTokenUsage.values()) {
+    for (const { threadId, turnId, runtime, usage } of pendingTokenUsage.values()) {
       next[threadId] = usage
       if (turnId) {
         const threadMetrics = { ...(nextMetrics[threadId] ?? {}) }
@@ -2737,7 +2789,7 @@ export const useCodexStore = defineStore('codex', () => {
         )
         if (tokens > 0) {
           // Always persist full breakdown when available (input/cache/output/reasoning).
-          const usageRuntime = runtimeIDForThread(threadId)
+          const usageRuntime = runtime || runtimeIDForThread(threadId)
           persistJobs.push(
             Promise.resolve(
               (backend as {
@@ -3284,6 +3336,7 @@ export const useCodexStore = defineStore('codex', () => {
         turnOffset,
         hasEarlier: page.hasEarlier === true || start > 0,
         loadingEarlier: false,
+        loadedUpdatedAt: Number(asRecord(page.thread).updatedAt) || 0,
       },
     }
   }
@@ -3295,6 +3348,7 @@ export const useCodexStore = defineStore('codex', () => {
       turnOffset: 0,
       hasEarlier: false,
       loadingEarlier: false,
+      loadedUpdatedAt: 0,
     }
     historyByThread.value = {
       ...historyByThread.value,
@@ -3362,7 +3416,7 @@ export const useCodexStore = defineStore('codex', () => {
   function rememberLoadedThread(threadID: string): void {
     loadedThreadIDs.delete(threadID)
     loadedThreadIDs.add(threadID)
-    while (loadedThreadIDs.size > 12 || cachedConversationWeight() > 8_000_000) {
+    while (loadedThreadIDs.size > 12 || cachedConversationWeight() > 32_000_000) {
       const evicted = [...loadedThreadIDs].find((id) =>
         id !== threadID
         && id !== activeThreadId.value
@@ -4540,6 +4594,18 @@ function uniqueWorkspacePaths(current: string, recent: string[]): string[] {
     result.push(value)
   }
   return result
+}
+
+function normalizeLocalUsageRuntime(value: unknown): LocalUsageRuntime | '' {
+  const runtime = asString(value).trim().toLocaleLowerCase()
+  if (
+    runtime === 'codex'
+    || runtime === 'claude'
+    || runtime === 'grok'
+    || runtime === 'gemini'
+    || runtime === 'opencode'
+  ) return runtime
+  return ''
 }
 
 function workspaceName(path: string): string {

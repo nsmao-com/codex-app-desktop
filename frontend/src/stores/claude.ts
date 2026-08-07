@@ -1444,7 +1444,7 @@ export const useClaudeStore = defineStore('claude', () => {
       if (sameClaudeSession(cached, id)) loadedSessionIds.delete(cached)
     }
     loadedSessionIds.add(id)
-    while (loadedSessionIds.size > 12 || cachedClaudeConversationWeight() > 8_000_000) {
+    while (loadedSessionIds.size > 12 || cachedClaudeConversationWeight() > 32_000_000) {
       const evicted = [...loadedSessionIds].find((candidate) =>
         !sameClaudeSession(candidate, id)
         && !sameClaudeSession(candidate, activeSessionId.value)

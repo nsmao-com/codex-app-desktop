@@ -2,6 +2,30 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.2.1 - 2026-08-06
+
+### 新增
+
+- Gemini CLI 与 OpenCode 的原生 usage 统计接入用量面板，支持输入、缓存、输出、推理和模型分组数据。
+- 外部运行时的模型、推理、沙箱和审批设置继续使用各自独立字段，并保留 provider/model 原生信息。
+
+### 修改
+
+- Codex 项目和会话切换复用工作区请求与历史快照，延迟后台刷新，避免长任务期间切换文件夹变慢或旧结果覆盖新会话。
+- Codex 历史缓存、只读线程快照和队列恢复逻辑增强，切换回来时保留正在执行的回合、流式内容和待发送消息。
+- 外部 CLI 的 usage/catalog 探测使用无窗口托管进程，Windows 下不会弹出空 PowerShell 窗口；usage 缓存按 runtime 与 workspace 隔离。
+- Gemini/OpenCode 用量读取改为账号范围聚合；OpenCode CLI 不可用时直接从原生 SQLite 数据库读取，Gemini/OpenCode 原生 token 字段也会被识别。
+- Gemini/OpenCode 侧栏现在显示与其他运行时一致的 token 用量入口、范围统计和输入/缓存/输出/推理明细。
+- 长会话切换提高前后端历史缓存容量，并复用已加载的 Codex 时间线，减少长对话切换时的重复读盘、反序列化和 WebView2 CPU 峰值。
+- 侧边栏会话列表按真实 provider 使用 Claude、Grok、Gemini、OpenCode 和 Codex 图标。
+
+### 修复
+
+- 修复 Claude 事件监听器在重复 bootstrap 后累积的问题，dispose 时现在会可靠解绑。
+- 修复外部 token 事件缺少 runtime 导致 Gemini/OpenCode 用量被错误归入 Codex 的问题。
+- 修复 Gemini 原生 `totalTokenCount` 与 cached token 重复计数，以及 OpenCode cache read 未纳入总量的问题。
+- 修复切换 Gemini/OpenCode 模型时污染 Codex 模型目录、会话协作模式和权限设置的问题。
+
 ## 1.2.0 - 2026-08-06
 
 ### 修改

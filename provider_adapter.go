@@ -545,6 +545,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		s.emitExternalNotification("thread/tokenUsage/updated", map[string]any{
 			"threadId": threadID,
 			"turnId":   turnID,
+			"runtime":  runtime,
 			"tokenUsage": map[string]any{
 				"last":  usage,
 				"total": usage,
@@ -806,7 +807,7 @@ func externalCommandArgs(provider, sessionID, workspace string, settings UserSet
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		return append(args, geminiPermissionArgs(settings)...), generatedSessionID
+		return append(args, geminiPermissionArgs(settings.GeminiSandbox, settings.GeminiApprovalPolicy)...), generatedSessionID
 	case "grok":
 		args := []string{"--single", prompt, "--output-format", "streaming-json", "--cwd", workspace}
 		if sessionID != "" {
@@ -843,7 +844,7 @@ func externalCommandArgs(provider, sessionID, workspace string, settings UserSet
 		if effort != "" && effort != "auto" {
 			args = append(args, "--variant", effort)
 		}
-		if settings.Sandbox == "danger-full-access" && settings.ApprovalPolicy == "never" {
+		if settings.OpenCodeSandbox == "danger-full-access" && settings.OpenCodeApprovalPolicy == "never" {
 			args = append(args, "--auto")
 		}
 		return args, generatedSessionID
@@ -877,10 +878,10 @@ func claudePermissionArgs(settings UserSettings) []string {
 		return []string{"--permission-mode", mode}
 	}
 	// Legacy sandbox + approval mapping (composer ask / auto / strict).
-	if settings.Sandbox == "danger-full-access" && settings.ApprovalPolicy == "never" {
+	if settings.ClaudeSandbox == "danger-full-access" && settings.ClaudeApprovalPolicy == "never" {
 		return []string{"--dangerously-skip-permissions"}
 	}
-	if settings.Sandbox == "read-only" {
+	if settings.ClaudeSandbox == "read-only" {
 		return []string{"--permission-mode", "plan"}
 	}
 	// workspace-write + on-request → acceptEdits (workable in print/stream-json)
@@ -896,11 +897,11 @@ func normalizeClaudePermissionMode(value string) string {
 	}
 }
 
-func geminiPermissionArgs(settings UserSettings) []string {
-	if settings.Sandbox == "danger-full-access" && settings.ApprovalPolicy == "never" {
+func geminiPermissionArgs(sandbox, approvalPolicy string) []string {
+	if sandbox == "danger-full-access" && approvalPolicy == "never" {
 		return []string{"--approval-mode", "yolo"}
 	}
-	if settings.Sandbox == "read-only" {
+	if sandbox == "read-only" {
 		return []string{"--approval-mode", "plan"}
 	}
 	return []string{"--approval-mode", "default"}
@@ -908,14 +909,14 @@ func geminiPermissionArgs(settings UserSettings) []string {
 
 func grokPermissionArgs(settings UserSettings) []string {
 	profile := "workspace"
-	switch settings.Sandbox {
+	switch settings.GrokSandbox {
 	case "read-only":
 		profile = "read-only"
 	case "danger-full-access":
 		profile = "off"
 	}
 	args := []string{"--sandbox", profile}
-	if settings.ApprovalPolicy == "never" {
+	if settings.GrokApprovalPolicy == "never" {
 		return append(args, "--yolo")
 	}
 	// Headless runs cannot display an approval dialog. Default mode safely denies
@@ -1000,6 +1001,35 @@ func extractExternalUsage(event map[string]any) map[string]any {
 			raw = event
 		}
 	}
+	// Gemini stream-json and OpenCode events commonly expose usage as
+	// `tokens`, `usageMetadata`, or `stats` instead of the generic `usage` key.
+	// Normalize those native envelopes before the provider-specific parser drops
+	// the event as a non-text notification.
+	if raw == nil {
+		for _, key := range []string{"tokens", "usageMetadata", "usage_metadata", "tokenUsage", "token_usage", "stats"} {
+			if nested, ok := event[key]; ok {
+				raw = nested
+				break
+			}
+		}
+	}
+	if raw == nil {
+		for _, containerKey := range []string{"part", "message", "data", "result"} {
+			container, ok := event[containerKey].(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, key := range []string{"tokens", "usageMetadata", "usage_metadata", "tokenUsage", "token_usage", "stats"} {
+				if nested, exists := container[key]; exists {
+					raw = nested
+					break
+				}
+			}
+			if raw != nil {
+				break
+			}
+		}
+	}
 	return normalizeTokenUsageMap(raw)
 }
 
@@ -1027,6 +1057,12 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	if inputRaw <= 0 {
 		inputRaw = anyToFloat(raw["promptTokens"])
 	}
+	if inputRaw <= 0 {
+		inputRaw = anyToFloat(raw["promptTokenCount"])
+	}
+	if inputRaw <= 0 {
+		inputRaw = anyToFloat(raw["input"])
+	}
 
 	// Cache field names across Grok headless / Grok session / Codex rollout:
 	// cache_read_input_tokens | cachedReadTokens | cached_input_tokens | cachedInputTokens
@@ -1046,6 +1082,15 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	if cached <= 0 {
 		cached = anyToFloat(raw["cached_tokens"])
 	}
+	if cached <= 0 {
+		cached = anyToFloat(raw["cachedContentTokenCount"])
+	}
+	if cached <= 0 {
+		cached = anyToFloat(raw["cached"])
+	}
+	if cached <= 0 {
+		cached = anyToFloat(raw["cacheRead"])
+	}
 	// Claude prompt caching reports newly-written prompt tokens separately from
 	// cache reads. Both occupy the active request context.
 	cacheCreation := anyToFloat(raw["cache_creation_input_tokens"])
@@ -1064,6 +1109,12 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	if output <= 0 {
 		output = anyToFloat(raw["completionTokens"])
 	}
+	if output <= 0 {
+		output = anyToFloat(raw["candidatesTokenCount"])
+	}
+	if output <= 0 {
+		output = anyToFloat(raw["output"])
+	}
 
 	reasoning := anyToFloat(raw["reasoning_tokens"])
 	if reasoning <= 0 {
@@ -1075,10 +1126,25 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	if reasoning <= 0 {
 		reasoning = anyToFloat(raw["reasoning_output_tokens"])
 	}
+	if reasoning <= 0 {
+		reasoning = anyToFloat(raw["thoughtsTokenCount"])
+	}
+	if reasoning <= 0 {
+		reasoning = anyToFloat(raw["thoughts"])
+	}
+	if reasoning <= 0 {
+		reasoning = anyToFloat(raw["reasoning"])
+	}
 
 	total := anyToFloat(raw["total_tokens"])
 	if total <= 0 {
 		total = anyToFloat(raw["totalTokens"])
+	}
+	if total <= 0 {
+		total = anyToFloat(raw["totalTokenCount"])
+	}
+	if total <= 0 {
+		total = anyToFloat(raw["total"])
 	}
 
 	// Normalize input to *uncached* tokens for a consistent UI.
