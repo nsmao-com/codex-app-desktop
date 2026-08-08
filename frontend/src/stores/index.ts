@@ -1,4 +1,5 @@
 export { useAppStore } from './app'
+export { useArenaStore } from './arena'
 export { useBrowserStore } from './browser'
 export { useCapabilitiesStore } from './capabilities'
 export { useCodexStore } from './codex'

@@ -82,7 +82,10 @@ type cliPackageSpec struct {
 var cliPackages = []cliPackageSpec{
 	{id: cliToolCodex, name: "Codex CLI", npmPkg: "@openai/codex", binName: "codex"},
 	{id: cliToolClaude, name: "Claude Code", npmPkg: "@anthropic-ai/claude-code", binName: "claude"},
-	{id: cliToolGrok, name: "Grok CLI", npmPkg: "@xai-official/grok", binName: "grok"},
+	// Grok Build is NOT managed via npm. Official install is x.ai/cli (native binary
+	// under ~/.grok/bin). The npm package @xai-official/grok is a platform-limited stub
+	// and must never be used for install/update or version checks.
+	{id: cliToolGrok, name: "Grok Build CLI", npmPkg: "x.ai/cli", binName: "grok"},
 	{id: cliToolGemini, name: "Gemini CLI", npmPkg: "@google/gemini-cli", binName: "gemini"},
 	{id: cliToolOpenCode, name: "OpenCode", npmPkg: "opencode-ai", binName: "opencode"},
 }
@@ -123,7 +126,9 @@ func (s *AppService) CheckCLITools() CLIToolsReport {
 	}
 }
 
-// InstallCLITool installs or upgrades a CLI via pnpm (global).
+// InstallCLITool installs or upgrades a CLI.
+// Codex / Claude / Gemini / OpenCode use pnpm global packages.
+// Grok Build uses the official x.ai installer / `grok update` (native binary).
 func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) {
 	toolID = strings.ToLower(strings.TrimSpace(toolID))
 	spec, ok := lookupCLIPackage(toolID)
@@ -143,6 +148,10 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 		delete(cliInstallBusy, toolID)
 		cliInstallMu.Unlock()
 	}()
+
+	if spec.id == cliToolGrok {
+		return s.installOrUpdateGrokCLI()
+	}
 
 	codex.EnrichPathForLookups()
 	pm, nodeOK, _ := detectNodePackageManager()
@@ -166,7 +175,14 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 	if envErr != nil {
 		return CLIToolActionResult{}, fmt.Errorf("prepare pnpm global directory: %w", envErr)
 	}
-	commandArgs := []string{"add", "-g", spec.npmPkg + "@latest"}
+
+	before := probeCLITool(spec, pm, true)
+
+	// pnpm 10+ blocks dependency lifecycle scripts by default. Claude Code /
+	// OpenCode ship stub bin/*.exe placeholders and only install the real native
+	// binary in postinstall — without --allow-build the command "succeeds" but
+	// leaves a non-runnable stub (or leaves an older npm copy on PATH in use).
+	commandArgs := []string{"add", "-g", "--allow-build=" + spec.npmPkg, spec.npmPkg + "@latest"}
 	commandPath, resolvedArgs, resolveErr := providerCommand(packageManagerBinary(pm), commandArgs)
 	if resolveErr != nil {
 		return CLIToolActionResult{}, resolveErr
@@ -175,7 +191,35 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 	cmd.Env = installEnv
 
 	output, err := runManagedCombinedOutput(ctx, cmd)
+	// Older pnpm without --allow-build: retry plain install, then run postinstall ourselves.
+	if err != nil && looksLikeUnknownPNPMOption(string(output), err) {
+		fallbackArgs := []string{"add", "-g", spec.npmPkg + "@latest"}
+		commandPath, resolvedArgs, resolveErr = providerCommand(packageManagerBinary(pm), fallbackArgs)
+		if resolveErr != nil {
+			return CLIToolActionResult{}, resolveErr
+		}
+		cmd = exec.CommandContext(ctx, commandPath, resolvedArgs...)
+		cmd.Env = installEnv
+		output, err = runManagedCombinedOutput(ctx, cmd)
+	}
 	text := strings.TrimSpace(string(output))
+
+	// Always run package postinstall after global add. pnpm may still skip
+	// builds for some configs; Claude/OpenCode are unusable without it.
+	if postText, postErr := ensureCLINativeBinary(ctx, installEnv, spec.npmPkg); postText != "" {
+		if text != "" {
+			text = text + "\n" + postText
+		} else {
+			text = postText
+		}
+		if err == nil && postErr != nil {
+			// Install command itself succeeded but native binary placement failed.
+			err = postErr
+		}
+	} else if postErr != nil && err == nil {
+		err = postErr
+	}
+
 	if len(text) > 8000 {
 		text = text[len(text)-8000:]
 	}
@@ -188,7 +232,6 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 	s.mu.Lock()
 	s.agentProviders = providers
 	s.mu.Unlock()
-	_ = s.RefreshGrokRuntime()
 
 	tool := probeCLITool(spec, pm, true)
 	if err != nil {
@@ -211,12 +254,229 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 			Tool:    tool,
 		}, errors.New("cli not found after install")
 	}
+	// Binary present but unusable (postinstall still missing / wrong arch).
+	if strings.TrimSpace(tool.Version) == "" {
+		msg := fmt.Sprintf(
+			"%s is installed but did not report a version. Native postinstall may have failed — try again, or run `pnpm add -g --allow-build=%s %s@latest` in a terminal.",
+			tool.Name, spec.npmPkg, spec.npmPkg,
+		)
+		return CLIToolActionResult{
+			OK:      false,
+			Message: msg,
+			Output:  text,
+			Tool:    tool,
+		}, errors.New(msg)
+	}
+	// Same guard as Grok: never report a fake "ready" while an update is still pending.
+	if tool.UpdateAvailable && tool.LatestVersion != "" &&
+		compareSemver(tool.LatestVersion, tool.Version) > 0 {
+		msg := fmt.Sprintf(
+			"%s is still at %s (latest %s). pnpm finished but the active binary was not upgraded — another install earlier on PATH may be taking priority, or postinstall did not place the new binary.",
+			tool.Name, tool.Version, tool.LatestVersion,
+		)
+		return CLIToolActionResult{
+			OK:      false,
+			Message: msg,
+			Output:  text,
+			Tool:    tool,
+		}, errors.New(msg)
+	}
+
+	versionNote := tool.Version
+	if before.Version != "" && tool.Version != "" && before.Version != tool.Version {
+		versionNote = before.Version + " → " + tool.Version
+	}
 	return CLIToolActionResult{
 		OK:      true,
-		Message: fmt.Sprintf("%s is ready (%s)", tool.Name, firstNonEmpty(tool.Version, tool.LatestVersion, "ok")),
+		Message: fmt.Sprintf("%s is ready (%s)", tool.Name, firstNonEmpty(versionNote, "ok")),
 		Output:  text,
 		Tool:    tool,
 	}, nil
+}
+
+// installOrUpdateGrokCLI installs or upgrades the official Grok Build native CLI.
+// Prefer `grok update` when a real binary exists; otherwise run the x.ai install script.
+func (s *AppService) installOrUpdateGrokCLI() (CLIToolActionResult, error) {
+	codex.EnrichPathForLookups()
+	invalidateGrokRuntimeProbeCache()
+
+	before := probeCLITool(cliPackages[cliPackageIndex(cliToolGrok)], "pnpm", true)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	var (
+		output []byte
+		err    error
+		method string
+	)
+
+	// Prefer the official binary for updates — never the broken npm shim.
+	exe := officialGrokBinaryPath()
+	if exe == "" {
+		// If only a PATH hit exists, still try `grok update` when it looks native.
+		if candidate := findGrokExecutable(); candidate != "" && !looksLikeNPMGrokShim(candidate) {
+			exe = candidate
+		}
+	}
+
+	if exe != "" {
+		method = "grok update"
+		commandPath, commandArgs, resolveErr := providerCommand(exe, []string{"update"})
+		if resolveErr != nil {
+			return CLIToolActionResult{}, resolveErr
+		}
+		cmd := exec.CommandContext(ctx, commandPath, commandArgs...)
+		output, err = runManagedCombinedOutput(ctx, cmd)
+	} else {
+		method = "official installer"
+		output, err = runOfficialGrokInstaller(ctx)
+	}
+
+	text := strings.TrimSpace(string(output))
+	if len(text) > 8000 {
+		text = text[len(text)-8000:]
+	}
+
+	// Refresh PATH + force re-probe so UI version is not stale TTL cache.
+	codex.EnrichPathForLookups()
+	invalidateGrokRuntimeProbeCache()
+	_ = s.RefreshGrokRuntime()
+	detection := codex.Detect()
+	providers := detectAgentProviders(detection)
+	s.mu.Lock()
+	s.agentProviders = providers
+	s.mu.Unlock()
+
+	tool := probeCLITool(cliPackages[cliPackageIndex(cliToolGrok)], "pnpm", true)
+	if err != nil {
+		msg := fmt.Sprintf("Grok Build update failed via %s: %v", method, err)
+		if text != "" {
+			msg = msg + "\n" + firstOutputLines(text, 10)
+		}
+		return CLIToolActionResult{
+			OK:      false,
+			Message: msg,
+			Output:  text,
+			Tool:    tool,
+		}, errors.New(msg)
+	}
+	if !tool.Installed {
+		return CLIToolActionResult{
+			OK:      false,
+			Message: "Installer finished but Grok Build was not found under ~/.grok/bin. Run the official install from https://x.ai/cli, then restart Nice Codex.",
+			Output:  text,
+			Tool:    tool,
+		}, errors.New("grok not found after install")
+	}
+
+	// If update still claims a newer version, report that clearly instead of a fake "ready".
+	if tool.UpdateAvailable && tool.LatestVersion != "" && tool.Version != "" &&
+		compareSemver(tool.LatestVersion, tool.Version) > 0 {
+		msg := fmt.Sprintf(
+			"Grok Build is still at %s (latest %s). %s completed but the binary was not upgraded — try again or run `grok update` in a terminal.",
+			tool.Version, tool.LatestVersion, method,
+		)
+		return CLIToolActionResult{
+			OK:      false,
+			Message: msg,
+			Output:  text,
+			Tool:    tool,
+		}, errors.New(msg)
+	}
+
+	versionNote := tool.Version
+	if before.Version != "" && tool.Version != "" && before.Version != tool.Version {
+		versionNote = before.Version + " → " + tool.Version
+	}
+	return CLIToolActionResult{
+		OK:      true,
+		Message: fmt.Sprintf("Grok Build is ready (%s)", firstNonEmpty(versionNote, "ok")),
+		Output:  text,
+		Tool:    tool,
+	}, nil
+}
+
+func cliPackageIndex(id CLIToolID) int {
+	for index, spec := range cliPackages {
+		if spec.id == id {
+			return index
+		}
+	}
+	return 0
+}
+
+type grokUpdateCheckResult struct {
+	CurrentVersion  string `json:"currentVersion"`
+	LatestVersion   string `json:"latestVersion"`
+	UpdateAvailable bool   `json:"updateAvailable"`
+	Error           any    `json:"error"`
+}
+
+func probeGrokUpdateCheck(executable string) (grokUpdateCheckResult, error) {
+	if strings.TrimSpace(executable) == "" {
+		return grokUpdateCheckResult{}, errors.New("empty grok executable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	commandPath, commandArgs, err := providerCommand(executable, []string{"update", "--check", "--json"})
+	if err != nil {
+		return grokUpdateCheckResult{}, err
+	}
+	cmd := exec.CommandContext(ctx, commandPath, commandArgs...)
+	output, runErr := runManagedCombinedOutput(ctx, cmd)
+	text := strings.TrimSpace(string(output))
+	// Even on non-zero exit, JSON may still be on stdout.
+	if text == "" && runErr != nil {
+		return grokUpdateCheckResult{}, runErr
+	}
+	// Extract the first JSON object from mixed logs.
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start < 0 || end <= start {
+		if runErr != nil {
+			return grokUpdateCheckResult{}, runErr
+		}
+		return grokUpdateCheckResult{}, errors.New("no JSON in grok update --check output")
+	}
+	var result grokUpdateCheckResult
+	if err := json.Unmarshal([]byte(text[start:end+1]), &result); err != nil {
+		return grokUpdateCheckResult{}, err
+	}
+	return result, nil
+}
+
+func runOfficialGrokInstaller(ctx context.Context) ([]byte, error) {
+	if runtime.GOOS == "windows" {
+		// Official: irm https://x.ai/cli/install.ps1 | iex
+		ps := findCommand(commandCandidates("powershell"))
+		if ps == "" {
+			ps = findCommand(commandCandidates("pwsh"))
+		}
+		if ps == "" {
+			ps = "powershell"
+		}
+		script := "irm https://x.ai/cli/install.ps1 | iex"
+		cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+		return runManagedCombinedOutput(ctx, cmd)
+	}
+	// Official: curl -fsSL https://x.ai/cli/install.sh | bash
+	shell := findCommand(commandCandidates("bash"))
+	if shell == "" {
+		shell = "/bin/bash"
+	}
+	script := "curl -fsSL https://x.ai/cli/install.sh | bash"
+	cmd := exec.CommandContext(ctx, shell, "-lc", script)
+	return runManagedCombinedOutput(ctx, cmd)
+}
+
+func looksLikeNPMGrokShim(path string) bool {
+	lower := strings.ToLower(filepath.ToSlash(path))
+	return strings.Contains(lower, "/pnpm/") ||
+		strings.Contains(lower, "\\pnpm\\") ||
+		strings.Contains(lower, "@xai-official") ||
+		strings.Contains(lower, "node_modules") ||
+		strings.HasSuffix(lower, ".cmd") ||
+		strings.HasSuffix(lower, ".ps1")
 }
 
 func lookupCLIPackage(id string) (cliPackageSpec, bool) {
@@ -246,10 +506,32 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 		status.Executable = det.Binary
 		status.Version = normalizeCLIVersion(det.Version)
 	case cliToolGrok:
+		// Always re-probe the official binary for CLI tools UI (skip short TTL cache).
+		invalidateGrokRuntimeProbeCache()
 		gr := detectGrokRuntime()
 		status.Installed = gr.BuildAvailable
 		status.Executable = gr.BuildExecutable
 		status.Version = normalizeCLIVersion(gr.BuildVersion)
+		// Grok Build can install/update without Node when the binary already exists,
+		// or via the official PowerShell/curl installer.
+		status.CanInstall = true
+		status.PackageManager = "official"
+		status.InstallCommand = officialGrokInstallCommand()
+		if status.Installed && status.Executable != "" && !looksLikeNPMGrokShim(status.Executable) {
+			if check, err := probeGrokUpdateCheck(status.Executable); err == nil {
+				if v := normalizeCLIVersion(check.CurrentVersion); v != "" {
+					status.Version = v
+				}
+				if v := normalizeCLIVersion(check.LatestVersion); v != "" {
+					status.LatestVersion = v
+				}
+				if status.Version != "" && status.LatestVersion != "" {
+					status.UpdateAvailable = compareSemver(status.LatestVersion, status.Version) > 0
+				} else {
+					status.UpdateAvailable = check.UpdateAvailable
+				}
+			}
+		}
 	case cliToolClaude, cliToolGemini, cliToolOpenCode:
 		status.Executable = findCommand(commandCandidates(spec.binName))
 		status.Installed = status.Executable != ""
@@ -260,18 +542,23 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 		}
 	}
 
-	latest, err := fetchNPMLatestVersion(spec.npmPkg)
-	if err == nil {
-		status.LatestVersion = latest
-		if status.Installed && status.Version != "" && latest != "" {
-			status.UpdateAvailable = compareSemver(latest, status.Version) > 0
+	// npm latest only applies to real npm-managed CLIs (not Grok Build).
+	if spec.id != cliToolGrok && strings.TrimSpace(spec.npmPkg) != "" && !strings.Contains(spec.npmPkg, "x.ai") {
+		latest, err := fetchNPMLatestVersion(spec.npmPkg)
+		if err == nil {
+			status.LatestVersion = latest
+			if status.Installed && status.Version != "" && latest != "" {
+				status.UpdateAvailable = compareSemver(latest, status.Version) > 0
+			}
 		}
 	}
 
 	switch {
-	case !nodeOK:
+	case spec.id == cliToolGrok && !status.Installed:
+		status.Message = "Not installed — uses official x.ai/cli installer"
+	case spec.id != cliToolGrok && !nodeOK:
 		status.Message = "Install Node.js and pnpm first"
-	case pm == "":
+	case spec.id != cliToolGrok && pm == "":
 		status.Message = "Install pnpm first"
 	case !status.Installed:
 		status.Message = "Not installed"
@@ -284,10 +571,19 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 }
 
 func formatInstallCommand(pm, npmPkg string) string {
-	if pm == "pnpm" {
-		return "pnpm add -g " + npmPkg
+	if npmPkg == "x.ai/cli" || strings.EqualFold(npmPkg, "x.ai/cli") {
+		return officialGrokInstallCommand()
 	}
-	return "pnpm add -g " + npmPkg
+	// --allow-build is required on pnpm 10+ so postinstall can place native binaries
+	// (Claude Code / OpenCode ship stub bin placeholders without it).
+	return "pnpm add -g --allow-build=" + npmPkg + " " + npmPkg
+}
+
+func officialGrokInstallCommand() string {
+	if runtime.GOOS == "windows" {
+		return "irm https://x.ai/cli/install.ps1 | iex"
+	}
+	return "curl -fsSL https://x.ai/cli/install.sh | bash"
 }
 
 func detectNodePackageManager() (manager string, nodeOK bool, nodeVersion string) {
@@ -306,6 +602,154 @@ func detectNodePackageManager() (manager string, nodeOK bool, nodeVersion string
 		return "pnpm", true, nodeVersion
 	}
 	return "", nodeOK, nodeVersion
+}
+
+func looksLikeUnknownPNPMOption(output string, err error) bool {
+	text := strings.ToLower(output + " " + fmt.Sprint(err))
+	return strings.Contains(text, "unknown option") ||
+		strings.Contains(text, "unknown flag") ||
+		strings.Contains(text, "allow-build")
+}
+
+// ensureCLINativeBinary runs the package postinstall/install script so native
+// CLI binaries (Claude Code, OpenCode, …) replace the stub bin/*.exe placeholder.
+// pnpm 10+ skips dependency lifecycle scripts unless --allow-build is used; even
+// then some global installs still leave the stub, so we always re-run postinstall.
+func ensureCLINativeBinary(ctx context.Context, env []string, npmPkg string) (string, error) {
+	npmPkg = strings.TrimSpace(npmPkg)
+	if npmPkg == "" || strings.Contains(npmPkg, "x.ai") {
+		return "", nil
+	}
+	pkgDir, err := resolvePNPMGlobalPackageDir(ctx, env, npmPkg)
+	if err != nil {
+		return "", err
+	}
+	packageJSONPath := filepath.Join(pkgDir, "package.json")
+	raw, err := os.ReadFile(packageJSONPath)
+	if err != nil {
+		return "", err
+	}
+	var meta struct {
+		Scripts map[string]string `json:"scripts"`
+		Bin     any               `json:"bin"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return "", err
+	}
+
+	// Prefer postinstall, then install. prepare is intentionally skipped (publish guards).
+	script := strings.TrimSpace(meta.Scripts["postinstall"])
+	if script == "" {
+		script = strings.TrimSpace(meta.Scripts["install"])
+	}
+	if script == "" {
+		// No lifecycle script — package is pure JS / prebuilt. Nothing to fix.
+		return "", nil
+	}
+
+	// If the declared binary already looks like a real native build, still re-run
+	// postinstall on upgrades so a newer optionalDependency binary is copied over.
+	// Only skip when the package has no bin entry at all.
+	if !packageDeclaresBin(meta.Bin) {
+		return "", nil
+	}
+
+	node := findCommand(commandCandidates("node"))
+	if node == "" {
+		return "", errors.New("node is required to run CLI postinstall scripts")
+	}
+
+	// package.json scripts are shell snippets ("node install.cjs"). Run via node
+	// when the command is a simple `node <file>` form; otherwise use the platform shell.
+	postOutput, postErr := runPackageLifecycleScript(ctx, env, node, pkgDir, script)
+	text := strings.TrimSpace(postOutput)
+	if postErr != nil {
+		if text == "" {
+			return text, fmt.Errorf("postinstall for %s failed: %w", npmPkg, postErr)
+		}
+		return text, fmt.Errorf("postinstall for %s failed: %w\n%s", npmPkg, postErr, firstOutputLines(text, 8))
+	}
+	if text == "" {
+		text = "postinstall: ok (" + npmPkg + ")"
+	}
+	return text, nil
+}
+
+func packageDeclaresBin(bin any) bool {
+	switch value := bin.(type) {
+	case string:
+		return strings.TrimSpace(value) != ""
+	case map[string]any:
+		return len(value) > 0
+	default:
+		return false
+	}
+}
+
+func resolvePNPMGlobalPackageDir(ctx context.Context, env []string, npmPkg string) (string, error) {
+	pnpmBin := packageManagerBinary("pnpm")
+	commandPath, args, err := providerCommand(pnpmBin, []string{"root", "-g"})
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, commandPath, args...)
+	cmd.Env = env
+	output, runErr := runManagedCombinedOutput(ctx, cmd)
+	root := strings.TrimSpace(string(output))
+	if runErr != nil || root == "" {
+		if runErr == nil {
+			runErr = errors.New("empty pnpm root -g")
+		}
+		return "", fmt.Errorf("resolve pnpm global node_modules: %w", runErr)
+	}
+	pkgDir := filepath.Join(append([]string{root}, strings.Split(npmPkg, "/")...)...)
+	if info, err := os.Stat(pkgDir); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("global package directory not found: %s", pkgDir)
+	}
+	return pkgDir, nil
+}
+
+func runPackageLifecycleScript(ctx context.Context, env []string, node, pkgDir, script string) (string, error) {
+	script = strings.TrimSpace(script)
+	fields := strings.Fields(script)
+	// Common forms: "node install.cjs", "node ./postinstall.mjs"
+	if len(fields) >= 2 && (fields[0] == "node" || strings.EqualFold(fields[0], "node.exe")) {
+		scriptPath := fields[1]
+		if !filepath.IsAbs(scriptPath) {
+			scriptPath = filepath.Join(pkgDir, filepath.FromSlash(scriptPath))
+		}
+		args := append([]string{scriptPath}, fields[2:]...)
+		cmd := exec.CommandContext(ctx, node, args...)
+		cmd.Dir = pkgDir
+		cmd.Env = env
+		output, err := runManagedCombinedOutput(ctx, cmd)
+		return string(output), err
+	}
+
+	// Generic fallback: run the script line through a shell in the package directory.
+	if runtime.GOOS == "windows" {
+		ps := findCommand(commandCandidates("powershell"))
+		if ps == "" {
+			ps = findCommand(commandCandidates("pwsh"))
+		}
+		if ps == "" {
+			ps = "powershell"
+		}
+		cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script)
+		cmd.Dir = pkgDir
+		cmd.Env = env
+		output, err := runManagedCombinedOutput(ctx, cmd)
+		return string(output), err
+	}
+	shell := findCommand(commandCandidates("bash"))
+	if shell == "" {
+		shell = "/bin/bash"
+	}
+	cmd := exec.CommandContext(ctx, shell, "-lc", script)
+	cmd.Dir = pkgDir
+	cmd.Env = env
+	output, err := runManagedCombinedOutput(ctx, cmd)
+	return string(output), err
 }
 
 func preparePNPMGlobalEnvironment() ([]string, string, error) {

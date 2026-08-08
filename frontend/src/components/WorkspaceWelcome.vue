@@ -4,9 +4,18 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { Button } from '@/components/ui/button'
+import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
 
 const appStore = useAppStore()
+const {
+  runtime: paneRuntime,
+  isCodexMode,
+  isClaudeMode,
+  isGrokMode,
+  isGeminiMode,
+  isOpenCodeMode,
+} = useRuntimeMode()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
@@ -17,14 +26,14 @@ const emit = defineEmits<{
   suggestion: [prompt: string]
 }>()
 
-const isGrok = computed(() => appStore.isGrokMode)
-const isClaude = computed(() => appStore.isClaudeMode)
-const isGemini = computed(() => appStore.isGeminiMode)
-const isOpenCode = computed(() => appStore.isOpenCodeMode)
+const isGrok = computed(() => isGrokMode.value)
+const isClaude = computed(() => isClaudeMode.value)
+const isGemini = computed(() => isGeminiMode.value)
+const isOpenCode = computed(() => isOpenCodeMode.value)
 const isExternal = computed(() => isGemini.value || isOpenCode.value)
 const externalRuntimeName = computed(() => isGemini.value ? 'Gemini CLI' : 'OpenCode')
-const externalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
-const isCowork = computed(() => appStore.isCodexMode && appStore.settings.workMode === 'cowork')
+const externalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === paneRuntime.value))
+const isCowork = computed(() => isCodexMode.value && appStore.settings.workMode === 'cowork')
 const titleText = computed(() => {
   if (isGrok.value) return t('chat.grokTitle')
   if (isClaude.value) return t('chat.claudeTitle')

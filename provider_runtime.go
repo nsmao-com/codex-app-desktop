@@ -1043,6 +1043,33 @@ func knownCLIRoots() []string {
 func findCommand(candidates []string) string {
 	// Ensure PATH includes platform-specific Node/CLI roots before LookPath.
 	codex.EnrichPathForLookups()
+
+	// Walk every PATH entry. exec.LookPath only returns the first match, which is
+	// wrong when an earlier pnpm global stub (postinstall not run) shadows a later
+	// working npm install of the same CLI.
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		for _, candidate := range candidates {
+			full := filepath.Join(dir, candidate)
+			info, err := os.Stat(full)
+			if err != nil || info.IsDir() || !usableCommandPath(full) {
+				continue
+			}
+			if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
+				continue
+			}
+			absolute, absoluteErr := filepath.Abs(full)
+			if absoluteErr == nil {
+				return absolute
+			}
+			return full
+		}
+	}
+
+	// Fallback for names that only resolve via PATHEXT / relative LookPath.
 	for _, candidate := range candidates {
 		path, err := exec.LookPath(candidate)
 		if err == nil && usableCommandPath(path) {
@@ -1053,6 +1080,7 @@ func findCommand(candidates []string) string {
 			return path
 		}
 	}
+
 	// GUI apps often miss user PATH entries (Windows npm, macOS Homebrew/nvm, ~/.grok/bin).
 	for _, root := range knownCLIRoots() {
 		for _, candidate := range candidates {

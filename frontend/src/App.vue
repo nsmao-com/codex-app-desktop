@@ -12,10 +12,11 @@ import UpdateCheckDialog from '@/components/UpdateCheckDialog.vue'
 import OnboardingView from '@/views/OnboardingView.vue'
 import { Toaster } from '@/components/ui/sonner'
 import { useNavigationHistory } from '@/composables/useNavigationHistory'
-import { useAppStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useTerminalStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useTerminalStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
 
 const appStore = useAppStore()
+const arenaStore = useArenaStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
@@ -61,11 +62,14 @@ async function activateRuntime(runtime: WorkspaceRuntime): Promise<void> {
   const sequence = ++runtimeActivationSequence
   if (!await appStore.ensureActiveRuntimeSynced(runtime)) return
   if (sequence !== runtimeActivationSequence || appStore.activeRuntime !== runtime) return
+  // Arena multi-pane keeps each provider's active session so split views stay populated.
+  // Single-pane mode still clears pointers when leaving a timeline family.
+  const arenaKeepSessions = arenaStore.isArenaMode
   // Codex, Gemini and OpenCode share one timeline store. Clear only the
   // selected pointer when entering the independent providers so composer
   // actions can never target a stale Codex session; background turns remain in
   // their per-thread maps and continue to receive events.
-  if (runtime === 'grok' || runtime === 'claude') {
+  if (!arenaKeepSessions && (runtime === 'grok' || runtime === 'claude')) {
     await codexStore.clearActiveSession()
   }
   await workspaceStore.hydrateActiveRuntimeWorkspace()
@@ -84,7 +88,9 @@ async function activateRuntime(runtime: WorkspaceRuntime): Promise<void> {
     // The Codex store is shared by the three timeline runtimes. Never leave a
     // Codex thread active while an external runtime is selected: composer model
     // edits and queued messages would otherwise target the wrong provider.
-    await codexStore.clearActiveSession()
+    if (!arenaKeepSessions) {
+      await codexStore.clearActiveSession()
+    }
     await Promise.all([
       codexStore.loadModels(),
       codexStore.loadThreads(),
@@ -103,7 +109,7 @@ async function activateRuntime(runtime: WorkspaceRuntime): Promise<void> {
     }
     return
   }
-  if (runtime === 'codex') {
+  if (!arenaKeepSessions && runtime === 'codex') {
     await codexStore.clearActiveSession()
   }
   await Promise.all([

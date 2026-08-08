@@ -797,6 +797,16 @@ export interface UserSettings {
     "claudePermissionMode": string;
 
     /**
+     * ClaudeCustomModels are free-form --model ids (aliases or full IDs) kept per-user.
+     */
+    "claudeCustomModels": string[] | null;
+
+    /**
+     * GrokCustomModels are free-form model ids for Build CLI / API mode pickers.
+     */
+    "grokCustomModels": string[] | null;
+
+    /**
      * Gemini/OpenCode preferences stay separate from Codex/Claude/Grok so a
      * runtime switch never changes another provider's default model.
      */
@@ -866,8 +876,8 @@ export interface UserSettings {
     "codexClientVersion": string;
 
     /**
-     * NetworkProxy* points outbound app + CLI traffic at Clash (or similar) HTTP proxies
-     * without requiring TUN. Applied as process env so child runtimes inherit it.
+     * NetworkProxy* lets users point Codex / CLI traffic at Clash (or similar)
+     * HTTP mixed ports without enabling TUN. Applied as process env + child inherit.
      */
     "networkProxyEnabled": boolean;
     "networkProxyUrl": string;

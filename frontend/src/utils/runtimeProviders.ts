@@ -127,6 +127,7 @@ export function modelsForRuntime(
 export function modelsForGrokRuntime(
   providerModels: Array<{ model: string; displayName?: string; isDefault?: boolean }> = [],
   preferredModel = '',
+  customModels: string[] = [],
 ): Array<{ model: string; displayName: string; isDefault: boolean }> {
   const options: Array<{ model: string; displayName: string; isDefault: boolean }> = []
   const push = (id: string, displayName = '', isDefault = false) => {
@@ -142,10 +143,68 @@ export function modelsForGrokRuntime(
   for (const item of providerModels) {
     push(item.model, item.displayName || item.model, item.isDefault === true)
   }
+  for (const custom of customModels) {
+    push(custom, custom, false)
+  }
   if (preferredModel.trim()) push(preferredModel.trim(), preferredModel.trim(), options.length === 0)
   if (!options.length) {
     for (const [index, id] of FALLBACK_GROK_MODELS.entries()) {
       push(id, formatModelLabel(id), index === 0)
+    }
+  }
+  if (preferredModel.trim()) {
+    for (const option of options) {
+      option.isDefault = option.model.toLocaleLowerCase() === preferredModel.trim().toLocaleLowerCase()
+    }
+    if (!options.some((item) => item.isDefault) && options[0]) options[0].isDefault = true
+  } else if (!options.some((item) => item.isDefault) && options[0]) {
+    options[0].isDefault = true
+  }
+  return options
+}
+
+const FALLBACK_CLAUDE_MODELS = [
+  { model: 'sonnet', displayName: 'Claude Sonnet', description: 'alias `sonnet` → latest Sonnet', isDefault: true },
+  { model: 'opus', displayName: 'Claude Opus', description: 'alias `opus` → latest Opus', isDefault: false },
+  { model: 'haiku', displayName: 'Claude Haiku', description: 'alias `haiku` → latest Haiku', isDefault: false },
+  { model: 'fable', displayName: 'Claude Fable', description: 'alias `fable` → latest Fable', isDefault: false },
+] as const
+
+/** Merge Claude Code catalog aliases with user-saved custom --model ids. */
+export function modelsForClaudeRuntime(
+  providerModels: Array<{ model: string; displayName?: string; description?: string; isDefault?: boolean }> = [],
+  preferredModel = '',
+  customModels: string[] = [],
+): Array<{ model: string; displayName: string; description: string; isDefault: boolean }> {
+  const options: Array<{ model: string; displayName: string; description: string; isDefault: boolean }> = []
+  const push = (id: string, displayName = '', description = '', isDefault = false) => {
+    const model = id.trim()
+    if (!model) return
+    if (options.some((item) => item.model.toLocaleLowerCase() === model.toLocaleLowerCase())) return
+    options.push({
+      model,
+      displayName: displayName || formatModelLabel(model),
+      description: description || model,
+      isDefault,
+    })
+  }
+  for (const item of providerModels) {
+    push(
+      item.model,
+      item.displayName || item.model,
+      item.description || (item.displayName ? `alias \`${item.model}\`` : item.model),
+      item.isDefault === true,
+    )
+  }
+  for (const custom of customModels) {
+    push(custom, formatModelLabel(custom), custom, false)
+  }
+  if (preferredModel.trim()) {
+    push(preferredModel.trim(), formatModelLabel(preferredModel.trim()), preferredModel.trim(), options.length === 0)
+  }
+  if (!options.length) {
+    for (const item of FALLBACK_CLAUDE_MODELS) {
+      push(item.model, item.displayName, item.description, item.isDefault)
     }
   }
   if (preferredModel.trim()) {

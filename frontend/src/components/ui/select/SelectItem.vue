@@ -24,7 +24,8 @@ const forwardedProps = useForwardProps(delegatedProps)
     v-bind="forwardedProps"
     :class="
       cn(
-        'focus:bg-accent focus:text-accent-foreground [&_svg:not([class*=\'text-\'])]:text-muted-foreground relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*=\'size-\'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2',
+        // min-w-0 is required for long labels to ellipsize inside flex popovers.
+        'focus:bg-accent focus:text-accent-foreground [&_svg:not([class*=\'text-\'])]:text-muted-foreground relative flex w-full min-w-0 cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*=\'size-\'])]:size-4 *:[span]:last:min-w-0 *:[span]:last:flex-1 *:[span]:last:overflow-hidden',
         props.class,
       )
     "
@@ -37,7 +38,10 @@ const forwardedProps = useForwardProps(delegatedProps)
       </SelectItemIndicator>
     </span>
 
-    <SelectItemText>
+    <SelectItemText
+      data-slot="select-item-text"
+      class="min-w-0 flex-1 overflow-hidden"
+    >
       <slot />
     </SelectItemText>
   </SelectItem>

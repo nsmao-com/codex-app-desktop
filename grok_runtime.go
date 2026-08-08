@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -148,6 +149,41 @@ func resolveGrokHome() string {
 	return filepath.Join(home, ".grok")
 }
 
+// officialGrokBinaryPath returns ~/.grok/bin/grok[.exe] when the official Build
+// installer has placed a native binary there.
+func officialGrokBinaryPath() string {
+	home := resolveGrokHome()
+	if home == "" {
+		return ""
+	}
+	name := "grok"
+	if runtime.GOOS == "windows" {
+		name = "grok.exe"
+	}
+	path := filepath.Join(home, "bin", name)
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	return path
+}
+
+// findGrokExecutable prefers the official Build binary over PATH npm shims.
+// The npm package @xai-official/grok is currently a macOS-arm64 stub and must
+// not shadow a real Windows/Linux install under ~/.grok/bin.
+func findGrokExecutable() string {
+	if path := officialGrokBinaryPath(); path != "" {
+		return path
+	}
+	return findCommand(commandCandidates("grok"))
+}
+
+func invalidateGrokRuntimeProbeCache() {
+	grokRuntimeProbeCache.Lock()
+	grokRuntimeProbeCache.expiresAt = time.Time{}
+	grokRuntimeProbeCache.Unlock()
+}
+
 func detectGrokRuntime() GrokRuntimeStatus {
 	now := time.Now()
 	grokRuntimeProbeCache.Lock()
@@ -161,7 +197,7 @@ func detectGrokRuntime() GrokRuntimeStatus {
 	// GUI apps (Win Explorer / macOS Finder) need PATH enrichment before LookPath.
 	codex.EnrichPathForLookups()
 	status := GrokRuntimeStatus{APIConfigured: grokAPIKeyConfigured()}
-	executable := findCommand(commandCandidates("grok"))
+	executable := findGrokExecutable()
 	if executable == "" {
 		cacheGrokRuntimeStatus(status)
 		return status
@@ -200,7 +236,7 @@ func detectGrokRuntime() GrokRuntimeStatus {
 
 func detectGrokRuntimeQuick() GrokRuntimeStatus {
 	codex.EnrichPathForLookups()
-	executable := findCommand(commandCandidates("grok"))
+	executable := findGrokExecutable()
 	return GrokRuntimeStatus{
 		BuildAvailable:  executable != "",
 		BuildExecutable: executable,
@@ -216,6 +252,7 @@ func cacheGrokRuntimeStatus(status GrokRuntimeStatus) {
 }
 
 func (s *AppService) RefreshGrokRuntime() GrokRuntimeStatus {
+	invalidateGrokRuntimeProbeCache()
 	status := detectGrokRuntime()
 	// Prefer settings-stored API key when env is empty.
 	if !status.APIConfigured {
@@ -632,7 +669,7 @@ func (s *AppService) DeleteGrokSession(backend, sessionID string) error {
 		s.dropGrokHistoryCache(sessionID)
 		return nil
 	}
-	executable := findCommand(commandCandidates("grok"))
+	executable := findGrokExecutable()
 	if executable == "" {
 		return errors.New("Grok Build is not installed")
 	}

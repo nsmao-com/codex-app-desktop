@@ -977,6 +977,103 @@ export const useGrokStore = defineStore('grok', () => {
     return count
   })
 
+  function historyItemsForSession(sessionId: string): TimelineItem[] {
+    const id = (sessionId || '').trim()
+    if (!id) return []
+    const historyKey = sessionStateKey(historyBySession.value, id)
+    const historyState = (historyKey && historyBySession.value[historyKey]) || null
+    let turn = historyState?.turnOffset ?? 0
+    const items: TimelineItem[] = []
+    for (const message of mergedSessionMessages(id)) {
+      const role = (message.role || '').toLowerCase()
+      if (role === 'user' || role === 'human') turn += 1
+      else if (turn === 0) turn = 1
+      items.push(messageToItem(message, `${id}:t${turn}`))
+    }
+    return items
+  }
+
+  function historyTurnCountForSession(sessionId: string): number {
+    const id = (sessionId || '').trim()
+    if (!id) return 0
+    const historyKey = sessionStateKey(historyBySession.value, id)
+    const historyState = (historyKey && historyBySession.value[historyKey]) || null
+    let count = historyState?.turnOffset ?? 0
+    for (const message of mergedSessionMessages(id)) {
+      const role = (message.role || '').toLowerCase()
+      if (role === 'user' || role === 'human') count += 1
+    }
+    return count
+  }
+
+  /** Timeline for any session (arena multi-pane can bind non-global active ids). */
+  function itemsForSession(sessionId: string): TimelineItem[] {
+    const id = (sessionId || '').trim()
+    if (!id) return []
+    // Active session keeps the optimized live-tail path (stable history refs).
+    if (sameGrokSession(id, activeSessionId.value)) return activeItems.value
+
+    const historyItems = historyItemsForSession(id)
+    const turn = Math.max(historyTurnCountForSession(id), historyItems.length ? 1 : 0)
+    const turnRef = turnForSession(id)
+    if (!turnRef || !sameGrokSession(turnRef.sessionId, id)) return historyItems
+
+    const items = [...historyItems]
+    const liveKeys = [id, turnRef.sessionId, resolveSessionId(turnRef.sessionId)].filter(Boolean)
+    let liveRaw = ''
+    let thought = ''
+    let liveActivity: GrokMessage[] = []
+    for (const key of liveKeys) {
+      if (!liveRaw && liveTextBySession.value[key]) liveRaw = liveTextBySession.value[key]
+      if (!thought && liveThoughtBySession.value[key]) thought = liveThoughtBySession.value[key]
+      if (!liveActivity.length && liveActivityBySession.value[key]?.length) {
+        liveActivity = liveActivityBySession.value[key] || []
+      }
+    }
+    const live = liveTextTailAfterActivity(liveRaw, liveActivity)
+    const liveTurn = turn > 0 ? turn : 1
+    const hasNativeReasoning = liveActivity.some((message) =>
+      (message.role || '').toLowerCase() === 'reasoning',
+    )
+    if (thought && !live && !hasNativeReasoning) {
+      items.push({
+        id: `grok-thought-${turnRef.turnId}`,
+        turnId: `${id}:t${liveTurn}`,
+        type: 'reasoning',
+        status: 'inProgress',
+        text: thought,
+        command: '',
+        cwd: '',
+        output: '',
+        title: '',
+        detail: '',
+        changes: [],
+        attachments: [],
+        reasoningSummary: thought,
+      })
+    }
+    for (const message of liveActivity) {
+      items.push(messageToItem(message, `${id}:t${liveTurn}`))
+    }
+    if (live) {
+      items.push({
+        id: `grok-live-${turnRef.turnId}`,
+        turnId: `${id}:t${liveTurn}`,
+        type: 'agentMessage',
+        status: 'inProgress',
+        text: live,
+        command: '',
+        cwd: '',
+        output: '',
+        title: '',
+        detail: '',
+        changes: [],
+        attachments: [],
+      })
+    }
+    return items
+  }
+
   const activeItems = computed<TimelineItem[]>(() => {
     const sessionId = activeSessionId.value
     // Persisted history keeps stable object references while only the live tail
@@ -2654,6 +2751,7 @@ export const useGrokStore = defineStore('grok', () => {
     activeMessages,
     activeQueuedMessages,
     activeItems,
+    itemsForSession,
     activeHistoryHasEarlier,
     activeHistoryEarlierCount,
     activeHistoryLoadingEarlier,

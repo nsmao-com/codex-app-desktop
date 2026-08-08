@@ -136,7 +136,9 @@ export function ImportMCPServers(request: $models.MCPServersImportRequest): $Can
 }
 
 /**
- * InstallCLITool installs or upgrades a CLI via pnpm (global).
+ * InstallCLITool installs or upgrades a CLI.
+ * Codex / Claude / Gemini / OpenCode use pnpm global packages.
+ * Grok Build uses the official x.ai installer / `grok update` (native binary).
  */
 export function InstallCLITool(toolID: string): $CancellablePromise<$models.CLIToolActionResult> {
     return $Call.ByID(1201058047, toolID);

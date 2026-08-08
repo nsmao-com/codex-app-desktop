@@ -143,6 +143,10 @@ type UserSettings struct {
 	// acceptEdits | auto | bypassPermissions | manual | dontAsk | plan.
 	// Empty falls back to ClaudeSandbox + ClaudeApprovalPolicy mapping.
 	ClaudePermissionMode string `json:"claudePermissionMode"`
+	// ClaudeCustomModels are free-form --model ids (aliases or full IDs) kept per-user.
+	ClaudeCustomModels []string `json:"claudeCustomModels"`
+	// GrokCustomModels are free-form model ids for Build CLI / API mode pickers.
+	GrokCustomModels []string `json:"grokCustomModels"`
 	// Gemini/OpenCode preferences stay separate from Codex/Claude/Grok so a
 	// runtime switch never changes another provider's default model.
 	GeminiWorkspace          string   `json:"geminiWorkspace"`
@@ -387,6 +391,8 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	}
 	settings.ModelProvider = "" // Codex-only: never persist Claude/Gemini/Grok workbench providers
 	settings.CustomModels = sanitizeCustomModels(settings.CustomModels)
+	settings.ClaudeCustomModels = sanitizeCustomModels(settings.ClaudeCustomModels)
+	settings.GrokCustomModels = sanitizeCustomModels(settings.GrokCustomModels)
 	settings.Effort = strings.TrimSpace(settings.Effort)
 	settings.ActiveRuntime = normalizeRuntime(settings.ActiveRuntime)
 	settings.GrokBackend = normalizeGrokBackend(settings.GrokBackend)
@@ -3099,6 +3105,8 @@ func defaultSettings() UserSettings {
 		ClaudeSandbox:            "workspace-write",
 		ClaudeApprovalPolicy:     "on-request",
 		ClaudePermissionMode:     "acceptEdits",
+		ClaudeCustomModels:       []string{},
+		GrokCustomModels:         []string{},
 		GeminiWorkspace:          "",
 		GeminiRecentWorkspaces:   []string{},
 		GeminiModel:              "gemini-2.5-pro",
@@ -3202,6 +3210,8 @@ func readSettings(path string) (UserSettings, error) {
 	settings.GeminiRecentWorkspaces = sanitizeRecentWorkspaces(settings.GeminiRecentWorkspaces)
 	settings.OpenCodeRecentWorkspaces = sanitizeRecentWorkspaces(settings.OpenCodeRecentWorkspaces)
 	settings.CustomModels = sanitizeCustomModels(settings.CustomModels)
+	settings.ClaudeCustomModels = sanitizeCustomModels(settings.ClaudeCustomModels)
+	settings.GrokCustomModels = sanitizeCustomModels(settings.GrokCustomModels)
 	if settings.MultiAgentMode == "proactiveAgents" {
 		settings.MultiAgentMode = "proactive"
 	}
@@ -3476,6 +3486,8 @@ func cloneSettings(settings UserSettings) UserSettings {
 	settings.RecentWorkspaces = append([]string(nil), settings.RecentWorkspaces...)
 	settings.GrokRecentWorkspaces = append([]string(nil), settings.GrokRecentWorkspaces...)
 	settings.ClaudeRecentWorkspaces = append([]string(nil), settings.ClaudeRecentWorkspaces...)
+	settings.ClaudeCustomModels = append([]string(nil), settings.ClaudeCustomModels...)
+	settings.GrokCustomModels = append([]string(nil), settings.GrokCustomModels...)
 	settings.GeminiCustomModels = append([]string(nil), settings.GeminiCustomModels...)
 	settings.OpenCodeCustomModels = append([]string(nil), settings.OpenCodeCustomModels...)
 	settings.CustomModels = append([]string(nil), settings.CustomModels...)

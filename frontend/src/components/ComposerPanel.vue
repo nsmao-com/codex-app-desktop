@@ -48,6 +48,7 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { useAppStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import {
   buildContextUsageView,
   CODEX_CONTEXT_BASELINE_TOKENS,
@@ -59,11 +60,20 @@ import {
   DEFAULT_CODEX_REASONING,
   DEFAULT_GROK_REASONING,
   formatModelLabel,
+  modelsForClaudeRuntime,
   modelsForGrokRuntime,
   modelsForRuntime,
 } from '@/utils/runtimeProviders'
 
 const appStore = useAppStore()
+const {
+  runtime: paneRuntime,
+  isCodexMode,
+  isClaudeMode,
+  isGrokMode,
+  isGeminiMode,
+  isOpenCodeMode,
+} = useRuntimeMode()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
@@ -100,9 +110,9 @@ const COMPOSER_MAX_COLLAPSED = 200
 const COMPOSER_MAX_EXPANDED = 480
 
 const sentMessageHistory = computed(() => {
-  const items = appStore.isGrokMode
+  const items = isGrokMode.value
     ? grokStore.activeItems
-    : appStore.isClaudeMode
+    : isClaudeMode.value
       ? claudeStore.activeItems
       : codexStore.activeItems
   return items
@@ -134,7 +144,7 @@ async function runAddCommand(): Promise<void> {
 }
 
 const slashCommands = computed<SlashCommand[]>(() => {
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     return [
       {
         id: 'rename',
@@ -162,7 +172,7 @@ const slashCommands = computed<SlashCommand[]>(() => {
       },
     ]
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     return [
       {
         id: 'archive',
@@ -184,7 +194,7 @@ const slashCommands = computed<SlashCommand[]>(() => {
       },
     ]
   }
-  if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
+  if (isGeminiMode.value || isOpenCodeMode.value) {
     return [
       {
         id: 'usage',
@@ -380,13 +390,13 @@ watch(pluginOptions, (options) => {
 
 const isDraggingFiles = computed(() => dragDepth.value > 0)
 const activeTokenUsage = computed(() => {
-  if (appStore.isGrokMode) return grokStore.activeTokenUsage
-  if (appStore.isClaudeMode) return claudeStore.activeTokenUsage
+  if (isGrokMode.value) return grokStore.activeTokenUsage
+  if (isClaudeMode.value) return claudeStore.activeTokenUsage
   return codexStore.activeTokenUsage
 })
 const contextUsage = computed(() => buildContextUsageView(
   activeTokenUsage.value,
-  appStore.isCodexMode ? CODEX_CONTEXT_BASELINE_TOKENS : 0,
+  isCodexMode.value ? CODEX_CONTEXT_BASELINE_TOKENS : 0,
 ))
 const contextWindow = computed(() => contextUsage.value.contextWindow)
 const contextUsedTokens = computed(() => contextUsage.value.usedTokens)
@@ -403,16 +413,16 @@ const contextUsageTooltip = computed(() => {
   return `${t('inspector.contextUsage')} ${contextUsedPercent.value.toFixed(1)}% · ${formatTokenCount(contextUsedTokens.value)} / ${formatTokenCount(contextWindow.value)}`
 })
 const sessionLocked = computed(() => Boolean(
-  (appStore.isCodexMode || appStore.isGeminiMode || appStore.isOpenCodeMode)
+  (isCodexMode.value || isGeminiMode.value || isOpenCodeMode.value)
   && codexStore.activeThreadId
   && !codexStore.activeThreadId.startsWith('pending-thread-')
   && codexStore.activeThread,
 ))
 const grokProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'grok'))
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
-const externalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+const externalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === paneRuntime.value))
 const externalModelCatalog = computed(() => {
-  const custom = appStore.isGeminiMode
+  const custom = isGeminiMode.value
     ? (appStore.settings.geminiCustomModels ?? [])
     : (appStore.settings.openCodeCustomModels ?? [])
   const catalog = (externalProvider.value?.models ?? []).map((item) => ({
@@ -426,7 +436,7 @@ const externalModelCatalog = computed(() => {
     })),
     serviceTiers: [],
     defaultReasoningEffort: externalProvider.value?.reasoningEfforts?.find((effort) => effort.isDefault)?.effort
-      || (appStore.isGeminiMode ? 'auto' : 'high'),
+      || (isGeminiMode.value ? 'auto' : 'high'),
     defaultServiceTier: '',
   }))
   for (const model of custom) {
@@ -439,65 +449,58 @@ const externalModelCatalog = computed(() => {
       isDefault: false,
       supportedReasoningEfforts: [],
       serviceTiers: [],
-      defaultReasoningEffort: appStore.isGeminiMode ? 'auto' : 'high',
+      defaultReasoningEffort: isGeminiMode.value ? 'auto' : 'high',
       defaultServiceTier: '',
     })
   }
   return catalog
 })
 const displayModel = computed(() => {
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     return appStore.settings.grokBackend === 'api'
       ? (appStore.settings.grokAPIModel || appStore.settings.grokBuildModel || 'grok-4.5')
       : (appStore.settings.grokBuildModel || appStore.settings.grokAPIModel || 'grok-4.5')
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     return appStore.settings.claudeModel || 'sonnet'
   }
-  if (appStore.isGeminiMode) return appStore.settings.geminiModel || 'gemini-2.5-pro'
-  if (appStore.isOpenCodeMode) return appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6'
+  if (isGeminiMode.value) return appStore.settings.geminiModel || 'gemini-2.5-pro'
+  if (isOpenCodeMode.value) return appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6'
   return sessionLocked.value
     ? (codexStore.activeThread?.model || appStore.settings.model)
     : appStore.settings.model
 })
 const displayEffort = computed(() => {
-  if (appStore.isGrokMode) return appStore.settings.grokEffort || 'high'
-  if (appStore.isClaudeMode) return appStore.settings.claudeEffort || 'high'
-  if (appStore.isGeminiMode) return appStore.settings.geminiEffort || 'auto'
-  if (appStore.isOpenCodeMode) return appStore.settings.openCodeEffort || 'high'
+  if (isGrokMode.value) return appStore.settings.grokEffort || 'high'
+  if (isClaudeMode.value) return appStore.settings.claudeEffort || 'high'
+  if (isGeminiMode.value) return appStore.settings.geminiEffort || 'auto'
+  if (isOpenCodeMode.value) return appStore.settings.openCodeEffort || 'high'
   return sessionLocked.value
     ? (codexStore.activeThread?.effort || appStore.settings.effort)
     : appStore.settings.effort
 })
 const selectedModel = computed(() => {
-  if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
+  if (isGeminiMode.value || isOpenCodeMode.value) {
     return externalModelCatalog.value.find((model) => model.model === displayModel.value)
   }
   return appStore.models.find((model) => model.model === displayModel.value)
 })
 const selectableModels = computed(() => {
-  if (appStore.isGrokMode) {
-    return modelsForGrokRuntime(grokProvider.value?.models ?? [], displayModel.value)
+  if (isGrokMode.value) {
+    return modelsForGrokRuntime(
+      grokProvider.value?.models ?? [],
+      displayModel.value,
+      appStore.settings.grokCustomModels ?? [],
+    )
   }
-  if (appStore.isClaudeMode) {
-    const models = claudeProvider.value?.models ?? []
-    if (models.length) {
-      return models.map((item) => ({
-        model: item.model,
-        displayName: item.displayName || formatModelLabel(item.model),
-        description: item.description
-          || (item.displayName ? `alias \`${item.model}\`` : item.model),
-        isDefault: item.isDefault,
-      }))
-    }
-    return [
-      { model: 'sonnet', displayName: 'Claude Sonnet', description: 'alias `sonnet` → latest Sonnet', isDefault: true },
-      { model: 'opus', displayName: 'Claude Opus', description: 'alias `opus` → latest Opus', isDefault: false },
-      { model: 'haiku', displayName: 'Claude Haiku', description: 'alias `haiku` → latest Haiku', isDefault: false },
-      { model: 'fable', displayName: 'Claude Fable', description: 'alias `fable` → latest Fable', isDefault: false },
-    ]
+  if (isClaudeMode.value) {
+    return modelsForClaudeRuntime(
+      claudeProvider.value?.models ?? [],
+      displayModel.value,
+      appStore.settings.claudeCustomModels ?? [],
+    )
   }
-  if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
+  if (isGeminiMode.value || isOpenCodeMode.value) {
     return externalModelCatalog.value
   }
   return modelsForRuntime(appStore.models, appStore.settings.customModels ?? []) ?? []
@@ -519,7 +522,7 @@ const composerModelSelection = computed({
   set: (value: string) => { void applyModelSelection(value) },
 })
 const reasoningOptions = computed(() => {
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     const fromProvider = grokProvider.value?.reasoningEfforts ?? []
     if (fromProvider.length) {
       return fromProvider.map((item) => ({
@@ -530,7 +533,7 @@ const reasoningOptions = computed(() => {
     }
     return [...DEFAULT_GROK_REASONING]
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     const fromProvider = claudeProvider.value?.reasoningEfforts ?? []
     if (fromProvider.length) {
       return fromProvider.map((item) => ({
@@ -552,29 +555,29 @@ const reasoningOptions = computed(() => {
 })
 /** Selected permission preset: ask | auto | strict — labels always match menu items. */
 const permissionPreset = computed((): 'ask' | 'auto' | 'strict' => {
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     const mode = appStore.settings.claudePermissionMode || ''
     if (mode === 'bypassPermissions') return 'auto'
     if (mode === 'plan') return 'strict'
     if (mode === 'acceptEdits' || mode === 'auto' || mode === 'dontAsk' || mode === 'manual') return 'ask'
     // Fall back to legacy sandbox pair.
   }
-  const sandbox = appStore.isGrokMode
+  const sandbox = isGrokMode.value
     ? appStore.settings.grokSandbox
-    : appStore.isClaudeMode
+    : isClaudeMode.value
       ? appStore.settings.claudeSandbox
-      : appStore.isGeminiMode
+      : isGeminiMode.value
         ? appStore.settings.geminiSandbox
-        : appStore.isOpenCodeMode
+        : isOpenCodeMode.value
           ? appStore.settings.openCodeSandbox
       : appStore.settings.sandbox
-  const approval = appStore.isGrokMode
+  const approval = isGrokMode.value
     ? appStore.settings.grokApprovalPolicy
-    : appStore.isClaudeMode
+    : isClaudeMode.value
       ? appStore.settings.claudeApprovalPolicy
-      : appStore.isGeminiMode
+      : isGeminiMode.value
         ? appStore.settings.geminiApprovalPolicy
-        : appStore.isOpenCodeMode
+        : isOpenCodeMode.value
           ? appStore.settings.openCodeApprovalPolicy
       : appStore.settings.approvalPolicy
   if (sandbox === 'danger-full-access' && approval === 'never') return 'auto'
@@ -588,7 +591,7 @@ const permissionLabel = computed(() => {
 })
 /** Secondary hint under the permission control (Claude official mode). */
 const permissionDetail = computed(() => {
-  if (!appStore.isClaudeMode) return ''
+  if (!isClaudeMode.value) return ''
   const mode = appStore.settings.claudePermissionMode
     || (permissionPreset.value === 'auto'
       ? 'bypassPermissions'
@@ -605,8 +608,8 @@ const selectedEffortLabel = computed(() => {
   return effort.charAt(0).toUpperCase() + effort.slice(1)
 })
 const activeQueuedMessages = computed(() => {
-  if (appStore.isGrokMode) return grokStore.activeQueuedMessages
-  if (appStore.isClaudeMode) return claudeStore.activeQueuedMessages
+  if (isGrokMode.value) return grokStore.activeQueuedMessages
+  if (isClaudeMode.value) return claudeStore.activeQueuedMessages
   return codexStore.activeQueuedMessages
 })
 /** Only show the queue strip when something is actually waiting / failed — not the in-flight send. */
@@ -614,10 +617,10 @@ const showQueueStrip = computed(() =>
   activeQueuedMessages.value.some((message) => message.state === 'queued' || message.state === 'failed'),
 )
 const activeSelectionLoading = computed(() => {
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     return Boolean(grokStore.activeSessionId && grokStore.loadingSessionId === grokStore.activeSessionId)
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     return Boolean(claudeStore.activeSessionId && claudeStore.loadingSessionId === claudeStore.activeSessionId)
   }
   return Boolean(codexStore.activeThreadId && codexStore.loadingThreadId === codexStore.activeThreadId)
@@ -630,10 +633,10 @@ const canSend = computed(() => {
   const hasContent = Boolean(modelValue.value.trim()) || attachedImages.value.length > 0
   if (attachingImages.value) return false
   if (workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return false
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     return hasContent && grokStore.isReady
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     return hasContent && claudeStore.isReady && Boolean(claudeStore.workspacePath)
   }
   return hasContent && codexStore.isReady && !codexStore.creatingThread
@@ -650,37 +653,37 @@ function canMoveQueued(index: number, direction: 'up' | 'down'): boolean {
 }
 
 function reorderQueued(messageId: string, direction: 'up' | 'down'): void {
-  if (appStore.isGrokMode) grokStore.reorderQueuedMessage(messageId, direction)
-  else if (appStore.isClaudeMode) claudeStore.reorderQueuedMessage(messageId, direction)
+  if (isGrokMode.value) grokStore.reorderQueuedMessage(messageId, direction)
+  else if (isClaudeMode.value) claudeStore.reorderQueuedMessage(messageId, direction)
   else codexStore.reorderQueuedMessage(messageId, direction)
 }
 
 function sendQueuedNow(messageId: string): void {
-  if (appStore.isGrokMode) void grokStore.sendQueuedMessageNow(messageId)
-  else if (appStore.isClaudeMode) void claudeStore.sendQueuedMessageNow(messageId)
+  if (isGrokMode.value) void grokStore.sendQueuedMessageNow(messageId)
+  else if (isClaudeMode.value) void claudeStore.sendQueuedMessageNow(messageId)
   else void codexStore.sendQueuedMessageNow(messageId)
 }
 
 function retryQueued(messageId: string): void {
-  if (appStore.isGrokMode) grokStore.retryQueuedMessage(messageId)
-  else if (appStore.isClaudeMode) claudeStore.retryQueuedMessage(messageId)
+  if (isGrokMode.value) grokStore.retryQueuedMessage(messageId)
+  else if (isClaudeMode.value) claudeStore.retryQueuedMessage(messageId)
   else codexStore.retryQueuedMessage(messageId)
 }
 
 function removeQueued(messageId: string): void {
-  if (appStore.isGrokMode) grokStore.removeQueuedMessage(messageId)
-  else if (appStore.isClaudeMode) claudeStore.removeQueuedMessage(messageId)
+  if (isGrokMode.value) grokStore.removeQueuedMessage(messageId)
+  else if (isClaudeMode.value) claudeStore.removeQueuedMessage(messageId)
   else codexStore.removeQueuedMessage(messageId)
 }
 
 const willQueueOnSend = computed(() => {
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     const loadingActiveSession = Boolean(
       grokStore.activeSessionId && grokStore.loadingSessionId === grokStore.activeSessionId,
     )
     return loadingActiveSession || grokStore.isTurnRunning || grokStore.sending || showQueueStrip.value
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     const loadingActiveSession = Boolean(
       claudeStore.activeSessionId && claudeStore.loadingSessionId === claudeStore.activeSessionId,
     )
@@ -689,19 +692,19 @@ const willQueueOnSend = computed(() => {
   return codexStore.activeThreadBusy || showQueueStrip.value
 })
 const activeRuntimeTurnRunning = computed(() => {
-  if (appStore.isGrokMode) return grokStore.isTurnRunning
-  if (appStore.isClaudeMode) return claudeStore.isTurnRunning
+  if (isGrokMode.value) return grokStore.isTurnRunning
+  if (isClaudeMode.value) return claudeStore.isTurnRunning
   return codexStore.isTurnRunning
 })
 const activeRuntimeSending = computed(() => {
-  if (appStore.isGrokMode) return grokStore.sending
-  if (appStore.isClaudeMode) return claudeStore.sending
+  if (isGrokMode.value) return grokStore.sending
+  if (isClaudeMode.value) return claudeStore.sending
   return codexStore.sendingMessage
 })
 const stopDisabled = computed(() => {
   if (workspaceStore.switchingWorkspace) return true
-  if (appStore.isGrokMode) return grokStore.interrupting
-  if (appStore.isClaudeMode) return claudeStore.interrupting
+  if (isGrokMode.value) return grokStore.interrupting
+  if (isClaudeMode.value) return claudeStore.interrupting
   return codexStore.interruptingTurn
 })
 const sendButtonLabel = computed(() => {
@@ -709,13 +712,13 @@ const sendButtonLabel = computed(() => {
   return t('chat.send')
 })
 const composerPlaceholder = computed(() => {
-  if (appStore.isGrokMode && willQueueOnSend.value) return t('chat.queuePlaceholder')
-  if (appStore.isGrokMode) return t('chat.grokPlaceholder')
-  if (appStore.isClaudeMode && willQueueOnSend.value) return t('chat.queuePlaceholder')
-  if (appStore.isClaudeMode) return t('chat.claudePlaceholder')
-  if ((appStore.isGeminiMode || appStore.isOpenCodeMode) && willQueueOnSend.value) return t('chat.queuePlaceholder')
-  if (appStore.isGeminiMode) return t('chat.runtimePlaceholder', { runtime: 'Gemini CLI' })
-  if (appStore.isOpenCodeMode) return t('chat.runtimePlaceholder', { runtime: 'OpenCode' })
+  if (isGrokMode.value && willQueueOnSend.value) return t('chat.queuePlaceholder')
+  if (isGrokMode.value) return t('chat.grokPlaceholder')
+  if (isClaudeMode.value && willQueueOnSend.value) return t('chat.queuePlaceholder')
+  if (isClaudeMode.value) return t('chat.claudePlaceholder')
+  if ((isGeminiMode.value || isOpenCodeMode.value) && willQueueOnSend.value) return t('chat.queuePlaceholder')
+  if (isGeminiMode.value) return t('chat.runtimePlaceholder', { runtime: 'Gemini CLI' })
+  if (isOpenCodeMode.value) return t('chat.runtimePlaceholder', { runtime: 'OpenCode' })
   if (willQueueOnSend.value) return t('chat.queuePlaceholder')
   return t('chat.placeholder')
 })
@@ -923,7 +926,7 @@ function onKeydown(event: KeyboardEvent): void {
     && (event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'End')
   ) resetSentHistoryNavigation()
   // Official Codex: Shift+Tab toggles plan mode.
-  if (appStore.isCodexMode && event.key === 'Tab' && event.shiftKey) {
+  if (isCodexMode.value && event.key === 'Tab' && event.shiftKey) {
     event.preventDefault()
     void togglePlanMode()
     return
@@ -991,7 +994,7 @@ const collaborationMode = computed(() => {
 const isPlanMode = computed(() => collaborationMode.value === 'plan')
 
 async function togglePlanMode(): Promise<void> {
-  if (!appStore.isCodexMode) return
+  if (!isCodexMode.value) return
   await codexStore.setCollaborationMode(isPlanMode.value ? 'default' : 'plan')
 }
 
@@ -1002,7 +1005,7 @@ async function send(): Promise<void> {
   if (!message && !images.length) return
   if (attachingImages.value) return
   if (workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     // Do not gate on sending — busy turns enqueue like Codex.
     if (!grokStore.isReady) return
     resetSentHistoryNavigation()
@@ -1018,7 +1021,7 @@ async function send(): Promise<void> {
     }
     return
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     if (!claudeStore.isReady) return
     // Capture then clear immediately so a second Enter cannot re-send the same text.
     resetSentHistoryNavigation()
@@ -1051,11 +1054,11 @@ async function send(): Promise<void> {
 
 function onStop(): void {
   if (workspaceStore.switchingWorkspace) return
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     void grokStore.interruptTurn()
     return
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     void claudeStore.interruptActiveTurn()
     return
   }
@@ -1237,7 +1240,7 @@ async function applyModelSelection(value: string): Promise<void> {
   const modelID = value.trim()
   if (!modelID) return
 
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     if (appStore.settings.grokBackend === 'api') {
       appStore.updateGrokPreferences({ grokAPIModel: modelID })
     } else {
@@ -1245,18 +1248,18 @@ async function applyModelSelection(value: string): Promise<void> {
     }
     return
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     appStore.patchSettings({ claudeModel: modelID })
     return
   }
-  if (appStore.isGeminiMode) {
+  if (isGeminiMode.value) {
     appStore.patchSettings({ geminiModel: modelID })
     if (sessionLocked.value && codexStore.activeThread) {
       void codexStore.updateSessionPreferences({ sessionId: codexStore.activeThread.id, model: modelID, effort: displayEffort.value, collaborationMode: collaborationMode.value }).catch(() => undefined)
     }
     return
   }
-  if (appStore.isOpenCodeMode) {
+  if (isOpenCodeMode.value) {
     const provider = modelID.includes('/') ? modelID.slice(0, modelID.indexOf('/')).trim() : ''
     appStore.patchSettings({
       openCodeModel: modelID,
@@ -1303,22 +1306,22 @@ async function applyModelSelection(value: string): Promise<void> {
 }
 
 function onEffortChange(value: string): void {
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     appStore.updateGrokPreferences({ grokEffort: value })
     return
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     appStore.patchSettings({ claudeEffort: value })
     return
   }
-  if (appStore.isGeminiMode) {
+  if (isGeminiMode.value) {
     appStore.patchSettings({ geminiEffort: value })
     if (sessionLocked.value && codexStore.activeThread) {
       void codexStore.updateSessionPreferences({ sessionId: codexStore.activeThread.id, model: displayModel.value, effort: value, collaborationMode: collaborationMode.value }).catch(() => undefined)
     }
     return
   }
-  if (appStore.isOpenCodeMode) {
+  if (isOpenCodeMode.value) {
     appStore.patchSettings({ openCodeEffort: value })
     if (sessionLocked.value && codexStore.activeThread) {
       void codexStore.updateSessionPreferences({ sessionId: codexStore.activeThread.id, model: displayModel.value, effort: value, collaborationMode: collaborationMode.value }).catch(() => undefined)
@@ -1342,7 +1345,7 @@ function onEffortChange(value: string): void {
 }
 
 function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     // Map composer presets to official Claude Code --permission-mode values.
     const values = mode === 'auto'
       ? {
@@ -1364,7 +1367,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
     appStore.patchSettings(values as any)
     return
   }
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     const values = mode === 'auto'
       ? { grokSandbox: 'danger-full-access', grokApprovalPolicy: 'never' }
       : mode === 'strict'
@@ -1374,8 +1377,8 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
     appStore.updateGrokPreferences(values)
     return
   }
-  if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
-    const prefix = appStore.isGeminiMode ? 'gemini' : 'openCode'
+  if (isGeminiMode.value || isOpenCodeMode.value) {
+    const prefix = isGeminiMode.value ? 'gemini' : 'openCode'
     const values = mode === 'auto'
       ? { [`${prefix}Sandbox`]: 'danger-full-access', [`${prefix}ApprovalPolicy`]: 'never' }
       : mode === 'strict'
@@ -1691,28 +1694,28 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               <DropdownMenuItem @click="setPermission('ask')">
                 <span class="flex min-w-0 flex-1 flex-col">
                   <span>{{ t('settings.permissionAsk') }}</span>
-                  <span v-if="appStore.isClaudeMode" class="text-[10px] text-muted-foreground">acceptEdits</span>
+                  <span v-if="isClaudeMode" class="text-[10px] text-muted-foreground">acceptEdits</span>
                 </span>
                 <span v-if="permissionPreset === 'ask'" class="ml-2 text-primary">✓</span>
               </DropdownMenuItem>
               <DropdownMenuItem @click="setPermission('auto')">
                 <span class="flex min-w-0 flex-1 flex-col">
                   <span>{{ t('settings.permissionAuto') }}</span>
-                  <span v-if="appStore.isClaudeMode" class="text-[10px] text-muted-foreground">bypassPermissions</span>
+                  <span v-if="isClaudeMode" class="text-[10px] text-muted-foreground">bypassPermissions</span>
                 </span>
                 <span v-if="permissionPreset === 'auto'" class="ml-2 text-primary">✓</span>
               </DropdownMenuItem>
               <DropdownMenuItem @click="setPermission('strict')">
                 <span class="flex min-w-0 flex-1 flex-col">
                   <span>{{ t('settings.permissionStrict') }}</span>
-                  <span v-if="appStore.isClaudeMode" class="text-[10px] text-muted-foreground">plan</span>
+                  <span v-if="isClaudeMode" class="text-[10px] text-muted-foreground">plan</span>
                 </span>
                 <span v-if="permissionPreset === 'strict'" class="ml-2 text-primary">✓</span>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
 
-          <SimpleTooltip v-if="appStore.isCodexMode" :content="t('chat.planModeToggleHint')">
+          <SimpleTooltip v-if="isCodexMode" :content="t('chat.planModeToggleHint')">
             <Button
               type="button"
               variant="ghost"

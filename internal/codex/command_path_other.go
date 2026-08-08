@@ -58,7 +58,10 @@ func commonUnixCLIBinDirs() []string {
 	)
 
 	if home != "" {
+		// Put official Grok Build (~/.grok/bin) first so it wins over any npm
+		// shim for `@xai-official/grok` (platform-limited stub package).
 		candidates = append(candidates,
+			filepath.Join(home, ".grok", "bin"),
 			filepath.Join(home, ".local", "bin"),
 			filepath.Join(home, ".volta", "bin"),
 			filepath.Join(home, ".cargo", "bin"),
@@ -66,7 +69,6 @@ func commonUnixCLIBinDirs() []string {
 			filepath.Join(home, ".yarn", "bin"),
 			filepath.Join(home, ".npm-global", "bin"),
 			filepath.Join(home, ".npm", "bin"),
-			filepath.Join(home, ".grok", "bin"),
 			filepath.Join(home, ".asdf", "shims"),
 			filepath.Join(home, ".local", "share", "pnpm"),
 			filepath.Join(home, "Library", "pnpm"), // macOS pnpm home

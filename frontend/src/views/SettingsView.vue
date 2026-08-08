@@ -51,12 +51,19 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type { ExternalRuntimeCatalog } from '../../bindings/nice_codex_desktop/models'
 import { supportedLocales } from '@/i18n'
 import { ACCENT_OPTIONS, type AppAccent } from '@/lib/accents'
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import { useAppStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import type { WorkspaceRuntime } from '@/stores/app'
 import {
   readClaudeGlobalInstructions,
   readClaudeProjectInstructions,
@@ -72,7 +79,7 @@ import {
   type CLIToolStatus,
   type CLIToolsReport,
 } from '@/utils/cliTools'
-import { DEFAULT_GROK_REASONING, modelsForGrokRuntime, modelsForRuntime } from '@/utils/runtimeProviders'
+import { DEFAULT_GROK_REASONING, modelsForClaudeRuntime, modelsForGrokRuntime, modelsForRuntime } from '@/utils/runtimeProviders'
 
 type SettingsPanel =
   | 'general'
@@ -139,6 +146,10 @@ const DEFAULT_MODEL_VALUE = '__nice_codex_default_model__'
 const model = shallowRef(appStore.settings.model)
 const customModels = shallowRef<string[]>([...(appStore.settings.customModels ?? [])])
 const customModelDraft = shallowRef('')
+const claudeCustomModels = shallowRef<string[]>([...(appStore.settings.claudeCustomModels ?? [])])
+const claudeCustomModelDraft = shallowRef('')
+const grokCustomModels = shallowRef<string[]>([...(appStore.settings.grokCustomModels ?? [])])
+const grokCustomModelDraft = shallowRef('')
 const effort = shallowRef(appStore.settings.effort)
 const serviceTier = shallowRef(appStore.settings.serviceTier)
 const collaborationMode = shallowRef(appStore.settings.collaborationMode)
@@ -198,6 +209,19 @@ const networkProxyPresets = [
   { label: '7897', url: 'http://127.0.0.1:7897' },
   { label: 'v2rayN 10809', url: 'http://127.0.0.1:10809' },
 ] as const
+const runtimeSwitching = shallowRef(false)
+const runtimeTabs: Array<{
+  id: WorkspaceRuntime
+  label: string
+  shortLabel: string
+  icon: Component
+}> = [
+  { id: 'codex', label: 'Codex', shortLabel: 'Codex', icon: OpenAIIcon },
+  { id: 'claude', label: 'Claude Code', shortLabel: 'Claude', icon: ClaudeIcon },
+  { id: 'grok', label: 'Grok', shortLabel: 'Grok', icon: GrokIcon },
+  { id: 'gemini', label: 'Gemini CLI', shortLabel: 'Gemini', icon: GeminiIcon },
+  { id: 'opencode', label: 'OpenCode', shortLabel: 'OpenCode', icon: OpenCodeIcon },
+]
 const browserAllowedHostsText = shallowRef((appStore.settings.browserAllowedHosts ?? []).join('\n'))
 const browserBlockedHostsText = shallowRef((appStore.settings.browserBlockedHosts ?? []).join('\n'))
 const browserDownloadDir = shallowRef(appStore.settings.browserDownloadDir ?? '')
@@ -513,12 +537,34 @@ const grokModelOptions = computed<SelectOption[]>(() => {
     displayName: item.displayName,
     isDefault: item.isDefault,
   }))
-  return modelsForGrokRuntime(catalog, preferred).map((option) => ({
+  return modelsForGrokRuntime(catalog, preferred, grokCustomModels.value).map((option) => ({
     value: option.model,
     label: option.displayName,
     description: option.model,
     badge: option.isDefault ? t('common.recommended') : '',
   }))
+})
+
+const claudeModelOptions = computed<SelectOption[]>(() => {
+  const catalog = (claudeStatus.value.models ?? []).map((item) => ({
+    model: item.model,
+    displayName: item.displayName,
+    description: item.description,
+    isDefault: item.isDefault,
+  }))
+  return modelsForClaudeRuntime(catalog, claudeModel.value, claudeCustomModels.value).map((option) => ({
+    value: option.model,
+    label: option.displayName,
+    description: option.description,
+    badge: option.isDefault ? t('common.recommended') : '',
+  }))
+})
+
+const claudeModelSelection = computed({
+  get: () => claudeModel.value || 'sonnet',
+  set: (value: string) => {
+    claudeModel.value = value.trim() || 'sonnet'
+  },
 })
 
 const grokModelSelection = computed({
@@ -753,17 +799,26 @@ const navGroups = computed<NavGroup[]>(() => [
   },
 ])
 
+/** Codex-only product surfaces — hide when editing other runtimes. */
+const codexOnlyPanels = new Set<SettingsPanel>([
+  'plugins',
+  'mcp',
+  'routing',
+  'hooks',
+  'scheduled',
+  'account',
+  'browser',
+])
+
 const filteredNavGroups = computed(() => {
   const query = settingsSearch.value.trim().toLocaleLowerCase()
-  // Grok/Claude mode: keep agent config + archived; hide pure Codex product surfaces.
-  const hideExternal = new Set(['plugins', 'mcp', 'routing', 'hooks', 'scheduled', 'account'])
   let base = navGroups.value
-  if (isGrokSettings.value || isClaudeSettings.value || isGeminiSettings.value || isOpenCodeSettings.value) {
+  if (!isCodexSettings.value) {
     base = navGroups.value
       .map((group) => ({
         ...group,
         items: group.items
-          .filter((item) => !hideExternal.has(item.id))
+          .filter((item) => !codexOnlyPanels.has(item.id))
           .map((item) => {
             if (item.id !== 'agent') return item
             if (isGrokSettings.value) {
@@ -788,8 +843,14 @@ const filteredNavGroups = computed(() => {
 })
 
 const activeNavItem = computed(() =>
-  navGroups.value.flatMap((group) => group.items).find((item) => item.id === activePanel.value),
+  filteredNavGroups.value.flatMap((group) => group.items).find((item) => item.id === activePanel.value)
+  ?? navGroups.value.flatMap((group) => group.items).find((item) => item.id === activePanel.value),
 )
+
+const runtimeSlideIndex = computed(() => {
+  const index = runtimeTabs.findIndex((item) => item.id === appStore.activeRuntime)
+  return index >= 0 ? index : 0
+})
 
 const archivedThreads = computed(() => {
   const query = archivedSearch.value.trim().toLocaleLowerCase()
@@ -895,10 +956,30 @@ watch([isGrokSettings, isClaudeSettings, isGeminiSettings, isOpenCodeSettings], 
 })
 
 function clampPanelForRuntime(): void {
-  if (!isGrokSettings.value && !isClaudeSettings.value && !isGeminiSettings.value && !isOpenCodeSettings.value) return
-  // Archived is supported by external runtimes; Codex-only panels are hidden.
-  const hiddenExternalPanels = new Set(['plugins', 'mcp', 'routing', 'hooks', 'scheduled', 'account'])
-  if (hiddenExternalPanels.has(activePanel.value)) activePanel.value = 'agent'
+  if (isCodexSettings.value) return
+  // Archived / agent / shared panels stay; pure Codex product surfaces jump to agent.
+  if (codexOnlyPanels.has(activePanel.value)) activePanel.value = 'agent'
+}
+
+async function switchSettingsRuntime(runtime: WorkspaceRuntime): Promise<void> {
+  if (runtimeSwitching.value || appStore.activeRuntime === runtime) return
+  runtimeSwitching.value = true
+  try {
+    const ok = await appStore.setActiveRuntime(runtime)
+    if (!ok) return
+    syncFromStore()
+    clampPanelForRuntime()
+    if (runtime === 'grok') void grokStore.refreshRuntime()
+    else if (runtime === 'claude') void claudeStore.refreshRuntime()
+    else if (runtime === 'gemini' || runtime === 'opencode') {
+      void appStore.refreshRuntimes()
+      void loadExternalSettingsCatalog()
+    } else {
+      void appStore.refreshAccountData().catch(() => undefined)
+    }
+  } finally {
+    runtimeSwitching.value = false
+  }
 }
 
 onUnmounted(() => {
@@ -936,6 +1017,8 @@ function syncFromStore(): void {
   const settings = appStore.settings
   model.value = settings.model
   customModels.value = [...(settings.customModels ?? [])].filter((item) => !item.includes('·') && !/claude|gemini|grok/i.test(item))
+  claudeCustomModels.value = [...(settings.claudeCustomModels ?? [])]
+  grokCustomModels.value = [...(settings.grokCustomModels ?? [])]
   effort.value = settings.effort
   serviceTier.value = settings.serviceTier
   collaborationMode.value = settings.collaborationMode
@@ -993,8 +1076,35 @@ function syncFromStore(): void {
   codexClientName.value = settings.codexClientName ?? ''
   codexClientTitle.value = settings.codexClientTitle ?? ''
   codexClientVersion.value = settings.codexClientVersion ?? ''
+  networkProxyEnabled.value = Boolean(settings.networkProxyEnabled)
+  networkProxyURL.value = settings.networkProxyUrl ?? ''
+  networkProxyNoProxy.value = settings.networkProxyNoProxy || 'localhost,127.0.0.1,::1'
   void loadAgentsInstructions()
   void loadFeatureFlags()
+}
+
+function networkProxySnapshot(source: {
+  networkProxyEnabled?: boolean
+  networkProxyUrl?: string
+  networkProxyNoProxy?: string
+}) {
+  return {
+    enabled: Boolean(source.networkProxyEnabled),
+    url: (source.networkProxyUrl ?? '').trim(),
+    noProxy: (source.networkProxyNoProxy || 'localhost,127.0.0.1,::1').trim(),
+  }
+}
+
+function networkProxyChanged(): boolean {
+  const previous = networkProxySnapshot(appStore.settings)
+  const next = networkProxySnapshot({
+    networkProxyEnabled: networkProxyEnabled.value,
+    networkProxyUrl: networkProxyURL.value,
+    networkProxyNoProxy: networkProxyNoProxy.value,
+  })
+  return previous.enabled !== next.enabled
+    || previous.url !== next.url
+    || previous.noProxy !== next.noProxy
 }
 
 function parseHostList(text: string): string[] {
@@ -1197,6 +1307,34 @@ function addCustomModel(): void {
 function removeCustomModel(value: string): void {
   customModels.value = customModels.value.filter((item) => item !== value)
   if (model.value === value) model.value = ''
+}
+
+function addClaudeCustomModel(): void {
+  const value = claudeCustomModelDraft.value.trim()
+  if (!value || value.length > 160 || claudeCustomModels.value.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) return
+  claudeCustomModels.value = [...claudeCustomModels.value, value].slice(0, 24)
+  claudeModel.value = value
+  claudeCustomModelDraft.value = ''
+}
+
+function removeClaudeCustomModel(value: string): void {
+  claudeCustomModels.value = claudeCustomModels.value.filter((item) => item !== value)
+  if (claudeModel.value === value) claudeModel.value = 'sonnet'
+}
+
+function addGrokCustomModel(): void {
+  const value = grokCustomModelDraft.value.trim()
+  if (!value || value.length > 160 || grokCustomModels.value.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) return
+  grokCustomModels.value = [...grokCustomModels.value, value].slice(0, 24)
+  if (grokBackend.value === 'api') grokAPIModel.value = value
+  else grokBuildModel.value = value
+  grokCustomModelDraft.value = ''
+}
+
+function removeGrokCustomModel(value: string): void {
+  grokCustomModels.value = grokCustomModels.value.filter((item) => item !== value)
+  if (grokAPIModel.value === value) grokAPIModel.value = 'grok-4.5'
+  if (grokBuildModel.value === value) grokBuildModel.value = ''
 }
 
 function toggleFast(value?: boolean): void {
@@ -1506,7 +1644,9 @@ async function save(): Promise<void> {
   if (saving.value) return
 
   // Upstream client identity only applies after app-server re-handshake (Codex only).
-  const identityChanged = !isGrokSettings.value && !isClaudeSettings.value && !isGeminiSettings.value && !isOpenCodeSettings.value && codexClientIdentityChanged()
+  const identityChanged = isCodexSettings.value && codexClientIdentityChanged()
+  const proxyChanged = networkProxyChanged()
+  const codexServerRunning = Boolean(codexStore.connection.running)
   let reconnectAfterSave = false
   if (identityChanged) {
     reconnectAfterSave = await dialogStore.confirm({
@@ -1517,6 +1657,14 @@ async function save(): Promise<void> {
       destructive: true,
     })
     // confirm → save + restart; cancel → save only (user was already on Save).
+  } else if (proxyChanged && isCodexSettings.value && codexServerRunning) {
+    reconnectAfterSave = await dialogStore.confirm({
+      title: t('settings.networkProxyRestartTitle'),
+      description: t('settings.networkProxyRestartDesc'),
+      confirmLabel: t('settings.networkProxyRestartConfirm'),
+      cancelLabel: t('settings.networkProxyRestartLater'),
+      destructive: false,
+    })
   }
 
   saving.value = true
@@ -1606,6 +1754,8 @@ async function save(): Promise<void> {
       claudeSandbox: isClaudeSettings.value ? (claudeSandbox.value || 'workspace-write') : appStore.settings.claudeSandbox,
       claudeApprovalPolicy: isClaudeSettings.value ? (claudeApprovalPolicy.value || 'on-request') : appStore.settings.claudeApprovalPolicy,
       claudePermissionMode: isClaudeSettings.value ? (claudePermissionMode.value || 'acceptEdits') : appStore.settings.claudePermissionMode,
+      claudeCustomModels: isClaudeSettings.value ? claudeCustomModels.value : (appStore.settings.claudeCustomModels ?? []),
+      grokCustomModels: isGrokSettings.value ? grokCustomModels.value : (appStore.settings.grokCustomModels ?? []),
       geminiModel: appStore.settings.geminiModel || 'gemini-2.5-pro',
       geminiEffort: appStore.settings.geminiEffort || 'auto',
       geminiSandbox: isGeminiSettings.value ? (geminiSandbox.value || 'workspace-write') : appStore.settings.geminiSandbox,
@@ -1668,15 +1818,27 @@ async function save(): Promise<void> {
     saved.value = true
     if (isCodexSettings.value || isGeminiSettings.value || isOpenCodeSettings.value) await codexStore.loadModels()
 
-    if (!isGrokSettings.value && identityChanged && reconnectAfterSave) {
+    if (isCodexSettings.value && (identityChanged || proxyChanged) && reconnectAfterSave) {
       const ok = await reconnectCodexRuntime({ silent: true })
       if (ok) {
-        notify('success', t('settings.codexClientRestartDone'), t('settings.codexClientRestartDoneHint'))
+        notify(
+          'success',
+          identityChanged ? t('settings.codexClientRestartDone') : t('settings.networkProxyRestartDone'),
+          identityChanged ? t('settings.codexClientRestartDoneHint') : t('settings.networkProxyRestartDoneHint'),
+        )
       } else {
-        notify('warning', t('settings.codexClientRestartFailed'), t('settings.codexClientRestartSavedOnlyHint'))
+        notify(
+          'warning',
+          identityChanged ? t('settings.codexClientRestartFailed') : t('settings.networkProxyRestartFailed'),
+          t('settings.codexClientRestartSavedOnlyHint'),
+        )
       }
     } else if (identityChanged) {
       notify('info', t('settings.codexClientRestartSavedOnly'), t('settings.codexClientRestartSavedOnlyHint'))
+    } else if (proxyChanged && isCodexSettings.value && codexServerRunning) {
+      notify('info', t('settings.networkProxyRestartSavedOnly'), t('settings.networkProxyRestartSavedOnlyHint'))
+    } else if (proxyChanged && !isCodexSettings.value) {
+      notify('info', t('settings.networkProxySavedExternal'), t('settings.networkProxySavedExternalHint', { runtime: activeRuntimeName.value }))
     }
     // Stay on settings after save; user can leave via back/close.
   } catch {
@@ -1767,20 +1929,60 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
       </nav>
 
       <div class="px-4 py-2 text-[10px] text-muted-foreground">
-        {{ isGrokSettings ? 'Grok' : isClaudeSettings ? 'Claude' : isGeminiSettings ? 'Gemini' : isOpenCodeSettings ? 'OpenCode' : `Codex ${appStore.codexVersion || 'app-server'}` }} · v{{ appStore.appVersion }}
+        {{ activeRuntimeName }}{{ isCodexSettings && appStore.codexVersion ? ` ${appStore.codexVersion}` : '' }} · v{{ appStore.appVersion }}
       </div>
     </aside>
 
     <!-- Rounded content card -->
     <div class="flex min-h-0 min-w-0 flex-1 flex-col pb-2 pr-2 pl-1.5 pt-0">
       <section class="workbench-card relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[14px] border bg-card">
-        <header class="flex h-12 shrink-0 items-center gap-3 border-b px-5">
-          <div class="min-w-0 flex-1">
-            <h1 class="text-[15px] font-semibold tracking-tight">{{ activeNavItem?.label || t('settings.title') }}</h1>
+        <header class="flex shrink-0 flex-col gap-2 border-b px-5 py-2.5">
+          <div class="flex h-8 items-center gap-3">
+            <div class="min-w-0 flex-1">
+              <h1 class="text-[15px] font-semibold tracking-tight">{{ activeNavItem?.label || t('settings.title') }}</h1>
+            </div>
+            <Button v-if="activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching">
+              {{ saving ? t('common.saving') : t('settings.save') }}
+            </Button>
           </div>
-          <Button v-if="activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving">
-            {{ saving ? t('common.saving') : t('settings.save') }}
-          </Button>
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-[11px] text-muted-foreground">{{ t('settings.runtimeTabLabel') }}</p>
+              <p class="hidden text-[10px] text-muted-foreground sm:block">{{ t('settings.runtimeTabHint') }}</p>
+            </div>
+            <TooltipProvider>
+              <div
+                class="relative grid grid-cols-5 rounded-lg bg-muted/70 p-0.5 ring-1 ring-border/60"
+                role="tablist"
+                :aria-label="t('settings.runtimeTabLabel')"
+              >
+                <div
+                  class="pointer-events-none absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/5)] rounded-md bg-background shadow-sm transition-transform duration-200 ease-out"
+                  :style="{ transform: `translateX(${runtimeSlideIndex * 100}%)` }"
+                />
+                <Tooltip v-for="tab in runtimeTabs" :key="tab.id">
+                  <TooltipTrigger as-child>
+                    <button
+                      type="button"
+                      role="tab"
+                      class="relative z-[1] flex h-8 items-center justify-center gap-1.5 rounded-md px-1 text-[11px] transition-colors"
+                      :class="appStore.activeRuntime === tab.id
+                        ? 'font-medium text-foreground'
+                        : 'text-muted-foreground hover:text-foreground'"
+                      :aria-selected="appStore.activeRuntime === tab.id"
+                      :aria-label="tab.label"
+                      :disabled="runtimeSwitching"
+                      @click="void switchSettingsRuntime(tab.id)"
+                    >
+                      <component :is="tab.icon" :size="13" class="shrink-0 opacity-90" />
+                      <span class="hidden truncate md:inline">{{ tab.shortLabel }}</span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">{{ tab.label }}</TooltipContent>
+                </Tooltip>
+              </div>
+            </TooltipProvider>
+          </div>
         </header>
 
         <main class="min-h-0 flex-1 overflow-y-auto px-5 py-5">
@@ -2194,8 +2396,57 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                 <div class="space-y-4 p-4">
                   <div class="space-y-1">
                     <Label class="text-xs">{{ t('settings.model') }}</Label>
-                    <Input v-model="claudeModel" class="h-9 font-mono text-xs" placeholder="sonnet" maxlength="160" />
+                    <SearchableSelect
+                      v-model="claudeModelSelection"
+                      class="h-9"
+                      content-class="min-w-[320px]"
+                      align="start"
+                      :options="claudeModelOptions"
+                      :aria-label="t('settings.model')"
+                      :search-placeholder="t('settings.modelSearch')"
+                    />
                     <p class="text-[10px] text-muted-foreground">{{ t('settings.claudeModelHint') }}</p>
+                  </div>
+                  <div class="space-y-2">
+                    <Label class="text-xs">{{ t('settings.customModel') }}</Label>
+                    <p class="text-[10px] text-muted-foreground">{{ t('settings.claudeCustomModelHint') }}</p>
+                    <div class="flex gap-2">
+                      <Input
+                        v-model="claudeCustomModelDraft"
+                        class="h-9 font-mono text-xs"
+                        :placeholder="t('settings.claudeCustomModelPlaceholder')"
+                        maxlength="160"
+                        @keydown.enter.prevent="addClaudeCustomModel"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-9 shrink-0"
+                        :disabled="!claudeCustomModelDraft.trim()"
+                        @click="addClaudeCustomModel"
+                      >
+                        <Plus :size="14" class="mr-1.5" />{{ t('common.add') }}
+                      </Button>
+                    </div>
+                    <div v-if="claudeCustomModels.length" class="divide-y rounded-md border">
+                      <div
+                        v-for="item in claudeCustomModels"
+                        :key="item"
+                        class="flex items-center gap-2 px-3 py-2"
+                      >
+                        <code class="min-w-0 flex-1 truncate text-[11px]">{{ item }}</code>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          :aria-label="t('common.delete')"
+                          @click="removeClaudeCustomModel(item)"
+                        >
+                          <Trash2 :size="12" />
+                        </Button>
+                      </div>
+                    </div>
                   </div>
                    <div class="space-y-1">
                      <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
@@ -2344,6 +2595,47 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                       :aria-label="t('settings.model')"
                       :search-placeholder="t('settings.modelSearch')"
                     />
+                  </div>
+                  <div class="space-y-2">
+                    <Label class="text-xs">{{ t('settings.customModel') }}</Label>
+                    <p class="text-[10px] text-muted-foreground">{{ t('settings.grokCustomModelHint') }}</p>
+                    <div class="flex gap-2">
+                      <Input
+                        v-model="grokCustomModelDraft"
+                        class="h-9 font-mono text-xs"
+                        :placeholder="t('settings.grokCustomModelPlaceholder')"
+                        maxlength="160"
+                        @keydown.enter.prevent="addGrokCustomModel"
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-9 shrink-0"
+                        :disabled="!grokCustomModelDraft.trim()"
+                        @click="addGrokCustomModel"
+                      >
+                        <Plus :size="14" class="mr-1.5" />{{ t('common.add') }}
+                      </Button>
+                    </div>
+                    <div v-if="grokCustomModels.length" class="divide-y rounded-md border">
+                      <div
+                        v-for="item in grokCustomModels"
+                        :key="item"
+                        class="flex items-center gap-2 px-3 py-2"
+                      >
+                        <code class="min-w-0 flex-1 truncate text-[11px]">{{ item }}</code>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          :aria-label="t('common.delete')"
+                          @click="removeGrokCustomModel(item)"
+                        >
+                          <Trash2 :size="12" />
+                        </Button>
+                      </div>
+                    </div>
                   </div>
                   <div class="space-y-1">
                     <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
@@ -2766,7 +3058,15 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                     maxlength="16000"
                     :disabled="!projectInstructionsAvailable"
                   />
-                  <p class="text-[10px] text-muted-foreground">{{ t('settings.projectInstructionsSync') }}</p>
+                  <p class="text-[10px] text-muted-foreground">
+                    {{
+                      isGrokSettings
+                        ? t('settings.grokProjectInstructionsSync')
+                        : isClaudeSettings
+                          ? t('settings.claudeProjectInstructionsHint')
+                          : t('settings.projectInstructionsSync')
+                    }}
+                  </p>
                 </div>
               </section>
               <section v-if="isCodexSettings" class="overflow-hidden rounded-xl border bg-card">

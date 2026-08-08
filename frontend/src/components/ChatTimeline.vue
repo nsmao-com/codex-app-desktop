@@ -12,7 +12,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { useAppStore, useClaudeStore, useCodexStore, useGrokStore } from '@/stores'
+import { useClaudeStore, useCodexStore, useGrokStore } from '@/stores'
+import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import type { TimelineItem } from '@/types/codex'
 import ChatMessageGroup from './ChatMessageGroup.vue'
 
@@ -20,35 +21,58 @@ const props = defineProps<{
   sentEpoch: number
 }>()
 
-const appStore = useAppStore()
+const {
+  runtime: paneRuntime,
+  isCodexMode,
+  isClaudeMode,
+  isGrokMode,
+  boundSessionId,
+} = useRuntimeMode()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
 const { t } = useI18n()
 
-const timelineItems = computed(() => {
-  if (appStore.isGrokMode) return grokStore.activeItems
-  if (appStore.isClaudeMode) return claudeStore.activeItems
-  return codexStore.activeItems
-})
+/** Prefer arena-bound session so non-focused panes do not mirror the focused store pointer. */
 const timelineThreadId = computed(() => {
-  if (appStore.isGrokMode) return grokStore.activeSessionId
-  if (appStore.isClaudeMode) return claudeStore.activeSessionId
+  if (boundSessionId.value) return boundSessionId.value
+  if (isGrokMode.value) return grokStore.activeSessionId
+  if (isClaudeMode.value) return claudeStore.activeSessionId
   return codexStore.activeThreadId
 })
+const timelineItems = computed(() => {
+  const id = timelineThreadId.value
+  if (!id) return []
+  if (isGrokMode.value) {
+    return grokStore.itemsForSession(id)
+  }
+  if (isClaudeMode.value) {
+    if (claudeStore.sameSession(id, claudeStore.activeSessionId)) return claudeStore.activeItems
+    return claudeStore.itemsBySession?.[id] || []
+  }
+  return codexStore.itemsByThread[id] ?? []
+})
 const timelineLoading = computed(() => {
-  if (appStore.isGrokMode) {
-    return Boolean(grokStore.loadingSessionId && grokStore.loadingSessionId === grokStore.activeSessionId)
+  const id = timelineThreadId.value
+  if (!id) return false
+  if (isGrokMode.value) {
+    return Boolean(grokStore.loadingSessionId && grokStore.sameSession(grokStore.loadingSessionId, id))
   }
-  if (appStore.isClaudeMode) {
-    return Boolean(claudeStore.loadingSessionId && claudeStore.loadingSessionId === claudeStore.activeSessionId)
+  if (isClaudeMode.value) {
+    return Boolean(claudeStore.loadingSessionId && claudeStore.sameSession(claudeStore.loadingSessionId, id))
   }
-  return codexStore.loadingThreadId === codexStore.activeThreadId && codexStore.activeThreadId !== ''
+  return codexStore.loadingThreadId === id
 })
 const timelineTurnRunning = computed(() => {
-  if (appStore.isGrokMode) return grokStore.isTurnRunning
-  if (appStore.isClaudeMode) return claudeStore.isTurnRunning
-  return codexStore.isTurnRunning
+  const id = timelineThreadId.value
+  if (!id) return false
+  if (isGrokMode.value) {
+    return grokStore.runningSessionIds.some((sessionId) => grokStore.sameSession(sessionId, id))
+  }
+  if (isClaudeMode.value) {
+    return claudeStore.runningSessionIds.some((sessionId) => claudeStore.sameSession(sessionId, id))
+  }
+  return Boolean(codexStore.activeTurnByThread?.[id] || codexStore.runningThreadIds?.includes(id))
 })
 
 const emit = defineEmits<{
@@ -86,18 +110,18 @@ let loadTakingLongTimer: number | null = null
 
 const isLoading = timelineLoading
 const historyHasEarlier = computed(() => {
-  if (appStore.isGrokMode) return grokStore.activeHistoryHasEarlier
-  if (appStore.isClaudeMode) return claudeStore.activeHistoryHasEarlier
+  if (isGrokMode.value) return grokStore.activeHistoryHasEarlier
+  if (isClaudeMode.value) return claudeStore.activeHistoryHasEarlier
   return codexStore.activeHistoryHasEarlier
 })
 const historyEarlierCount = computed(() => {
-  if (appStore.isGrokMode) return grokStore.activeHistoryEarlierCount
-  if (appStore.isClaudeMode) return claudeStore.activeHistoryEarlierCount
+  if (isGrokMode.value) return grokStore.activeHistoryEarlierCount
+  if (isClaudeMode.value) return claudeStore.activeHistoryEarlierCount
   return codexStore.activeHistoryEarlierCount
 })
 const historyLoadingEarlier = computed(() => {
-  if (appStore.isGrokMode) return grokStore.activeHistoryLoadingEarlier
-  if (appStore.isClaudeMode) return claudeStore.activeHistoryLoadingEarlier
+  if (isGrokMode.value) return grokStore.activeHistoryLoadingEarlier
+  if (isClaudeMode.value) return claudeStore.activeHistoryLoadingEarlier
   return codexStore.activeHistoryLoadingEarlier
 })
 
@@ -300,8 +324,8 @@ const lastItemSignature = computed(() => {
 })
 
 const activeTurnKey = computed(() => {
-  if (appStore.isGrokMode) return grokStore.activeTurn?.turnId || grokStore.activeSessionId || ''
-  if (appStore.isClaudeMode) return claudeStore.activeTurn?.turnId || claudeStore.activeSessionId || ''
+  if (isGrokMode.value) return grokStore.activeTurn?.turnId || grokStore.activeSessionId || ''
+  if (isClaudeMode.value) return claudeStore.activeTurn?.turnId || claudeStore.activeSessionId || ''
   return codexStore.activeTurnId || codexStore.activeTurnFeedback?.turnId || ''
 })
 
@@ -331,8 +355,8 @@ function isLiveExternalItem(item: TimelineItem): boolean {
  * footer "正在思考" row while no agent group had `streaming=true` — blank wait.
  */
 const lastStreamingTurnId = computed(() => {
-  if (appStore.isGrokMode || appStore.isClaudeMode) {
-    const running = appStore.isGrokMode
+  if (isGrokMode.value || isClaudeMode.value) {
+    const running = isGrokMode.value
       ? (grokStore.isTurnRunning || grokStore.sending)
       : (claudeStore.isTurnRunning || claudeStore.sending)
     if (!running) return ''
@@ -355,11 +379,11 @@ const showThinking = computed(() => {
   if (isLoading.value) return false
   // The streaming agent group already owns thinking / reasoning UI — never duplicate it below.
   if (lastStreamingTurnId.value) return false
-  if (appStore.isGrokMode) {
+  if (isGrokMode.value) {
     // Mirror Codex: show footer shimmer until the first live agent activity lands.
     return grokStore.sending || grokStore.isTurnRunning
   }
-  if (appStore.isClaudeMode) {
+  if (isClaudeMode.value) {
     return claudeStore.sending || claudeStore.isTurnRunning
   }
   const feedback = codexStore.activeTurnFeedback
@@ -388,7 +412,7 @@ const showThinking = computed(() => {
 })
 
 const thinkingLabel = computed(() => {
-  if (appStore.isGrokMode || appStore.isClaudeMode) return t('chat.thinking')
+  if (isGrokMode.value || isClaudeMode.value) return t('chat.thinking')
   const feedback = codexStore.activeTurnFeedback
   if (feedback?.message) return feedback.message
   return t('chat.thinking')
@@ -432,9 +456,9 @@ async function recoverCurrentThread(): Promise<void> {
   recoveringThread.value = true
   loadTakingLong.value = false
   try {
-    const recovery = appStore.isGrokMode
+    const recovery = isGrokMode.value
       ? grokStore.recoverActiveSession()
-      : appStore.isClaudeMode
+      : isClaudeMode.value
         ? claudeStore.recoverActiveSession()
         : codexStore.recoverActiveThread()
     await Promise.race([
@@ -716,18 +740,18 @@ async function loadEarlierHistoryPage(): Promise<void> {
     : null
   const anchorTop = anchor?.getBoundingClientRect().top ?? null
   const previousVisibleCount = Math.max(1, renderWindowEnd.value - renderWindowStart.value)
-  const requestedRuntime = appStore.activeRuntime
+  const requestedRuntime = paneRuntime.value
   const requestedThreadId = timelineThreadId.value
   unlockFromBottom()
   windowShiftPending = true
   try {
-    const loaded = appStore.isGrokMode
+    const loaded = isGrokMode.value
       ? await grokStore.loadEarlierHistory()
-      : appStore.isClaudeMode
+      : isClaudeMode.value
         ? await claudeStore.loadEarlierHistory()
         : await codexStore.loadEarlierHistory()
     if (!loaded) return
-    if (appStore.activeRuntime !== requestedRuntime || timelineThreadId.value !== requestedThreadId) return
+    if (paneRuntime.value !== requestedRuntime || timelineThreadId.value !== requestedThreadId) return
     await nextTick()
 
     const anchorIndex = anchorID
@@ -843,7 +867,7 @@ watch(showThinking, (visible) => {
 watch(
   () => codexStore.activeTurnFeedback?.state,
   (state, prev) => {
-    if (appStore.isGrokMode || !stickToBottom.value) return
+    if (isGrokMode.value || !stickToBottom.value) return
     if (prev === 'running' || prev === 'submitting') {
       if (state === 'failed' || state === 'interrupted' || !state) {
         void settleToBottom({ maxFrames: 16, followUp: true })
@@ -1030,15 +1054,15 @@ onUnmounted(() => {
             <ChatMessageGroup
               :kind="entry.group.kind"
               :items="entry.group.items"
-              :metrics="appStore.isGrokMode
+              :metrics="isGrokMode
                 ? grokStore.activeTurnMetrics[entry.group.turnId]
-                : appStore.isClaudeMode
+                : isClaudeMode
                   ? claudeStore.activeTurnMetrics[entry.group.turnId]
                   : codexStore.activeTurnMetrics[entry.group.turnId]"
               :animated="entry.index >= groups.length - 2"
               :streaming="entry.group.kind === 'agent' && entry.group.turnId === lastStreamingTurnId"
-              :turn-diff="appStore.isCodexMode ? (codexStore.diffsByTurn[entry.group.turnId] || '') : ''"
-              :allow-turn-actions="appStore.isCodexMode"
+              :turn-diff="isCodexMode ? (codexStore.diffsByTurn[entry.group.turnId] || '') : ''"
+              :allow-turn-actions="isCodexMode"
               :turn-index="entry.turnIndex"
               :turn-count="entry.turnCount"
               @retry="emit('retry', $event)"

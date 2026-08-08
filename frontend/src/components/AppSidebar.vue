@@ -5,6 +5,9 @@ import {
   ChevronDown,
   ChevronRight,
   Coins,
+  Columns2,
+  Columns3,
+  Columns4,
   Copy,
   Folder,
   FolderOpen,
@@ -64,7 +67,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
 import type { ThreadGroup, ThreadSummary } from '@/types/codex'
 import {
@@ -77,6 +80,7 @@ import { sameWorkspacePath } from '@/utils/workspacePath'
 
 const router = useRouter()
 const appStore = useAppStore()
+const arenaStore = useArenaStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
@@ -283,6 +287,66 @@ async function setActiveRuntime(runtime: WorkspaceRuntime): Promise<void> {
   if (appStore.activeRuntime === runtime) return
   // Only flip the flag here. App.vue watch defers hydrate/load so the tab animation isn't blocked.
   await appStore.setActiveRuntime(runtime)
+  // Keep arena focused pane in sync when switching from the sidebar tabs.
+  if (arenaStore.isArenaMode) {
+    const match = arenaStore.panes.find((pane) => pane.runtime === runtime)
+    if (match) arenaStore.focusPane(match.id)
+  }
+}
+
+const arenaContextMenu = shallowRef<{ x: number; y: number; runtime: WorkspaceRuntime } | null>(null)
+
+function openArenaContextMenu(event: MouseEvent, runtime: WorkspaceRuntime): void {
+  arenaContextMenu.value = {
+    x: event.clientX,
+    y: event.clientY,
+    runtime,
+  }
+}
+
+function closeArenaContextMenu(): void {
+  arenaContextMenu.value = null
+}
+
+function startArena(columns: 2 | 3 | 4 | 6 | 8): void {
+  const seed = arenaContextMenu.value?.runtime || appStore.activeRuntime
+  arenaStore.openArena(columns, seed)
+  closeArenaContextMenu()
+  void setActiveRuntime(seed)
+}
+
+function startArenaSameProvider(columns: 2 | 3 | 4): void {
+  const seed = arenaContextMenu.value?.runtime || appStore.activeRuntime
+  arenaStore.openArena(2, seed)
+  // Force every pane to the same provider so multi-tab same-model works.
+  for (const pane of arenaStore.panes) {
+    arenaStore.setPaneRuntime(pane.id, seed)
+  }
+  while (arenaStore.panes.length < columns && arenaStore.canAddPane) {
+    arenaStore.addPane(seed)
+  }
+  closeArenaContextMenu()
+  void setActiveRuntime(seed)
+}
+
+function onGlobalPointerDown(event: PointerEvent): void {
+  if (!arenaContextMenu.value) return
+  const target = event.target as HTMLElement | null
+  if (target?.closest?.('[data-arena-context-menu]')) return
+  closeArenaContextMenu()
+}
+
+onMounted(() => {
+  window.addEventListener('pointerdown', onGlobalPointerDown, true)
+  window.addEventListener('keydown', onArenaMenuEscape, true)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('pointerdown', onGlobalPointerDown, true)
+  window.removeEventListener('keydown', onArenaMenuEscape, true)
+})
+
+function onArenaMenuEscape(event: KeyboardEvent): void {
+  if (event.key === 'Escape') closeArenaContextMenu()
 }
 
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
@@ -822,9 +886,10 @@ function formatGrokUpdated(value?: number | null): string {
             : 'text-muted-foreground hover:text-foreground'"
           :aria-label="t('sidebar.runtimeCodex')"
           @click="void setActiveRuntime('codex')"
+          @contextmenu.prevent="openArenaContextMenu($event, 'codex')"
         >
           <OpenAIIcon :size="13" class="shrink-0 opacity-90" />
-        </Button></TooltipTrigger><TooltipContent side="bottom">Codex</TooltipContent></Tooltip>
+        </Button></TooltipTrigger><TooltipContent side="bottom">{{ t('arena.tabTip', { name: 'Codex' }) }}</TooltipContent></Tooltip>
         <Tooltip><TooltipTrigger as-child><Button
           variant="ghost"
           size="sm"
@@ -834,9 +899,10 @@ function formatGrokUpdated(value?: number | null): string {
             : 'text-muted-foreground hover:text-foreground'"
           :aria-label="t('sidebar.runtimeClaude')"
           @click="void setActiveRuntime('claude')"
+          @contextmenu.prevent="openArenaContextMenu($event, 'claude')"
         >
           <ClaudeIcon :size="13" class="shrink-0 opacity-90" />
-        </Button></TooltipTrigger><TooltipContent side="bottom">Claude</TooltipContent></Tooltip>
+        </Button></TooltipTrigger><TooltipContent side="bottom">{{ t('arena.tabTip', { name: 'Claude' }) }}</TooltipContent></Tooltip>
         <Tooltip><TooltipTrigger as-child><Button
           variant="ghost"
           size="sm"
@@ -846,9 +912,10 @@ function formatGrokUpdated(value?: number | null): string {
             : 'text-muted-foreground hover:text-foreground'"
           :aria-label="t('sidebar.runtimeGrok')"
           @click="void setActiveRuntime('grok')"
+          @contextmenu.prevent="openArenaContextMenu($event, 'grok')"
         >
           <GrokIcon :size="13" class="shrink-0 opacity-90" />
-        </Button></TooltipTrigger><TooltipContent side="bottom">Grok</TooltipContent></Tooltip>
+        </Button></TooltipTrigger><TooltipContent side="bottom">{{ t('arena.tabTip', { name: 'Grok' }) }}</TooltipContent></Tooltip>
         <Tooltip><TooltipTrigger as-child><Button
           variant="ghost"
           size="sm"
@@ -856,9 +923,10 @@ function formatGrokUpdated(value?: number | null): string {
           :class="appStore.isGeminiMode ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
           aria-label="Gemini"
           @click="void setActiveRuntime('gemini')"
+          @contextmenu.prevent="openArenaContextMenu($event, 'gemini')"
         >
           <GeminiIcon :size="13" class="shrink-0 opacity-90" />
-        </Button></TooltipTrigger><TooltipContent side="bottom">Gemini</TooltipContent></Tooltip>
+        </Button></TooltipTrigger><TooltipContent side="bottom">{{ t('arena.tabTip', { name: 'Gemini' }) }}</TooltipContent></Tooltip>
         <Tooltip><TooltipTrigger as-child><Button
           variant="ghost"
           size="sm"
@@ -866,9 +934,10 @@ function formatGrokUpdated(value?: number | null): string {
           :class="appStore.isOpenCodeMode ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
           aria-label="OpenCode"
           @click="void setActiveRuntime('opencode')"
+          @contextmenu.prevent="openArenaContextMenu($event, 'opencode')"
         >
           <OpenCodeIcon :size="13" class="shrink-0 opacity-90" />
-        </Button></TooltipTrigger><TooltipContent side="bottom">OpenCode</TooltipContent></Tooltip>
+        </Button></TooltipTrigger><TooltipContent side="bottom">{{ t('arena.tabTip', { name: 'OpenCode' }) }}</TooltipContent></Tooltip>
       </div>
       </TooltipProvider>
 
@@ -2256,5 +2325,98 @@ function formatGrokUpdated(value?: number | null): string {
       </div>
     </div>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="arenaContextMenu"
+        data-arena-context-menu
+        class="fixed z-[200] min-w-[200px] overflow-hidden rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg"
+        :style="{ left: `${arenaContextMenu.x}px`, top: `${arenaContextMenu.y}px` }"
+        role="menu"
+      >
+        <p class="px-2 py-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          {{ t('arena.menuTitle') }}
+        </p>
+        <button
+          type="button"
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-accent"
+          role="menuitem"
+          @click="startArena(2)"
+        >
+          <Columns2 :size="13" class="opacity-80" />
+          {{ t('arena.columns2') }}
+        </button>
+        <button
+          type="button"
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-accent"
+          role="menuitem"
+          @click="startArena(3)"
+        >
+          <Columns3 :size="13" class="opacity-80" />
+          {{ t('arena.columns3') }}
+        </button>
+        <button
+          type="button"
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-accent"
+          role="menuitem"
+          @click="startArena(4)"
+        >
+          <Columns4 :size="13" class="opacity-80" />
+          {{ t('arena.columns4') }}
+        </button>
+        <div class="my-1 h-px bg-border" />
+        <p class="px-2 py-1 text-[10px] text-muted-foreground">
+          {{ t('arena.sameProviderMenu') }}
+        </p>
+        <button
+          type="button"
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-accent"
+          role="menuitem"
+          @click="startArenaSameProvider(2)"
+        >
+          <Columns2 :size="13" class="opacity-80" />
+          {{ t('arena.sameProvider2') }}
+        </button>
+        <button
+          type="button"
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-accent"
+          role="menuitem"
+          @click="startArenaSameProvider(3)"
+        >
+          <Columns3 :size="13" class="opacity-80" />
+          {{ t('arena.sameProvider3') }}
+        </button>
+        <button
+          type="button"
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-accent"
+          role="menuitem"
+          @click="startArenaSameProvider(4)"
+        >
+          <Columns4 :size="13" class="opacity-80" />
+          {{ t('arena.sameProvider4') }}
+        </button>
+        <div v-if="arenaStore.isArenaMode" class="my-1 h-px bg-border" />
+        <button
+          v-if="arenaStore.isArenaMode && arenaStore.canAddPane"
+          type="button"
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-accent"
+          role="menuitem"
+          @click="arenaStore.addPane(arenaContextMenu?.runtime || appStore.activeRuntime); closeArenaContextMenu()"
+        >
+          <Plus :size="13" class="opacity-80" />
+          {{ t('arena.addPane') }}
+        </button>
+        <button
+          v-if="arenaStore.isArenaMode"
+          type="button"
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] text-destructive hover:bg-destructive/10"
+          role="menuitem"
+          @click="arenaStore.closeArena(); closeArenaContextMenu()"
+        >
+          <X :size="13" class="opacity-80" />
+          {{ t('arena.exit') }}
+        </button>
+      </div>
+    </Teleport>
   </Motion>
 </template>

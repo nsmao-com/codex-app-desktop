@@ -84,6 +84,9 @@ func commonCodexBinDirs() []string {
 	programFilesX86 := os.Getenv("ProgramFiles(x86)")
 
 	candidates := []string{
+		// Official Grok Build installs here; keep ahead of pnpm shims that may
+		// point at the macOS-only @xai-official/grok npm package.
+		filepath.Join(home, ".grok", "bin"),
 		filepath.Join(appData, "npm"),
 		filepath.Join(appData, "fnm"),
 		filepath.Join(localAppData, "pnpm"),

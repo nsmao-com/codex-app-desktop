@@ -26,7 +26,7 @@ import { translate } from '../i18n'
 import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.2.6'
+const AppVersionFallback = '1.2.7'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -55,6 +55,8 @@ const defaultSettings: UserSettings = {
   claudeSandbox: 'workspace-write',
   claudeApprovalPolicy: 'on-request',
   claudePermissionMode: 'acceptEdits',
+  claudeCustomModels: [],
+  grokCustomModels: [],
   geminiWorkspace: '',
   geminiRecentWorkspaces: [],
   geminiModel: 'gemini-2.5-pro',
@@ -145,7 +147,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.2.6')
+  const appVersion = shallowRef('1.2.7')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -292,6 +294,8 @@ export const useAppStore = defineStore('app', () => {
       claudeSandbox: data.settings.claudeSandbox || 'workspace-write',
       claudeApprovalPolicy: data.settings.claudeApprovalPolicy || 'on-request',
       claudePermissionMode: data.settings.claudePermissionMode || 'acceptEdits',
+      claudeCustomModels: data.settings.claudeCustomModels ?? [],
+      grokCustomModels: data.settings.grokCustomModels ?? [],
       geminiWorkspace: data.settings.geminiWorkspace ?? '',
       geminiRecentWorkspaces: data.settings.geminiRecentWorkspaces ?? [],
       geminiModel: data.settings.geminiModel || 'gemini-2.5-pro',
@@ -437,6 +441,8 @@ export const useAppStore = defineStore('app', () => {
       claudeSandbox: saved.claudeSandbox || next.claudeSandbox || 'workspace-write',
       claudeApprovalPolicy: saved.claudeApprovalPolicy || next.claudeApprovalPolicy || 'on-request',
       claudePermissionMode: saved.claudePermissionMode || next.claudePermissionMode || 'acceptEdits',
+      claudeCustomModels: saved.claudeCustomModels ?? next.claudeCustomModels ?? [],
+      grokCustomModels: saved.grokCustomModels ?? next.grokCustomModels ?? [],
       geminiWorkspace: saved.geminiWorkspace ?? next.geminiWorkspace ?? '',
       geminiRecentWorkspaces: saved.geminiRecentWorkspaces ?? next.geminiRecentWorkspaces ?? [],
       geminiModel: saved.geminiModel || next.geminiModel || 'gemini-2.5-pro',

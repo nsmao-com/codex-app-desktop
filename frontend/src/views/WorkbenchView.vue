@@ -7,6 +7,7 @@ defineOptions({ name: 'WorkbenchView' })
 
 import AppSidebar from '@/components/AppSidebar.vue'
 import AppTopbar from '@/components/AppTopbar.vue'
+import ArenaChatLayout from '@/components/ArenaChatLayout.vue'
 import BrowserLauncher from '@/components/BrowserLauncher.vue'
 import ChatWorkspace from '@/components/ChatWorkspace.vue'
 import ConnectionBanner from '@/components/ConnectionBanner.vue'
@@ -14,14 +15,44 @@ import InspectorPanel from '@/components/InspectorPanel.vue'
 import LiveDiffPanel from '@/components/LiveDiffPanel.vue'
 import TerminalPanel from '@/components/TerminalPanel.vue'
 import { overlayFade, springSoft } from '@/lib/motion'
-import { useBrowserStore, useShellStore, useTerminalStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useShellStore, useTerminalStore, useWorkspaceStore } from '@/stores'
+import type { WorkspaceRuntime } from '@/stores/app'
 
 const route = useRoute()
 const router = useRouter()
+const appStore = useAppStore()
+const arenaStore = useArenaStore()
 const terminalStore = useTerminalStore()
 const workspaceStore = useWorkspaceStore()
 const shellStore = useShellStore()
 const browserStore = useBrowserStore()
+const codexStore = useCodexStore()
+const grokStore = useGrokStore()
+const claudeStore = useClaudeStore()
+
+async function focusArenaRuntime(runtime: string): Promise<void> {
+  const next = runtime as WorkspaceRuntime
+  if (appStore.activeRuntime === next) return
+  await appStore.setActiveRuntime(next)
+}
+
+async function openArenaPaneSession(payload: { runtime: string; sessionId: string }): Promise<void> {
+  const runtime = payload.runtime as WorkspaceRuntime
+  const sessionId = payload.sessionId.trim()
+  if (!sessionId) return
+  if (appStore.activeRuntime !== runtime) {
+    await appStore.setActiveRuntime(runtime)
+  }
+  if (runtime === 'grok') {
+    await grokStore.openSession(sessionId)
+    return
+  }
+  if (runtime === 'claude') {
+    await claudeStore.openSession(sessionId)
+    return
+  }
+  await codexStore.openThread(sessionId)
+}
 
 const isMobile = shallowRef(window.innerWidth < 768)
 const inspectorCollapsed = shallowRef(true)
@@ -89,7 +120,16 @@ watch(() => route.query.openBrowser, () => consumeOpenBrowserQuery())
             layout
             :transition="springSoft"
           >
-            <ChatWorkspace @show-inspector="inspectorCollapsed = false" />
+            <ArenaChatLayout
+              v-if="arenaStore.isArenaMode"
+              @show-inspector="inspectorCollapsed = false"
+              @focus-runtime="(runtime) => void focusArenaRuntime(runtime)"
+              @open-pane-session="(payload) => void openArenaPaneSession(payload)"
+            />
+            <ChatWorkspace
+              v-else
+              @show-inspector="inspectorCollapsed = false"
+            />
             <ConnectionBanner />
           </Motion>
 
