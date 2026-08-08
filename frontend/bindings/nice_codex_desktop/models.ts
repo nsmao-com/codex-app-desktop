@@ -864,6 +864,14 @@ export interface UserSettings {
     "codexClientName": string;
     "codexClientTitle": string;
     "codexClientVersion": string;
+
+    /**
+     * NetworkProxy* points outbound app + CLI traffic at Clash (or similar) HTTP proxies
+     * without requiring TUN. Applied as process env so child runtimes inherit it.
+     */
+    "networkProxyEnabled": boolean;
+    "networkProxyUrl": string;
+    "networkProxyNoProxy": string;
     "onboardingCompleted": boolean;
 }
 

@@ -13,6 +13,7 @@ import {
   Laptop,
   LogIn,
   LogOut,
+  Network,
   Palette,
   Plus,
   PlugZap,
@@ -189,6 +190,14 @@ const shortcutBrowser = shallowRef(appStore.settings.shortcutBrowser || 'Ctrl+Sh
 const codexClientName = shallowRef(appStore.settings.codexClientName ?? '')
 const codexClientTitle = shallowRef(appStore.settings.codexClientTitle ?? '')
 const codexClientVersion = shallowRef(appStore.settings.codexClientVersion ?? '')
+const networkProxyEnabled = shallowRef(Boolean(appStore.settings.networkProxyEnabled))
+const networkProxyURL = shallowRef(appStore.settings.networkProxyUrl ?? '')
+const networkProxyNoProxy = shallowRef(appStore.settings.networkProxyNoProxy || 'localhost,127.0.0.1,::1')
+const networkProxyPresets = [
+  { label: 'Clash 7890', url: 'http://127.0.0.1:7890' },
+  { label: '7897', url: 'http://127.0.0.1:7897' },
+  { label: 'v2rayN 10809', url: 'http://127.0.0.1:10809' },
+] as const
 const browserAllowedHostsText = shallowRef((appStore.settings.browserAllowedHosts ?? []).join('\n'))
 const browserBlockedHostsText = shallowRef((appStore.settings.browserBlockedHosts ?? []).join('\n'))
 const browserDownloadDir = shallowRef(appStore.settings.browserDownloadDir ?? '')
@@ -738,7 +747,7 @@ const navGroups = computed<NavGroup[]>(() => [
     id: 'coding',
     label: t('settings.navCoding'),
     items: [
-      { id: 'environment', label: t('settings.navEnvironment'), icon: Laptop, keywords: 'environment codex cli client user-agent originator 环境 客户端 标识' },
+      { id: 'environment', label: t('settings.navEnvironment'), icon: Laptop, keywords: 'environment codex cli client user-agent originator proxy clash http_proxy 环境 客户端 标识 代理 网络' },
       { id: 'git', label: t('settings.navGit'), icon: GitBranch, keywords: 'git branch pr prefix 工作区' },
     ],
   },
@@ -1264,6 +1273,11 @@ function setPermissionToggle(level: 'default' | 'autoReview' | 'full' | 'strict'
   applyPermissionLevel(level)
 }
 
+function applyNetworkProxyPreset(url: string): void {
+  networkProxyURL.value = url
+  networkProxyEnabled.value = true
+}
+
 async function onAlwaysOnTopToggle(enabled: boolean): Promise<void> {
   alwaysOnTop.value = enabled
   try {
@@ -1603,6 +1617,9 @@ async function save(): Promise<void> {
       openCodeApprovalPolicy: isOpenCodeSettings.value ? (openCodeApprovalPolicy.value || 'on-request') : appStore.settings.openCodeApprovalPolicy,
       openCodeProvider: appStore.settings.openCodeProvider || '',
       openCodeCustomModels: appStore.settings.openCodeCustomModels ?? [],
+      networkProxyEnabled: networkProxyEnabled.value,
+      networkProxyUrl: networkProxyURL.value.trim(),
+      networkProxyNoProxy: networkProxyNoProxy.value.trim() || 'localhost,127.0.0.1,::1',
       theme: theme.value,
       accentColor: accentColor.value,
       fontFamily: fontFamily.value,
@@ -2952,6 +2969,73 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
 
             <!-- Environment -->
             <template v-else-if="activePanel === 'environment'">
+              <section class="overflow-hidden rounded-xl border bg-card">
+                <div class="border-b px-4 py-3">
+                  <div class="flex items-start gap-2">
+                    <Network :size="15" class="mt-0.5 shrink-0 text-muted-foreground" />
+                    <div class="min-w-0">
+                      <h2 class="text-[13px] font-semibold">{{ t('settings.networkProxyTitle') }}</h2>
+                      <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.networkProxyHint') }}</p>
+                    </div>
+                  </div>
+                </div>
+                <div class="divide-y">
+                  <div class="flex items-center justify-between gap-3 px-4 py-3">
+                    <div class="min-w-0">
+                      <p class="text-[13px] font-medium">{{ t('settings.networkProxyEnable') }}</p>
+                      <p class="text-[11px] text-muted-foreground">{{ t('settings.networkProxyEnableHint') }}</p>
+                    </div>
+                    <Switch
+                      :checked="networkProxyEnabled"
+                      :aria-label="t('settings.networkProxyEnable')"
+                      @update:checked="networkProxyEnabled = $event"
+                    />
+                  </div>
+                  <div class="space-y-2 px-4 py-3" :class="networkProxyEnabled ? '' : 'opacity-60'">
+                    <p class="text-[13px]">{{ t('settings.networkProxyURL') }}</p>
+                    <p class="text-[11px] text-muted-foreground">{{ t('settings.networkProxyURLHint') }}</p>
+                    <Input
+                      v-model="networkProxyURL"
+                      class="h-9 font-mono text-xs"
+                      :disabled="!networkProxyEnabled"
+                      :placeholder="t('settings.networkProxyURLPlaceholder')"
+                      maxlength="512"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                    <div class="flex flex-wrap gap-1.5 pt-0.5">
+                      <Button
+                        v-for="preset in networkProxyPresets"
+                        :key="preset.url"
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        class="h-7 text-[11px]"
+                        @click="applyNetworkProxyPreset(preset.url)"
+                      >
+                        {{ preset.label }}
+                      </Button>
+                    </div>
+                  </div>
+                  <div class="space-y-2 px-4 py-3" :class="networkProxyEnabled ? '' : 'opacity-60'">
+                    <p class="text-[13px]">{{ t('settings.networkProxyNoProxy') }}</p>
+                    <p class="text-[11px] text-muted-foreground">{{ t('settings.networkProxyNoProxyHint') }}</p>
+                    <Input
+                      v-model="networkProxyNoProxy"
+                      class="h-9 font-mono text-xs"
+                      :disabled="!networkProxyEnabled"
+                      :placeholder="t('settings.networkProxyNoProxyPlaceholder')"
+                      maxlength="1024"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                  </div>
+                  <div class="px-4 py-3 text-[11px] leading-relaxed text-muted-foreground">
+                    {{ t('settings.networkProxyApplyHint') }}
+                  </div>
+                </div>
+              </section>
+
               <section class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
                   <div class="min-w-0">

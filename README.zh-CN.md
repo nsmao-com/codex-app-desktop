@@ -4,7 +4,7 @@
 
 **Nice Codex** 是面向官方 OpenAI Codex 运行时的非官方轻量桌面客户端。基于 Wails v3 + Vue 3，通过本机 `codex app-server` 完成登录、会话、回合、审批、工具与流式事件。
 
-> 当前版本：**v1.2.5**
+> 当前版本：**v1.2.6**
 > 发布页：[github.com/nsmao-com/codex-app-desktop/releases](https://github.com/nsmao-com/codex-app-desktop/releases)
 
 ## 功能亮点
@@ -15,6 +15,7 @@
 - 按运行时区分 MCP / 配置入口，支持 JSON 粘贴导入并提示各 CLI 的原生配置来源
 - 内嵌交互终端（ConPTY / PTY）
 - 外观：主题、强调色、**本机系统字体下拉**（Windows 注册表 / macOS 字体族）
+- **网络代理**（Clash 等 HTTP 混合端口，无需开 TUN）：写入 `HTTP(S)_PROXY` 并让子进程 CLI 继承
 - 侧边栏左上角 **版本号**，并自动检测 **GitHub Releases 更新**
 
 ## 环境要求

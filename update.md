@@ -2,6 +2,14 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.2.6 - 2026-08-08
+
+### 新增
+
+- 设置 → 环境：新增 **网络代理**，可对接 Clash / 同类工具的 HTTP 混合端口（如 `http://127.0.0.1:7890`），无需开启 TUN。
+- 启用后向 NiceCodex 进程注入 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`，Codex、Claude、Grok、Gemini、OpenCode 等子进程 CLI 与 Go 出站请求会继承该配置。
+- 提供常用端口预设（7890 / 7897 / 10809）与 `NO_PROXY` 排除列表（默认 localhost）。
+
 ## 1.2.5 - 2026-08-08
 
 ### 修复

@@ -206,6 +206,11 @@ type UserSettings struct {
 	CodexClientName     string `json:"codexClientName"`
 	CodexClientTitle    string `json:"codexClientTitle"`
 	CodexClientVersion  string `json:"codexClientVersion"`
+	// NetworkProxy* lets users point Codex / CLI traffic at Clash (or similar)
+	// HTTP mixed ports without enabling TUN. Applied as process env + child inherit.
+	NetworkProxyEnabled bool   `json:"networkProxyEnabled"`
+	NetworkProxyURL     string `json:"networkProxyUrl"`
+	NetworkProxyNoProxy string `json:"networkProxyNoProxy"`
 	OnboardingCompleted bool   `json:"onboardingCompleted"`
 }
 
@@ -330,6 +335,8 @@ func NewAppService(app *application.App, pluginAssets *pluginAssetServer) *AppSe
 		service.maybeRecordLocalUsage(event)
 		app.Event.Emit("codex:event", event)
 	})
+	// Apply proxy before any outbound HTTP / child CLI is started.
+	applyNetworkProxyFromSettings(settings)
 	go service.runScheduledTaskLoop()
 	return service
 }
@@ -485,6 +492,15 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	settings.CodexClientName = sanitizeCodexClientField(settings.CodexClientName, 64)
 	settings.CodexClientTitle = sanitizeCodexClientField(settings.CodexClientTitle, 80)
 	settings.CodexClientVersion = sanitizeCodexClientField(settings.CodexClientVersion, 32)
+	proxyURL, proxyErr := normalizeNetworkProxyURL(settings.NetworkProxyURL)
+	if proxyErr != nil {
+		return UserSettings{}, proxyErr
+	}
+	settings.NetworkProxyURL = proxyURL
+	settings.NetworkProxyNoProxy = sanitizeNetworkProxyNoProxy(settings.NetworkProxyNoProxy)
+	if settings.NetworkProxyEnabled && settings.NetworkProxyURL == "" {
+		return UserSettings{}, errors.New("network proxy URL is required when proxy is enabled")
+	}
 	if settings.Effort == "" {
 		settings.Effort = "high"
 	}
@@ -528,6 +544,7 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 		if !result.PreventSleepWhileRunning {
 			setSystemSleepPrevention(false)
 		}
+		applyNetworkProxyFromSettings(result)
 	}
 	return result, err
 }
@@ -3139,6 +3156,9 @@ func defaultSettings() UserSettings {
 		CodexClientName:      "",
 		CodexClientTitle:     "",
 		CodexClientVersion:   "",
+		NetworkProxyEnabled:  false,
+		NetworkProxyURL:      "",
+		NetworkProxyNoProxy:  defaultNetworkProxyNoProxy(),
 		OnboardingCompleted:  false,
 		RecentWorkspaces:     []string{},
 		GrokRecentWorkspaces: []string{},
@@ -3197,6 +3217,18 @@ func readSettings(path string) (UserSettings, error) {
 	settings.ShortcutBrowser = normalizeShortcutBinding(settings.ShortcutBrowser, "Ctrl+Shift+B")
 	settings.ModelProvider = sanitizeWorkbenchProvider(settings.ModelProvider)
 	settings.ActiveRuntime = normalizeRuntime(settings.ActiveRuntime)
+	if normalized, err := normalizeNetworkProxyURL(settings.NetworkProxyURL); err == nil {
+		settings.NetworkProxyURL = normalized
+	} else {
+		settings.NetworkProxyURL = strings.TrimSpace(settings.NetworkProxyURL)
+	}
+	settings.NetworkProxyNoProxy = sanitizeNetworkProxyNoProxy(settings.NetworkProxyNoProxy)
+	if settings.NetworkProxyNoProxy == "" {
+		settings.NetworkProxyNoProxy = defaultNetworkProxyNoProxy()
+	}
+	if settings.NetworkProxyEnabled && settings.NetworkProxyURL == "" {
+		settings.NetworkProxyEnabled = false
+	}
 	settings.GrokBackend = normalizeGrokBackend(settings.GrokBackend)
 	settings.GrokEffort = normalizeGrokEffort(settings.GrokEffort)
 	if !isAllowed(settings.GrokSandbox, "read-only", "workspace-write", "danger-full-access") {
