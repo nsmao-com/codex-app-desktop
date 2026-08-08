@@ -209,13 +209,15 @@ func (c *Client) Stop() error {
 	}
 
 	// Soft wait for graceful exit after stdin close.
+	graceTimer := time.NewTimer(1500 * time.Millisecond)
 	select {
 	case <-done:
+		graceTimer.Stop()
 		if cleanup != nil {
 			cleanup()
 		}
 		return nil
-	case <-time.After(1500 * time.Millisecond):
+	case <-graceTimer.C:
 	}
 
 	// Hard stop: kill entire process tree (app-server + MCP python/node/npx/…).
@@ -232,10 +234,12 @@ func (c *Client) Stop() error {
 		_ = command.Process.Kill()
 	}
 
+	hardTimer := time.NewTimer(2 * time.Second)
 	select {
 	case <-done:
+		hardTimer.Stop()
 		return nil
-	case <-time.After(2 * time.Second):
+	case <-hardTimer.C:
 		return errors.New("timed out while stopping Codex")
 	}
 }

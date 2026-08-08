@@ -54,7 +54,11 @@ type AppService struct {
 	codexLifecycleMu       sync.Mutex
 	codexThreadStartMu     sync.Mutex
 	codexActiveTurns       map[string]string
-	pendingCodexSessionID  string
+	// pendingCodexSessions maps a workspace to the NiceCodex session that is
+	// mid-first-allocation (thread/start sent, response or thread/started event
+	// not yet bound). A map keeps concurrent allocations in different workspaces
+	// from clobbering each other's pending slot.
+	pendingCodexSessions map[string]string
 	codexHistoryCache      map[string]*codexHistorySnapshot
 	claudeHistoryCache     map[string]*claudeHistorySnapshot
 	grokHistoryCache       map[string]*grokHistorySnapshot
@@ -312,6 +316,7 @@ func NewAppService(app *application.App, pluginAssets *pluginAssetServer) *AppSe
 		schedulerStop:          make(chan struct{}),
 		providerRouter:         newProviderRouter(),
 		codexActiveTurns:       make(map[string]string),
+		pendingCodexSessions:   make(map[string]string),
 	}
 	if routerConfig, err := loadProviderRouterConfig(settingsPath); err != nil {
 		service.providerRouter.setError(err.Error())
@@ -3985,12 +3990,12 @@ func (s *AppService) ensureCodexBackendThread(session *SessionRecord, settings U
 		return ref, nil
 	}
 	session = cloneSession(record)
-	s.pendingCodexSessionID = session.ID
+	s.pendingCodexSessions[workspaceKey(workspace)] = session.ID
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
-		if s.pendingCodexSessionID == session.ID {
-			s.pendingCodexSessionID = ""
+		if s.pendingCodexSessions[workspaceKey(workspace)] == session.ID {
+			delete(s.pendingCodexSessions, workspaceKey(workspace))
 		}
 		s.mu.Unlock()
 	}()
@@ -4113,7 +4118,60 @@ func (s *AppService) sessionIDForBackendRef(backendID string) string {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.sessionIDForBackendRefLocked(backendID)
+}
 
+func (s *AppService) claimPendingCodexSession(backendID, eventWorkspace string) string {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return ""
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// The backend thread must not already be owned by a different session. A
+	// late thread/started event must never rebind an allocated thread to another
+	// session just because that session's pending slot is now the only one left.
+	if ref := s.sessionIDForBackendRefLocked(backendID); ref != "" && ref != backendID {
+		return ""
+	}
+
+	sessionID := s.pendingCodexSessions[workspaceKey(eventWorkspace)]
+	if eventWorkspace == "" {
+		// Fall back to the single pending session when the event omits a cwd.
+		sessionID = ""
+		for _, candidate := range s.pendingCodexSessions {
+			sessionID = candidate
+			break
+		}
+	}
+	record := s.sessions[sessionID]
+	if sessionID == "" || record == nil || record.Archived || isExternalSession(record) {
+		return ""
+	}
+	if eventWorkspace != "" && !samePath(eventWorkspace, record.Workspace) {
+		return ""
+	}
+	if ref := strings.TrimSpace(record.BackendRef); ref != "" && ref != backendID {
+		return ""
+	}
+	record.BackendRef = backendID
+	record.UpdatedAt = time.Now().Unix()
+	s.allowedThreads[sessionID] = record.Workspace
+	s.allowedThreads[backendID] = record.Workspace
+	delete(s.pendingCodexSessions, workspaceKey(record.Workspace))
+	s.persistSessionsLocked()
+	return sessionID
+}
+
+// sessionIDForBackendRefLocked is the locked-only variant of
+// sessionIDForBackendRef. It must only be called while s.mu is held.
+func (s *AppService) sessionIDForBackendRefLocked(backendID string) string {
+	backendID = strings.TrimSpace(backendID)
+	if backendID == "" {
+		return ""
+	}
 	// Prefer NiceCodex UUID sessions that own this app-server thread.
 	// Codex-id mirrors (id == backendRef) must not win, or events/UI can split
 	// across two rows that share the same backend conversation context.
@@ -4137,34 +4195,6 @@ func (s *AppService) sessionIDForBackendRef(backendID string) string {
 		return mirrorID
 	}
 	return backendID
-}
-
-func (s *AppService) claimPendingCodexSession(backendID, eventWorkspace string) string {
-	backendID = strings.TrimSpace(backendID)
-	if backendID == "" {
-		return ""
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sessionID := s.pendingCodexSessionID
-	record := s.sessions[sessionID]
-	if sessionID == "" || record == nil || record.Archived || isExternalSession(record) {
-		return ""
-	}
-	if eventWorkspace != "" && !samePath(eventWorkspace, record.Workspace) {
-		return ""
-	}
-	if ref := strings.TrimSpace(record.BackendRef); ref != "" && ref != backendID {
-		return ""
-	}
-	record.BackendRef = backendID
-	record.UpdatedAt = time.Now().Unix()
-	s.allowedThreads[sessionID] = record.Workspace
-	s.allowedThreads[backendID] = record.Workspace
-	s.pendingCodexSessionID = ""
-	s.persistSessionsLocked()
-	return sessionID
 }
 
 func (s *AppService) remapCodexEvent(event *codex.Event) {
@@ -4230,6 +4260,17 @@ func samePath(left string, right string) bool {
 		return strings.EqualFold(left, right)
 	}
 	return left == right
+}
+
+// workspaceKey returns a canonical key for workspace maps. It must be the only
+// way pending/thread workspace maps are keyed so event cwd strings (which may
+// differ in case or separator style) hit the same entry.
+func workspaceKey(path string) string {
+	path = filepath.Clean(path)
+	if runtime.GOOS == "windows" {
+		path = strings.ToLower(path)
+	}
+	return path
 }
 
 func isAllowed(value string, allowed ...string) bool {

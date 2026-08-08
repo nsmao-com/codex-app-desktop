@@ -465,6 +465,9 @@ func (r *providerRouter) recordProviderFailure(
 	state.consecutiveFailures++
 	if wasHalfOpen || state.consecutiveFailures >= r.config.FailureThreshold {
 		state.openUntil = time.Now().Add(time.Duration(r.config.CooldownSeconds) * time.Second)
+		// Re-opening is driven by wasHalfOpen (or the next closed-cycle burst),
+		// so keep the counter as a fresh window metric instead of a running total.
+		state.consecutiveFailures = 0
 	}
 }
 

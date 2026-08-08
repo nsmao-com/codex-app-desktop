@@ -104,7 +104,18 @@ func openCodeTextSuffix(previous, next string) string {
 	if strings.HasPrefix(next, previous) {
 		return next[len(previous):]
 	}
-	return next
+	// Divergent snapshot: the part content was replaced, not appended. Emit only
+	// the suffix after the longest common prefix so already-streamed text is
+	// never duplicated; the part's stored text still advances to the new base.
+	common := 0
+	max := len(previous)
+	if len(next) < max {
+		max = len(next)
+	}
+	for common < max && previous[common] == next[common] {
+		common++
+	}
+	return next[common:]
 }
 
 func newExternalStreamCoalescer(onStream func(kind, chunk string)) *externalStreamCoalescer {
@@ -202,10 +213,13 @@ func (s *AppService) syncCodexThreadsIntoSessions(response map[string]any, works
 	defer s.mu.Unlock()
 	changed := false
 	pendingAllocation := false
-	if pending := s.sessions[s.pendingCodexSessionID]; pending != nil &&
-		!pending.Archived && !isExternalSession(pending) &&
-		samePath(pending.Workspace, workspace) && strings.TrimSpace(pending.BackendRef) == "" {
-		pendingAllocation = true
+	for _, pendingID := range s.pendingCodexSessions {
+		if pending := s.sessions[pendingID]; pending != nil &&
+			!pending.Archived && !isExternalSession(pending) &&
+			samePath(pending.Workspace, workspace) && strings.TrimSpace(pending.BackendRef) == "" {
+			pendingAllocation = true
+			break
+		}
 	}
 
 	// Prefer NiceCodex-owned UUID sessions (id != backendRef) over raw Codex-id mirrors.
