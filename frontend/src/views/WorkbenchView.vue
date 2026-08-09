@@ -99,7 +99,9 @@ watch(
       void activateFocusedArenaPane(true)
     }
   },
-  { immediate: true, flush: 'post' },
+  // Activate before the next render so global inspector/chrome never paints
+  // the previous pane while the pane-bound timeline has already switched.
+  { immediate: true, flush: 'pre' },
 )
 
 const isMobile = shallowRef(window.innerWidth < 768)

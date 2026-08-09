@@ -22,10 +22,13 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { springSnappy } from '@/lib/motion'
-import { useAppStore, useCodexStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
 
 const appStore = useAppStore()
+const arenaStore = useArenaStore()
 const codexStore = useCodexStore()
+const grokStore = useGrokStore()
+const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const { t } = useI18n()
 
@@ -47,6 +50,59 @@ const themeIcon = computed(() => {
     default: return Monitor
   }
 })
+
+const topbarContext = computed(() => {
+  const pane = arenaStore.isArenaMode ? arenaStore.focusedPane : null
+  const runtime = pane?.runtime || appStore.activeRuntime
+  const sessionId = pane
+    ? arenaStore.sessionForPane(pane.id)
+    : runtime === 'grok'
+      ? grokStore.activeSessionId
+      : runtime === 'claude'
+        ? claudeStore.activeSessionId
+        : codexStore.activeThreadId
+
+  if (runtime === 'grok') {
+    const session = grokStore.sessions.find((item) => grokStore.sameSession(item.id, sessionId))
+    return {
+      title: session?.name || session?.preview || '',
+      workspace: session?.workspace || grokStore.workspacePath,
+      hasSession: Boolean(sessionId),
+    }
+  }
+  if (runtime === 'claude') {
+    const session = claudeStore.sessions.find((item) => claudeStore.sameSession(item.id, sessionId))
+    return {
+      title: session?.name || session?.preview || '',
+      workspace: session?.workspace || claudeStore.workspacePath,
+      hasSession: Boolean(sessionId),
+    }
+  }
+  const thread = codexStore.activeThread && codexStore.sameThread(codexStore.activeThread.id, sessionId)
+    ? codexStore.activeThread
+    : codexStore.threads.find((item) => codexStore.sameThread(item.id, sessionId))
+      || Object.values(codexStore.projectThreads).flat()
+        .find((item) => codexStore.sameThread(item.id, sessionId))
+  return {
+    title: thread?.name || thread?.preview || '',
+    workspace: thread?.cwd || appStore.currentWorkspacePath,
+    hasSession: Boolean(sessionId),
+  }
+})
+
+function workspaceName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) || path
+}
+
+const topbarWorkspaceName = computed(() => {
+  const path = topbarContext.value.workspace
+  if (!path) return workspaceStore.workspace?.name || ''
+  if (workspaceStore.workspace?.path === path) return workspaceStore.workspace.name
+  return workspaceName(path)
+})
+const topbarTitle = computed(() =>
+  topbarContext.value.title || topbarWorkspaceName.value || 'Nice Codex',
+)
 </script>
 
 <template>
@@ -64,18 +120,14 @@ const themeIcon = computed(() => {
       </Motion>
     </div>
 
-    <Motion
+    <div
       class="pointer-events-none absolute left-1/2 min-w-0 max-w-[min(42vw,760px)] -translate-x-1/2 text-center"
-      :key="codexStore.activeThreadId || workspaceStore.workspace?.path || 'home'"
-      :initial="{ opacity: 0, y: -4 }"
-      :animate="{ opacity: 1, y: 0 }"
-      :transition="{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }"
     >
-      <p class="truncate text-[12.5px] font-semibold tracking-tight">{{ codexStore.activeThread?.name || workspaceStore.workspace?.name || 'Nice Codex' }}</p>
-      <p v-if="codexStore.activeThread && workspaceStore.workspace" class="truncate text-[10px] text-muted-foreground">
-        {{ workspaceStore.workspace.name }}
+      <p class="truncate text-[12.5px] font-semibold tracking-tight">{{ topbarTitle }}</p>
+      <p v-if="topbarContext.hasSession && topbarWorkspaceName" class="truncate text-[10px] text-muted-foreground">
+        {{ topbarWorkspaceName }}
       </p>
-    </Motion>
+    </div>
 
     <div class="flex items-center gap-0.5">
       <Motion :whileHover="{ scale: 1.08 }" :whilePress="{ scale: 0.9 }" :transition="springSnappy">

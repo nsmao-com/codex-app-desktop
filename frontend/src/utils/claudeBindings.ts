@@ -25,6 +25,7 @@ export interface ClaudeSessionSummary {
   effort: string
   createdAt: number
   updatedAt: number
+  activeTurnId?: string
 }
 
 export interface ClaudeMessage {
@@ -43,6 +44,7 @@ export interface ClaudeSessionDetail {
   historyTotal: number
   historyTurnOffset: number
   hasEarlier: boolean
+  activeTurnId?: string
 }
 
 export interface ClaudeSendRequest {

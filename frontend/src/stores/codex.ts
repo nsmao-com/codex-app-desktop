@@ -10,8 +10,10 @@ import type {
 } from '../../bindings/nice_codex_desktop/models'
 import type { Event as CodexEvent, Status as CodexStatus } from '../../bindings/nice_codex_desktop/internal/codex/models'
 import { useAppStore, type WorkspaceRuntime } from './app'
+import { useArenaStore } from './arena'
 import { useCapabilitiesStore } from './capabilities'
 import { useDialogStore } from './dialog'
+import { useNavigationStore } from './navigation'
 import { useTerminalStore } from './terminal'
 import { useWorkspaceStore } from './workspace'
 import { notify } from '../utils/notify'
@@ -99,6 +101,8 @@ const emptyTurnMetrics = (): TurnMetrics => ({
 
 export const useCodexStore = defineStore('codex', () => {
   const appStore = useAppStore()
+  const arenaStore = useArenaStore()
+  const navigationStore = useNavigationStore()
   const workspaceStore = useWorkspaceStore()
   const capabilitiesStore = useCapabilitiesStore()
   const terminalStore = useTerminalStore()
@@ -122,7 +126,10 @@ export const useCodexStore = defineStore('codex', () => {
   const archivedThreads = shallowRef<ThreadSummary[]>([])
   const projectThreads = shallowRef<Record<string, ThreadSummary[]>>({})
   const projectErrors = shallowRef<Record<string, string>>({})
-  const loadingProjects = shallowRef<string[]>([])
+  const projectLoadingByRuntime = shallowRef<Record<string, string>>({})
+  const loadingProjects = computed(() =>
+    uniqueWorkspacePaths('', Object.values(projectLoadingByRuntime.value)),
+  )
   // Share in-flight project list reads between the background recent-project
   // scan and an explicit folder click. Without this, a click can observe the
   // same path as "loading" and return before its sessions are available.
@@ -177,7 +184,6 @@ export const useCodexStore = defineStore('codex', () => {
   let openThreadSequence = 0
   let threadHydrationSequence = 0
   let createThreadSequence = 0
-  let projectLoadSequence = 0
   let deltaTimer = 0
   let diffTimer = 0
   let tokenUsageTimer = 0
@@ -213,7 +219,7 @@ export const useCodexStore = defineStore('codex', () => {
   const activeHistoryHasEarlier = computed(() => historyByThread.value[activeThreadId.value]?.hasEarlier === true)
   const activeHistoryEarlierCount = computed(() => historyByThread.value[activeThreadId.value]?.turnOffset ?? 0)
   const activeHistoryLoadingEarlier = computed(() => historyByThread.value[activeThreadId.value]?.loadingEarlier === true)
-  const activeQueuedMessages = computed(() => queuedMessagesByThread.value[activeThreadId.value] ?? [])
+  const activeQueuedMessages = computed(() => queuedMessagesForThread(activeThreadId.value))
   const activeThreadBusy = computed(() => threadIsBusy(activeThreadId.value) || activeQueuedMessages.value.length > 0)
   const activeThreadUsesExternalProvider = computed(() => {
     const provider = activeThread.value?.modelProvider || ''
@@ -223,7 +229,7 @@ export const useCodexStore = defineStore('codex', () => {
 
   function knownRuntimeIDForThread(threadID: string): 'codex' | 'gemini' | 'opencode' | null {
     const thread = threadID
-      ? (findThreadSummary(threadID) || (activeThread.value?.id === threadID ? activeThread.value : null))
+      ? (findThreadSummary(threadID) || (activeThread.value && sameThreadSession(activeThread.value.id, threadID) ? activeThread.value : null))
       : activeThread.value
     const provider = (thread?.modelProvider || threadModelIdentity[threadID]?.provider || '').toLocaleLowerCase()
     if (provider === '__gemini__' || provider === 'gemini-cli') return 'gemini'
@@ -253,7 +259,7 @@ export const useCodexStore = defineStore('codex', () => {
     if (threadID.startsWith('pending-thread-') || workspaceStore.switchingWorkspace) return false
     if (threadHasLoadingBarrier(threadID) || isThreadSubmitting(threadID) || pendingThreadSubmission(threadID)) return false
     if (!threadIsRunning(threadID) || activeThreadUsesExternalProvider.value) return false
-    if ((queuedMessagesByThread.value[threadID] ?? []).length > 0) return false
+    if (queuedMessagesForThread(threadID).length > 0) return false
     return !pendingRequests.value.some((request) => sameThreadSession(asString(request.data.threadId), threadID))
   })
   const activeTurnFeedback = computed(() => threadFeedback(activeThreadId.value))
@@ -365,6 +371,37 @@ export const useCodexStore = defineStore('codex', () => {
     ]
   }
 
+  function projectRuntimeKey(runtime: WorkspaceRuntime, path: string): string {
+    return `${runtime}:${workspaceKey(path)}`
+  }
+
+  function projectIsLoading(path: string, runtime?: WorkspaceRuntime): boolean {
+    if (runtime) return Boolean(projectLoadingByRuntime.value[projectRuntimeKey(runtime, path)])
+    return Object.values(projectLoadingByRuntime.value).some((loadingPath) =>
+      sameWorkspace(loadingPath, path),
+    )
+  }
+
+  function projectError(path: string, runtime: WorkspaceRuntime): string {
+    return projectErrors.value[projectRuntimeKey(runtime, path)] ?? ''
+  }
+
+  function arenaProjectError(path: string, runtimes: WorkspaceRuntime[]): string {
+    for (const runtime of runtimes) {
+      const message = projectError(path, runtime)
+      if (message) return message
+    }
+    return ''
+  }
+
+  function setProjectLoading(path: string, runtime: WorkspaceRuntime, loading: boolean): void {
+    const key = projectRuntimeKey(runtime, path)
+    const next = { ...projectLoadingByRuntime.value }
+    if (loading) next[key] = path
+    else delete next[key]
+    projectLoadingByRuntime.value = next
+  }
+
   const threadGroups = computed<ThreadGroup[]>(() => {
     const recent = activeRuntimeRecentWorkspaces()
     const paths = appStore.orderWorkspacePaths(
@@ -376,8 +413,8 @@ export const useCodexStore = defineStore('codex', () => {
       path,
       name: workspaceName(path),
       active: sameWorkspace(path, appStore.currentWorkspacePath),
-      loading: loadingProjects.value.some((loadingPath) => sameWorkspace(loadingPath, path)),
-      error: projectErrors.value[path] ?? '',
+      loading: projectIsLoading(path, appStore.activeRuntime),
+      error: projectError(path, appStore.activeRuntime),
       threads: sortThreadsByPin(threadsForRuntime(
         projectThreadsForPath(path)
           ?? (sameWorkspace(path, appStore.currentWorkspacePath) ? threads.value : []),
@@ -396,8 +433,8 @@ export const useCodexStore = defineStore('codex', () => {
       path,
       name: workspaceName(path),
       active: runtimes.some((runtime) => sameWorkspace(path, runtimeWorkspacePath(runtime))),
-      loading: loadingProjects.value.some((loadingPath) => sameWorkspace(loadingPath, path)),
-      error: projectErrors.value[path] ?? '',
+      loading: projectIsLoading(path),
+      error: arenaProjectError(path, runtimes),
       threads: sortThreadsByPin(projectThreadsForPath(path) ?? []),
     }))
   })
@@ -581,36 +618,38 @@ export const useCodexStore = defineStore('codex', () => {
       if (requestedRuntime !== appStore.activeRuntime) return
       if (list === null) return
       const archived = normalizeThreadList(asRecord(archivedResponse).data)
-      if (sameWorkspace(requestedPath, appStore.currentWorkspacePath)) {
+      if (
+        requestedRuntime === appStore.activeRuntime
+        && sameWorkspace(requestedPath, appStore.currentWorkspacePath)
+      ) {
         threads.value = [...(projectThreadsForPath(requestedPath) ?? list)]
         archivedThreads.value = archived
       }
     } catch (error) {
-      if (sameWorkspace(requestedPath, appStore.currentWorkspacePath)) {
+      if (
+        requestedRuntime === appStore.activeRuntime
+        && sameWorkspace(requestedPath, appStore.currentWorkspacePath)
+      ) {
         notify('error', translate('sidebar.projectLoadFailed'), errorMessage(error))
       }
     }
   }
 
   async function loadRecentProjectThreads(): Promise<void> {
-    const sequence = ++projectLoadSequence
     const current = appStore.currentWorkspacePath
     const recent = activeRuntimeRecentWorkspaces()
     const paths = appStore.orderWorkspacePaths(appStore.activeRuntime, uniqueWorkspacePaths(current, recent), recent)
       .filter((path) => !sameWorkspace(path, current))
-    loadingProjects.value = paths
     const requestedRuntime = appStore.activeRuntime
     await mapWithConcurrency(paths, 3, (path) => loadProjectThreads(path, false, requestedRuntime))
-    if (sequence === projectLoadSequence) {
-      loadingProjects.value = loadingProjects.value.filter((loadingPath) =>
-        !paths.some((path) => sameWorkspace(path, loadingPath)),
-      )
-    }
   }
 
-  async function reloadProject(path: string): Promise<void> {
+  async function reloadProject(
+    path: string,
+    runtime: WorkspaceRuntime = appStore.activeRuntime,
+  ): Promise<void> {
     if (!path) return
-    if (sameWorkspace(path, appStore.currentWorkspacePath)) {
+    if (runtime === appStore.activeRuntime && sameWorkspace(path, appStore.currentWorkspacePath)) {
       try {
         await loadThreads()
       } catch (error) {
@@ -618,7 +657,7 @@ export const useCodexStore = defineStore('codex', () => {
       }
       return
     }
-    await loadProjectThreads(path, true, appStore.activeRuntime)
+    await loadProjectThreads(path, true, runtime)
   }
 
   async function loadProjectThreads(
@@ -627,18 +666,16 @@ export const useCodexStore = defineStore('codex', () => {
     runtime: WorkspaceRuntime = appStore.activeRuntime,
   ): Promise<ThreadSummary[] | null> {
     if (!path) return null
-    const key = `${runtime}:${workspaceKey(path)}`
+    const key = projectRuntimeKey(runtime, path)
     const inFlight = projectLoadPromises.get(key)
     if (inFlight) {
       const result = await inFlight
-      if (result === null && notifyOnError) notifyProjectLoadError(path)
+      if (result === null && notifyOnError) notifyProjectLoadError(path, '', runtime)
       return result
     }
 
     const request = (async (): Promise<ThreadSummary[] | null> => {
-      loadingProjects.value = loadingProjects.value.some((item) => sameWorkspace(item, path))
-        ? loadingProjects.value
-        : [...loadingProjects.value, path]
+      setProjectLoading(path, runtime, true)
       const nextErrors = { ...projectErrors.value }
       delete nextErrors[key]
       delete nextErrors[path]
@@ -651,11 +688,11 @@ export const useCodexStore = defineStore('codex', () => {
         return list
       } catch (error) {
         const message = errorMessage(error)
-        projectErrors.value = { ...projectErrors.value, [path]: message }
-        if (notifyOnError) notifyProjectLoadError(path, message)
+        projectErrors.value = { ...projectErrors.value, [key]: message }
+        if (notifyOnError) notifyProjectLoadError(path, message, runtime)
         return null
       } finally {
-        loadingProjects.value = loadingProjects.value.filter((item) => !sameWorkspace(item, path))
+        setProjectLoading(path, runtime, false)
       }
     })()
     projectLoadPromises.set(key, request)
@@ -666,14 +703,17 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
-  function notifyProjectLoadError(path: string, detail = ''): void {
+  function notifyProjectLoadError(
+    path: string,
+    detail = '',
+    runtime: WorkspaceRuntime = appStore.activeRuntime,
+  ): void {
     const message = detail
-      || projectErrors.value[path]
-      || Object.entries(projectErrors.value).find(([projectPath]) => sameWorkspace(projectPath, path))?.[1]
+      || projectError(path, runtime)
       || translate('notifications.taskOpenFailed')
     notify('error', translate('sidebar.projectLoadFailed'), message, {
       label: translate('sidebar.retryProject'),
-      onClick: () => reloadProject(path),
+      onClick: () => reloadProject(path, runtime),
     })
   }
 
@@ -747,6 +787,7 @@ export const useCodexStore = defineStore('codex', () => {
     } catch {
       response = null
     }
+    if (requestedRuntime !== appStore.activeRuntime) return
 
     const customModels = appStore.settings.customModels ?? []
     const raw = response ? normalizeModels(asRecord(response).data) : []
@@ -995,6 +1036,7 @@ export const useCodexStore = defineStore('codex', () => {
     threadID: string,
     options: { activate?: boolean; runtime?: WorkspaceRuntime } = {},
   ): Promise<void> {
+    threadID = resolveThreadID(threadID) || threadID.trim()
     if (!threadID) return
     const activate = options.activate !== false
     if (!activate && loadingSequenceByThread.has(threadID)) return
@@ -1016,7 +1058,7 @@ export const useCodexStore = defineStore('codex', () => {
       activeThreadId.value = threadID
       if (summary) {
         activeThread.value = summary
-      } else if (activeThread.value?.id !== threadID) {
+      } else if (!activeThread.value || !sameThreadSession(activeThread.value.id, threadID)) {
         activeThread.value = null
       }
       rememberProjectThread(summary?.cwd || appStore.currentWorkspacePath, threadID, options.runtime)
@@ -1103,8 +1145,8 @@ export const useCodexStore = defineStore('codex', () => {
         || pendingThreadSubmission(threadID)
         || isThreadSubmitting(thread.id)
         || isThreadSubmitting(threadID)
-        || (queuedMessagesByThread.value[thread.id] ?? []).length
-        || (queuedMessagesByThread.value[threadID] ?? []).length
+        || queuedMessagesForThread(thread.id).length > 0
+        || queuedMessagesForThread(threadID).length > 0
       )
       const mergedItems = preserveInFlightItems && split.current.length
         ? mergeThreadSnapshotWithLive(snapshotItems, split.current, liveTurnID)
@@ -1127,7 +1169,7 @@ export const useCodexStore = defineStore('codex', () => {
         removeThreadHistoryState(threadID)
       }
       if (threadID !== thread.id) migrateQueueThreadKey(threadID, thread.id)
-      if (activate && activationSequence === openThreadSequence && (activeThreadId.value === threadID || activeThreadId.value === thread.id)) {
+      if (activate && activationSequence === openThreadSequence && sameThreadSession(activeThreadId.value, thread.id)) {
         activeThread.value = thread
         // Keep activeThreadId aligned with the remapped session id from the backend.
         if (thread.id && thread.id !== activeThreadId.value) {
@@ -1161,7 +1203,7 @@ export const useCodexStore = defineStore('codex', () => {
       // Keep a message admitted during loading attached to this thread and visible
       // in its queue. A retry can hydrate it; restoring the old thread made it look
       // as if the message vanished and risked a later send using the wrong owner.
-      if ((queuedMessagesByThread.value[threadID] ?? []).length === 0) {
+      if (queuedMessagesForThread(threadID).length === 0) {
         activeThread.value = previousThread
         activeThreadId.value = previousThreadID
       }
@@ -1205,13 +1247,19 @@ export const useCodexStore = defineStore('codex', () => {
     await openThread(threadID)
   }
 
-  async function openProjectThread(path: string, threadID: string): Promise<void> {
+  async function openProjectThread(
+    path: string,
+    threadID: string,
+    requestedRuntime: WorkspaceRuntime = knownRuntimeIDForThread(threadID) || appStore.activeRuntime,
+  ): Promise<void> {
+    threadID = resolveThreadID(threadID) || threadID.trim()
     if (!path || !threadID) return
+    if (appStore.activeRuntime !== requestedRuntime) return
     if (
       sameWorkspace(path, appStore.currentWorkspacePath)
       && !workspaceStore.switchingWorkspace
     ) {
-      await openThread(threadID)
+      await openThread(threadID, { runtime: requestedRuntime })
       return
     }
 
@@ -1230,18 +1278,20 @@ export const useCodexStore = defineStore('codex', () => {
       if (
         !switched
         || openThreadSequence !== sequence
-        || activeThreadId.value !== threadID
+        || appStore.activeRuntime !== requestedRuntime
+        || !sameWorkspace(path, appStore.currentWorkspacePath)
+        || !sameThreadSession(activeThreadId.value, threadID)
       ) return
       handedOff = true
-      await activateProject(path, threadID)
+      await activateProject(path, threadID, requestedRuntime)
     } finally {
       if (workspaceSelectionSequenceByThread.get(threadID) === sequence) {
         workspaceSelectionSequenceByThread.delete(threadID)
         if (loadingThreadId.value === threadID) loadingThreadId.value = ''
         if (
           !handedOff
-          && activeThreadId.value === threadID
-          && !(queuedMessagesByThread.value[threadID] ?? []).length
+          && sameThreadSession(activeThreadId.value, threadID)
+          && queuedMessagesForThread(threadID).length === 0
         ) {
           activeThread.value = previousThread
           activeThreadId.value = previousThreadID
@@ -1252,43 +1302,61 @@ export const useCodexStore = defineStore('codex', () => {
 
   async function switchProject(path: string, preferredThreadID = ''): Promise<void> {
     if (!path) return
+    const requestedRuntime = appStore.activeRuntime
     const currentPath = appStore.currentWorkspacePath
-    if (activeThreadId.value && currentPath) rememberProjectThread(currentPath, activeThreadId.value)
+    if (activeThreadId.value && currentPath) rememberProjectThread(currentPath, activeThreadId.value, requestedRuntime)
     const knownTarget = preferredThreadID
-      || projectThreadForPath(path)
-      || runtimeProjectThreadsForPath(path)?.[0]?.id
+      || projectThreadForPath(path, requestedRuntime)
+      || runtimeProjectThreadsForPath(path, requestedRuntime)?.[0]?.id
       || ''
     if (knownTarget) {
-      await openProjectThread(path, knownTarget)
+      await openProjectThread(path, knownTarget, requestedRuntime)
       return
     }
     const switched = await workspaceStore.useWorkspace(path)
-    if (!switched) return
+    if (
+      !switched
+      || appStore.activeRuntime !== requestedRuntime
+      || !sameWorkspace(path, appStore.currentWorkspacePath)
+    ) return
 
     // No target is known yet. Detach the previous project's thread before the
     // project listing await, so a send can never be admitted to the old owner.
     activeThread.value = null
     activeThreadId.value = ''
-    await activateProject(path, preferredThreadID)
+    await activateProject(path, preferredThreadID, requestedRuntime)
   }
 
   async function selectProject(): Promise<void> {
+    const requestedRuntime = appStore.activeRuntime
     const currentPath = appStore.currentWorkspacePath
-    if (activeThreadId.value && currentPath) rememberProjectThread(currentPath, activeThreadId.value)
+    if (activeThreadId.value && currentPath) rememberProjectThread(currentPath, activeThreadId.value, requestedRuntime)
     const path = await workspaceStore.selectWorkspace()
-    if (!path) return
-    await activateProject(path)
+    if (!path || appStore.activeRuntime !== requestedRuntime) return
+    await activateProject(path, '', requestedRuntime)
   }
 
-  async function activateProject(path: string, preferredThreadID = ''): Promise<void> {
-    const requestedRuntime = appStore.activeRuntime
-    const cached = loadedProjectRuntimeKeys.has(`${appStore.activeRuntime}:${workspaceKey(path)}`)
-      ? runtimeProjectThreadsForPath(path)
+  async function activateProject(
+    path: string,
+    preferredThreadID = '',
+    requestedRuntime: WorkspaceRuntime = appStore.activeRuntime,
+  ): Promise<void> {
+    if (
+      !path
+      || appStore.activeRuntime !== requestedRuntime
+      || !sameWorkspace(path, appStore.currentWorkspacePath)
+    ) return
+    const cached = loadedProjectRuntimeKeys.has(`${requestedRuntime}:${workspaceKey(path)}`)
+      ? runtimeProjectThreadsForPath(path, requestedRuntime)
       : undefined
     if (cached) {
       threads.value = [...(projectThreadsForPath(path) ?? cached)]
     } else {
-      await reloadProject(path)
+      await reloadProject(path, requestedRuntime)
+      if (
+        appStore.activeRuntime !== requestedRuntime
+        || !sameWorkspace(path, appStore.currentWorkspacePath)
+      ) return
       threads.value = [...(projectThreadsForPath(path) ?? [])]
     }
     const locallySelectedThreadID = activeThread.value?.cwd
@@ -1297,11 +1365,11 @@ export const useCodexStore = defineStore('codex', () => {
       : ''
     const targetThreadID = preferredThreadID
       || locallySelectedThreadID
-      || projectThreadForPath(path)
+      || projectThreadForPath(path, requestedRuntime)
       || runtimeProjectThreadsForPath(path, requestedRuntime)?.[0]?.id
       || ''
     if (targetThreadID) {
-      await openThread(targetThreadID)
+      await openThread(targetThreadID, { runtime: requestedRuntime })
     } else {
       activeThread.value = null
       activeThreadId.value = ''
@@ -1350,16 +1418,19 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
-  function projectThreadForPath(path: string): string {
+  function projectThreadForPath(
+    path: string,
+    runtime: WorkspaceRuntime = appStore.activeRuntime,
+  ): string {
     const key = workspaceKey(path)
-    const scoped = lastThreadByWorkspace.value[`${appStore.activeRuntime}:${key}`] ?? ''
+    const scoped = lastThreadByWorkspace.value[`${runtime}:${key}`] ?? ''
     if (scoped) return scoped
     const legacy = lastThreadByWorkspace.value[key] ?? ''
-    return legacy && runtimeIDForThread(legacy) === appStore.activeRuntime ? legacy : ''
+    return legacy && runtimeIDForThread(legacy) === runtime ? legacy : ''
   }
 
   async function forkThread(threadID: string, activate = true): Promise<ThreadSummary | null> {
-    const id = threadID.trim()
+    const id = resolveThreadID(threadID) || threadID.trim()
     if (!id || threadMutationForThread(id)) return null
     if (id.startsWith('pending-thread-')) {
       notify('warning', translate('threadActions.forkFailed'), translate('notifications.taskOpenFailed'))
@@ -1395,8 +1466,8 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function archiveThread(threadID: string): Promise<void> {
-    const id = threadID.trim()
-    if (!id || threadMutationForThread(id)) return
+    const id = resolveThreadID(threadID) || threadID.trim()
+    if (!id || threadMutationForThread(id) || !canMutateThread(id)) return
     const target = findThreadSummary(id)
     const targetRuntime = knownRuntimeIDForThread(id) || appStore.activeRuntime
     const targetWorkspace = target?.cwd || appStore.currentWorkspacePath
@@ -1428,20 +1499,21 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function compactThread(threadID: string, activate = true): Promise<void> {
-    if (!threadID || threadIsBusy(threadID) || !beginThreadMutation(threadID, 'compact')) return
+    const id = resolveThreadID(threadID) || threadID.trim()
+    if (!id || threadIsBusy(id) || !beginThreadMutation(id, 'compact')) return
     try {
-      await backend.CompactThread(threadID)
-      if (runtimeIDForThread(threadID) !== 'codex') {
-        loadedThreadIDs.delete(threadID)
-        await openThread(threadID, { activate, runtime: runtimeIDForThread(threadID) })
+      await backend.CompactThread(id)
+      if (runtimeIDForThread(id) !== 'codex') {
+        loadedThreadIDs.delete(id)
+        await openThread(id, { activate, runtime: runtimeIDForThread(id) })
       }
       notify('info', translate('threadActions.compacting'), translate('threadActions.compactingRuntimeHint', {
-        runtime: runtimeNameForThread(threadID),
+        runtime: runtimeNameForThread(id),
       }))
     } catch (error) {
       notify('error', translate('threadActions.compactFailed'), errorMessage(error))
     } finally {
-      endThreadMutation(threadID)
+      endThreadMutation(id)
     }
   }
 
@@ -1450,9 +1522,10 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function renameThread(threadID: string, name?: string): Promise<boolean> {
-    const id = threadID.trim()
+    const id = resolveThreadID(threadID) || threadID.trim()
     if (!id || threadMutationForThread(id)) return false
-    const current = findThreadSummary(id) || (activeThread.value?.id === id ? activeThread.value : null)
+    const current = findThreadSummary(id)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
     let nextName = name
     if (nextName === undefined) {
       const prompted = await dialogStore.prompt({
@@ -1471,7 +1544,7 @@ export const useCodexStore = defineStore('codex', () => {
     if (id.startsWith('pending-thread-')) {
       const local = current ? { ...current, name: nextName } : null
       if (local) {
-        if (activeThreadId.value === id) activeThread.value = local
+        if (sameThreadSession(activeThreadId.value, id)) activeThread.value = local
         addOrUpdateThread(local)
       }
       notify('success', translate('threadActions.renamed'), nextName)
@@ -1484,7 +1557,7 @@ export const useCodexStore = defineStore('codex', () => {
       const thread = normalizeRuntimeThread(asRecord(asRecord(response).thread), response)
         ?? (current ? { ...current, name: nextName } : null)
       if (thread) {
-        if (activeThreadId.value === id) activeThread.value = thread
+        if (sameThreadSession(activeThreadId.value, id)) activeThread.value = thread
         addOrUpdateThread(thread)
       }
       notify('success', translate('threadActions.renamed'), nextName)
@@ -1504,8 +1577,8 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function deleteThread(threadID: string): Promise<void> {
-    const id = threadID.trim()
-    if (!id || threadMutationForThread(id)) return
+    const id = resolveThreadID(threadID) || threadID.trim()
+    if (!id || threadMutationForThread(id) || !canMutateThread(id)) return
     const target = findThreadSummary(id)
     const targetRuntime = knownRuntimeIDForThread(id) || appStore.activeRuntime
     const targetWorkspace = target?.cwd || appStore.currentWorkspacePath
@@ -1545,61 +1618,97 @@ export const useCodexStore = defineStore('codex', () => {
 
   function discardLocalThread(threadID: string): void {
     if (!threadID) return
-    threads.value = threads.value.filter((thread) => thread.id !== threadID)
-    archivedThreads.value = archivedThreads.value.filter((thread) => thread.id !== threadID)
+    const wasActive = sameThreadSession(activeThreadId.value, threadID)
+    const matches = (id: string) => sameThreadSession(id, threadID)
+    const relatedSessionIds = [...new Set([
+      threadID,
+      resolveThreadID(threadID),
+      ...[...threadAlias.keys()].filter(matches),
+      ...[...threadAlias.values()].filter(matches),
+    ].filter(Boolean))]
+    const runtime = runtimeIDForThread(threadID)
+    arenaStore.clearSessionBindings(runtime, relatedSessionIds)
+    navigationStore.removeSessions(runtime, relatedSessionIds, translate('sidebar.newTask'))
+    threads.value = threads.value.filter((thread) => !sameThreadSession(thread.id, threadID))
+    archivedThreads.value = archivedThreads.value.filter((thread) => !sameThreadSession(thread.id, threadID))
     const nextProjects = { ...projectThreads.value }
     for (const [path, projectItems] of Object.entries(nextProjects)) {
-      nextProjects[path] = projectItems.filter((thread) => thread.id !== threadID)
+      nextProjects[path] = projectItems.filter((thread) => !sameThreadSession(thread.id, threadID))
     }
     projectThreads.value = nextProjects
 
-    const nextItems = { ...itemsByThread.value }
-    delete nextItems[threadID]
-    itemsByThread.value = nextItems
-    removeThreadHistoryState(threadID)
+    itemsByThread.value = Object.fromEntries(
+      Object.entries(itemsByThread.value).filter(([id]) => !matches(id)),
+    )
+    historyByThread.value = Object.fromEntries(
+      Object.entries(historyByThread.value).filter(([id]) => !matches(id)),
+    )
 
     releasePendingThreadSubmissions(threadID)
-    clearThreadQueue(threadID)
+    queuedMessagesByThread.value = Object.fromEntries(
+      Object.entries(queuedMessagesByThread.value).filter(([id]) => !matches(id)),
+    )
     clearTurnFeedback(threadID)
     setThreadTurn(threadID, '')
 
-    const nextMetrics = { ...turnMetricsByThread.value }
-    delete nextMetrics[threadID]
-    turnMetricsByThread.value = nextMetrics
+    turnMetricsByThread.value = Object.fromEntries(
+      Object.entries(turnMetricsByThread.value).filter(([id]) => !matches(id)),
+    )
+    tokenUsageByThread.value = Object.fromEntries(
+      Object.entries(tokenUsageByThread.value).filter(([id]) => !matches(id)),
+    )
+    latestDiffByThread.value = Object.fromEntries(
+      Object.entries(latestDiffByThread.value).filter(([id]) => !matches(id)),
+    )
 
-    const nextToken = { ...tokenUsageByThread.value }
-    delete nextToken[threadID]
-    tokenUsageByThread.value = nextToken
-
-    loadedThreadIDs.delete(threadID)
-    latestStartedTurnByThread.delete(threadID)
-    clearThreadAliases(threadID)
-    if (pinnedThreadIds.value.includes(threadID)) {
-      const nextPinned = pinnedThreadIds.value.filter((id) => id !== threadID)
+    for (const id of [...loadedThreadIDs]) {
+      if (matches(id)) loadedThreadIDs.delete(id)
+    }
+    for (const id of [...latestStartedTurnByThread.keys()]) {
+      if (matches(id)) latestStartedTurnByThread.delete(id)
+    }
+    sendingThreadIds.value = sendingThreadIds.value.filter((id) => !matches(id))
+    interruptingThreadIds.value = interruptingThreadIds.value.filter((id) => !matches(id))
+    if (pinnedThreadIds.value.some(matches)) {
+      const nextPinned = pinnedThreadIds.value.filter((id) => !matches(id))
       pinnedThreadIds.value = nextPinned
       persistPinnedThreadIds(nextPinned)
     }
-    if (activeThreadId.value === threadID) {
+    clearThreadAliases(threadID)
+    if (wasActive) {
       activeThread.value = null
       activeThreadId.value = ''
     }
   }
 
-  async function unarchiveThread(threadID: string): Promise<void> {
-    const id = threadID.trim()
-    if (!id || !beginThreadMutation(id, 'unarchive')) return
+  async function unarchiveThread(threadID: string): Promise<ThreadSummary | null> {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    if (!id || !beginThreadMutation(id, 'unarchive')) return null
+    const requestedRuntime = knownRuntimeIDForThread(id) || appStore.activeRuntime
     try {
       const response = await backend.UnarchiveThread(id)
-      await loadThreads()
       const thread = normalizeRuntimeThread(asRecord(asRecord(response).thread), response)
+      archivedThreads.value = archivedThreads.value.filter((item) => !sameThreadSession(item.id, id))
+      if (appStore.activeRuntime !== requestedRuntime) {
+        notify('success', translate('threadActions.unarchived'), thread?.name || translate('threadActions.unarchivedHint'))
+        return thread
+      }
+      await loadThreads()
+      if (appStore.activeRuntime !== requestedRuntime) return thread
       if (thread) {
-        await openThread(thread.id)
+        if (thread.cwd && !sameWorkspace(thread.cwd, appStore.currentWorkspacePath)) {
+          await openProjectThread(thread.cwd, thread.id, requestedRuntime)
+        } else {
+          await openThread(thread.id, { runtime: requestedRuntime })
+        }
         notify('success', translate('threadActions.unarchived'), thread.name)
       } else {
         notify('success', translate('threadActions.unarchived'), translate('threadActions.unarchivedHint'))
       }
+      return thread
     } catch (error) {
       notify('error', translate('threadActions.unarchiveFailed'), errorMessage(error))
+      return null
     } finally {
       endThreadMutation(id)
     }
@@ -1611,14 +1720,15 @@ export const useCodexStore = defineStore('codex', () => {
     instructions?: string
     delivery?: 'inline' | 'detached'
   } = {}, threadID = activeThreadId.value): Promise<void> {
-    if (!threadID || threadID.startsWith('pending-thread-') || threadIsBusy(threadID) || threadMutationForThread(threadID)) {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    if (!id || id.startsWith('pending-thread-') || threadIsBusy(id) || threadMutationForThread(id)) {
       notify('warning', translate('threadActions.reviewNeedThread'), translate('threadActions.reviewNeedThreadHint'))
       return
     }
-    if (!beginThreadMutation(threadID, 'review')) return
+    if (!beginThreadMutation(id, 'review')) return
     try {
       const response = await backend.StartReview({
-        threadId: threadID,
+        threadId: id,
         targetType: options.targetType || 'uncommittedChanges',
         branch: options.branch || '',
         instructions: options.instructions || '',
@@ -1626,10 +1736,10 @@ export const useCodexStore = defineStore('codex', () => {
       })
       const payload = asRecord(response)
       const reviewThread = normalizeRuntimeThread(payload.thread, response)
-      const reviewThreadID = asString(payload.reviewThreadId) || reviewThread?.id || threadID
-      if (options.delivery === 'detached' && reviewThreadID && reviewThreadID !== threadID) {
-        const source = findThreadSummary(threadID)
-          || (activeThread.value?.id === threadID ? activeThread.value : null)
+      const reviewThreadID = asString(payload.reviewThreadId) || reviewThread?.id || id
+      if (options.delivery === 'detached' && reviewThreadID && !sameThreadSession(reviewThreadID, id)) {
+        const source = findThreadSummary(id)
+          || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
         addOrUpdateThread(reviewThread ?? {
           id: reviewThreadID,
           name: translate('threadActions.reviewThreadName'),
@@ -1646,14 +1756,14 @@ export const useCodexStore = defineStore('codex', () => {
       } else {
         const turn = asRecord(payload.turn)
         const turnID = asString(turn.id)
-        if (turnID) setThreadTurn(threadID, turnID)
+        if (turnID) setThreadTurn(id, turnID)
       }
       notify('info', translate('threadActions.reviewStarted'), translate('threadActions.reviewStartedHint'))
       void workspaceStore.refreshWorkspace().catch(() => undefined)
     } catch (error) {
       notify('error', translate('threadActions.reviewFailed'), errorMessage(error))
     } finally {
-      endThreadMutation(threadID)
+      endThreadMutation(id)
     }
   }
 
@@ -1662,9 +1772,10 @@ export const useCodexStore = defineStore('codex', () => {
     mode: 'single' | 'fromHere' = 'fromHere',
     threadID = activeThreadId.value,
   ): Promise<void> {
-    if (!threadID || !turnID || threadIsBusy(threadID) || threadMutationForThread(threadID)) return
+    const id = resolveThreadID(threadID) || threadID.trim()
+    if (!id || !turnID || threadIsBusy(id) || threadMutationForThread(id)) return
     const turnIDs = [...new Set(
-      (itemsByThread.value[threadID] ?? []).map((item) => item.turnId).filter(Boolean),
+      (itemsByThread.value[id] ?? []).map((item) => item.turnId).filter(Boolean),
     )]
     const turnIndex = turnIDs.indexOf(turnID)
     if (turnIndex < 0) return
@@ -1675,14 +1786,14 @@ export const useCodexStore = defineStore('codex', () => {
     }
     const numTurns = mode === 'single' ? 1 : turnIDs.length - turnIndex
     if (numTurns < 1) return
-    if (!beginThreadMutation(threadID, 'rollback')) return
+    if (!beginThreadMutation(id, 'rollback')) return
     try {
-      const response = await backend.RollbackThread(threadID, numTurns)
+      const response = await backend.RollbackThread(id, numTurns)
       const rawThread = asRecord(asRecord(response).thread)
       const thread = normalizeRuntimeThread(rawThread, response)
       if (!thread) throw new Error(translate('notifications.taskOpenFailed'))
       const items = timelineFromTurns(rawThread.turns)
-      const remainsActive = sameThreadSession(activeThreadId.value, threadID)
+      const remainsActive = sameThreadSession(activeThreadId.value, id)
       if (remainsActive) setActiveThread(thread, items)
       else itemsByThread.value = { ...itemsByThread.value, [thread.id]: items }
       addOrUpdateThread(thread)
@@ -1693,7 +1804,7 @@ export const useCodexStore = defineStore('codex', () => {
     } catch (error) {
       notify('error', translate('timeline.rollbackFailed'), errorMessage(error))
     } finally {
-      endThreadMutation(threadID)
+      endThreadMutation(id)
     }
   }
 
@@ -1707,17 +1818,20 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function retryMessage(itemID: string, text: string, threadID = activeThreadId.value): Promise<boolean> {
-    const item = (itemsByThread.value[threadID] ?? []).find((candidate) => candidate.id === itemID)
+    const id = resolveThreadID(threadID) || threadID.trim()
+    if (!id) return false
+    const item = (itemsByThread.value[id] ?? []).find((candidate) => candidate.id === itemID)
     if (!item?.failed) return false
-    const queuedMessage = (queuedMessagesByThread.value[threadID] ?? [])
+    const queueID = queueThreadKey(id)
+    const queuedMessage = queuedMessagesForThread(id)
       .find((message) => message.localItemId === itemID)
     if (queuedMessage) {
       if (queuedMessage.state !== 'failed') return false
-      patchQueuedMessage(threadID, queuedMessage.id, { state: 'queued', error: '' })
-      scheduleThreadQueueDrain(threadID)
+      patchQueuedMessage(queueID, queuedMessage.id, { state: 'queued', error: '' })
+      scheduleThreadQueueDrain(queueID)
       return true
     }
-    return enqueueMessage(text, itemID, localAttachmentSources(item.attachments), threadID)
+    return enqueueMessage(text, itemID, localAttachmentSources(item.attachments), id)
   }
 
   async function retryLastMessage(): Promise<boolean> {
@@ -1742,15 +1856,19 @@ export const useCodexStore = defineStore('codex', () => {
     const selectedThreadID = targetThreadID === undefined
       ? activeThreadId.value
       : resolveThreadID(targetThreadID)
-    const selectedThread = activeThread.value?.id === selectedThreadID ? activeThread.value : null
+    const selectedThread = activeThread.value && sameThreadSession(activeThread.value.id, selectedThreadID)
+      ? activeThread.value
+      : null
     const threadID = selectedThreadID || `pending-thread-${now}-${sequence}`
     const workspace = selectedThread?.cwd || findThreadSummary(threadID)?.cwd || appStore.currentWorkspacePath
     const runtime = targetRuntime || knownRuntimeIDForThread(threadID) || appStore.activeRuntime
     if (!threadID || !workspace || !isRuntimeReady(runtime)) return false
-    const waitInQueue = threadIsBusy(threadID) || (queuedMessagesByThread.value[threadID]?.length ?? 0) > 0
+    const waitInQueue = threadIsBusy(threadID) || queuedMessagesForThread(threadID).length > 0
     if (!selectedThreadID) activeThreadId.value = threadID
     // User continued chatting — dismiss implement prompt (official dismisses on follow-up).
-    if (planImplementPrompt.value?.threadId === threadID) planImplementPrompt.value = null
+    if (planImplementPrompt.value && sameThreadSession(planImplementPrompt.value.threadId, threadID)) {
+      planImplementPrompt.value = null
+    }
 
     const feedback = threadFeedback(threadID)
     const pendingSubmission = pendingThreadSubmission(threadID)?.submission
@@ -1838,7 +1956,9 @@ export const useCodexStore = defineStore('codex', () => {
         return
       }
 
-      let thread = activeThread.value?.id === threadID ? activeThread.value : findThreadSummary(threadID)
+      let thread = activeThread.value && sameThreadSession(activeThread.value.id, threadID)
+        ? activeThread.value
+        : findThreadSummary(threadID)
       if (threadID.startsWith('pending-thread-')) {
         const pendingThreadID = threadID
         const draft = thread
@@ -1872,7 +1992,7 @@ export const useCodexStore = defineStore('codex', () => {
           }
           if (!submissionStillOwnsThread(resolvedThreadID)) return
         }
-        if (activeThreadId.value === thread.id) {
+        if (sameThreadSession(activeThreadId.value, thread.id)) {
           thread = {
             ...thread,
             model: activeThread.value?.model || thread.model,
@@ -1899,7 +2019,7 @@ export const useCodexStore = defineStore('codex', () => {
           const rawResumedThread = asRecord(responseRecord.thread)
           const resumed = normalizeRuntimeThread(rawResumedThread, responseRecord)
           if (resumed) {
-            const latestPreferences = activeThread.value?.id === resumed.id
+            const latestPreferences = activeThread.value && sameThreadSession(activeThread.value.id, resumed.id)
               ? activeThread.value
               : (findThreadSummary(resumed.id) ?? localPreferences)
             thread = {
@@ -1909,7 +2029,7 @@ export const useCodexStore = defineStore('codex', () => {
               effort: latestPreferences.effort || resumed.effort,
               collaborationMode: latestPreferences.collaborationMode || resumed.collaborationMode,
             }
-            if (activeThreadId.value === resumed.id) activeThread.value = thread
+            if (sameThreadSession(activeThreadId.value, resumed.id)) activeThread.value = thread
             addOrUpdateThread(thread)
             if (isActiveStatus(resumed.status)) {
               const resumedTurnID = activeTurnIDFromSnapshot(rawResumedThread)
@@ -1928,7 +2048,7 @@ export const useCodexStore = defineStore('codex', () => {
       }
       await waitForSessionPreferences(thread.id)
       if (!submissionStillOwnsThread(resolvedThreadID)) return
-      const latestPreferences = activeThread.value?.id === thread.id
+      const latestPreferences = activeThread.value && sameThreadSession(activeThread.value.id, thread.id)
         ? activeThread.value
         : findThreadSummary(thread.id)
       if (latestPreferences) {
@@ -2011,9 +2131,12 @@ export const useCodexStore = defineStore('codex', () => {
       const newerSubmission = pendingThreadSubmission(thread.id)
       const currentTurnID = threadTurnID(thread.id)
       const updateThreadPreview = () => {
-        if (thread.preview || (activeThread.value?.id !== thread.id && !findThreadSummary(thread.id))) return
+        if (
+          thread.preview
+          || ((!activeThread.value || !sameThreadSession(activeThread.value.id, thread.id)) && !findThreadSummary(thread.id))
+        ) return
         const updated = { ...thread, name: queuedMessage.text.slice(0, 56), preview: queuedMessage.text }
-        if (activeThreadId.value === thread.id) activeThread.value = updated
+        if (sameThreadSession(activeThreadId.value, thread.id)) activeThread.value = updated
         addOrUpdateThread(updated)
       }
       if (newerSubmission && newerSubmission.submission !== submission) {
@@ -2164,20 +2287,23 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   function removeQueuedMessage(messageID: string, threadID = activeThreadId.value): void {
-    const message = queuedMessagesByThread.value[threadID]?.find((item) => item.id === messageID)
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const queueID = queueThreadKey(id)
+    const message = queuedMessagesByThread.value[queueID]?.find((item) => item.id === messageID)
     if (!message || message.state === 'sending') return
-    removeQueuedMessageFromThread(threadID, messageID)
-    if (threadID.startsWith('pending-thread-') && !queuedMessagesByThread.value[threadID] && !activeThread.value) {
+    removeQueuedMessageFromThread(queueID, messageID)
+    if (id.startsWith('pending-thread-') && !queuedMessagesByThread.value[queueID] && !activeThread.value) {
       activeThreadId.value = ''
     }
-    scheduleThreadQueueDrain(threadID)
+    scheduleThreadQueueDrain(queueID)
   }
 
   function retryQueuedMessage(messageID: string, threadID = activeThreadId.value): void {
-    const message = queuedMessagesByThread.value[threadID]?.find((item) => item.id === messageID)
+    const queueID = queueThreadKey(resolveThreadID(threadID) || threadID.trim())
+    const message = queuedMessagesByThread.value[queueID]?.find((item) => item.id === messageID)
     if (!message || message.state !== 'failed') return
-    patchQueuedMessage(threadID, messageID, { state: 'queued', error: '' })
-    scheduleThreadQueueDrain(threadID)
+    patchQueuedMessage(queueID, messageID, { state: 'queued', error: '' })
+    scheduleThreadQueueDrain(queueID)
   }
 
   /** Reorder a waiting queue item. Leading `sending` items stay pinned at the front. */
@@ -2186,8 +2312,9 @@ export const useCodexStore = defineStore('codex', () => {
     action: 'up' | 'down' | 'top',
     threadID = activeThreadId.value,
   ): void {
-    if (!threadID) return
-    const messages = [...(queuedMessagesByThread.value[threadID] ?? [])]
+    const queueID = queueThreadKey(resolveThreadID(threadID) || threadID.trim())
+    if (!queueID) return
+    const messages = [...(queuedMessagesByThread.value[queueID] ?? [])]
     const index = messages.findIndex((item) => item.id === messageID)
     if (index < 0) return
     const message = messages[index]
@@ -2204,7 +2331,7 @@ export const useCodexStore = defineStore('codex', () => {
 
     messages.splice(index, 1)
     messages.splice(target, 0, message)
-    queuedMessagesByThread.value = { ...queuedMessagesByThread.value, [threadID]: messages }
+    queuedMessagesByThread.value = { ...queuedMessagesByThread.value, [queueID]: messages }
   }
 
   /**
@@ -2212,36 +2339,38 @@ export const useCodexStore = defineStore('codex', () => {
    * If a turn is live, interrupt it first — turn/completed will drain the queue.
    */
   async function sendQueuedMessageNow(messageID: string, threadID = activeThreadId.value): Promise<void> {
-    if (!threadID) return
-    const message = queuedMessagesByThread.value[threadID]?.find((item) => item.id === messageID)
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const queueID = queueThreadKey(id)
+    if (!id || !queueID) return
+    const message = queuedMessagesByThread.value[queueID]?.find((item) => item.id === messageID)
     if (!message) return
     // Orphan "sending" after reconnect/stuck drain — allow re-fire.
     if (message.state === 'sending') {
-      if (isThreadSubmitting(threadID) || threadIsRunning(threadID) || pendingThreadSubmission(threadID)) return
-      patchQueuedMessage(threadID, messageID, { state: 'queued', error: '' })
+      if (isThreadSubmitting(id) || threadIsRunning(id) || pendingThreadSubmission(id)) return
+      patchQueuedMessage(queueID, messageID, { state: 'queued', error: '' })
     }
     if (message.state === 'failed') {
-      patchQueuedMessage(threadID, messageID, { state: 'queued', error: '' })
+      patchQueuedMessage(queueID, messageID, { state: 'queued', error: '' })
     }
-    reorderQueuedMessage(messageID, 'top')
-    if (threadIsRunning(threadID)) {
-      await interruptTurn(threadID)
+    reorderQueuedMessage(messageID, 'top', queueID)
+    if (threadIsRunning(id)) {
+      await interruptTurn(id)
       return
     }
     // Without a live turn, clear stale busy flags and drain immediately.
-    clearStaleBusyState(threadID)
+    clearStaleBusyState(id)
     if (
       message.blockedByTurnId
       && !completedTurns.has(message.blockedByTurnId)
-      && !threadIsBusy(threadID)
+      && !threadIsBusy(id)
     ) {
-      patchQueuedMessage(threadID, messageID, { blockedByTurnId: undefined })
+      patchQueuedMessage(queueID, messageID, { blockedByTurnId: undefined })
     }
     if (!isRuntimeReady(message.runtime)) {
       notify('warning', translate('notifications.connectionFailed'), translate('app.connecting'))
       return
     }
-    await drainThreadQueue(threadID)
+    await drainThreadQueue(queueID)
   }
 
   async function steerMessage(text: string, images: string[] = []): Promise<boolean> {
@@ -2281,50 +2410,51 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function interruptTurn(threadID = activeThreadId.value): Promise<void> {
-    const turnID = threadTurnID(threadID) || threadFeedback(threadID)?.turnId || ''
-    if (isThreadInterrupting(threadID)) return
-    if (!threadID || !turnID) {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const turnID = threadTurnID(id) || threadFeedback(id)?.turnId || ''
+    if (isThreadInterrupting(id)) return
+    if (!id || !turnID) {
       notify('warning', translate('notifications.turnStopFailed'), translate('chat.stopping'))
       return
     }
-    setThreadInterrupting(threadID, true)
-    setTurnFeedback(threadID, {
+    setThreadInterrupting(id, true)
+    setTurnFeedback(id, {
       state: 'running',
       message: translate('chat.stopping'),
       turnId: turnID,
     })
     // Cancel any open approval prompt first so the turn can finish interrupting.
-    const blockingRequest = pendingRequestForThread(threadID)
+    const blockingRequest = pendingRequestForThread(id)
     if (blockingRequest) {
       cancelPendingRequest(blockingRequest)
     }
     try {
-      await backend.InterruptTurn(threadID, turnID)
+      await backend.InterruptTurn(id, turnID)
       // Keep "正在停止…" until turn/completed; force-clear if Codex stalls.
       trackedTimeout(() => {
-        if (threadTurnID(threadID) !== turnID) {
-          setThreadInterrupting(threadID, false)
+        if (threadTurnID(id) !== turnID) {
+          setThreadInterrupting(id, false)
           return
         }
         rememberCompletedTurn(turnID, 'interrupted')
-        setThreadTurn(threadID, '')
-        finalizeActiveItemsForCompletedTurns(threadID, turnID)
-        finalizeOrphanedActiveItems(threadID)
-        setLocalThreadStatus(threadID, 'idle')
-        setTurnFeedback(threadID, {
+        setThreadTurn(id, '')
+        finalizeActiveItemsForCompletedTurns(id, turnID)
+        finalizeOrphanedActiveItems(id)
+        setLocalThreadStatus(id, 'idle')
+        setTurnFeedback(id, {
           state: 'interrupted',
           message: translate('chat.interrupted'),
           turnId: turnID,
         })
-        setThreadInterrupting(threadID, false)
-        clearStaleBusyState(threadID)
-        scheduleThreadQueueDrain(threadID)
+        setThreadInterrupting(id, false)
+        clearStaleBusyState(id)
+        scheduleThreadQueueDrain(queueThreadKey(id))
       }, 8000)
     } catch (error) {
-      setThreadInterrupting(threadID, false)
+      setThreadInterrupting(id, false)
       notify('error', translate('notifications.turnStopFailed'), errorMessage(error))
-      if (threadTurnID(threadID) === turnID) {
-        setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
+      if (threadTurnID(id) === turnID) {
+        setTurnFeedback(id, { state: 'running', message: '', turnId: turnID })
       }
     }
   }
@@ -2441,14 +2571,23 @@ export const useCodexStore = defineStore('codex', () => {
         handleNotification(event.method ?? '', event.data)
         break
       case 'request':
-        pendingRequests.value = [
-          ...pendingRequests.value,
-          {
+        {
+          const request = {
             requestKey: event.requestKey ?? '',
             method: event.method ?? '',
             data: asRecord(event.data),
-          },
-        ]
+          }
+          const existingIndex = request.requestKey
+            ? pendingRequests.value.findIndex((item) => item.requestKey === request.requestKey)
+            : -1
+          if (existingIndex < 0) {
+            pendingRequests.value = [...pendingRequests.value, request]
+          } else {
+            const next = [...pendingRequests.value]
+            next[existingIndex] = request
+            pendingRequests.value = next
+          }
+        }
         break
       case 'stderr':
         lastTransportMessage.value = asString(asRecord(event.data).message)
@@ -2516,13 +2655,15 @@ export const useCodexStore = defineStore('codex', () => {
       case 'thread/name/updated': {
         const id = asString(payload.threadId)
         const name = asString(payload.name)
-        threads.value = threads.value.map((thread) => thread.id === id ? { ...thread, name } : thread)
+        threads.value = threads.value.map((thread) => sameThreadSession(thread.id, id) ? { ...thread, name } : thread)
         const nextProjects = { ...projectThreads.value }
         for (const [path, projectItems] of Object.entries(nextProjects)) {
-          nextProjects[path] = projectItems.map((thread) => thread.id === id ? { ...thread, name } : thread)
+          nextProjects[path] = projectItems.map((thread) => sameThreadSession(thread.id, id) ? { ...thread, name } : thread)
         }
         projectThreads.value = nextProjects
-        if (activeThread.value?.id === id) activeThread.value = { ...activeThread.value, name }
+        if (activeThread.value && sameThreadSession(activeThread.value.id, id)) {
+          activeThread.value = { ...activeThread.value, name }
+        }
         break
       }
       case 'thread/status/changed': {
@@ -2548,20 +2689,7 @@ export const useCodexStore = defineStore('codex', () => {
       case 'thread/deleted':
       case 'thread/closed': {
         const threadID = asString(payload.threadId)
-        threads.value = threads.value.filter((thread) => thread.id !== threadID)
-        const nextProjects = { ...projectThreads.value }
-        for (const [path, projectItems] of Object.entries(nextProjects)) {
-          nextProjects[path] = projectItems.filter((thread) => thread.id !== threadID)
-        }
-        projectThreads.value = nextProjects
-        releasePendingThreadSubmissions(threadID)
-        clearThreadQueue(threadID)
-        latestStartedTurnByThread.delete(threadID)
-        clearThreadAliases(threadID)
-        if ((method === 'thread/deleted' || method === 'thread/closed') && activeThreadId.value === threadID) {
-          activeThread.value = null
-          activeThreadId.value = ''
-        }
+        discardLocalThread(threadID)
         break
       }
       case 'thread/unarchived': {
@@ -2701,6 +2829,7 @@ export const useCodexStore = defineStore('codex', () => {
       case 'item/completed': {
         const threadID = asString(payload.threadId)
         const turnID = asString(payload.turnId)
+        const authoritativeText = payload.replace === true
         let item = normalizeTimelineItem(payload.item, turnID)
         if (item) {
           if (completedTurns.has(turnID) && isActiveStatus(item.status)) {
@@ -2717,7 +2846,7 @@ export const useCodexStore = defineStore('codex', () => {
           else flushThreadDeltas(threadID)
           item.startedAt = typeof payload.startedAtMs === 'number' ? payload.startedAtMs : item.startedAt
           item.completedAt = typeof payload.completedAtMs === 'number' ? payload.completedAtMs : item.completedAt
-          upsertItem(threadID, item)
+          upsertItem(threadID, item, authoritativeText)
           if (method === 'item/completed') {
             if (item.type === 'contextCompaction') {
               const rawItem = asRecord(payload.item)
@@ -3054,7 +3183,7 @@ export const useCodexStore = defineStore('codex', () => {
 
     // Refresh the persisted snapshot after upstream compaction so the context
     // window and historical token metrics survive reopening this conversation.
-    if (activeThreadId.value === threadID) {
+    if (sameThreadSession(activeThreadId.value, threadID)) {
       loadedThreadIDs.delete(threadID)
       void openThread(threadID)
     }
@@ -3162,7 +3291,8 @@ export const useCodexStore = defineStore('codex', () => {
     if (!appStore.settings.notifyOnTurnComplete) return
     // Match Codex: prefer notifying when the window is in the background.
     if (typeof document !== 'undefined' && !document.hidden && document.hasFocus()) return
-    const thread = findThreadSummary(threadID) || (activeThread.value?.id === threadID ? activeThread.value : null)
+    const thread = findThreadSummary(threadID)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, threadID) ? activeThread.value : null)
     const title = thread?.name?.trim() || translate('notifications.turnCompleteTitle')
     let message = translate('notifications.turnCompleteHintRuntime', {
       runtime: runtimeNameForThread(threadID),
@@ -3373,8 +3503,9 @@ export const useCodexStore = defineStore('codex', () => {
     provider?: string,
     collaborationMode?: string,
   ): void {
-    const thread = findThreadSummary(threadID)
-      || (activeThread.value?.id === threadID ? activeThread.value : null)
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const thread = findThreadSummary(id)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
     if (!thread) return
     const next: ThreadSummary = {
       ...thread,
@@ -3386,7 +3517,7 @@ export const useCodexStore = defineStore('codex', () => {
         : (collaborationMode || 'default'),
       updatedAt: Math.floor(Date.now() / 1000),
     }
-    if (activeThreadId.value === threadID) activeThread.value = next
+    if (sameThreadSession(activeThreadId.value, id)) activeThread.value = next
     addOrUpdateThread(next)
     rememberThreadModelIdentity(next.id, next.model, next.modelProvider)
   }
@@ -3419,8 +3550,9 @@ export const useCodexStore = defineStore('codex', () => {
   ): Promise<void> {
     const next = mode === 'plan' ? 'plan' : 'default'
     appStore.patchSettings({ collaborationMode: next })
-    const thread = findThreadSummary(threadID)
-      || (activeThread.value?.id === threadID ? activeThread.value : null)
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const thread = findThreadSummary(id)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
     if (!thread) return
     patchSessionPreferences(thread.id, thread.model, thread.effort || '', thread.modelProvider, next)
     if (thread.id.startsWith('pending-thread-')) return
@@ -3439,7 +3571,9 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   function resolveThreadCollaborationMode(thread: ThreadSummary): CollaborationMode {
-    const live = activeThread.value?.id === thread.id ? activeThread.value : null
+    const live = activeThread.value && sameThreadSession(activeThread.value.id, thread.id)
+      ? activeThread.value
+      : null
     const mode = live?.collaborationMode
       || thread.collaborationMode
       || findThreadSummary(thread.id)?.collaborationMode
@@ -3556,7 +3690,7 @@ export const useCodexStore = defineStore('codex', () => {
     ) return
     // Official TUI suppresses when approvals/queue are pending.
     if (pendingRequests.value.length) return
-    const queued = queuedMessagesByThread.value[threadID] ?? []
+    const queued = queuedMessagesForThread(threadID)
     if (queued.some((message) => message.state !== 'failed')) return
 
     const submittedMode = collaborationModeByTurn.get(turnID)
@@ -3590,7 +3724,7 @@ export const useCodexStore = defineStore('codex', () => {
     if (!prompt) return
     clearPlanOfferRetries(`${prompt.threadId}:${prompt.turnId}`)
     planImplementPrompt.value = null
-    if (activeThreadId.value !== prompt.threadId) {
+    if (!sameThreadSession(activeThreadId.value, prompt.threadId)) {
       await openThread(prompt.threadId)
     }
     // Official: SubmitUserMessageWithMode(default) + "Implement the plan."
@@ -3640,14 +3774,16 @@ export const useCodexStore = defineStore('codex', () => {
   function updateThreadModelIdentity(threadID: string, model: string, provider: string): void {
     if (!threadID || (!model && !provider)) return
     rememberThreadModelIdentity(threadID, model, provider)
-    const apply = (thread: ThreadSummary) => thread.id === threadID
+    const apply = (thread: ThreadSummary) => sameThreadSession(thread.id, threadID)
       ? { ...thread, model: model || thread.model, modelProvider: provider || thread.modelProvider }
       : thread
     threads.value = threads.value.map(apply)
     const nextProjects = { ...projectThreads.value }
     for (const [path, projectItems] of Object.entries(nextProjects)) nextProjects[path] = projectItems.map(apply)
     projectThreads.value = nextProjects
-    if (activeThread.value?.id === threadID) activeThread.value = apply(activeThread.value)
+    if (activeThread.value && sameThreadSession(activeThread.value.id, threadID)) {
+      activeThread.value = apply(activeThread.value)
+    }
   }
 
   function setThreadMetrics(threadID: string, turns: unknown, merge = false): void {
@@ -3750,37 +3886,38 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function loadEarlierHistory(threadID = activeThreadId.value): Promise<boolean> {
-    const state = historyByThread.value[threadID]
-    if (!threadID || !state?.hasEarlier || state.loadingEarlier) return false
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const state = historyByThread.value[id]
+    if (!id || !state?.hasEarlier || state.loadingEarlier) return false
     const before = state.start
-    patchThreadHistoryState(threadID, { loadingEarlier: true })
+    patchThreadHistoryState(id, { loadingEarlier: true })
     try {
-      const response = await backend.ReadThreadHistory(threadID, before)
-      const currentState = historyByThread.value[threadID]
+      const response = await backend.ReadThreadHistory(id, before)
+      const currentState = historyByThread.value[id]
       if (!currentState || currentState.start !== before) return false
       const page = asRecord(response)
       const turns = page.turns
       const earlierItems = timelineFromTurns(turns)
-      const currentItems = itemsByThread.value[threadID] ?? []
+      const currentItems = itemsByThread.value[id] ?? []
       const existingIDs = new Set(currentItems.map((item) => item.id).filter(Boolean))
       const prefix = earlierItems.filter((item) => !item.id || !existingIDs.has(item.id))
       if (prefix.length) {
         itemsByThread.value = {
           ...itemsByThread.value,
-          [threadID]: [...prefix, ...currentItems],
+          [id]: [...prefix, ...currentItems],
         }
       }
-      setThreadMetrics(threadID, turns, true)
-      setThreadHistoryState(threadID, page)
+      setThreadMetrics(id, turns, true)
+      setThreadHistoryState(id, page)
       return prefix.length > 0 || (Number(page.historyStart) || 0) < before
     } catch (error) {
-      if (activeThreadId.value === threadID) {
+      if (sameThreadSession(activeThreadId.value, id)) {
         notify('error', translate('notifications.taskOpenFailed'), errorMessage(error))
       }
       return false
     } finally {
-      if (historyByThread.value[threadID]?.loadingEarlier) {
-        patchThreadHistoryState(threadID, { loadingEarlier: false })
+      if (historyByThread.value[id]?.loadingEarlier) {
+        patchThreadHistoryState(id, { loadingEarlier: false })
       }
     }
   }
@@ -3804,11 +3941,11 @@ export const useCodexStore = defineStore('codex', () => {
     while (loadedThreadIDs.size > 12 || cachedConversationWeight() > 64_000_000) {
       const recentlyOpened = [...loadedThreadIDs].slice(-2)
       const evicted = [...loadedThreadIDs].find((id) =>
-        id !== threadID
+        !sameThreadSession(id, threadID)
         && !recentlyOpened.includes(id)
-        && id !== activeThreadId.value
+        && !sameThreadSession(id, activeThreadId.value)
         && !threadIsBusy(id)
-        && !(queuedMessagesByThread.value[id] ?? []).length,
+        && queuedMessagesForThread(id).length === 0,
       )
       if (!evicted) break
       evictCachedThread(evicted)
@@ -4051,6 +4188,8 @@ export const useCodexStore = defineStore('codex', () => {
 
   function activeTurnIDFromSnapshot(threadValue: unknown): string {
     const rawThread = asRecord(threadValue)
+    const activeTurnID = asString(rawThread.activeTurnId)
+    if (activeTurnID && activeTurnID !== 'active') return activeTurnID
     for (const turnValue of [...asArray(rawThread.turns)].reverse()) {
       const turn = asRecord(turnValue)
       const turnID = asString(turn.id)
@@ -4164,6 +4303,18 @@ export const useCodexStore = defineStore('codex', () => {
     return threadHasLocalLiveOwnership(threadID) || threadReportsActive(threadID)
   }
 
+  function canMutateThread(threadID: string): boolean {
+    const queued = queuedMessagesForThread(threadID)
+      .some((message) => message.state === 'queued' || message.state === 'sending')
+    if (!threadIsBusy(threadID) && !queued) return true
+    notify(
+      'warning',
+      translate('threadActions.busyActionBlocked'),
+      translate('threadActions.busyActionBlockedHint'),
+    )
+    return false
+  }
+
   function preserveLocalLiveThreadStatus(thread: ThreadSummary): ThreadSummary {
     if (!thread.id || isActiveStatus(thread.status) || !threadHasLocalLiveOwnership(thread.id)) return thread
     return { ...thread, status: 'active' }
@@ -4192,13 +4343,15 @@ export const useCodexStore = defineStore('codex', () => {
    */
   function resetOrphanedInFlightSends(threadID = ''): void {
     if (threadID) {
-      releasePendingThreadSubmissions(threadID)
-      if (isThreadSubmitting(threadID)) setThreadSubmitting(threadID, false)
-      const messages = queuedMessagesByThread.value[threadID]
+      const id = resolveThreadID(threadID) || threadID.trim()
+      const queueID = queueThreadKey(id)
+      releasePendingThreadSubmissions(id)
+      if (isThreadSubmitting(id)) setThreadSubmitting(id, false)
+      const messages = queuedMessagesByThread.value[queueID]
       if (!messages?.some((message) => message.state === 'sending')) return
       queuedMessagesByThread.value = {
         ...queuedMessagesByThread.value,
-        [threadID]: messages.map((message) =>
+        [queueID]: messages.map((message) =>
           message.state === 'sending' ? { ...message, state: 'queued', error: '' } : message,
         ),
       }
@@ -4503,6 +4656,19 @@ export const useCodexStore = defineStore('codex', () => {
     return resolveThreadID(left) === resolveThreadID(right)
   }
 
+  function queueThreadKey(threadID: string): string {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    if (!id) return ''
+    if (queuedMessagesByThread.value[id] !== undefined) return id
+    return Object.keys(queuedMessagesByThread.value)
+      .find((key) => sameThreadSession(key, id)) || id
+  }
+
+  function queuedMessagesForThread(threadID: string): QueuedMessage[] {
+    const key = queueThreadKey(threadID)
+    return key ? (queuedMessagesByThread.value[key] ?? []) : []
+  }
+
   function clearThreadAliases(threadID: string): void {
     const related = [...threadAlias.keys()].filter((id) => sameThreadSession(id, threadID))
     for (const id of related) threadAlias.delete(id)
@@ -4648,7 +4814,7 @@ export const useCodexStore = defineStore('codex', () => {
     }
     queuedMessagesByThread.value = nextQueues
     sendingThreadIds.value = [...new Set(sendingThreadIds.value.map((id) => id === pendingThreadID ? threadID : id))]
-    if (activeThreadId.value === pendingThreadID) activeThreadId.value = threadID
+    if (sameThreadSession(activeThreadId.value, pendingThreadID)) activeThreadId.value = threadID
     loadedThreadIDs.delete(pendingThreadID)
     loadedThreadIDs.add(threadID)
 
@@ -4666,7 +4832,7 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
-  function upsertItem(threadID: string, item: TimelineItem): void {
+  function upsertItem(threadID: string, item: TimelineItem, authoritativeText = false): void {
     const items = [...(itemsByThread.value[threadID] ?? [])]
     const index = items.findIndex((existing) => existing.id === item.id)
     if (index >= 0) {
@@ -4675,8 +4841,9 @@ export const useCodexStore = defineStore('codex', () => {
       items[index] = {
         ...current,
         ...item,
-        // Never let a shorter completed/snapshot replace a longer streamed body.
-        text: mergeStreamText(item.text, current.text),
+        // Normal snapshots must not truncate buffered deltas. External adapters
+        // can explicitly mark a provider revision as an authoritative replacement.
+        text: authoritativeText ? item.text : mergeStreamText(item.text, current.text),
         reasoningSummary: mergeStreamText(item.reasoningSummary, current.reasoningSummary),
         reasoningContent: mergeStreamText(item.reasoningContent, current.reasoningContent),
         output: mergeStreamText(item.output, current.output),
@@ -4751,8 +4918,7 @@ export const useCodexStore = defineStore('codex', () => {
 
   function resetConversationState(): void {
     openThreadSequence += 1
-    projectLoadSequence += 1
-    loadingProjects.value = []
+    projectLoadingByRuntime.value = {}
     activeThread.value = null
     activeThreadId.value = ''
     activeTurnByThread.value = {}

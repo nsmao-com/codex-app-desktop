@@ -24,14 +24,15 @@ type ClaudeRuntimeStatus struct {
 
 // ClaudeSessionSummary is a sidebar row for Claude history.
 type ClaudeSessionSummary struct {
-	ID        string `json:"id"`
-	Workspace string `json:"workspace"`
-	Name      string `json:"name"`
-	Preview   string `json:"preview"`
-	Model     string `json:"model"`
-	Effort    string `json:"effort"`
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	ID           string `json:"id"`
+	Workspace    string `json:"workspace"`
+	Name         string `json:"name"`
+	Preview      string `json:"preview"`
+	Model        string `json:"model"`
+	Effort       string `json:"effort"`
+	CreatedAt    int64  `json:"createdAt"`
+	UpdatedAt    int64  `json:"updatedAt"`
+	ActiveTurnID string `json:"activeTurnId,omitempty"`
 }
 
 // ClaudeMessage is one timeline row stored with a session.
@@ -52,6 +53,7 @@ type ClaudeSessionDetail struct {
 	HistoryTotal      int                  `json:"historyTotal"`
 	HistoryTurnOffset int                  `json:"historyTurnOffset"`
 	HasEarlier        bool                 `json:"hasEarlier"`
+	ActiveTurnID      string               `json:"activeTurnId,omitempty"`
 }
 
 // ClaudeSendRequest starts a Claude Code turn.
@@ -95,6 +97,9 @@ func loadClaudeSessions(settingsPath string) map[string]*claudeStoredSession {
 		return result
 	}
 	if err := json.Unmarshal(payload, &result); err != nil {
+		return make(map[string]*claudeStoredSession)
+	}
+	if result == nil {
 		return make(map[string]*claudeStoredSession)
 	}
 	return result
@@ -235,9 +240,27 @@ func (s *AppService) ListClaudeSessions(workspace, search string) ([]ClaudeSessi
 	// Merge NiceCodex-owned rows with official Claude Code transcripts under ~/.claude/projects.
 	s.mu.Lock()
 	local := make(map[string]*claudeStoredSession, len(s.claudeSessions))
+	localByBackendRef := make(map[string]*claudeStoredSession, len(s.claudeSessions))
+	localIsRunning := make(map[string]bool, len(s.claudeSessions))
 	for id, session := range s.claudeSessions {
 		if session != nil {
 			local[id] = session
+			localIsRunning[id] = s.externalRuns[claudeRunKey(id)] != nil
+			if backendRef := strings.TrimSpace(session.BackendRef); backendRef != "" {
+				owner := localByBackendRef[backendRef]
+				candidateRunning := localIsRunning[session.ID]
+				ownerRunning := owner != nil && localIsRunning[owner.ID]
+				candidateStable := session.ID != backendRef
+				ownerStable := owner != nil && owner.ID != backendRef
+				if owner == nil ||
+					(candidateRunning != ownerRunning && candidateRunning) ||
+					(candidateRunning == ownerRunning && candidateStable != ownerStable && candidateStable) ||
+					(candidateRunning == ownerRunning && candidateStable == ownerStable && session.UpdatedAt > owner.UpdatedAt) ||
+					(candidateRunning == ownerRunning && candidateStable == ownerStable && session.UpdatedAt == owner.UpdatedAt && session.CreatedAt > owner.CreatedAt) ||
+					(candidateRunning == ownerRunning && candidateStable == ownerStable && session.UpdatedAt == owner.UpdatedAt && session.CreatedAt == owner.CreatedAt && session.ID < owner.ID) {
+					localByBackendRef[backendRef] = session
+				}
+			}
 		}
 	}
 	s.mu.Unlock()
@@ -249,6 +272,13 @@ func (s *AppService) ListClaudeSessions(workspace, search string) ([]ClaudeSessi
 	for _, session := range local {
 		if session.Archived {
 			continue
+		}
+		// Keep historical duplicate rows on disk, but expose only one stable owner
+		// for a native transcript so the sidebar never shows the same chat twice.
+		if backendRef := strings.TrimSpace(session.BackendRef); backendRef != "" {
+			if owner := localByBackendRef[backendRef]; owner != nil && owner.ID != session.ID {
+				continue
+			}
 		}
 		haystack := strings.ToLower(session.Name + "\n" + session.Preview + "\n" + session.Workspace)
 		if query != "" && !strings.Contains(haystack, query) {
@@ -265,7 +295,10 @@ func (s *AppService) ListClaudeSessions(workspace, search string) ([]ClaudeSessi
 	// for the same UUID, so merge the fresh transcript summary into that row
 	// instead of letting the stale index hide it.
 	for _, native := range scanClaudeNativeSessions(cleanWorkspace) {
-		localSession := local[native.Summary.ID]
+		localSession := localByBackendRef[native.Summary.ID]
+		if localSession == nil {
+			localSession = local[native.Summary.ID]
+		}
 		if localSession != nil && localSession.Archived {
 			continue
 		}
@@ -285,6 +318,8 @@ func (s *AppService) ListClaudeSessions(workspace, search string) ([]ClaudeSessi
 			if localSession.UpdatedAt > summary.UpdatedAt {
 				summary.UpdatedAt = localSession.UpdatedAt
 			}
+			// Keep the NiceCodex id stable; BackendRef owns the native transcript id.
+			summary.ID = localSession.ID
 		}
 		haystack := strings.ToLower(summary.Name + "\n" + summary.Preview + "\n" + summary.Workspace)
 		if query != "" && !strings.Contains(haystack, query) {
@@ -305,6 +340,9 @@ func (s *AppService) ListClaudeSessions(workspace, search string) ([]ClaudeSessi
 		}
 		seen[summary.ID] = struct{}{}
 		result = append(result, summary)
+	}
+	for index := range result {
+		result[index].ActiveTurnID = s.claudeActiveTurnID(result[index].ID)
 	}
 
 	sort.SliceStable(result, func(i, j int) bool {
@@ -348,6 +386,8 @@ func (s *AppService) readClaudeSessionPage(sessionID string, before int) (Claude
 	if err != nil {
 		return ClaudeSessionDetail{}, err
 	}
+	detail.ActiveTurnID = s.claudeActiveTurnID(sessionID)
+	detail.Summary.ActiveTurnID = detail.ActiveTurnID
 	return paginateClaudeSession(detail, before), nil
 }
 
@@ -369,13 +409,22 @@ func (s *AppService) readClaudeSessionFull(sessionID string) (ClaudeSessionDetai
 		localMeta = &clone
 	}
 	s.mu.Unlock()
+	nativeSessionID := sessionID
+	if localMeta != nil {
+		if backendRef := strings.TrimSpace(localMeta.BackendRef); backendRef != "" {
+			nativeSessionID = backendRef
+		}
+	}
 
 	if summary, messages, ok := s.cachedClaudeHistory(sessionID); ok {
 		summary = mergeClaudeLocalSummary(summary, localMeta)
+		if localMeta != nil {
+			summary.ID = localMeta.ID
+		}
 		return ClaudeSessionDetail{Summary: summary, Messages: messages}, nil
 	}
 
-	if native, ok := findClaudeNativeSession(sessionID); ok {
+	if native, ok := findClaudeNativeSession(nativeSessionID); ok {
 		before, _ := os.Stat(native.Path)
 		messages, err := readClaudeNativeMessages(native.Path)
 		if err != nil {
@@ -395,6 +444,9 @@ func (s *AppService) readClaudeSessionFull(sessionID string) (ClaudeSessionDetai
 			}, nil
 		}
 		summary := mergeClaudeLocalSummary(native.Summary, localMeta)
+		if localMeta != nil {
+			summary.ID = localMeta.ID
+		}
 		s.cacheClaudeHistory(sessionID, native.Path, summary, messages, before)
 		// The native transcript and history cache keep the full conversation. The
 		// persisted index only needs a bounded fallback for brief file locks.
@@ -402,7 +454,7 @@ func (s *AppService) readClaudeSessionFull(sessionID string) (ClaudeSessionDetai
 		s.mu.Lock()
 		if s.claudeSessions[sessionID] == nil {
 			s.claudeSessions[sessionID] = &claudeStoredSession{
-				ID: summary.ID, BackendRef: summary.ID, Workspace: summary.Workspace,
+				ID: summary.ID, BackendRef: native.Summary.ID, Workspace: summary.Workspace,
 				Name: summary.Name, Preview: summary.Preview, Model: summary.Model,
 				CreatedAt: summary.CreatedAt, UpdatedAt: summary.UpdatedAt,
 				Messages: fallbackMessages,
@@ -411,7 +463,7 @@ func (s *AppService) readClaudeSessionFull(sessionID string) (ClaudeSessionDetai
 		} else {
 			stored := s.claudeSessions[sessionID]
 			stored.ID = summary.ID
-			stored.BackendRef = summary.ID
+			stored.BackendRef = native.Summary.ID
 			stored.Workspace = summary.Workspace
 			stored.Name = summary.Name
 			stored.Preview = summary.Preview
@@ -574,6 +626,9 @@ func (s *AppService) setClaudeSessionArchived(sessionID string, archived bool) e
 	if sessionID == "" {
 		return errors.New("Claude session id is required")
 	}
+	if archived && s.isClaudeSessionRunning(sessionID) {
+		return errors.New("stop the running Claude turn before archiving its session")
+	}
 	s.mu.Lock()
 	session := s.claudeSessions[sessionID]
 	if session == nil {
@@ -621,12 +676,10 @@ func (s *AppService) DeleteClaudeSession(sessionID string) error {
 	if strings.HasPrefix(sessionID, "pending-claude-") {
 		return nil
 	}
-	key := claudeRunKey(sessionID)
-	s.mu.Lock()
-	if run := s.externalRuns[key]; run != nil {
-		run.cancel()
-		delete(s.externalRuns, key)
+	if s.isClaudeSessionRunning(sessionID) {
+		return errors.New("stop the running Claude turn before deleting its session")
 	}
+	s.mu.Lock()
 	// Soft-delete: archive + clear messages so native transcripts stay hidden in NiceCodex
 	// (we do not delete ~/.claude/projects files).
 	session := s.claudeSessions[sessionID]
@@ -666,6 +719,9 @@ func (s *AppService) SendClaudeMessage(request ClaudeSendRequest) (ClaudeTurnRef
 	ctx, cancel := context.WithCancel(context.Background())
 	key := claudeRunKey(request.SessionID)
 	s.mu.Lock()
+	if s.externalRuns == nil {
+		s.externalRuns = make(map[string]*externalRun)
+	}
 	// If a turn is already running for this session, do not spawn a second CLI.
 	// Frontend should queue; cancel+replace is reserved for explicit interrupt paths.
 	if previous := s.externalRuns[key]; previous != nil {
@@ -694,6 +750,23 @@ func (s *AppService) InterruptClaudeTurn(ref ClaudeTurnRef) error {
 	}
 	run.cancel()
 	return nil
+}
+
+func (s *AppService) isClaudeSessionRunning(sessionID string) bool {
+	return s.claudeActiveTurnID(sessionID) != ""
+}
+
+func (s *AppService) claudeActiveTurnID(sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if run := s.externalRuns[claudeRunKey(sessionID)]; run != nil {
+		return strings.TrimSpace(run.turnID)
+	}
+	return ""
 }
 
 func claudeRunKey(sessionID string) string {

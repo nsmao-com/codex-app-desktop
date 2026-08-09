@@ -1055,6 +1055,12 @@ func (s *AppService) ArchiveThread(threadID string) error {
 	if session != nil {
 		workspace = session.Workspace
 	}
+	if session != nil && isExternalSession(session) && s.externalSessionIsRunning(threadID) {
+		return errors.New("stop the running external turn before archiving its session")
+	}
+	if session != nil && !isExternalSession(session) && s.codexActiveTurnID(threadID, session.BackendRef) != "" {
+		return errors.New("stop the running Codex turn before archiving its session")
+	}
 	// Local directory is authoritative.
 	s.markSessionArchived(threadID)
 	if session == nil || isExternalSession(session) || session.BackendRef == "" {
@@ -1110,6 +1116,17 @@ func (s *AppService) DeleteThread(threadID string) error {
 	workspace := s.activeWorkspacePath()
 	if session != nil {
 		workspace = session.Workspace
+	}
+	if session != nil && isExternalSession(session) {
+		if s.externalSessionIsRunning(threadID) {
+			return errors.New("stop the running external turn before deleting its session")
+		}
+		if err := s.deleteNativeExternalSession(session); err != nil {
+			return err
+		}
+	}
+	if session != nil && !isExternalSession(session) && s.codexActiveTurnID(threadID, session.BackendRef) != "" {
+		return errors.New("stop the running Codex turn before deleting its session")
 	}
 	deleted := s.deleteSession(threadID)
 	if deleted == nil && session == nil {
@@ -4196,6 +4213,13 @@ func (s *AppService) attachSessionIdentity(result map[string]any, session *Sessi
 	result["workMode"] = workMode
 	if thread, ok := result["thread"].(map[string]any); ok {
 		thread["id"] = id
+		backendRef := ""
+		if session != nil {
+			backendRef = session.BackendRef
+		}
+		if turnID := s.codexActiveTurnID(id, sessionID, backendRef); turnID != "" && turnID != "active" {
+			thread["activeTurnId"] = turnID
+		}
 		if model != "" {
 			thread["model"] = model
 		}

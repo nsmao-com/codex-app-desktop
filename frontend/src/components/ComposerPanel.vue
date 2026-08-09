@@ -48,6 +48,7 @@ import {
 } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { useAppStore, useArenaStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import type { WorkspaceRuntime } from '@/stores/app'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import {
   buildContextUsageView,
@@ -1078,11 +1079,11 @@ async function togglePlanMode(): Promise<void> {
   )
 }
 
-function composerSessionExists(sessionId: string): boolean {
-  if (isGrokMode.value) {
+function composerSessionExists(runtime: WorkspaceRuntime, sessionId: string): boolean {
+  if (runtime === 'grok') {
     return grokStore.sessions.some((item) => grokStore.sameSession(item.id, sessionId))
   }
-  if (isClaudeMode.value) {
+  if (runtime === 'claude') {
     return claudeStore.sessions.some((item) => claudeStore.sameSession(item.id, sessionId))
   }
   return codexStore.threads.some((item) => codexStore.sameThread(item.id, sessionId))
@@ -1090,37 +1091,46 @@ function composerSessionExists(sessionId: string): boolean {
       .some((item) => codexStore.sameThread(item.id, sessionId))
 }
 
-function clearRemovedComposerSession(sessionId: string, resolvedId: string): void {
-  if (!isArenaPane.value || composerSessionExists(resolvedId || sessionId)) return
-  arenaStore.clearSessionBindings(paneRuntime.value, [sessionId, resolvedId])
+function clearRemovedComposerSession(
+  runtime: WorkspaceRuntime,
+  arena: boolean,
+  sessionId: string,
+  resolvedId: string,
+): void {
+  if (!arena || composerSessionExists(runtime, resolvedId || sessionId)) return
+  arenaStore.clearSessionBindings(runtime, [sessionId, resolvedId])
 }
 
 async function archiveComposerSession(): Promise<void> {
   const sessionId = composerSessionId.value
   if (!sessionId) return
-  const resolvedId = isGrokMode.value
+  const runtime = paneRuntime.value
+  const arena = isArenaPane.value
+  const resolvedId = runtime === 'grok'
     ? grokStore.resolveSessionId(sessionId)
-    : isClaudeMode.value
+    : runtime === 'claude'
       ? claudeStore.resolveSessionId(sessionId)
       : codexStore.resolveThreadID(sessionId)
-  if (isGrokMode.value) await grokStore.archiveSession(sessionId)
-  else if (isClaudeMode.value) await claudeStore.archiveSession(sessionId)
+  if (runtime === 'grok') await grokStore.archiveSession(sessionId)
+  else if (runtime === 'claude') await claudeStore.archiveSession(sessionId)
   else await codexStore.archiveThread(sessionId)
-  clearRemovedComposerSession(sessionId, resolvedId)
+  clearRemovedComposerSession(runtime, arena, sessionId, resolvedId)
 }
 
 async function deleteComposerSession(): Promise<void> {
   const sessionId = composerSessionId.value
   if (!sessionId) return
-  const resolvedId = isGrokMode.value
+  const runtime = paneRuntime.value
+  const arena = isArenaPane.value
+  const resolvedId = runtime === 'grok'
     ? grokStore.resolveSessionId(sessionId)
-    : isClaudeMode.value
+    : runtime === 'claude'
       ? claudeStore.resolveSessionId(sessionId)
       : codexStore.resolveThreadID(sessionId)
-  if (isGrokMode.value) await grokStore.deleteSession(sessionId)
-  else if (isClaudeMode.value) await claudeStore.deleteSession(sessionId)
+  if (runtime === 'grok') await grokStore.deleteSession(sessionId)
+  else if (runtime === 'claude') await claudeStore.deleteSession(sessionId)
   else await codexStore.deleteThread(sessionId)
-  clearRemovedComposerSession(sessionId, resolvedId)
+  clearRemovedComposerSession(runtime, arena, sessionId, resolvedId)
 }
 
 function compactComposerSession(): void {
@@ -1138,40 +1148,66 @@ function reviewComposerSession(): void {
 }
 
 async function forkComposerSession(): Promise<void> {
-  const thread = await codexStore.forkThread(composerSessionId.value, !isArenaPane.value)
-  if (isArenaPane.value && thread?.id) arenaStore.selectPaneSession(paneId.value, thread.id)
+  const sessionId = composerSessionId.value
+  if (!sessionId) return
+  const arena = isArenaPane.value
+  const targetPaneId = paneId.value
+  const runtime = paneRuntime.value
+  const thread = await codexStore.forkThread(sessionId, !arena)
+  const pane = arenaStore.panes.find((item) => item.id === targetPaneId)
+  if (
+    arena
+    && thread?.id
+    && arenaStore.isArenaMode
+    && pane?.runtime === runtime
+    && codexStore.sameThread(arenaStore.sessionForPane(targetPaneId), sessionId)
+  ) arenaStore.selectPaneSession(targetPaneId, thread.id)
 }
 
-async function prepareArenaSession(): Promise<string | null> {
-  if (!isArenaPane.value) return composerSessionId.value
+function arenaComposerTargetIsCurrent(
+  targetPaneId: string,
+  targetRuntime: WorkspaceRuntime,
+  expectedSessionId: string,
+): boolean {
+  const pane = arenaStore.panes.find((item) => item.id === targetPaneId)
+  return Boolean(
+    arenaStore.isArenaMode
+    && pane?.runtime === targetRuntime
+    && arenaStore.sessionForPane(targetPaneId) === expectedSessionId,
+  )
+}
 
-  let sessionId = boundSessionId.value
+async function prepareArenaSession(
+  targetPaneId: string,
+  targetRuntime: WorkspaceRuntime,
+): Promise<string | null> {
+  let sessionId = arenaStore.sessionForPane(targetPaneId)
   if (
     sessionId
-    && !isGrokMode.value
-    && !isClaudeMode.value
+    && targetRuntime !== 'grok'
+    && targetRuntime !== 'claude'
     && codexStore.knownRuntimeIDForThread(sessionId)
-    && codexStore.knownRuntimeIDForThread(sessionId) !== paneRuntime.value
+    && codexStore.knownRuntimeIDForThread(sessionId) !== targetRuntime
   ) {
-    arenaStore.setPaneSession(paneId.value, '')
+    arenaStore.setPaneSession(targetPaneId, '')
     sessionId = ''
   }
 
   if (sessionId) return sessionId
+  if (!arenaComposerTargetIsCurrent(targetPaneId, targetRuntime, '')) return null
 
-  if (isGrokMode.value) {
+  if (targetRuntime === 'grok') {
     grokStore.newSession()
     return ''
   }
-  if (isClaudeMode.value) {
-    claudeStore.newSession(true)
-    sessionId = claudeStore.activeSessionId
+  if (targetRuntime === 'claude') {
+    sessionId = claudeStore.newSession(true)
   } else {
-    const thread = await codexStore.newRuntimeThread(paneRuntime.value, true)
+    const thread = await codexStore.newRuntimeThread(targetRuntime, true)
     sessionId = thread?.id || ''
   }
-  if (!sessionId) return isGrokMode.value ? '' : null
-  arenaStore.setPaneSession(paneId.value, sessionId)
+  if (!sessionId || !arenaComposerTargetIsCurrent(targetPaneId, targetRuntime, '')) return null
+  arenaStore.setPaneSession(targetPaneId, sessionId)
   return sessionId
 }
 
@@ -1182,9 +1218,14 @@ async function send(): Promise<void> {
   if (!message && !images.length) return
   if (attachingImages.value) return
   if (!isArenaPane.value && workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return
-  const targetSessionId = await prepareArenaSession()
-  if (isArenaPane.value && targetSessionId === null) return
-  if (isGrokMode.value) {
+  const arena = isArenaPane.value
+  const targetPaneId = paneId.value
+  const targetRuntime = paneRuntime.value
+  const targetSessionId = arena
+    ? await prepareArenaSession(targetPaneId, targetRuntime)
+    : composerSessionId.value
+  if (targetSessionId === null) return
+  if (targetRuntime === 'grok') {
     // Do not gate on sending — busy turns enqueue like Codex.
     if (!grokStore.isReady) return
     resetSentHistoryNavigation()
@@ -1193,10 +1234,15 @@ async function send(): Promise<void> {
     const sendPromise = grokStore.sendMessage(
       message,
       images,
-      isArenaPane.value ? targetSessionId || '' : undefined,
+      arena ? targetSessionId || '' : undefined,
     )
-    if (isArenaPane.value && !boundSessionId.value && grokStore.activeSessionId) {
-      arenaStore.setPaneSession(paneId.value, grokStore.activeSessionId)
+    if (
+      arena
+      && !targetSessionId
+      && grokStore.activeSessionId
+      && arenaComposerTargetIsCurrent(targetPaneId, targetRuntime, '')
+    ) {
+      arenaStore.setPaneSession(targetPaneId, grokStore.activeSessionId)
     }
     emit('sent')
     const ok = await sendPromise
@@ -1207,7 +1253,7 @@ async function send(): Promise<void> {
     }
     return
   }
-  if (isClaudeMode.value) {
+  if (targetRuntime === 'claude') {
     if (!claudeStore.isReady) return
     // Capture then clear immediately so a second Enter cannot re-send the same text.
     resetSentHistoryNavigation()
@@ -1216,11 +1262,8 @@ async function send(): Promise<void> {
     const sendPromise = claudeStore.sendMessage(
       message,
       images,
-      isArenaPane.value ? targetSessionId || '' : undefined,
+      arena ? targetSessionId || '' : undefined,
     )
-    if (isArenaPane.value && !boundSessionId.value && claudeStore.activeSessionId) {
-      arenaStore.setPaneSession(paneId.value, claudeStore.activeSessionId)
-    }
     emit('sent')
     const ok = await sendPromise
     if (!ok) {
@@ -1231,15 +1274,15 @@ async function send(): Promise<void> {
     }
     return
   }
-  if (!codexStore.isRuntimeReady(paneRuntime.value)) return
+  if (!codexStore.isRuntimeReady(targetRuntime)) return
   resetSentHistoryNavigation()
   modelValue.value = ''
   attachedImages.value = []
   const sendPromise = codexStore.sendMessage(
     message,
     images,
-    isArenaPane.value ? targetSessionId || '' : undefined,
-    isArenaPane.value ? paneRuntime.value : undefined,
+    arena ? targetSessionId || '' : undefined,
+    arena ? targetRuntime : undefined,
   )
   emit('sent')
   const ok = await sendPromise

@@ -255,9 +255,12 @@ func (s *AppService) syncNativeExternalSessions(runtime, workspace string) {
 	if runtime == "" {
 		return
 	}
-	key := runtime + "|" + strings.ToLower(filepath.ToSlash(filepath.Clean(strings.TrimSpace(workspace))))
+	key := nativeSessionSyncKey(runtime, workspace)
 	now := time.Now()
 	s.mu.Lock()
+	if s.nativeSessionsSyncedAt == nil {
+		s.nativeSessionsSyncedAt = make(map[string]time.Time)
+	}
 	if last := s.nativeSessionsSyncedAt[key]; !last.IsZero() && now.Sub(last) < 15*time.Second {
 		s.mu.Unlock()
 		return
@@ -278,6 +281,9 @@ func (s *AppService) syncNativeExternalSessions(runtime, workspace string) {
 	}
 
 	s.mu.Lock()
+	if s.sessions == nil {
+		s.sessions = make(map[string]*SessionRecord)
+	}
 	changed := false
 	invalidated := make([]string, 0, 4)
 	for _, view := range views {
@@ -296,6 +302,8 @@ func (s *AppService) syncNativeExternalSessions(runtime, workspace string) {
 		var existing *SessionRecord
 		var pending *SessionRecord
 		var nativeMirror *SessionRecord
+		pendingMatches := 0
+		hasUnboundActiveRun := false
 		for _, record := range s.sessions {
 			if record == nil || record.Provider != runtime || !samePath(record.Workspace, viewWorkspace) {
 				continue
@@ -310,11 +318,27 @@ func (s *AppService) syncNativeExternalSessions(runtime, workspace string) {
 			recordName := strings.TrimSpace(record.Name)
 			recordPreview := strings.TrimSpace(record.Preview)
 			titleMatches := viewTitle != "" && ((recordName != "" && (strings.EqualFold(recordName, viewTitle) || strings.HasPrefix(recordName, viewTitle) || strings.HasPrefix(viewTitle, recordName))) || (recordPreview != "" && (strings.EqualFold(recordPreview, viewTitle) || strings.HasPrefix(recordPreview, viewTitle) || strings.HasPrefix(viewTitle, recordPreview))))
-			if !record.Archived && !record.Native && strings.TrimSpace(record.BackendRef) == "" && ((len(record.Turns) == 0 && strings.TrimSpace(record.Preview) == "") || titleMatches) {
+			if !record.Archived && !record.Native && strings.TrimSpace(record.BackendRef) == "" && s.externalRuns[record.ID] != nil {
+				hasUnboundActiveRun = true
+			}
+			// Empty local drafts are indistinguishable when two panes start their
+			// first turn in the same project. Only a unique title/preview match may
+			// be claimed here; live runs bind themselves from their own CLI event.
+			if !record.Archived && !record.Native && strings.TrimSpace(record.BackendRef) == "" && titleMatches {
+				pendingMatches++
 				if pending == nil || record.UpdatedAt > pending.UpdatedAt || (record.UpdatedAt == pending.UpdatedAt && record.CreatedAt > pending.CreatedAt) {
 					pending = record
 				}
 			}
+		}
+		if pendingMatches != 1 {
+			pending = nil
+		}
+		if existing == nil && hasUnboundActiveRun {
+			// The native row may have been created milliseconds before OpenCode
+			// emits its session id. Importing a mirror in that window creates a
+			// duplicate sidebar entry and, with two panes, can bind the wrong run.
+			continue
 		}
 		if existing == nil {
 			existing = pending
@@ -397,6 +421,20 @@ func (s *AppService) syncNativeExternalSessions(runtime, workspace string) {
 	for _, backendRef := range invalidated {
 		s.invalidateNativeHistoryCache(runtime, backendRef)
 	}
+}
+
+func nativeSessionSyncKey(runtime, workspace string) string {
+	return normalizeExternalRuntime(runtime) + "|" + strings.ToLower(filepath.ToSlash(filepath.Clean(strings.TrimSpace(workspace))))
+}
+
+func (s *AppService) invalidateNativeSessionSync(runtime, workspace string) {
+	key := nativeSessionSyncKey(runtime, workspace)
+	if strings.HasPrefix(key, "|") {
+		return
+	}
+	s.mu.Lock()
+	delete(s.nativeSessionsSyncedAt, key)
+	s.mu.Unlock()
 }
 
 func (s *AppService) invalidateNativeHistoryCache(runtime, backendRef string) {

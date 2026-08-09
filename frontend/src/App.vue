@@ -196,20 +196,28 @@ function matchShortcut(event: KeyboardEvent, binding: string): boolean {
 async function createShortcutSession(): Promise<void> {
   const pane = arenaStore.isArenaMode ? arenaStore.focusedPane : null
   const runtime = pane?.runtime || appStore.activeRuntime
+  const previousSessionId = pane ? arenaStore.sessionForPane(pane.id) : ''
   if (runtime === 'grok') {
     grokStore.newSession()
     if (pane) arenaStore.setPaneSession(pane.id, grokStore.activeSessionId)
     return
   }
   if (runtime === 'claude') {
-    claudeStore.newSession(Boolean(pane))
-    if (pane && claudeStore.activeSessionId) arenaStore.setPaneSession(pane.id, claudeStore.activeSessionId)
+    const sessionId = claudeStore.newSession(Boolean(pane))
+    if (pane && sessionId) arenaStore.setPaneSession(pane.id, sessionId)
     return
   }
   const thread = pane
     ? await codexStore.newRuntimeThread(runtime, true)
     : await codexStore.newThread()
-  if (pane && thread?.id) arenaStore.setPaneSession(pane.id, thread.id)
+  if (
+    pane
+    && thread?.id
+    && arenaStore.isArenaMode
+    && arenaStore.focusedPaneId === pane.id
+    && arenaStore.panes.some((item) => item.id === pane.id && item.runtime === runtime)
+    && arenaStore.sessionForPane(pane.id) === previousSessionId
+  ) arenaStore.setPaneSession(pane.id, thread.id)
 }
 
 function onGlobalKeydown(event: KeyboardEvent): void {

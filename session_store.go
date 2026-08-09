@@ -53,6 +53,11 @@ func loadSessions(settingsPath string) map[string]*SessionRecord {
 			result = make(map[string]*SessionRecord)
 		}
 	}
+	// A valid JSON `null` decodes without error but leaves a nil map. Every
+	// session import/read path expects this registry to be writable.
+	if result == nil {
+		result = make(map[string]*SessionRecord)
+	}
 	// One-time migration from legacy external-threads.json
 	legacy := loadExternalThreads(settingsPath)
 	changed := false
@@ -158,6 +163,9 @@ func (s *AppService) sessionForIDAny(sessionID string) *SessionRecord {
 func (s *AppService) upsertSessionLocked(record *SessionRecord) {
 	if record == nil || record.ID == "" {
 		return
+	}
+	if s.sessions == nil {
+		s.sessions = make(map[string]*SessionRecord)
 	}
 	if record.WorkMode == "" {
 		record.WorkMode = "code"
@@ -269,9 +277,19 @@ func isExternalSession(record *SessionRecord) bool {
 
 func (s *AppService) sessionThreadMap(record *SessionRecord, includeTurns bool) map[string]any {
 	status := "idle"
+	activeTurnID := ""
 	if record != nil {
 		s.mu.Lock()
-		if s.externalRuns[record.ID] != nil {
+		if run := s.externalRuns[record.ID]; run != nil {
+			status = "active"
+			activeTurnID = strings.TrimSpace(run.turnID)
+		} else if !isExternalSession(record) {
+			activeTurnID = strings.TrimSpace(s.codexActiveTurns[record.ID])
+			if activeTurnID == "" {
+				activeTurnID = strings.TrimSpace(s.codexActiveTurns[record.BackendRef])
+			}
+		}
+		if activeTurnID != "" {
 			status = "active"
 		}
 		s.mu.Unlock()
@@ -301,6 +319,9 @@ func (s *AppService) sessionThreadMap(record *SessionRecord, includeTurns bool) 
 		"collaborationMode": collaborationMode,
 		"workMode":          normalizeWorkMode(record.WorkMode),
 		"backendRef":        record.BackendRef,
+	}
+	if activeTurnID != "" && activeTurnID != "active" {
+		thread["activeTurnId"] = activeTurnID
 	}
 	if record.UseMemories != nil {
 		thread["useMemories"] = *record.UseMemories

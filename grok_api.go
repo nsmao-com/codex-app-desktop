@@ -48,6 +48,9 @@ func loadGrokAPISessions(settingsPath string) map[string]*GrokAPISession {
 	if err := readGrokJSONFile(grokAPISessionsPath(settingsPath), &result); err != nil {
 		return make(map[string]*GrokAPISession)
 	}
+	if result == nil {
+		return make(map[string]*GrokAPISession)
+	}
 	return result
 }
 

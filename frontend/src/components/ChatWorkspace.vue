@@ -340,38 +340,45 @@ function onOpenUrl(url: string): void {
   void browserStore.openBrowser(url)
 }
 
-function sessionExists(sessionId: string): boolean {
-  if (isGrokMode.value) return grokStore.sessions.some((item) => grokStore.sameSession(item.id, sessionId))
-  if (isClaudeMode.value) return claudeStore.sessions.some((item) => claudeStore.sameSession(item.id, sessionId))
+function sessionExists(runtime: ComposerRuntime, sessionId: string): boolean {
+  if (runtime === 'grok') return grokStore.sessions.some((item) => grokStore.sameSession(item.id, sessionId))
+  if (runtime === 'claude') return claudeStore.sessions.some((item) => claudeStore.sameSession(item.id, sessionId))
   return codexStore.threads.some((item) => codexStore.sameThread(item.id, sessionId))
     || Object.values(codexStore.projectThreads).flat().some((item) => codexStore.sameThread(item.id, sessionId))
 }
 
-function clearRemovedArenaSession(sessionId: string, resolvedId: string): void {
-  if (!isArenaPane.value || sessionExists(resolvedId || sessionId)) return
-  arenaStore.clearSessionBindings(paneRuntime.value, [sessionId, resolvedId])
+function clearRemovedArenaSession(
+  runtime: ComposerRuntime,
+  arena: boolean,
+  sessionId: string,
+  resolvedId: string,
+): void {
+  if (!arena || sessionExists(runtime, resolvedId || sessionId)) return
+  arenaStore.clearSessionBindings(runtime, [sessionId, resolvedId])
 }
 
 async function archiveThread(): Promise<void> {
   const sessionId = paneSessionId.value
   if (!sessionId) return
-  const resolvedId = isGrokMode.value
+  const runtime = paneRuntime.value as ComposerRuntime
+  const arena = isArenaPane.value
+  const resolvedId = runtime === 'grok'
     ? grokStore.resolveSessionId(sessionId)
-    : isClaudeMode.value
+    : runtime === 'claude'
       ? claudeStore.resolveSessionId(sessionId)
       : codexStore.resolveThreadID(sessionId)
-  if (isGrokMode.value) {
+  if (runtime === 'grok') {
     await grokStore.archiveSession(sessionId)
-    clearRemovedArenaSession(sessionId, resolvedId)
+    clearRemovedArenaSession(runtime, arena, sessionId, resolvedId)
     return
   }
-  if (isClaudeMode.value) {
+  if (runtime === 'claude') {
     await claudeStore.archiveSession(sessionId)
-    clearRemovedArenaSession(sessionId, resolvedId)
+    clearRemovedArenaSession(runtime, arena, sessionId, resolvedId)
     return
   }
   await codexStore.archiveThread(sessionId)
-  clearRemovedArenaSession(sessionId, resolvedId)
+  clearRemovedArenaSession(runtime, arena, sessionId, resolvedId)
 }
 
 function compactThread(): void {
@@ -379,9 +386,20 @@ function compactThread(): void {
 }
 
 async function forkThread(): Promise<void> {
-  if (!paneSessionId.value) return
-  const thread = await codexStore.forkThread(paneSessionId.value, !isArenaPane.value)
-  if (isArenaPane.value && thread?.id) arenaStore.selectPaneSession(paneId.value, thread.id)
+  const sessionId = paneSessionId.value
+  if (!sessionId) return
+  const arena = isArenaPane.value
+  const targetPaneId = paneId.value
+  const runtime = paneRuntime.value
+  const thread = await codexStore.forkThread(sessionId, !arena)
+  const pane = arenaStore.panes.find((item) => item.id === targetPaneId)
+  if (
+    arena
+    && thread?.id
+    && arenaStore.isArenaMode
+    && pane?.runtime === runtime
+    && codexStore.sameThread(arenaStore.sessionForPane(targetPaneId), sessionId)
+  ) arenaStore.selectPaneSession(targetPaneId, thread.id)
 }
 
 function renameThread(): void {
@@ -401,23 +419,25 @@ function renameThread(): void {
 async function deleteThread(): Promise<void> {
   const sessionId = paneSessionId.value
   if (!sessionId) return
-  const resolvedId = isGrokMode.value
+  const runtime = paneRuntime.value as ComposerRuntime
+  const arena = isArenaPane.value
+  const resolvedId = runtime === 'grok'
     ? grokStore.resolveSessionId(sessionId)
-    : isClaudeMode.value
+    : runtime === 'claude'
       ? claudeStore.resolveSessionId(sessionId)
       : codexStore.resolveThreadID(sessionId)
-  if (isGrokMode.value) {
+  if (runtime === 'grok') {
     await grokStore.deleteSession(sessionId)
-    clearRemovedArenaSession(sessionId, resolvedId)
+    clearRemovedArenaSession(runtime, arena, sessionId, resolvedId)
     return
   }
-  if (isClaudeMode.value) {
+  if (runtime === 'claude') {
     await claudeStore.deleteSession(sessionId)
-    clearRemovedArenaSession(sessionId, resolvedId)
+    clearRemovedArenaSession(runtime, arena, sessionId, resolvedId)
     return
   }
   await codexStore.deleteThread(sessionId)
-  clearRemovedArenaSession(sessionId, resolvedId)
+  clearRemovedArenaSession(runtime, arena, sessionId, resolvedId)
 }
 
 const activeSessionTitle = computed(() => {

@@ -35,8 +35,8 @@ function sameEntry(a: NavEntry | undefined, b: NavEntry): boolean {
 export const useNavigationStore = defineStore('navigation', () => {
   const entries = shallowRef<NavEntry[]>([])
   const index = shallowRef(-1)
-  let applying = false
-  let applyHandler: ((entry: NavEntry) => void | Promise<void>) | null = null
+  const navigating = shallowRef(false)
+  let applyHandler: ((entry: NavEntry) => boolean | void | Promise<boolean | void>) | null = null
 
   const current = computed(() => (index.value >= 0 ? entries.value[index.value] ?? null : null))
   const canGoBack = computed(() => index.value > 0)
@@ -44,12 +44,14 @@ export const useNavigationStore = defineStore('navigation', () => {
   const backEntry = computed(() => (canGoBack.value ? entries.value[index.value - 1] ?? null : null))
   const forwardEntry = computed(() => (canGoForward.value ? entries.value[index.value + 1] ?? null : null))
 
-  function setApplyHandler(handler: ((entry: NavEntry) => void | Promise<void>) | null): void {
+  function setApplyHandler(
+    handler: ((entry: NavEntry) => boolean | void | Promise<boolean | void>) | null,
+  ): void {
     applyHandler = handler
   }
 
   function push(entry: NavEntry): void {
-    if (applying) return
+    if (navigating.value) return
     if (sameEntry(current.value ?? undefined, entry)) {
       // Refresh label/detail on the current slot.
       const next = [...entries.value]
@@ -64,30 +66,122 @@ export const useNavigationStore = defineStore('navigation', () => {
     index.value = trimmed.length - 1
   }
 
+  function replaceCurrent(entry: NavEntry): void {
+    if (index.value < 0 || !entries.value[index.value]) {
+      push(entry)
+      return
+    }
+    const next = [...entries.value]
+    next[index.value] = { ...entry, id: next[index.value]?.id || entry.id }
+    entries.value = next
+  }
+
+  function removeSessions(
+    runtime: WorkspaceRuntime,
+    sessionIds: string[],
+    replacementLabel = '',
+  ): void {
+    const ids = new Set(sessionIds.map((id) => id.trim()).filter(Boolean))
+    if (!ids.size) return
+    const currentIndex = index.value
+    const next: NavEntry[] = []
+    let nextIndex = -1
+
+    entries.value.forEach((entry, entryIndex) => {
+      const matches = entry.runtime === runtime
+        && Boolean(entry.threadId)
+        && ids.has(entry.threadId!.trim())
+      if (!matches) {
+        if (entryIndex === currentIndex) nextIndex = next.length
+        next.push(entry)
+        return
+      }
+      if (entryIndex !== currentIndex) return
+
+      // Keep the current slot aligned with the empty workbench while pruning
+      // stale back/forward targets for the deleted or archived session.
+      nextIndex = next.length
+      next.push({
+        ...entry,
+        label: entry.kind === 'thread' && replacementLabel ? replacementLabel : entry.label,
+        threadId: undefined,
+      })
+    })
+
+    entries.value = next
+    index.value = next.length
+      ? (nextIndex >= 0 ? nextIndex : Math.min(currentIndex, next.length - 1))
+      : -1
+  }
+
+  function clearRuntimeSessions(runtime: WorkspaceRuntime, replacementLabel = ''): void {
+    const currentIndex = index.value
+    const next: NavEntry[] = []
+    let nextIndex = -1
+
+    entries.value.forEach((entry, entryIndex) => {
+      const matches = entry.runtime === runtime && Boolean(entry.threadId)
+      if (!matches) {
+        if (entryIndex === currentIndex) nextIndex = next.length
+        next.push(entry)
+        return
+      }
+      if (entryIndex !== currentIndex) return
+
+      nextIndex = next.length
+      next.push({
+        ...entry,
+        label: entry.kind === 'thread' && replacementLabel ? replacementLabel : entry.label,
+        threadId: undefined,
+      })
+    })
+
+    entries.value = next
+    index.value = next.length
+      ? (nextIndex >= 0 ? nextIndex : Math.min(currentIndex, next.length - 1))
+      : -1
+  }
+
   async function goBack(): Promise<boolean> {
-    if (!canGoBack.value) return false
+    if (navigating.value || !canGoBack.value) return false
     const target = entries.value[index.value - 1]
     if (!target) return false
+    const previousIndex = index.value
     index.value -= 1
-    applying = true
+    navigating.value = true
     try {
-      await applyHandler?.(target)
+      const applied = await applyHandler?.(target)
+      if (applied === false) {
+        index.value = previousIndex
+        return false
+      }
+    } catch {
+      index.value = previousIndex
+      return false
     } finally {
-      applying = false
+      navigating.value = false
     }
     return true
   }
 
   async function goForward(): Promise<boolean> {
-    if (!canGoForward.value) return false
+    if (navigating.value || !canGoForward.value) return false
     const target = entries.value[index.value + 1]
     if (!target) return false
+    const previousIndex = index.value
     index.value += 1
-    applying = true
+    navigating.value = true
     try {
-      await applyHandler?.(target)
+      const applied = await applyHandler?.(target)
+      if (applied === false) {
+        index.value = previousIndex
+        return false
+      }
+    } catch {
+      index.value = previousIndex
+      return false
     } finally {
-      applying = false
+      navigating.value = false
     }
     return true
   }
@@ -103,10 +197,14 @@ export const useNavigationStore = defineStore('navigation', () => {
     current,
     canGoBack,
     canGoForward,
+    navigating,
     backEntry,
     forwardEntry,
     setApplyHandler,
     push,
+    replaceCurrent,
+    removeSessions,
+    clearRuntimeSessions,
     goBack,
     goForward,
     reset,

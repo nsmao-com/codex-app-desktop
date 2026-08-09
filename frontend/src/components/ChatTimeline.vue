@@ -68,9 +68,7 @@ const timelineItems = computed(() => {
     return grokStore.itemsForSession(id)
   }
   if (isClaudeMode.value) {
-    if (claudeStore.sameSession(id, claudeStore.activeSessionId)) return claudeStore.activeItems
-    const key = matchingClaudeSessionKey(claudeStore.itemsBySession, id)
-    return (key && claudeStore.itemsBySession[key]) || []
+    return claudeStore.itemsForSession(id)
   }
   const key = matchingCodexThreadKey(codexStore.itemsByThread, id)
   return (key && codexStore.itemsByThread[key]) || []
@@ -979,7 +977,7 @@ watch(showThinking, (visible) => {
 watch(
   () => timelineTurnFeedback.value?.state,
   (state, prev) => {
-    if (isGrokMode.value || !stickToBottom.value) return
+    if (isGrokMode.value || isClaudeMode.value || !stickToBottom.value) return
     if (prev === 'running' || prev === 'submitting') {
       if (state === 'failed' || state === 'interrupted' || !state) {
         void settleToBottom({ maxFrames: 16, followUp: true })
@@ -987,7 +985,16 @@ watch(
     }
   },
 )
-watch(timelineThreadId, () => {
+watch(timelineThreadId, (current, previous) => {
+  const sameSession = current && previous && (
+    isGrokMode.value
+      ? grokStore.sameSession(current, previous)
+      : isClaudeMode.value
+        ? claudeStore.sameSession(current, previous)
+        : codexStore.sameThread(current, previous)
+  )
+  // Pending -> provider id is an identity promotion, not a conversation switch.
+  if (sameSession) return
   // A thread switch is a new timeline, not an edit to the previous one. Clear
   // the grouping cache synchronously so a long old thread is never compared
   // item-by-item with the newly selected thread during the switch render.

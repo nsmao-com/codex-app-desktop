@@ -22,6 +22,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { SimpleTooltip } from '@/components/ui/tooltip'
 import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useGrokStore, useNavigationStore, useShellStore, useWorkspaceStore } from '@/stores'
+import type { ArenaPane } from '@/stores/arena'
+import type { WorkspaceRuntime } from '@/stores/app'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -145,38 +147,74 @@ function openGitHub(): void {
 async function createTitlebarSession(): Promise<void> {
   const pane = arenaStore.isArenaMode ? arenaStore.focusedPane : null
   const runtime = titlebarRuntime.value
+  const previousSessionId = pane ? arenaStore.sessionForPane(pane.id) : ''
   if (runtime === 'grok') {
     grokStore.newSession()
     if (pane) arenaStore.setPaneSession(pane.id, grokStore.activeSessionId)
     return
   }
   if (runtime === 'claude') {
-    claudeStore.newSession(Boolean(pane))
-    if (pane && claudeStore.activeSessionId) {
-      arenaStore.setPaneSession(pane.id, claudeStore.activeSessionId)
+    const sessionId = claudeStore.newSession(Boolean(pane))
+    if (pane && sessionId) {
+      arenaStore.setPaneSession(pane.id, sessionId)
     }
     return
   }
   const thread = pane
     ? await codexStore.newRuntimeThread(runtime, true)
     : await codexStore.newThread()
-  if (pane && thread?.id) arenaStore.setPaneSession(pane.id, thread.id)
+  if (
+    pane
+    && thread?.id
+    && titlebarPaneIsCurrent(pane, runtime)
+    && arenaStore.sessionForPane(pane.id) === previousSessionId
+  ) arenaStore.setPaneSession(pane.id, thread.id)
+}
+
+function titlebarPaneIsCurrent(
+  pane: ArenaPane | null,
+  runtime: WorkspaceRuntime,
+): boolean {
+  if (!pane) return !arenaStore.isArenaMode && appStore.activeRuntime === runtime
+  return Boolean(
+    arenaStore.isArenaMode
+    && arenaStore.focusedPaneId === pane.id
+    && arenaStore.panes.some((item) => item.id === pane.id && item.runtime === runtime),
+  )
+}
+
+function preferredTitlebarSession<T extends { id: string }>(
+  sessions: T[],
+  runtime: WorkspaceRuntime,
+  activeSessionId: string,
+  sameSession: (left: string, right: string) => boolean,
+  pane: ArenaPane | null,
+): T | undefined {
+  const selectedId = pane ? arenaStore.sessionForPane(pane.id) : activeSessionId
+  return sessions.find((session) => sameSession(session.id, selectedId))
+    || sessions.find((session) => !pane || !arenaStore.isSessionTakenByOtherPane(pane.id, session.id, runtime))
+    || sessions[0]
 }
 
 async function selectTitlebarWorkspace(): Promise<void> {
   const pane = arenaStore.isArenaMode ? arenaStore.focusedPane : null
   const runtime = titlebarRuntime.value
+  const previousSessionId = pane ? arenaStore.sessionForPane(pane.id) : ''
+  const targetIsCurrent = () => titlebarPaneIsCurrent(pane, runtime)
+    && (!pane || arenaStore.sessionForPane(pane.id) === previousSessionId)
   const ready = appStore.activeRuntime === runtime
     ? await appStore.ensureActiveRuntimeSynced(runtime)
     : await appStore.setActiveRuntime(runtime)
-  if (!ready) return
+  if (!ready || !targetIsCurrent()) return
   if (runtime === 'grok') {
     const path = await workspaceStore.selectWorkspace()
-    if (!path) return
+    if (!path || !targetIsCurrent()) return
     await grokStore.loadSessions(true)
+    if (!targetIsCurrent()) return
     const group = grokStore.sessionGroups.find((item) => item.active)
-    const target = group?.sessions.find((item) => grokStore.sameSession(item.id, grokStore.activeSessionId))
-      || group?.sessions[0]
+    const target = preferredTitlebarSession(
+      group?.sessions || [], runtime, grokStore.activeSessionId, grokStore.sameSession, pane,
+    )
     if (target) {
       if (pane) arenaStore.selectPaneSession(pane.id, target.id)
       else await grokStore.openSession(target.id, { switchWorkspace: false })
@@ -188,25 +226,29 @@ async function selectTitlebarWorkspace(): Promise<void> {
   }
   if (runtime === 'claude') {
     const path = await workspaceStore.selectWorkspace()
-    if (!path) return
+    if (!path || !targetIsCurrent()) return
     await claudeStore.loadSessions()
+    if (!targetIsCurrent()) return
     const group = claudeStore.sessionGroups.find((item) => item.active)
-    const target = group?.sessions.find((item) => claudeStore.sameSession(item.id, claudeStore.activeSessionId))
-      || group?.sessions[0]
+    const target = preferredTitlebarSession(
+      group?.sessions || [], runtime, claudeStore.activeSessionId, claudeStore.sameSession, pane,
+    )
     if (target) {
       if (pane) arenaStore.selectPaneSession(pane.id, target.id)
       else await claudeStore.openSession(target.id, { switchWorkspace: false })
     } else {
-      claudeStore.newSession(Boolean(pane))
-      if (pane && claudeStore.activeSessionId) arenaStore.setPaneSession(pane.id, claudeStore.activeSessionId)
+      const sessionId = claudeStore.newSession(Boolean(pane))
+      if (pane && sessionId) arenaStore.setPaneSession(pane.id, sessionId)
     }
     return
   }
   await codexStore.selectProject()
-  if (pane) arenaStore.setPaneSession(pane.id, codexStore.activeThreadId)
+  if (pane && targetIsCurrent()) {
+    arenaStore.setPaneSession(pane.id, codexStore.activeThreadId)
+  }
 }
 
-function titlebarSessionExists(runtime: typeof titlebarRuntime.value, sessionId: string): boolean {
+function titlebarSessionExists(runtime: WorkspaceRuntime, sessionId: string): boolean {
   if (runtime === 'grok') {
     return grokStore.sessions.some((item) => grokStore.sameSession(item.id, sessionId))
   }
@@ -264,8 +306,8 @@ async function mutateTitlebarSession(action: 'archive' | 'delete'): Promise<void
         <button
           type="button"
           class="chrome-btn"
-          :class="{ 'is-disabled': !navStore.canGoBack }"
-          :disabled="!navStore.canGoBack"
+          :class="{ 'is-disabled': !navStore.canGoBack || navStore.navigating }"
+          :disabled="!navStore.canGoBack || navStore.navigating"
           :aria-label="backTitle"
           @click.stop="goBack"
         >
@@ -276,8 +318,8 @@ async function mutateTitlebarSession(action: 'archive' | 'delete'): Promise<void
         <button
           type="button"
           class="chrome-btn"
-          :class="{ 'is-disabled': !navStore.canGoForward }"
-          :disabled="!navStore.canGoForward"
+          :class="{ 'is-disabled': !navStore.canGoForward || navStore.navigating }"
+          :disabled="!navStore.canGoForward || navStore.navigating"
           :aria-label="forwardTitle"
           @click.stop="goForward"
         >

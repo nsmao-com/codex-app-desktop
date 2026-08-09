@@ -28,7 +28,9 @@ import { normalizeThreadTokenUsage } from '@/utils/protocol'
 import { resolveProviderModelContextWindow } from '@/utils/accountUsage'
 import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
 import { useAppStore } from './app'
+import { useArenaStore } from './arena'
 import { useDialogStore } from './dialog'
+import { useNavigationStore } from './navigation'
 import { useWorkspaceStore } from './workspace'
 
 function workspaceLeafName(path: string): string {
@@ -223,6 +225,8 @@ function mergeClaudeLiveActivity(
 
 export const useClaudeStore = defineStore('claude', () => {
   const appStore = useAppStore()
+  const arenaStore = useArenaStore()
+  const navigationStore = useNavigationStore()
   const dialogStore = useDialogStore()
   const workspaceStore = useWorkspaceStore()
 
@@ -262,6 +266,7 @@ export const useClaudeStore = defineStore('claude', () => {
   let eventUnsub: (() => void) | null = null
   let streamFlushTimer = 0
   let sessionLoadSequence = 0
+  let archivedSessionLoadSequence = 0
   let queuedSequence = 0
 
   function rememberFinalizedClaudeTurn(turnId: string): void {
@@ -301,18 +306,46 @@ export const useClaudeStore = defineStore('claude', () => {
   }, { flush: 'sync' })
 
   /** Route stream events to the timeline bucket that actually has the turn. */
-  function resolveEventSessionId(sessionId: string): string {
+  function resolveEventSessionId(sessionId: string, turnId = ''): string {
     const raw = (sessionId || '').trim()
-    if (!raw) return activeSessionId.value || ''
+    if (!raw) {
+      if (!turnId) return ''
+      const activeOwner = Object.entries(activeTurnBySession.value)
+        .find(([, ref]) => ref?.turnId === turnId)?.[0]
+      if (activeOwner) return resolveSessionId(activeOwner) || activeOwner
+      for (const [candidate, startedTurnId] of latestStartedTurnBySession) {
+        if (startedTurnId === turnId) return resolveSessionId(candidate) || candidate
+      }
+      return ''
+    }
     // Never infer pending ownership from whichever session is active: a stream
     // from a background project may arrive while another new chat is selected.
     // The matching send response performs the authoritative pending → real bind.
-    if (sessionAlias.has(raw)) return sessionAlias.get(raw) || raw
-    return raw
+    return resolveSessionId(raw) || raw
   }
 
   function resolveSessionId(sessionId: string): string {
-    return sessionAlias.get(sessionId.trim()) || sessionId.trim()
+    const raw = sessionId.trim()
+    if (!raw) return ''
+    const seen = new Set<string>()
+    let current = raw
+    while (!seen.has(current)) {
+      seen.add(current)
+      const next = (sessionAlias.get(current) || '').trim()
+      if (!next || next === current) break
+      current = next
+    }
+    for (const alias of seen) sessionAlias.set(alias, current)
+    return current
+  }
+
+  function sessionStateKey<T>(bucket: Record<string, T>, sessionId: string): string {
+    const id = sessionId.trim()
+    if (!id) return ''
+    if (bucket[id] !== undefined) return id
+    const resolved = resolveSessionId(id)
+    if (resolved && bucket[resolved] !== undefined) return resolved
+    return Object.keys(bucket).find((key) => sameClaudeSession(key, id)) || resolved || id
   }
 
   /**
@@ -345,10 +378,16 @@ export const useClaudeStore = defineStore('claude', () => {
       historyBySession.value = nextHistory
     }
 
-    sessions.value = sessions.value.map((item) =>
-      item.id === pendingId ? { ...item, id: realId } : item,
-    )
-    if (activeSessionId.value === pendingId) activeSessionId.value = realId
+    const dedupedSessions = new Map<string, ClaudeSessionSummary>()
+    for (const item of sessions.value) {
+      const patched = item.id === pendingId ? { ...item, id: realId } : item
+      const canonicalId = resolveSessionId(patched.id) || patched.id
+      const canonical = canonicalId === patched.id ? patched : { ...patched, id: canonicalId }
+      const previous = dedupedSessions.get(canonicalId)
+      dedupedSessions.set(canonicalId, previous ? { ...previous, ...canonical } : canonical)
+    }
+    sessions.value = [...dedupedSessions.values()]
+    if (sameClaudeSession(activeSessionId.value, pendingId)) activeSessionId.value = realId
     remapSessionBusy(pendingId, realId)
 
     const pendingActivity = liveActivityBySession.value[pendingId]
@@ -378,6 +417,14 @@ export const useClaudeStore = defineStore('claude', () => {
       })
       queueBySession.value = nextQ
     }
+    const pendingUsage = tokenUsageBySession.value[pendingId]
+    if (pendingUsage) {
+      const nextUsage = { ...tokenUsageBySession.value }
+      delete nextUsage[pendingId]
+      if (!nextUsage[realId]) nextUsage[realId] = pendingUsage
+      tokenUsageBySession.value = nextUsage
+    }
+    loadedSessionIds.delete(pendingId)
     rememberLoadedClaudeSession(realId)
   }
   const isReady = computed(() => Boolean(runtime.value.available))
@@ -387,30 +434,45 @@ export const useClaudeStore = defineStore('claude', () => {
   const interrupting = computed(() =>
     Boolean(activeSessionId.value && interruptingSessionIds.value.some((id) => sameClaudeSession(id, activeSessionId.value))),
   )
-  const activeItems = computed(() => {
-    const sessionId = activeSessionId.value
-    const base = itemsBySession.value[sessionId] || []
-    const turn = activeTurnBySession.value[sessionId]
+  function itemsForSession(sessionId: string): TimelineItem[] {
+    if (!sessionId) return []
+    const itemKey = sessionStateKey(itemsBySession.value, sessionId)
+    const turnKey = sessionStateKey(activeTurnBySession.value, sessionId)
+    const activityKey = sessionStateKey(liveActivityBySession.value, sessionId)
+    const base = itemsBySession.value[itemKey] || []
+    const turn = activeTurnBySession.value[turnKey]
     if (!turn?.turnId) return base
-    const activity = liveActivityBySession.value[sessionId] || []
+    const activity = liveActivityBySession.value[activityKey] || []
     if (!activity.length) return base
     return mergeClaudeLiveActivity(base, activity, turn.turnId)
+  }
+  const activeItems = computed(() => itemsForSession(activeSessionId.value))
+  const activeHistory = computed(() => {
+    const key = sessionStateKey(historyBySession.value, activeSessionId.value)
+    return historyBySession.value[key]
   })
-  const activeHistoryHasEarlier = computed(() => historyBySession.value[activeSessionId.value]?.hasEarlier === true)
-  const activeHistoryEarlierCount = computed(() => historyBySession.value[activeSessionId.value]?.turnOffset ?? 0)
-  const activeHistoryLoadingEarlier = computed(() => historyBySession.value[activeSessionId.value]?.loadingEarlier === true)
+  const activeHistoryHasEarlier = computed(() => activeHistory.value?.hasEarlier === true)
+  const activeHistoryEarlierCount = computed(() => activeHistory.value?.turnOffset ?? 0)
+  const activeHistoryLoadingEarlier = computed(() => activeHistory.value?.loadingEarlier === true)
   const isTurnRunning = computed(() =>
     Boolean(activeSessionId.value && runningSessionIds.value.some((id) => sameClaudeSession(id, activeSessionId.value))),
   )
-  const activeQueuedMessages = computed(() => queueBySession.value[activeSessionId.value] || [])
-  const activeTurn = computed(() => activeTurnBySession.value[activeSessionId.value] || null)
+  const activeQueuedMessages = computed(() => {
+    const key = sessionStateKey(queueBySession.value, activeSessionId.value)
+    return queueBySession.value[key] || []
+  })
+  const activeTurn = computed(() => {
+    const key = sessionStateKey(activeTurnBySession.value, activeSessionId.value)
+    return activeTurnBySession.value[key] || null
+  })
   const activeTokenUsage = computed(() => {
     const id = activeSessionId.value
     if (!id) return null
-    const usage = tokenUsageBySession.value[id] || null
+    const usageKey = sessionStateKey(tokenUsageBySession.value, id)
+    const usage = tokenUsageBySession.value[usageKey] || null
     if (!usage) return null
-    const summary = sessions.value.find((item) => item.id === id)
-      ?? archivedSessions.value.find((item) => item.id === id)
+    const summary = sessions.value.find((item) => sameClaudeSession(item.id, id))
+      ?? archivedSessions.value.find((item) => sameClaudeSession(item.id, id))
     const model = summary?.model || appStore.settings.claudeModel || ''
     const contextWindow = resolveProviderModelContextWindow(appStore.agentProviders, 'claude', model)
     return contextWindow > 0 && usage.modelContextWindow !== contextWindow
@@ -541,8 +603,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const rawSessionId = String(data.sessionId || '')
     const turnId = String(data.turnId || '')
     if (rawSessionId && discardedSessionIds.has(rawSessionId)) return
-    if (!rawSessionId && !activeSessionId.value) return
-    let sessionId = resolveEventSessionId(rawSessionId || activeSessionId.value)
+    let sessionId = resolveEventSessionId(rawSessionId, turnId)
     if (!sessionId) return
 
     if (kind === 'turn.started') {
@@ -553,7 +614,7 @@ export const useClaudeStore = defineStore('claude', () => {
         && rawSessionId !== clientSessionId
       ) {
         promotePendingSession(clientSessionId, rawSessionId)
-        sessionId = resolveEventSessionId(rawSessionId)
+        sessionId = resolveEventSessionId(rawSessionId, turnId)
       }
       if (turnId) latestStartedTurnBySession.set(sessionId, turnId)
       // Turn ids are unique; delayed bridge delivery must not revive a turn whose
@@ -876,10 +937,46 @@ export const useClaudeStore = defineStore('claude', () => {
     interruptingSessionIds.value = next
   }
 
+  function reconcileSnapshotTurn(sessionId: string, snapshotTurnId: string, observedTurnId = ''): void {
+    const id = resolveSessionId(sessionId) || sessionId.trim()
+    if (!id) return
+    const snapshot = snapshotTurnId.trim()
+    if (snapshot) {
+      const key = sessionStateKey(activeTurnBySession.value, id)
+      const current = key ? activeTurnBySession.value[key] : undefined
+      if (current?.turnId !== snapshot || key !== id) {
+        const next = { ...activeTurnBySession.value }
+        if (key) delete next[key]
+        next[id] = { sessionId: id, turnId: snapshot }
+        activeTurnBySession.value = next
+      }
+      markRunning(id, true)
+      if (!turnStartedAtById.value[snapshot]) {
+        const startedAt = Date.now()
+        turnStartedAtById.value = { ...turnStartedAtById.value, [snapshot]: startedAt }
+        activeTurnMetrics.value = {
+          ...activeTurnMetrics.value,
+          [snapshot]: { ...(activeTurnMetrics.value[snapshot] ?? emptyTurnMetrics()), startedAt },
+        }
+      }
+      return
+    }
+    if (!observedTurnId || observedTurnId.startsWith('claude-turn-pending-')) return
+    const key = sessionStateKey(activeTurnBySession.value, id)
+    const current = key ? activeTurnBySession.value[key] : undefined
+    if (current?.turnId !== observedTurnId) return
+    const next = { ...activeTurnBySession.value }
+    delete next[key]
+    activeTurnBySession.value = next
+    markRunning(id, false)
+    markSending(id, false)
+    markInterrupting(id, false)
+  }
+
   function sameClaudeSession(left: string, right: string): boolean {
-    if (!left || !right) return false
-    if (left === right) return true
-    return sessionAlias.get(left) === right || sessionAlias.get(right) === left
+    const a = resolveSessionId(left)
+    const b = resolveSessionId(right)
+    return Boolean(a && b && a === b)
   }
 
   async function enterRuntime(refreshSessions = true): Promise<void> {
@@ -935,6 +1032,9 @@ export const useClaudeStore = defineStore('claude', () => {
         ),
       )
       const pendingIds = new Set(pending.map((item) => item.id))
+      for (const item of list || []) {
+        if (item.activeTurnId) reconcileSnapshotTurn(item.id, item.activeTurnId)
+      }
       sessions.value = [
         ...pending,
         ...(list || []).filter((item) => !pendingIds.has(item.id)),
@@ -950,10 +1050,12 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function loadArchivedSessions(): Promise<void> {
+    const sequence = ++archivedSessionLoadSequence
     try {
-      archivedSessions.value = (await listArchivedClaudeSessions()) || []
+      const list = (await listArchivedClaudeSessions()) || []
+      if (sequence === archivedSessionLoadSequence) archivedSessions.value = list
     } catch {
-      archivedSessions.value = []
+      if (sequence === archivedSessionLoadSequence) archivedSessions.value = []
     }
   }
 
@@ -961,13 +1063,14 @@ export const useClaudeStore = defineStore('claude', () => {
     sessionId: string,
     options?: { switchWorkspace?: boolean; terminalStatus?: string; activate?: boolean },
   ): Promise<void> {
-    const requestedId = sessionId.trim()
+    const requestedId = resolveSessionId(sessionId) || sessionId.trim()
     if (!requestedId) return
     const activate = options?.activate !== false
     const previousSessionId = activeSessionId.value
     if (activate) activeSessionId.value = requestedId
     rememberLoadedClaudeSession(requestedId)
     const known = sessions.value.find((item) => sameClaudeSession(item.id, requestedId))
+    if (known?.activeTurnId) reconcileSnapshotTurn(requestedId, known.activeTurnId)
     const sequence = (sessionOpenSequence.get(requestedId) || 0) + 1
     sessionOpenSequence.set(requestedId, sequence)
     loadingSequenceBySession.set(requestedId, sequence)
@@ -1009,11 +1112,14 @@ export const useClaudeStore = defineStore('claude', () => {
         !options?.terminalStatus
         && cachedHistory
         && hasCachedTimeline
-        && (cacheIsCurrent || isSessionTurnBusy(requestedId))
+        && cacheIsCurrent
+        && !isSessionTurnBusy(requestedId)
       ) return
 
+      const observedTurnId = activeTurnBySession.value[sessionStateKey(activeTurnBySession.value, requestedId)]?.turnId || ''
       const detail = await readClaudeSession(requestedId)
       if (sessionOpenSequence.get(requestedId) !== sequence) return
+      reconcileSnapshotTurn(requestedId, detail.activeTurnId || detail.summary?.activeTurnId || '', observedTurnId)
       const messages = detail.messages || []
       const fromDisk = buildTimelineFromMessages(requestedId, messages, detail.historyTurnOffset || 0)
 
@@ -1382,10 +1488,10 @@ export const useClaudeStore = defineStore('claude', () => {
       || (itemsBySession.value[sessionId] || []).length > 0
   }
 
-  function newSession(preserveOtherDrafts = false): void {
+  function newSession(preserveOtherDrafts = false): string {
     if (!workspacePath.value) {
       notify('error', translate('sidebar.claudeEmpty'), translate('app.needWorkspaceHintReady'))
-      return
+      return ''
     }
     const id = `pending-claude-${Date.now()}-${++queuedSequence}`
     const now = Math.floor(Date.now() / 1000)
@@ -1408,6 +1514,7 @@ export const useClaudeStore = defineStore('claude', () => {
     activeSessionId.value = id
     itemsBySession.value = { ...itemsBySession.value, [id]: [] }
     rememberLoadedClaudeSession(id)
+    return id
   }
 
   function ensureActiveSessionId(targetSessionId?: string): string {
@@ -1514,7 +1621,7 @@ export const useClaudeStore = defineStore('claude', () => {
   const sessionMutation = computed(() => sessionMutationForSession(activeSessionId.value))
 
   function rememberLoadedClaudeSession(sessionId: string): void {
-    const id = sessionAlias.get(sessionId) || sessionId.trim()
+    const id = resolveSessionId(sessionId)
     if (!id) return
     for (const cached of [...loadedSessionIds]) {
       if (sameClaudeSession(cached, id)) loadedSessionIds.delete(cached)
@@ -1980,7 +2087,7 @@ export const useClaudeStore = defineStore('claude', () => {
     }
     itemsBySession.value = nextItems
 
-    const canonicalId = sessionAlias.get(ref.sessionId) || ref.sessionId
+    const canonicalId = resolveSessionId(ref.sessionId) || ref.sessionId
     if (canonicalId && !canonicalId.startsWith('pending-claude-')) {
       await openSession(canonicalId, {
         switchWorkspace: false,
@@ -2152,6 +2259,8 @@ export const useClaudeStore = defineStore('claude', () => {
     ])
     const related = [...candidates].filter((id) => id && sameClaudeSession(id, sessionId))
     if (!related.includes(sessionId)) related.push(sessionId)
+    arenaStore.clearSessionBindings('claude', related)
+    navigationStore.removeSessions('claude', related, translate('sidebar.newTask'))
     const relatedSet = new Set(related)
     const turnIds = new Set<string>()
     for (const id of related) {
@@ -2226,19 +2335,20 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function deleteSession(sessionId: string): Promise<void> {
-    if (!sessionId || sessionMutationForSession(sessionId) || !canMutateClaudeSession(sessionId)) return
-    if (!beginSessionMutation(sessionId, 'delete')) return
+    const id = resolveSessionId(sessionId)
+    if (!id || sessionMutationForSession(id) || !canMutateClaudeSession(id)) return
+    if (!beginSessionMutation(id, 'delete')) return
     try {
-      if (!sessionId.startsWith('pending-claude-')) {
-        await deleteClaudeSessionApi(sessionId)
+      if (!id.startsWith('pending-claude-')) {
+        await deleteClaudeSessionApi(id)
       }
-      sessions.value = sessions.value.filter((item) => item.id !== sessionId)
-      archivedSessions.value = archivedSessions.value.filter((item) => item.id !== sessionId)
-      discardClaudeSessionState(sessionId)
+      sessions.value = sessions.value.filter((item) => !sameClaudeSession(item.id, id))
+      archivedSessions.value = archivedSessions.value.filter((item) => !sameClaudeSession(item.id, id))
+      discardClaudeSessionState(id)
     } catch (error) {
       notify('error', translate('threadActions.deleteFailed'), errorMessage(error))
     } finally {
-      endSessionMutation(sessionId)
+      endSessionMutation(id)
     }
   }
 
@@ -2248,9 +2358,10 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function renameSession(sessionId: string, name?: string): Promise<boolean> {
-    if (!sessionId || sessionMutationForSession(sessionId)) return false
-    const current = sessions.value.find((item) => item.id === sessionId)
-      || archivedSessions.value.find((item) => item.id === sessionId)
+    const id = resolveSessionId(sessionId)
+    if (!id || sessionMutationForSession(id)) return false
+    const current = sessions.value.find((item) => sameClaudeSession(item.id, id))
+      || archivedSessions.value.find((item) => sameClaudeSession(item.id, id))
     let nextName = name
     if (nextName === undefined) {
       const prompted = await dialogStore.prompt({
@@ -2265,20 +2376,27 @@ export const useClaudeStore = defineStore('claude', () => {
     }
     nextName = nextName.trim()
     if (!nextName || nextName === current?.name) return false
-    if (!beginSessionMutation(sessionId, 'rename')) return false
+    if (!beginSessionMutation(id, 'rename')) return false
     try {
-      if (sessionId.startsWith('pending-claude-')) {
+      if (id.startsWith('pending-claude-')) {
         sessions.value = sessions.value.map((item) =>
-          item.id === sessionId
+          sameClaudeSession(item.id, id)
             ? { ...item, name: nextName!, updatedAt: Math.floor(Date.now() / 1000) }
             : item,
         )
         notify('success', translate('threadActions.renamed'), '')
         return true
       }
-      await renameClaudeSessionApi(sessionId, nextName)
+      await renameClaudeSessionApi(id, nextName)
       sessions.value = sessions.value.map((item) =>
-        item.id === sessionId ? { ...item, name: nextName!, updatedAt: Math.floor(Date.now() / 1000) } : item,
+        sameClaudeSession(item.id, id)
+          ? { ...item, name: nextName!, updatedAt: Math.floor(Date.now() / 1000) }
+          : item,
+      )
+      archivedSessions.value = archivedSessions.value.map((item) =>
+        sameClaudeSession(item.id, id)
+          ? { ...item, name: nextName!, updatedAt: Math.floor(Date.now() / 1000) }
+          : item,
       )
       notify('success', translate('threadActions.renamed'), '')
       return true
@@ -2286,7 +2404,7 @@ export const useClaudeStore = defineStore('claude', () => {
       notify('error', translate('threadActions.renameFailed'), errorMessage(error))
       return false
     } finally {
-      endSessionMutation(sessionId)
+      endSessionMutation(id)
     }
   }
 
@@ -2296,22 +2414,23 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function archiveSession(sessionId: string): Promise<void> {
-    if (!sessionId || sessionMutationForSession(sessionId) || !canMutateClaudeSession(sessionId)) return
-    if (!beginSessionMutation(sessionId, 'archive')) return
+    const id = resolveSessionId(sessionId)
+    if (!id || sessionMutationForSession(id) || !canMutateClaudeSession(id)) return
+    if (!beginSessionMutation(id, 'archive')) return
     try {
-      if (sessionId.startsWith('pending-claude-')) {
-        sessions.value = sessions.value.filter((item) => item.id !== sessionId)
-        discardClaudeSessionState(sessionId)
+      if (id.startsWith('pending-claude-')) {
+        sessions.value = sessions.value.filter((item) => !sameClaudeSession(item.id, id))
+        discardClaudeSessionState(id)
         return
       }
-      await archiveClaudeSessionApi(sessionId)
-      sessions.value = sessions.value.filter((item) => item.id !== sessionId)
-      discardClaudeSessionState(sessionId)
+      await archiveClaudeSessionApi(id)
+      sessions.value = sessions.value.filter((item) => !sameClaudeSession(item.id, id))
+      discardClaudeSessionState(id)
       notify('success', translate('threadActions.archived'), translate('threadActions.archivedHint'))
     } catch (error) {
       notify('error', translate('threadActions.archiveFailed'), errorMessage(error))
     } finally {
-      endSessionMutation(sessionId)
+      endSessionMutation(id)
     }
   }
 
@@ -2321,18 +2440,19 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function unarchiveSession(sessionId: string): Promise<void> {
-    if (!sessionId || sessionMutationForSession(sessionId)) return
-    if (!beginSessionMutation(sessionId, 'unarchive')) return
+    const id = resolveSessionId(sessionId)
+    if (!id || sessionMutationForSession(id)) return
+    if (!beginSessionMutation(id, 'unarchive')) return
     try {
-      await unarchiveClaudeSessionApi(sessionId)
-      discardedSessionIds.delete(sessionId)
+      await unarchiveClaudeSessionApi(id)
+      discardedSessionIds.delete(id)
       await loadSessions()
       await loadArchivedSessions()
       notify('success', translate('threadActions.unarchived'), translate('threadActions.unarchivedHint'))
     } catch (error) {
       notify('error', translate('threadActions.unarchiveFailed'), errorMessage(error))
     } finally {
-      endSessionMutation(sessionId)
+      endSessionMutation(id)
     }
   }
 
@@ -2358,6 +2478,7 @@ export const useClaudeStore = defineStore('claude', () => {
     workspacePath,
     isReady,
     activeItems,
+    itemsForSession,
     activeHistoryHasEarlier,
     activeHistoryEarlierCount,
     activeHistoryLoadingEarlier,

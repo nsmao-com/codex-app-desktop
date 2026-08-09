@@ -89,47 +89,63 @@ const descriptionText = computed(() => {
 
 async function chooseWorkspace(): Promise<void> {
   const runtime = paneRuntime.value
+  const targetPaneId = isArenaPane.value ? paneId.value : ''
+  const previousSessionId = targetPaneId ? arenaStore.sessionForPane(targetPaneId) : ''
+  const targetIsCurrent = () => targetPaneId
+    ? Boolean(
+        arenaStore.isArenaMode
+        && arenaStore.focusedPaneId === targetPaneId
+        && arenaStore.panes.some((pane) => pane.id === targetPaneId && pane.runtime === runtime)
+        && arenaStore.sessionForPane(targetPaneId) === previousSessionId,
+      )
+    : !arenaStore.isArenaMode && appStore.activeRuntime === runtime
   const ready = appStore.activeRuntime === runtime
     ? await appStore.ensureActiveRuntimeSynced(runtime)
     : await appStore.setActiveRuntime(runtime)
-  if (!ready) return
+  if (!ready || !targetIsCurrent()) return
   if (isGrok.value) {
     const path = await workspaceStore.selectWorkspace()
-    if (!path) return
+    if (!path || !targetIsCurrent()) return
     await grokStore.loadSessions(true)
+    if (!targetIsCurrent()) return
     const group = grokStore.sessionGroups.find((item) => item.active)
-    const target = group?.sessions.find((item) => grokStore.sameSession(item.id, grokStore.activeSessionId))
+    const selectedId = targetPaneId ? arenaStore.sessionForPane(targetPaneId) : grokStore.activeSessionId
+    const target = group?.sessions.find((item) => grokStore.sameSession(item.id, selectedId))
+      || group?.sessions.find((item) => !targetPaneId || !arenaStore.isSessionTakenByOtherPane(targetPaneId, item.id, runtime))
       || group?.sessions[0]
     if (target) {
       if (isArenaPane.value) arenaStore.selectPaneSession(paneId.value, target.id)
       else await grokStore.openSession(target.id, { switchWorkspace: false })
     } else {
       grokStore.newSession()
-      if (isArenaPane.value) arenaStore.setPaneSession(paneId.value, grokStore.activeSessionId)
+      if (targetPaneId) arenaStore.setPaneSession(targetPaneId, '')
     }
     return
   }
   if (isClaude.value) {
     const path = await workspaceStore.selectWorkspace()
-    if (!path) return
+    if (!path || !targetIsCurrent()) return
     await claudeStore.loadSessions()
+    if (!targetIsCurrent()) return
     const group = claudeStore.sessionGroups.find((item) => item.active)
-    const target = group?.sessions.find((item) => claudeStore.sameSession(item.id, claudeStore.activeSessionId))
+    const selectedId = targetPaneId ? arenaStore.sessionForPane(targetPaneId) : claudeStore.activeSessionId
+    const target = group?.sessions.find((item) => claudeStore.sameSession(item.id, selectedId))
+      || group?.sessions.find((item) => !targetPaneId || !arenaStore.isSessionTakenByOtherPane(targetPaneId, item.id, runtime))
       || group?.sessions[0]
     if (target) {
       if (isArenaPane.value) arenaStore.selectPaneSession(paneId.value, target.id)
       else await claudeStore.openSession(target.id, { switchWorkspace: false })
     } else {
-      claudeStore.newSession(isArenaPane.value)
-      if (isArenaPane.value && claudeStore.activeSessionId) {
-        arenaStore.setPaneSession(paneId.value, claudeStore.activeSessionId)
+      const sessionId = claudeStore.newSession(Boolean(targetPaneId))
+      if (targetPaneId && sessionId) {
+        arenaStore.setPaneSession(targetPaneId, sessionId)
       }
     }
     return
   }
   await codexStore.selectProject()
-  if (isArenaPane.value && codexStore.activeThreadId) {
-    arenaStore.selectPaneSession(paneId.value, codexStore.activeThreadId)
+  if (targetPaneId && targetIsCurrent() && codexStore.activeThreadId) {
+    arenaStore.selectPaneSession(targetPaneId, codexStore.activeThreadId)
   }
 }
 </script>

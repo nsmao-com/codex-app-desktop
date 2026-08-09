@@ -32,6 +32,7 @@ import {
   useWorkspaceStore,
 } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
+import type { ArenaPane } from '@/stores/arena'
 
 const open = defineModel<boolean>('open', { default: false })
 
@@ -113,80 +114,127 @@ const paletteCanReview = computed(() => Boolean(
   && !paletteSessionBusy.value,
 ))
 
-function bindPaletteSession(runtime: WorkspaceRuntime, sessionId: string): boolean {
-  const pane = palettePane.value
-  if (!pane || pane.runtime !== runtime) return false
+function bindPaletteSession(
+  runtime: WorkspaceRuntime,
+  sessionId: string,
+  pane = palettePane.value,
+): boolean {
+  if (!pane || !palettePaneIsCurrent(pane, runtime)) return false
   arenaStore.selectPaneSession(pane.id, sessionId)
   return true
 }
 
-async function syncPaletteRuntime(): Promise<boolean> {
-  const runtime = paletteRuntime.value
-  return appStore.activeRuntime === runtime
-    ? appStore.ensureActiveRuntimeSynced(runtime)
-    : appStore.setActiveRuntime(runtime)
+function palettePaneIsCurrent(pane: ArenaPane | null, runtime: WorkspaceRuntime): boolean {
+  if (!pane) return !arenaStore.isArenaMode && appStore.activeRuntime === runtime
+  return Boolean(
+    arenaStore.isArenaMode
+    && arenaStore.focusedPaneId === pane.id
+    && arenaStore.panes.some((item) => item.id === pane.id && item.runtime === runtime),
+  )
+}
+
+function preferredPaletteSession<T extends { id: string }>(
+  runtime: WorkspaceRuntime,
+  sessions: T[],
+  activeSessionId: string,
+  sameSession: (left: string, right: string) => boolean,
+  pane = palettePane.value,
+): T | undefined {
+  const selectedId = pane ? arenaStore.sessionForPane(pane.id) : activeSessionId
+  return sessions.find((session) => sameSession(session.id, selectedId))
+    || sessions.find((session) => !pane || !arenaStore.isSessionTakenByOtherPane(pane.id, session.id, runtime))
+    || sessions[0]
 }
 
 async function createPaletteSession(): Promise<void> {
   if (paletteNewSessionDisabled.value) return
   const pane = palettePane.value
   const runtime = paletteRuntime.value
+  const previousSessionId = pane ? arenaStore.sessionForPane(pane.id) : ''
   if (runtime === 'grok') {
     grokStore.newSession()
     if (pane) arenaStore.setPaneSession(pane.id, grokStore.activeSessionId)
     return
   }
   if (runtime === 'claude') {
-    claudeStore.newSession(Boolean(pane))
-    if (pane && claudeStore.activeSessionId) arenaStore.setPaneSession(pane.id, claudeStore.activeSessionId)
+    const sessionId = claudeStore.newSession(Boolean(pane))
+    if (pane && sessionId) arenaStore.setPaneSession(pane.id, sessionId)
     return
   }
   const thread = pane
     ? await codexStore.newRuntimeThread(runtime, true)
     : await codexStore.newThread()
-  if (pane && thread?.id) arenaStore.setPaneSession(pane.id, thread.id)
+  if (
+    pane
+    && thread?.id
+    && palettePaneIsCurrent(pane, runtime)
+    && arenaStore.sessionForPane(pane.id) === previousSessionId
+  ) {
+    arenaStore.setPaneSession(pane.id, thread.id)
+  }
 }
 
 async function selectPaletteWorkspace(): Promise<void> {
-  if (workspaceStore.switchingWorkspace || !await syncPaletteRuntime()) return
+  const pane = palettePane.value
   const runtime = paletteRuntime.value
+  const previousSessionId = pane ? arenaStore.sessionForPane(pane.id) : ''
+  const targetIsCurrent = () => palettePaneIsCurrent(pane, runtime)
+    && (!pane || arenaStore.sessionForPane(pane.id) === previousSessionId)
+  if (workspaceStore.switchingWorkspace) return
+  const ready = appStore.activeRuntime === runtime
+    ? await appStore.ensureActiveRuntimeSynced(runtime)
+    : await appStore.setActiveRuntime(runtime)
+  if (!ready || !targetIsCurrent()) return
   if (runtime === 'grok') {
     const path = await workspaceStore.selectWorkspace()
-    if (!path) return
+    if (!path || !targetIsCurrent()) return
     await grokStore.loadSessions(true)
+    if (!targetIsCurrent()) return
     const group = grokStore.sessionGroups.find((item) => item.active)
-    const target = group?.sessions.find((item) => grokStore.sameSession(item.id, grokStore.activeSessionId))
-      || group?.sessions[0]
+    const target = preferredPaletteSession(
+      runtime,
+      group?.sessions || [],
+      grokStore.activeSessionId,
+      grokStore.sameSession,
+      pane,
+    )
     if (target) {
-      if (!bindPaletteSession(runtime, target.id)) {
+      if (!bindPaletteSession(runtime, target.id, pane)) {
         await grokStore.openSession(target.id, { switchWorkspace: false })
       }
     } else {
       grokStore.newSession()
-      bindPaletteSession(runtime, grokStore.activeSessionId)
+      bindPaletteSession(runtime, '', pane)
     }
     return
   }
   if (runtime === 'claude') {
     const path = await workspaceStore.selectWorkspace()
-    if (!path) return
+    if (!path || !targetIsCurrent()) return
     await claudeStore.loadSessions()
+    if (!targetIsCurrent()) return
     const group = claudeStore.sessionGroups.find((item) => item.active)
-    const target = group?.sessions.find((item) => claudeStore.sameSession(item.id, claudeStore.activeSessionId))
-      || group?.sessions[0]
+    const target = preferredPaletteSession(
+      runtime,
+      group?.sessions || [],
+      claudeStore.activeSessionId,
+      claudeStore.sameSession,
+      pane,
+    )
     if (target) {
-      if (!bindPaletteSession(runtime, target.id)) {
+      if (!bindPaletteSession(runtime, target.id, pane)) {
         await claudeStore.openSession(target.id, { switchWorkspace: false })
       }
     } else {
-      claudeStore.newSession(Boolean(palettePane.value))
-      bindPaletteSession(runtime, claudeStore.activeSessionId)
+      const sessionId = claudeStore.newSession(Boolean(pane))
+      if (sessionId) bindPaletteSession(runtime, sessionId, pane)
     }
     return
   }
   await codexStore.selectProject()
-  const pane = palettePane.value
-  if (pane) arenaStore.setPaneSession(pane.id, codexStore.activeThreadId)
+  if (pane && targetIsCurrent()) {
+    arenaStore.setPaneSession(pane.id, codexStore.activeThreadId)
+  }
 }
 
 function reviewPaletteSession(): void {

@@ -89,6 +89,14 @@ const workspaceStore = useWorkspaceStore()
 const { locale, t } = useI18n()
 let externalSearchTimer = 0
 let projectSelectionSequence = 0
+const sidebarActionRuntime = computed(() => arenaStore.isArenaMode
+  ? (arenaStore.focusedPane?.runtime || appStore.activeRuntime)
+  : appStore.activeRuntime)
+const sidebarIsCodexMode = computed(() => sidebarActionRuntime.value === 'codex')
+const sidebarIsClaudeMode = computed(() => sidebarActionRuntime.value === 'claude')
+const sidebarIsGrokMode = computed(() => sidebarActionRuntime.value === 'grok')
+const sidebarIsGeminiMode = computed(() => sidebarActionRuntime.value === 'gemini')
+const sidebarIsOpenCodeMode = computed(() => sidebarActionRuntime.value === 'opencode')
 
 onBeforeUnmount(() => {
   if (externalSearchTimer) window.clearTimeout(externalSearchTimer)
@@ -147,10 +155,10 @@ const usageRangeMeta = computed(() => usageRangeDays.value === 'cumulative'
     : t('sidebar.usageRangeMeta', { days: usageRangeView.value.days, avg: '—', count: 0 }))
 const usageLocale = computed(() => (locale.value === 'zh-CN' ? 'zh-CN' : 'en-US'))
 const usageSubtitle = computed(() => {
-  if (appStore.isGrokMode) return t('sidebar.usageSubtitleGrok')
-  if (appStore.isClaudeMode) return t('sidebar.usageSubtitleClaude')
-  if (appStore.isGeminiMode) return t('sidebar.usageSubtitleGemini')
-  if (appStore.isOpenCodeMode) return t('sidebar.usageSubtitleOpenCode')
+  if (sidebarIsGrokMode.value) return t('sidebar.usageSubtitleGrok')
+  if (sidebarIsClaudeMode.value) return t('sidebar.usageSubtitleClaude')
+  if (sidebarIsGeminiMode.value) return t('sidebar.usageSubtitleGemini')
+  if (sidebarIsOpenCodeMode.value) return t('sidebar.usageSubtitleOpenCode')
   return t('sidebar.usageSubtitle')
 })
 
@@ -158,7 +166,7 @@ watch(usagePopoverOpen, (open) => {
   if (!open) return
   usageLoading.value = true
   // Grok/Claude: local usage.json only. Codex may also seed from cloud after auth.
-  const localOnly = !appStore.isCodexMode || !appStore.account.authenticated
+  const localOnly = !sidebarIsCodexMode.value || !appStore.account.authenticated
   const refresh = localOnly
     ? appStore.loadLocalUsage()
     : appStore.refreshAccountData()
@@ -171,7 +179,7 @@ watch(usagePopoverOpen, (open) => {
 
 // Keep runtime-scoped local totals warm when switching.
 watch(
-  () => appStore.activeRuntime,
+  sidebarActionRuntime,
   () => {
     void appStore.loadLocalUsage().catch(() => undefined)
   },
@@ -194,24 +202,24 @@ const sidebarMotion = computed(() => {
 
 const search = computed({
   get: () => {
-    if (appStore.isGrokMode) return grokStore.search
-    if (appStore.isClaudeMode) return claudeStore.search
+    if (sidebarIsGrokMode.value) return grokStore.search
+    if (sidebarIsClaudeMode.value) return claudeStore.search
     return codexStore.threadSearch
   },
   set: (value: string) => {
-    if (appStore.isGrokMode) {
+    if (sidebarIsGrokMode.value) {
       grokStore.search = value
       if (externalSearchTimer) window.clearTimeout(externalSearchTimer)
       externalSearchTimer = window.setTimeout(() => {
-        if (appStore.isGrokMode) void grokStore.loadSessions()
+        if (sidebarIsGrokMode.value) void grokStore.loadSessions()
       }, 250)
       return
     }
-    if (appStore.isClaudeMode) {
+    if (sidebarIsClaudeMode.value) {
       claudeStore.search = value
       if (externalSearchTimer) window.clearTimeout(externalSearchTimer)
       externalSearchTimer = window.setTimeout(() => {
-        if (appStore.isClaudeMode) void claudeStore.loadSessions()
+        if (sidebarIsClaudeMode.value) void claudeStore.loadSessions()
       }, 250)
       return
     }
@@ -219,22 +227,66 @@ const search = computed({
   },
 })
 
+function sidebarRuntimeWorkspacePath(runtime: WorkspaceRuntime): string {
+  if (runtime === 'gemini') return appStore.settings.geminiWorkspace || appStore.settings.workspace
+  if (runtime === 'opencode') return appStore.settings.openCodeWorkspace || appStore.settings.workspace
+  return appStore.settings.workspace
+}
+
+function sidebarRuntimeRecentWorkspacePaths(runtime: WorkspaceRuntime): string[] {
+  if (runtime === 'gemini') {
+    return appStore.settings.geminiRecentWorkspaces?.length
+      ? appStore.settings.geminiRecentWorkspaces
+      : (appStore.settings.recentWorkspaces ?? [])
+  }
+  if (runtime === 'opencode') {
+    return appStore.settings.openCodeRecentWorkspaces?.length
+      ? appStore.settings.openCodeRecentWorkspaces
+      : (appStore.settings.recentWorkspaces ?? [])
+  }
+  return appStore.settings.recentWorkspaces ?? []
+}
+
+const sidebarThreadGroups = computed<ThreadGroup[]>(() => {
+  if (!arenaStore.isArenaMode) return codexStore.filteredThreadGroups
+  const runtime = sidebarActionRuntime.value
+  if (runtime !== 'codex' && runtime !== 'gemini' && runtime !== 'opencode') return []
+  const workspace = sidebarRuntimeWorkspacePath(runtime)
+  const recent = sidebarRuntimeRecentWorkspacePaths(runtime)
+  const paths = appStore.orderWorkspacePaths(runtime, [workspace, ...recent], recent)
+  const query = codexStore.threadSearch.trim().toLocaleLowerCase()
+  return paths
+    .map((path) => {
+      const group = codexStore.arenaThreadGroups.find((item) => sameWorkspacePath(item.path, path))
+      if (!group) return null
+      const threads = group.threads.filter((thread) => codexStore.knownRuntimeIDForThread(thread.id) === runtime)
+      const matchesGroup = `${group.name} ${group.path}`.toLocaleLowerCase().includes(query)
+      return {
+        ...group,
+        active: sameWorkspacePath(group.path, workspace),
+        threads: !query || matchesGroup
+          ? threads
+          : threads.filter((thread) =>
+              `${thread.name} ${thread.preview}`.toLocaleLowerCase().includes(query),
+            ),
+      }
+    })
+    .filter((group): group is ThreadGroup => Boolean(group && (!query || group.threads.length > 0)))
+})
+
 const threadCount = computed(() => {
-  if (appStore.isGrokMode) {
+  if (sidebarIsGrokMode.value) {
     return grokStore.sessionGroups.reduce((total, group) => total + group.sessions.length, 0)
   }
-  if (appStore.isClaudeMode) {
+  if (sidebarIsClaudeMode.value) {
     return claudeStore.sessionGroups.reduce((total, group) => total + group.sessions.length, 0)
   }
-  return codexStore.filteredThreadGroups.reduce((total, group) => total + group.threads.length, 0)
+  return sidebarThreadGroups.value.reduce((total, group) => total + group.threads.length, 0)
 })
-const groups = computed(() => codexStore.filteredThreadGroups)
+const groups = sidebarThreadGroups
 const grokGroups = computed(() => grokStore.sessionGroups)
 const claudeGroups = computed(() => claudeStore.sessionGroups)
-const usesCodexTimeline = computed(() => appStore.isCodexMode || appStore.isGeminiMode || appStore.isOpenCodeMode)
-const sidebarActionRuntime = computed(() => arenaStore.isArenaMode
-  ? (arenaStore.focusedPane?.runtime || appStore.activeRuntime)
-  : appStore.activeRuntime)
+const usesCodexTimeline = computed(() => sidebarIsCodexMode.value || sidebarIsGeminiMode.value || sidebarIsOpenCodeMode.value)
 const sidebarNewSessionDisabled = computed(() => {
   if (sidebarActionRuntime.value === 'grok') return !grokStore.workspacePath
   if (sidebarActionRuntime.value === 'claude') return !claudeStore.workspacePath
@@ -243,11 +295,10 @@ const sidebarNewSessionDisabled = computed(() => {
 const activeSidebarSessionId = computed(() => {
   if (arenaStore.isArenaMode) {
     const pane = arenaStore.focusedPane
-    if (pane?.runtime === appStore.activeRuntime) return arenaStore.sessionForPane(pane.id)
-    return ''
+    return pane ? arenaStore.sessionForPane(pane.id) : ''
   }
-  if (appStore.isGrokMode) return grokStore.activeSessionId
-  if (appStore.isClaudeMode) return claudeStore.activeSessionId
+  if (sidebarIsGrokMode.value) return grokStore.activeSessionId
+  if (sidebarIsClaudeMode.value) return claudeStore.activeSessionId
   return codexStore.activeThreadId
 })
 
@@ -272,6 +323,7 @@ function isCodexThreadRunning(threadId: string): boolean {
 }
 const creatingInProject = shallowRef('')
 const renamingThreadId = shallowRef('')
+const renamingRuntime = shallowRef<WorkspaceRuntime | ''>('')
 const renameDraft = shallowRef('')
 
 function formatUpdated(timestamp: number): string {
@@ -302,7 +354,7 @@ function openCapabilities(): void {
 }
 
 async function setWorkMode(mode: 'code' | 'cowork'): Promise<void> {
-  if (!appStore.isCodexMode) return
+  if (!sidebarIsCodexMode.value) return
   if (appStore.settings.workMode === mode) return
   const previous = { ...appStore.settings }
   const next = {
@@ -412,37 +464,27 @@ function onArenaMenuEscape(event: KeyboardEvent): void {
 }
 
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
-const activeExternalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+const activeExternalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === sidebarActionRuntime.value))
 
 const recentWorkspacePaths = computed(() => {
-  let paths: string[]
-  if (appStore.isGrokMode) {
+  let paths = sidebarRuntimeRecentWorkspacePaths(sidebarActionRuntime.value)
+  if (sidebarIsGrokMode.value) {
     paths = (appStore.settings.grokRecentWorkspaces?.length
       ? appStore.settings.grokRecentWorkspaces
       : appStore.settings.recentWorkspaces) ?? []
-  } else if (appStore.isClaudeMode) {
+  } else if (sidebarIsClaudeMode.value) {
     paths = (appStore.settings.claudeRecentWorkspaces?.length
       ? appStore.settings.claudeRecentWorkspaces
       : appStore.settings.recentWorkspaces) ?? []
-  } else if (appStore.isGeminiMode) {
-    paths = (appStore.settings.geminiRecentWorkspaces?.length
-      ? appStore.settings.geminiRecentWorkspaces
-      : appStore.settings.recentWorkspaces) ?? []
-  } else if (appStore.isOpenCodeMode) {
-    paths = (appStore.settings.openCodeRecentWorkspaces?.length
-      ? appStore.settings.openCodeRecentWorkspaces
-      : appStore.settings.recentWorkspaces) ?? []
-  } else {
-    paths = appStore.settings.recentWorkspaces ?? []
   }
-  return appStore.orderWorkspacePaths(appStore.activeRuntime, paths ?? [], paths ?? [])
+  return appStore.orderWorkspacePaths(sidebarActionRuntime.value, paths ?? [], paths ?? [])
 })
 
 function runtimeSlideX(): string {
-  if (appStore.isClaudeMode) return '100%'
-  if (appStore.isGrokMode) return '200%'
-  if (appStore.isGeminiMode) return '300%'
-  if (appStore.isOpenCodeMode) return '400%'
+  if (sidebarIsClaudeMode.value) return '100%'
+  if (sidebarIsGrokMode.value) return '200%'
+  if (sidebarIsGeminiMode.value) return '300%'
+  if (sidebarIsOpenCodeMode.value) return '400%'
   return '0%'
 }
 
@@ -473,25 +515,33 @@ async function openGrokSession(group: { path: string; active: boolean }, session
 
 async function createSidebarSession(): Promise<void> {
   const runtime = sidebarActionRuntime.value
+  const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
+  const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
   if (runtime === 'grok') {
     grokStore.newSession()
-    bindFocusedArenaSession(runtime, grokStore.activeSessionId)
+    bindFocusedArenaSession(runtime, '', paneId)
     return
   }
   if (runtime === 'claude') {
-    claudeStore.newSession(arenaStore.isArenaMode)
-    bindFocusedArenaSession(runtime, claudeStore.activeSessionId)
+    const sessionId = claudeStore.newSession(arenaStore.isArenaMode)
+    if (sessionId) bindFocusedArenaSession(runtime, sessionId, paneId)
     return
   }
   const thread = arenaStore.isArenaMode
     ? await codexStore.newRuntimeThread(runtime, true)
     : await codexStore.newThread()
-  if (thread?.id) bindFocusedArenaSession(runtime, thread.id)
+  if (thread?.id && arenaTargetIsCurrent(paneId, runtime, previousSessionId)) {
+    bindFocusedArenaSession(runtime, thread.id, paneId)
+  }
 }
 
-function bindFocusedArenaSession(runtime: WorkspaceRuntime, sessionId: string): boolean {
+function bindFocusedArenaSession(
+  runtime: WorkspaceRuntime,
+  sessionId: string,
+  targetPaneId = arenaStore.focusedPane?.id || '',
+): boolean {
   if (!arenaStore.isArenaMode) return false
-  const pane = arenaStore.focusedPane
+  const pane = arenaStore.panes.find((item) => item.id === targetPaneId)
   if (!pane) return false
   if (pane.runtime !== runtime) arenaStore.setPaneRuntime(pane.id, runtime)
   const previousOwner = arenaStore.selectPaneSession(pane.id, sessionId)
@@ -501,26 +551,69 @@ function bindFocusedArenaSession(runtime: WorkspaceRuntime, sessionId: string): 
   return true
 }
 
+function arenaTargetIsCurrent(
+  paneId: string,
+  runtime: WorkspaceRuntime,
+  expectedSessionId?: string,
+): boolean {
+  if (!paneId) return !arenaStore.isArenaMode && appStore.activeRuntime === runtime
+  const pane = arenaStore.panes.find((item) => item.id === paneId)
+  return Boolean(
+    arenaStore.isArenaMode
+    && pane
+    && pane.runtime === runtime
+    && arenaStore.focusedPaneId === paneId
+    && (expectedSessionId === undefined || arenaStore.sessionForPane(paneId) === expectedSessionId)
+  )
+}
+
+function preferredSessionForPane<T extends { id: string }>(
+  runtime: WorkspaceRuntime,
+  paneId: string,
+  sessions: T[],
+  activeSessionId: string,
+  sameSession: (left: string, right: string) => boolean,
+): T | undefined {
+  const selectedId = paneId ? arenaStore.sessionForPane(paneId) : activeSessionId
+  return sessions.find((session) => sameSession(session.id, selectedId))
+    || sessions.find((session) => !paneId || !arenaStore.isSessionTakenByOtherPane(paneId, session.id, runtime))
+    || sessions[0]
+}
+
 async function newInClaudeProject(group: { path: string; active: boolean }, event?: Event): Promise<void> {
   event?.stopPropagation()
   event?.preventDefault()
   if (!group.path || group.path === '(unknown)') return
+  const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
+  const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
+  const ready = appStore.activeRuntime === 'claude'
+    ? await appStore.ensureActiveRuntimeSynced('claude')
+    : await appStore.setActiveRuntime('claude')
+  if (!ready || !arenaTargetIsCurrent(paneId, 'claude', previousSessionId)) return
   if (!group.active) {
     if (!await workspaceStore.useWorkspace(group.path)) return
   }
-  claudeStore.newSession(arenaStore.isArenaMode)
-  bindFocusedArenaSession('claude', claudeStore.activeSessionId)
+  if (!arenaTargetIsCurrent(paneId, 'claude', previousSessionId)) return
+  const sessionId = claudeStore.newSession(arenaStore.isArenaMode)
+  if (sessionId) bindFocusedArenaSession('claude', sessionId, paneId)
 }
 
 async function newInGrokProject(group: { path: string; active: boolean }, event?: Event): Promise<void> {
   event?.stopPropagation()
   event?.preventDefault()
   if (!group.path || group.path === '(unknown)') return
+  const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
+  const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
+  const ready = appStore.activeRuntime === 'grok'
+    ? await appStore.ensureActiveRuntimeSynced('grok')
+    : await appStore.setActiveRuntime('grok')
+  if (!ready || !arenaTargetIsCurrent(paneId, 'grok', previousSessionId)) return
   if (!group.active) {
     if (!await workspaceStore.useWorkspace(group.path)) return
   }
+  if (!arenaTargetIsCurrent(paneId, 'grok', previousSessionId)) return
   grokStore.newSession()
-  bindFocusedArenaSession('grok', grokStore.activeSessionId)
+  bindFocusedArenaSession('grok', '', paneId)
 }
 
 async function archiveClaudeSession(sessionID: string, event?: Event): Promise<void> {
@@ -549,7 +642,7 @@ function formatClaudeUpdated(value: number): string {
 
 async function openThread(group: ThreadGroup, thread: ThreadSummary): Promise<void> {
   const runtime = codexStore.knownRuntimeIDForThread(thread.id)
-    || (usesCodexTimeline.value ? appStore.activeRuntime : 'codex')
+    || (usesCodexTimeline.value ? sidebarActionRuntime.value : 'codex')
   if (bindFocusedArenaSession(runtime, thread.id)) return
   if (appStore.activeRuntime !== runtime && !await appStore.setActiveRuntime(runtime)) return
   await codexStore.openProjectThread(group.path, thread.id)
@@ -561,26 +654,39 @@ function addArenaPaneFromMenu(): void {
 }
 
 async function switchWorkspace(path: string): Promise<void> {
-  const runtime = appStore.activeRuntime
+  const runtime = sidebarActionRuntime.value
+  const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
+  const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
   const sequence = ++projectSelectionSequence
   const selectionIsCurrent = () =>
     sequence === projectSelectionSequence
     && appStore.activeRuntime === runtime
     && sameWorkspacePath(path, appStore.currentWorkspacePath)
+    && arenaTargetIsCurrent(paneId, runtime, previousSessionId)
+  const ready = appStore.activeRuntime === runtime
+    ? await appStore.ensureActiveRuntimeSynced(runtime)
+    : await appStore.setActiveRuntime(runtime)
+  if (!ready || !arenaTargetIsCurrent(paneId, runtime, previousSessionId)) return
   if (runtime === 'grok') {
     if (!await workspaceStore.useWorkspace(path)) return
     if (!selectionIsCurrent()) return
     await grokStore.loadSessions(true)
     if (!selectionIsCurrent()) return
     const activeGroup = grokStore.sessionGroups.find((group) => group.active)
-    const target = activeGroup?.sessions.find((session) => session.id === grokStore.activeSessionId)
-      ?? activeGroup?.sessions[0]
+    const target = preferredSessionForPane(
+      runtime,
+      paneId,
+      activeGroup?.sessions || [],
+      grokStore.activeSessionId,
+      grokStore.sameSession,
+    )
     if (target) {
-      bindFocusedArenaSession(runtime, target.id)
-      await grokStore.openSession(target.id, { switchWorkspace: false })
+      if (!bindFocusedArenaSession(runtime, target.id, paneId)) {
+        await grokStore.openSession(target.id, { switchWorkspace: false })
+      }
     } else {
       grokStore.newSession()
-      bindFocusedArenaSession(runtime, grokStore.activeSessionId)
+      bindFocusedArenaSession(runtime, '', paneId)
     }
     return
   }
@@ -590,67 +696,92 @@ async function switchWorkspace(path: string): Promise<void> {
     await claudeStore.loadSessions()
     if (!selectionIsCurrent()) return
     const activeGroup = claudeStore.sessionGroups.find((group) => group.active)
-    const target = activeGroup?.sessions.find((session) => session.id === claudeStore.activeSessionId)
-      ?? activeGroup?.sessions[0]
+    const target = preferredSessionForPane(
+      runtime,
+      paneId,
+      activeGroup?.sessions || [],
+      claudeStore.activeSessionId,
+      claudeStore.sameSession,
+    )
     if (target) {
-      bindFocusedArenaSession(runtime, target.id)
-      await claudeStore.openSession(target.id, { switchWorkspace: false })
+      if (!bindFocusedArenaSession(runtime, target.id, paneId)) {
+        await claudeStore.openSession(target.id, { switchWorkspace: false })
+      }
     } else {
-      claudeStore.newSession(arenaStore.isArenaMode)
-      bindFocusedArenaSession(runtime, claudeStore.activeSessionId)
+      const sessionId = claudeStore.newSession(arenaStore.isArenaMode)
+      if (sessionId) bindFocusedArenaSession(runtime, sessionId, paneId)
     }
     return
   }
   await codexStore.switchProject(path)
-  bindFocusedArenaSession(runtime, codexStore.activeThreadId)
+  if (selectionIsCurrent()) bindFocusedArenaSession(runtime, codexStore.activeThreadId, paneId)
 }
 
-function chooseWorkspace(): void {
-  const runtime = appStore.activeRuntime
+async function chooseWorkspace(): Promise<void> {
+  const runtime = sidebarActionRuntime.value
+  const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
+  const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
   const sequence = ++projectSelectionSequence
   const selectionIsCurrent = (path: string) =>
     sequence === projectSelectionSequence
     && appStore.activeRuntime === runtime
     && sameWorkspacePath(path, appStore.currentWorkspacePath)
+    && arenaTargetIsCurrent(paneId, runtime, previousSessionId)
+  const ready = appStore.activeRuntime === runtime
+    ? await appStore.ensureActiveRuntimeSynced(runtime)
+    : await appStore.setActiveRuntime(runtime)
+  if (!ready || !arenaTargetIsCurrent(paneId, runtime, previousSessionId)) return
   if (runtime === 'grok') {
-    void workspaceStore.selectWorkspace().then(async (path) => {
-      if (!path || !selectionIsCurrent(path)) return
-      await grokStore.loadSessions(true)
-      if (!selectionIsCurrent(path)) return
-      const activeGroup = grokStore.sessionGroups.find((group) => group.active)
-      const target = activeGroup?.sessions.find((session) => session.id === grokStore.activeSessionId)
-        ?? activeGroup?.sessions[0]
-      if (target) {
-        bindFocusedArenaSession(runtime, target.id)
+    const path = await workspaceStore.selectWorkspace()
+    if (!path || !selectionIsCurrent(path)) return
+    await grokStore.loadSessions(true)
+    if (!selectionIsCurrent(path)) return
+    const activeGroup = grokStore.sessionGroups.find((group) => group.active)
+    const target = preferredSessionForPane(
+      runtime,
+      paneId,
+      activeGroup?.sessions || [],
+      grokStore.activeSessionId,
+      grokStore.sameSession,
+    )
+    if (target) {
+      if (!bindFocusedArenaSession(runtime, target.id, paneId)) {
         await grokStore.openSession(target.id, { switchWorkspace: false })
-      } else {
-        grokStore.newSession()
-        bindFocusedArenaSession(runtime, grokStore.activeSessionId)
       }
-    })
+    } else {
+      grokStore.newSession()
+      bindFocusedArenaSession(runtime, '', paneId)
+    }
     return
   }
   if (runtime === 'claude') {
-    void workspaceStore.selectWorkspace().then(async (path) => {
-      if (!path || !selectionIsCurrent(path)) return
-      await claudeStore.loadSessions()
-      if (!selectionIsCurrent(path)) return
-      const activeGroup = claudeStore.sessionGroups.find((group) => group.active)
-      const target = activeGroup?.sessions.find((session) => session.id === claudeStore.activeSessionId)
-        ?? activeGroup?.sessions[0]
-      if (target) {
-        bindFocusedArenaSession(runtime, target.id)
+    const path = await workspaceStore.selectWorkspace()
+    if (!path || !selectionIsCurrent(path)) return
+    await claudeStore.loadSessions()
+    if (!selectionIsCurrent(path)) return
+    const activeGroup = claudeStore.sessionGroups.find((group) => group.active)
+    const target = preferredSessionForPane(
+      runtime,
+      paneId,
+      activeGroup?.sessions || [],
+      claudeStore.activeSessionId,
+      claudeStore.sameSession,
+    )
+    if (target) {
+      if (!bindFocusedArenaSession(runtime, target.id, paneId)) {
         await claudeStore.openSession(target.id, { switchWorkspace: false })
-      } else {
-        claudeStore.newSession(arenaStore.isArenaMode)
-        bindFocusedArenaSession(runtime, claudeStore.activeSessionId)
       }
-    })
+    } else {
+      const sessionId = claudeStore.newSession(arenaStore.isArenaMode)
+      if (sessionId) bindFocusedArenaSession(runtime, sessionId, paneId)
+    }
     return
   }
-  void codexStore.selectProject().then(() => {
-    bindFocusedArenaSession(runtime, codexStore.activeThreadId)
-  })
+  await codexStore.selectProject()
+  if (
+    sequence === projectSelectionSequence
+    && arenaTargetIsCurrent(paneId, runtime, previousSessionId)
+  ) bindFocusedArenaSession(runtime, codexStore.activeThreadId, paneId)
 }
 
 async function archiveThread(threadID: string, event?: Event): Promise<void> {
@@ -679,6 +810,7 @@ function beginRename(thread: { id: string; name?: string }, event?: Event): void
   event?.stopPropagation()
   event?.preventDefault()
   renamingThreadId.value = thread.id
+  renamingRuntime.value = sidebarActionRuntime.value
   renameDraft.value = thread.name || ''
   void nextTick(() => {
     const input = document.querySelector<HTMLInputElement>('[data-thread-rename-input]')
@@ -690,13 +822,15 @@ function beginRename(thread: { id: string; name?: string }, event?: Event): void
 async function commitRename(thread: { id: string; name?: string }): Promise<void> {
   if (renamingThreadId.value !== thread.id) return
   const next = renameDraft.value.trim()
+  const runtime = renamingRuntime.value
   renamingThreadId.value = ''
+  renamingRuntime.value = ''
   if (!next || next === thread.name) return
-  if (appStore.isGrokMode) {
+  if (runtime === 'grok') {
     await grokStore.renameSession(thread.id, next)
     return
   }
-  if (appStore.isClaudeMode) {
+  if (runtime === 'claude') {
     await claudeStore.renameSession(thread.id, next)
     return
   }
@@ -705,6 +839,7 @@ async function commitRename(thread: { id: string; name?: string }): Promise<void
 
 function cancelRename(): void {
   renamingThreadId.value = ''
+  renamingRuntime.value = ''
   renameDraft.value = ''
 }
 
@@ -732,8 +867,12 @@ async function forkThread(threadID: string, event?: Event): Promise<void> {
   event?.stopPropagation()
   event?.preventDefault()
   const runtime = codexStore.runtimeIDForThread(threadID)
+  const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
+  const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
   const thread = await codexStore.forkThread(threadID, !arenaStore.isArenaMode)
-  if (thread?.id) bindFocusedArenaSession(runtime, thread.id)
+  if (thread?.id && arenaTargetIsCurrent(paneId, runtime, previousSessionId)) {
+    bindFocusedArenaSession(runtime, thread.id, paneId)
+  }
 }
 
 async function newInProject(group: ThreadGroup, event?: Event): Promise<void> {
@@ -744,11 +883,15 @@ async function newInProject(group: ThreadGroup, event?: Event): Promise<void> {
   try {
     // Expand the project so the new draft is visible.
     setGroupCollapsed(group, false)
-    const runtime = appStore.activeRuntime
+    const runtime = sidebarActionRuntime.value
+    const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
+    const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
     const thread = arenaStore.isArenaMode
       ? await codexStore.newRuntimeThread(runtime, true, group.path)
       : await codexStore.newThreadInProject(group.path)
-    if (thread?.id) bindFocusedArenaSession(runtime, thread.id)
+    if (thread?.id && arenaTargetIsCurrent(paneId, runtime, previousSessionId)) {
+      bindFocusedArenaSession(runtime, thread.id, paneId)
+    }
   } finally {
     creatingInProject.value = ''
   }
@@ -780,8 +923,8 @@ function providerLabel(thread: ThreadSummary): string {
   if (normalized === '__claude__' || normalized === 'claude-cli') return 'Claude Code'
   if (normalized === '__grok__' || normalized === 'grok-cli') return 'Grok'
   if (provider) return provider
-  if (appStore.isGeminiMode) return 'Gemini CLI'
-  if (appStore.isOpenCodeMode) return 'OpenCode'
+  if (sidebarIsGeminiMode.value) return 'Gemini CLI'
+  if (sidebarIsOpenCodeMode.value) return 'OpenCode'
   return 'Codex / OpenAI'
 }
 
@@ -793,7 +936,7 @@ const dragOverProjectPath = shallowRef('')
 const dragOverPosition = shallowRef<'before' | 'after' | ''>('')
 
 watch(
-  () => appStore.activeRuntime,
+  sidebarActionRuntime,
   () => {
     projectSelectionSequence += 1
     endProjectDrag()
@@ -816,7 +959,7 @@ function startProjectDrag(event: DragEvent, path: string): void {
     return
   }
   draggingProjectPath.value = path
-  draggingProjectRuntime.value = appStore.activeRuntime
+  draggingProjectRuntime.value = sidebarActionRuntime.value
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = 'move'
     event.dataTransfer.setData('text/plain', path)
@@ -826,7 +969,7 @@ function startProjectDrag(event: DragEvent, path: string): void {
 function updateProjectDropTarget(event: DragEvent, path: string): void {
   if (
     !draggingProjectPath.value
-    || draggingProjectRuntime.value !== appStore.activeRuntime
+    || draggingProjectRuntime.value !== sidebarActionRuntime.value
     || draggingProjectPath.value === path
   ) return
   event.preventDefault()
@@ -853,7 +996,7 @@ function dropProject(event: DragEvent, targetPath: string): void {
   const runtime = draggingProjectRuntime.value
   const sourcePath = draggingProjectPath.value
   const position = dragOverPosition.value
-  if (!runtime || runtime !== appStore.activeRuntime || !sourcePath || !position || sourcePath === targetPath) {
+  if (!runtime || runtime !== sidebarActionRuntime.value || !sourcePath || !position || sourcePath === targetPath) {
     endProjectDrag()
     return
   }
@@ -879,7 +1022,7 @@ function endProjectDrag(): void {
 
 function moveProjectByKeyboard(path: string, direction: -1 | 1): void {
   if (!canDragProject(path)) return
-  const runtime = appStore.activeRuntime
+  const runtime = sidebarActionRuntime.value
   const next = [...currentProjectPaths(runtime)]
   const sourceIndex = next.indexOf(path)
   const targetIndex = sourceIndex + direction
@@ -1041,7 +1184,7 @@ function formatGrokUpdated(value?: number | null): string {
           variant="ghost"
           size="sm"
           class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
-          :class="appStore.isCodexMode
+          :class="sidebarIsCodexMode
             ? 'font-medium text-foreground'
             : 'text-muted-foreground hover:text-foreground'"
           :aria-label="t('sidebar.runtimeCodex')"
@@ -1054,7 +1197,7 @@ function formatGrokUpdated(value?: number | null): string {
           variant="ghost"
           size="sm"
           class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
-          :class="appStore.isClaudeMode
+          :class="sidebarIsClaudeMode
             ? 'font-medium text-foreground'
             : 'text-muted-foreground hover:text-foreground'"
           :aria-label="t('sidebar.runtimeClaude')"
@@ -1067,7 +1210,7 @@ function formatGrokUpdated(value?: number | null): string {
           variant="ghost"
           size="sm"
           class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
-          :class="appStore.isGrokMode
+          :class="sidebarIsGrokMode
             ? 'font-medium text-foreground'
             : 'text-muted-foreground hover:text-foreground'"
           :aria-label="t('sidebar.runtimeGrok')"
@@ -1080,7 +1223,7 @@ function formatGrokUpdated(value?: number | null): string {
           variant="ghost"
           size="sm"
           class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
-          :class="appStore.isGeminiMode ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
+          :class="sidebarIsGeminiMode ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
           aria-label="Gemini"
           @click="void setActiveRuntime('gemini')"
           @contextmenu.prevent="openArenaContextMenu($event, 'gemini')"
@@ -1091,7 +1234,7 @@ function formatGrokUpdated(value?: number | null): string {
           variant="ghost"
           size="sm"
           class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
-          :class="appStore.isOpenCodeMode ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
+          :class="sidebarIsOpenCodeMode ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
           aria-label="OpenCode"
           @click="void setActiveRuntime('opencode')"
           @contextmenu.prevent="openArenaContextMenu($event, 'opencode')"
@@ -1103,7 +1246,7 @@ function formatGrokUpdated(value?: number | null): string {
 
       <!-- Codex-only work mode (code / writing) — same equal-track math as runtime tabs. -->
       <div
-        v-if="appStore.isCodexMode"
+        v-if="sidebarIsCodexMode"
         class="relative grid grid-cols-2 rounded-lg bg-foreground/[0.06] p-0.5 ring-1 ring-foreground/[0.05] dark:bg-white/[0.06]"
       >
         <Motion
@@ -1184,7 +1327,7 @@ function formatGrokUpdated(value?: number | null): string {
     <ScrollArea class="min-h-0 flex-1 px-2">
       <div class="space-y-1.5 pb-3">
         <!-- Grok sessions: project-grouped like Codex -->
-        <template v-if="appStore.isGrokMode">
+        <template v-if="sidebarIsGrokMode">
           <Collapsible
             v-for="group in grokGroups"
             :key="`grok-${group.path}`"
@@ -1682,7 +1825,7 @@ function formatGrokUpdated(value?: number | null): string {
         </Collapsible>
 
         <!-- Claude sessions: project-grouped like Codex / Grok -->
-        <template v-if="appStore.isClaudeMode">
+        <template v-if="sidebarIsClaudeMode">
           <Collapsible
             v-for="group in claudeGroups"
             :key="`claude-${group.path}`"
@@ -1932,12 +2075,12 @@ function formatGrokUpdated(value?: number | null): string {
           class="flex flex-col items-center gap-2 px-4 py-10 text-center text-[11px] text-muted-foreground"
         >
           <div class="grid size-10 place-items-center rounded-full bg-muted/60">
-            <GeminiIcon v-if="appStore.isGeminiMode" :size="16" class="opacity-70" />
-            <OpenCodeIcon v-else-if="appStore.isOpenCodeMode" :size="16" class="opacity-70" />
+            <GeminiIcon v-if="sidebarIsGeminiMode" :size="16" class="opacity-70" />
+            <OpenCodeIcon v-else-if="sidebarIsOpenCodeMode" :size="16" class="opacity-70" />
             <MessageSquareText v-else :size="16" class="opacity-70" />
           </div>
           <p>{{ search ? t('sidebar.noSearchResults') : t('sidebar.firstTask') }}</p>
-          <p v-if="!search && appStore.isCodexMode" class="max-w-[200px] text-[10px] leading-4 text-muted-foreground/80">
+          <p v-if="!search && sidebarIsCodexMode" class="max-w-[200px] text-[10px] leading-4 text-muted-foreground/80">
             {{
               appStore.settings.workMode === 'cowork'
                 ? t('sidebar.switchToCodeHint')
@@ -1945,7 +2088,7 @@ function formatGrokUpdated(value?: number | null): string {
             }}
           </p>
           <Button
-            v-if="!search && appStore.isCodexMode"
+            v-if="!search && sidebarIsCodexMode"
             type="button"
             variant="outline"
             class="h-7 rounded-md px-2.5 text-[11px]"
@@ -1960,7 +2103,7 @@ function formatGrokUpdated(value?: number | null): string {
     <div class="border-t border-sidebar-border/40 p-2">
       <div class="flex items-center gap-1">
         <!-- Grok: same token usage popover as Codex (today / 7d / 14d / 30d). -->
-        <div v-if="appStore.isGrokMode" class="flex min-w-0 flex-1 items-center gap-1">
+        <div v-if="sidebarIsGrokMode" class="flex min-w-0 flex-1 items-center gap-1">
           <Popover v-model:open="usagePopoverOpen">
             <PopoverTrigger as-child>
               <button
@@ -2075,7 +2218,7 @@ function formatGrokUpdated(value?: number | null): string {
             </PopoverContent>
           </Popover>
         </div>
-        <div v-else-if="appStore.isClaudeMode" class="flex min-w-0 flex-1 items-center gap-1">
+        <div v-else-if="sidebarIsClaudeMode" class="flex min-w-0 flex-1 items-center gap-1">
           <Popover v-model:open="usagePopoverOpen">
             <PopoverTrigger as-child>
               <button
@@ -2190,7 +2333,7 @@ function formatGrokUpdated(value?: number | null): string {
             </PopoverContent>
           </Popover>
         </div>
-        <div v-else-if="appStore.isGeminiMode || appStore.isOpenCodeMode" class="flex min-w-0 flex-1 items-center gap-1">
+        <div v-else-if="sidebarIsGeminiMode || sidebarIsOpenCodeMode" class="flex min-w-0 flex-1 items-center gap-1">
           <Popover v-model:open="usagePopoverOpen">
             <PopoverTrigger as-child>
               <button
@@ -2199,11 +2342,11 @@ function formatGrokUpdated(value?: number | null): string {
                 :aria-label="t('sidebar.usageHint')"
               >
                 <span class="grid size-6 shrink-0 place-items-center rounded-full border border-border/60 bg-panel/80">
-                  <GeminiIcon v-if="appStore.isGeminiMode" :size="13" class="opacity-80" />
+                  <GeminiIcon v-if="sidebarIsGeminiMode" :size="13" class="opacity-80" />
                   <OpenCodeIcon v-else :size="13" class="opacity-80" />
                 </span>
                 <div class="min-w-0 flex-1">
-                  <p class="truncate text-[11px] font-medium">{{ appStore.isGeminiMode ? 'Gemini CLI' : 'OpenCode' }}</p>
+                  <p class="truncate text-[11px] font-medium">{{ sidebarIsGeminiMode ? 'Gemini CLI' : 'OpenCode' }}</p>
                   <p class="truncate text-[9px] text-muted-foreground">
                     <span v-if="appStore.accountUsage?.lifetimeTokens != null">
                       {{ t('sidebar.usageLifetimeShort', { count: formatTokenCount(appStore.accountUsage.lifetimeTokens) }) }}

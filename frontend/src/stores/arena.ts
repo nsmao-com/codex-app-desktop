@@ -60,6 +60,7 @@ function loadPersisted(): {
   panes: ArenaPane[]
   focusedPaneId: string
   sessionByPane: Record<string, string>
+  runtimeBackends: Record<string, string>
 } | null {
   try {
     // Migrate v1 → v2 key if present.
@@ -71,6 +72,7 @@ function loadPersisted(): {
       panes?: Array<{ id?: string; runtime?: string }>
       focusedPaneId?: string
       sessionByPane?: Record<string, string>
+      runtimeBackends?: Record<string, string>
     }
     const panes = (parsed.panes || [])
       .map((pane) => ({
@@ -86,15 +88,33 @@ function loadPersisted(): {
     const rawSessions = parsed.sessionByPane && typeof parsed.sessionByPane === 'object'
       ? parsed.sessionByPane
       : {}
+    const claimedSessions = new Set<string>()
     for (const pane of panes) {
       const sessionId = String(rawSessions[pane.id] || '').trim()
-      if (sessionId) sessionByPane[pane.id] = sessionId
+      if (!sessionId) continue
+      // Optimistic ids only exist in the previous renderer process and cannot
+      // be reopened after restart; retaining one would issue ReadThread on a
+      // non-existent session and leave a permanently broken pane.
+      if (/^pending-(?:thread|grok|claude)-/.test(sessionId)) continue
+      const claim = `${pane.runtime}\u0000${sessionId}`
+      if (claimedSessions.has(claim)) continue
+      claimedSessions.add(claim)
+      sessionByPane[pane.id] = sessionId
+    }
+    const runtimeBackends: Record<string, string> = {}
+    const rawRuntimeBackends = parsed.runtimeBackends && typeof parsed.runtimeBackends === 'object'
+      ? parsed.runtimeBackends
+      : {}
+    for (const runtime of ALL_RUNTIMES) {
+      const identity = String(rawRuntimeBackends[runtime] || '').trim().toLowerCase()
+      if (identity) runtimeBackends[runtime] = identity
     }
     return {
       enabled: Boolean(parsed.enabled) && panes.length >= ARENA_MIN_PANES,
       panes,
       focusedPaneId,
       sessionByPane,
+      runtimeBackends,
     }
   } catch {
     return null
@@ -111,6 +131,7 @@ export const useArenaStore = defineStore('arena', () => {
   )
   const focusedPaneId = shallowRef(persisted?.focusedPaneId || panes.value[0]?.id || 'main')
   const sessionByPane = shallowRef<Record<string, string>>(persisted?.sessionByPane || {})
+  const runtimeBackends = shallowRef<Record<string, string>>(persisted?.runtimeBackends || {})
   const sessionSelectionRevision = shallowRef(0)
   const dragPaneId = shallowRef('')
 
@@ -131,6 +152,7 @@ export const useArenaStore = defineStore('arena', () => {
         panes: panes.value,
         focusedPaneId: focusedPaneId.value,
         sessionByPane: sessionByPane.value,
+        runtimeBackends: runtimeBackends.value,
       }))
     } catch {
       // ignore quota / private mode
@@ -142,13 +164,22 @@ export const useArenaStore = defineStore('arena', () => {
   }
 
   function setPaneSession(paneId: string, sessionId: string): void {
-    if (!panes.value.some((pane) => pane.id === paneId)) return
+    const targetPane = panes.value.find((pane) => pane.id === paneId)
+    if (!targetPane) return
     const current = sessionForPane(paneId)
     const next = { ...sessionByPane.value }
     const clean = sessionId.trim()
-    if (current === clean) return
+    const duplicateOwners = clean
+      ? panes.value.filter((pane) =>
+          pane.id !== paneId
+          && pane.runtime === targetPane.runtime
+          && sessionForPane(pane.id) === clean,
+        )
+      : []
+    if (current === clean && duplicateOwners.length === 0) return
     if (!clean) delete next[paneId]
     else next[paneId] = clean
+    for (const pane of duplicateOwners) delete next[pane.id]
     sessionByPane.value = next
     sessionSelectionRevision.value += 1
     persist()
@@ -179,6 +210,31 @@ export const useArenaStore = defineStore('arena', () => {
     sessionByPane.value = next
     persist()
     return previousOwner?.id || ''
+  }
+
+  /** Promote an optimistic id without leaving the same real session in two panes. */
+  function promotePaneSession(paneId: string, fromSessionId: string, toSessionId: string): void {
+    const targetPane = panes.value.find((pane) => pane.id === paneId)
+    const from = fromSessionId.trim()
+    const to = toSessionId.trim()
+    if (!targetPane || !from || !to || from === to) return
+    const current = sessionForPane(paneId)
+    // Ignore a stale promotion after this pane has already selected something else.
+    if (current !== from && current !== to) return
+
+    const next = { ...sessionByPane.value, [paneId]: to }
+    for (const pane of panes.value) {
+      if (pane.id === paneId || pane.runtime !== targetPane.runtime) continue
+      const bound = sessionForPane(pane.id)
+      if (bound === from || bound === to) delete next[pane.id]
+    }
+    if (
+      current === to
+      && Object.keys(next).length === Object.keys(sessionByPane.value).length
+    ) return
+    sessionByPane.value = next
+    sessionSelectionRevision.value += 1
+    persist()
   }
 
   /** True if another pane already binds this session for the same runtime. */
@@ -409,6 +465,46 @@ export const useArenaStore = defineStore('arena', () => {
     persist()
   }
 
+  /** Drop every pane binding for a runtime whose backend identity changed. */
+  function clearRuntimeBindings(runtime: WorkspaceRuntime): void {
+    const next = { ...sessionByPane.value }
+    let changed = false
+    for (const pane of panes.value) {
+      if (pane.runtime !== runtime || !sessionForPane(pane.id)) continue
+      delete next[pane.id]
+      changed = true
+    }
+    if (!changed) return
+    sessionByPane.value = next
+    sessionSelectionRevision.value += 1
+    persist()
+  }
+
+  /** Persist a provider backend identity so restored panes cannot cross variants. */
+  function syncRuntimeBackend(runtime: WorkspaceRuntime, identity: string): void {
+    const clean = identity.trim().toLowerCase()
+    if (!clean) return
+    const previous = (runtimeBackends.value[runtime] || '').trim().toLowerCase()
+    const nextSessions = { ...sessionByPane.value }
+    let bindingsChanged = false
+    // Older arena state has no backend metadata. Clear its Grok bindings once;
+    // keeping an ambiguous Build/API id is more dangerous than requiring reselection.
+    if (previous !== clean) {
+      for (const pane of panes.value) {
+        if (pane.runtime !== runtime || !sessionForPane(pane.id)) continue
+        delete nextSessions[pane.id]
+        bindingsChanged = true
+      }
+    }
+    if (!bindingsChanged && previous === clean) return
+    if (bindingsChanged) {
+      sessionByPane.value = nextSessions
+      sessionSelectionRevision.value += 1
+    }
+    runtimeBackends.value = { ...runtimeBackends.value, [runtime]: clean }
+    persist()
+  }
+
   return {
     enabled,
     panes,
@@ -419,6 +515,7 @@ export const useArenaStore = defineStore('arena', () => {
     canAddPane,
     canRemovePane,
     sessionByPane,
+    runtimeBackends,
     sessionSelectionRevision,
     dragPaneId,
     maxPanes: ARENA_MAX_PANES,
@@ -442,7 +539,10 @@ export const useArenaStore = defineStore('arena', () => {
     sessionForPane,
     setPaneSession,
     selectPaneSession,
+    promotePaneSession,
     clearSessionBindings,
+    clearRuntimeBindings,
+    syncRuntimeBackend,
     isSessionTakenByOtherPane,
   }
 })

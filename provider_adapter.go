@@ -211,6 +211,9 @@ func (s *AppService) syncCodexThreadsIntoSessions(response map[string]any, works
 	now := time.Now().Unix()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sessions == nil {
+		s.sessions = make(map[string]*SessionRecord)
+	}
 	changed := false
 	pendingAllocation := false
 	for _, pendingID := range s.pendingCodexSessions {
@@ -606,6 +609,9 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	started := time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
+	if s.externalRuns == nil {
+		s.externalRuns = make(map[string]*externalRun)
+	}
 	if s.externalRuns[threadID] != nil {
 		s.mu.Unlock()
 		cancel()
@@ -727,7 +733,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 			activeAgentText.WriteString(delta)
 			item := map[string]any{"id": itemID, "type": "agentMessage", "status": "inProgress", "text": delta}
 			recordTimelineItem(item)
-			s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
 			return
 		}
 		if kind != "" && kind != "text" {
@@ -791,27 +797,45 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	}
 	// A provider may only send a final full snapshot (or omit text events
 	// entirely). Reconcile it into the current segment before closing items.
+	// The active segment has not yet been copied back into timelineItems, so it
+	// must be included explicitly. Otherwise a fully streamed answer is mistaken
+	// for a missing suffix and appended a second time at process exit.
 	if output != "" {
 		rendered := ""
+		agentSegments := 0
 		for _, item := range timelineItems {
 			if firstMapString(item, "type") == "agentMessage" {
-				rendered += firstMapString(item, "text")
+				agentSegments++
+				if firstMapString(item, "id", "itemId") == activeAgentID {
+					rendered += activeAgentText.String()
+				} else {
+					rendered += firstMapString(item, "text")
+				}
 			}
 		}
 		if rendered != output {
 			itemID := ensureAgentSegment()
-			if strings.HasPrefix(output, rendered) {
+			switch {
+			case rendered == "":
+				activeAgentText.Reset()
+				activeAgentText.WriteString(output)
+				item := map[string]any{"id": itemID, "type": "agentMessage", "status": "inProgress", "text": output}
+				recordTimelineItem(item)
+				s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
+			case strings.HasPrefix(output, rendered):
 				suffix := strings.TrimPrefix(output, rendered)
 				if suffix != "" {
 					activeAgentText.WriteString(suffix)
 					s.emitExternalNotification("item/agentMessage/delta", map[string]any{"threadId": threadID, "turnId": turnID, "itemId": itemID, "delta": suffix})
 				}
-			} else {
+			case activeAgentID != "" && agentSegments == 1:
+				// A divergent final snapshot replaces the only live segment. Do not
+				// append it to the streamed draft, which would duplicate both versions.
 				activeAgentText.Reset()
 				activeAgentText.WriteString(output)
 				item := map[string]any{"id": itemID, "type": "agentMessage", "status": "inProgress", "text": output}
 				recordTimelineItem(item)
-				s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+				s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
 			}
 		}
 	}
@@ -827,6 +851,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		// when a CLI stream omits its final usage event.
 		s.invalidateExternalUsageCache(normalizedProvider)
 		s.invalidateNativeHistoryCache(normalizedProvider, sessionID)
+		s.invalidateNativeSessionSync(normalizedProvider, workspace)
 	}
 	if b := breakdownFromUsageMap(usage); b.valid() {
 		// Attribute usage to the active native runtime. The Codex bucket is only
@@ -1678,7 +1703,11 @@ func (s *AppService) bindExternalSession(threadID, provider, backendRef string) 
 		return
 	}
 	current := strings.TrimSpace(record.BackendRef)
-	if current != "" && current != backendRef {
+	// This callback comes from the CLI process owned by threadID and is therefore
+	// authoritative while that run is registered. It may repair an older
+	// heuristic sync that attached the wrong native id.
+	authoritative := s.externalRuns[threadID] != nil
+	if current != "" && current != backendRef && !authoritative {
 		s.mu.Unlock()
 		return
 	}
@@ -1687,10 +1716,20 @@ func (s *AppService) bindExternalSession(threadID, provider, backendRef string) 
 	record.Provider = provider
 	record.ProviderID = externalProviderID(provider)
 	for id, other := range s.sessions {
-		if other == nil || id == threadID || !other.Native || normalizeExternalRuntime(other.Provider) != provider || !samePath(other.Workspace, record.Workspace) || strings.TrimSpace(other.BackendRef) != backendRef {
+		if other == nil || id == threadID || normalizeExternalRuntime(other.Provider) != provider || !samePath(other.Workspace, record.Workspace) || strings.TrimSpace(other.BackendRef) != backendRef {
 			continue
 		}
-		delete(s.sessions, id)
+		if other.Native {
+			delete(s.sessions, id)
+		} else if authoritative {
+			// One native conversation can have only one NiceCodex owner. The
+			// running callback proves the current owner; leave the stale local row
+			// available as a fresh session instead of letting two panes share context.
+			other.BackendRef = ""
+			other.UpdatedAt = time.Now().Unix()
+		} else {
+			continue
+		}
 		changed = true
 	}
 	if changed {
@@ -2175,6 +2214,74 @@ func (s *AppService) interruptExternalTurn(threadID, turnID string) bool {
 	s.mu.Unlock()
 	cancel()
 	return true
+}
+
+func (s *AppService) externalSessionIsRunning(threadID string) bool {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.externalRuns[threadID] != nil
+}
+
+func (s *AppService) deleteNativeExternalSession(record *SessionRecord) error {
+	if record == nil {
+		return nil
+	}
+	provider := normalizeExternalRuntime(record.Provider)
+	backendRef := strings.TrimSpace(record.BackendRef)
+	if backendRef == "" || (provider != "gemini" && provider != "opencode") {
+		return nil
+	}
+	if provider == "gemini" {
+		home, _ := os.UserHomeDir()
+		root := filepath.Join(home, ".gemini")
+		path := findGeminiNativeSessionFile(root, backendRef)
+		if path == "" {
+			return nil
+		}
+		absoluteRoot, rootErr := filepath.Abs(root)
+		absolutePath, pathErr := filepath.Abs(path)
+		if rootErr != nil || pathErr != nil {
+			return errors.New("resolve Gemini session path")
+		}
+		relative, relErr := filepath.Rel(absoluteRoot, absolutePath)
+		if relErr != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+			return errors.New("Gemini session path is outside its native history directory")
+		}
+		if err := os.Remove(absolutePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("delete Gemini session: %w", err)
+		}
+		s.invalidateNativeHistoryCache(provider, backendRef)
+		s.invalidateNativeSessionSync(provider, record.Workspace)
+		return nil
+	}
+
+	executable := s.externalExecutable(provider)
+	if executable == "" {
+		return errors.New("OpenCode CLI executable was not found")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	commandPath, commandArgs, resolveErr := providerCommand(executable, []string{"session", "delete", backendRef})
+	if resolveErr != nil {
+		return resolveErr
+	}
+	command := exec.CommandContext(ctx, commandPath, commandArgs...)
+	command.Dir = record.Workspace
+	output, err := runManagedCombinedOutput(ctx, command)
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("delete OpenCode session: %s", truncateRunes(message, 1000))
+	}
+	s.invalidateNativeHistoryCache(provider, backendRef)
+	s.invalidateNativeSessionSync(provider, record.Workspace)
+	return nil
 }
 
 func (s *AppService) cancelExternalRuns() {

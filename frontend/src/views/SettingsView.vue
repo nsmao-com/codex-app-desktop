@@ -62,7 +62,7 @@ import type { ExternalRuntimeCatalog } from '../../bindings/nice_codex_desktop/m
 import { supportedLocales } from '@/i18n'
 import { ACCENT_OPTIONS, type AppAccent } from '@/lib/accents'
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
-import { useAppStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
 import {
   readClaudeGlobalInstructions,
@@ -116,6 +116,7 @@ type NavGroup = {
 const router = useRouter()
 const route = useRoute()
 const appStore = useAppStore()
+const arenaStore = useArenaStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
@@ -872,18 +873,51 @@ const archivedThreads = computed(() => {
 })
 
 async function restoreArchived(threadID: string): Promise<void> {
-  if (appStore.isGrokMode) {
+  const runtime = appStore.activeRuntime
+  const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
+  const targetIsCurrent = () => {
+    if (route.name !== 'settings' || appStore.activeRuntime !== runtime) return false
+    if (!paneId) return !arenaStore.isArenaMode
+    return Boolean(
+      arenaStore.isArenaMode
+      && arenaStore.focusedPaneId === paneId
+      && arenaStore.panes.some((pane) => pane.id === paneId && pane.runtime === runtime),
+    )
+  }
+  if (runtime === 'grok') {
     await grokStore.unarchiveSession(threadID)
-    if (grokStore.activeSessionId === threadID) router.push('/')
+    if (!targetIsCurrent()) return
+    const restored = grokStore.sessions.find((session) => grokStore.sameSession(session.id, threadID))
+    if (!restored) return
+    await grokStore.openSession(restored.id)
+    if (!targetIsCurrent()) return
+    bindRestoredArenaSession(runtime, restored.id, paneId)
+    await router.push('/')
     return
   }
-  if (appStore.isClaudeMode) {
+  if (runtime === 'claude') {
     await claudeStore.unarchiveSession(threadID)
-    if (claudeStore.activeSessionId === threadID) router.push('/')
+    if (!targetIsCurrent()) return
+    const restored = claudeStore.sessions.find((session) => claudeStore.sameSession(session.id, threadID))
+    if (!restored) return
+    await claudeStore.openSession(restored.id)
+    if (!targetIsCurrent()) return
+    bindRestoredArenaSession(runtime, restored.id, paneId)
+    await router.push('/')
     return
   }
-  await codexStore.unarchiveThread(threadID)
-  if (codexStore.activeThreadId === threadID) router.push('/')
+  const restored = await codexStore.unarchiveThread(threadID)
+  if (restored?.id && targetIsCurrent()) {
+    bindRestoredArenaSession(runtime, restored.id, paneId)
+    await router.push('/')
+  }
+}
+
+function bindRestoredArenaSession(runtime: WorkspaceRuntime, sessionId: string, paneId: string): void {
+  if (!arenaStore.isArenaMode || !paneId || !sessionId) return
+  const pane = arenaStore.panes.find((item) => item.id === paneId)
+  if (!pane || pane.runtime !== runtime || arenaStore.focusedPaneId !== paneId) return
+  arenaStore.selectPaneSession(paneId, sessionId)
 }
 
 function deleteArchived(threadID: string): void {
@@ -919,6 +953,12 @@ watch(
   },
 )
 
+function loadArchivedForActiveRuntime(): void {
+  if (appStore.isGrokMode) void grokStore.loadArchivedSessions()
+  else if (appStore.isClaudeMode) void claudeStore.loadArchivedSessions()
+  else void codexStore.loadThreads().catch(() => undefined)
+}
+
 watch(activePanel, (panel) => {
   if (panel === 'personalization') {
     void loadAgentsInstructions()
@@ -926,11 +966,7 @@ watch(activePanel, (panel) => {
   }
   if (panel === 'scheduled') void loadScheduledTasks()
   if (panel === 'browser') void loadFeatureFlags()
-  if (panel === 'archived') {
-    if (appStore.isGrokMode) void grokStore.loadArchivedSessions()
-    else if (appStore.isClaudeMode) void claudeStore.loadArchivedSessions()
-    else void codexStore.loadThreads().catch(() => undefined)
-  }
+  if (panel === 'archived') loadArchivedForActiveRuntime()
   if (panel === 'environment') void refreshCLITools({ silent: true })
 })
 
@@ -948,6 +984,7 @@ onMounted(() => {
 watch([isGrokSettings, isClaudeSettings, isGeminiSettings, isOpenCodeSettings], ([grok, _claude, gemini, openCode]) => {
   syncFromStore()
   clampPanelForRuntime()
+  if (activePanel.value === 'archived') loadArchivedForActiveRuntime()
   if (grok) void grokStore.refreshRuntime()
   else if (gemini || openCode) {
     void appStore.refreshRuntimes()
@@ -1642,6 +1679,21 @@ async function runPush(): Promise<void> {
 
 async function save(): Promise<void> {
   if (saving.value) return
+
+  const grokBackendChanged = isGrokSettings.value
+    && grokBackend.value !== (appStore.settings.grokBackend === 'api' ? 'api' : 'build')
+  const grokBackendHasPendingWork = grokStore.runningSessionIds.length > 0
+    || grokStore.sendingSessionIds.length > 0
+    || Object.values(grokStore.queuedBySession).some((queue) => queue.length > 0)
+    || Boolean(grokStore.sessionMutation)
+  if (grokBackendChanged && grokBackendHasPendingWork) {
+    notify(
+      'warning',
+      t('settings.grokBackendBusyTitle'),
+      t('settings.grokBackendBusyHint'),
+    )
+    return
+  }
 
   // Upstream client identity only applies after app-server re-handshake (Codex only).
   const identityChanged = isCodexSettings.value && codexClientIdentityChanged()

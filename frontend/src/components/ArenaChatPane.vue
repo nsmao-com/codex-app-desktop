@@ -293,28 +293,33 @@ async function onSessionChange(value: unknown): Promise<void> {
 }
 
 async function createNewSession(): Promise<void> {
+  const runtime = props.runtime
   arenaStore.setPaneSession(props.paneId, '')
   emit('focus')
-  if (props.runtime === 'grok') {
-    await grokStore.newSession()
-    if (grokStore.activeSessionId) {
+  const targetIsCurrent = () => Boolean(
+    arenaStore.panes.some((pane) => pane.id === props.paneId && pane.runtime === runtime)
+    && !arenaStore.sessionForPane(props.paneId),
+  )
+  if (runtime === 'grok') {
+    grokStore.newSession()
+    if (targetIsCurrent() && grokStore.activeSessionId) {
       arenaStore.setPaneSession(props.paneId, grokStore.activeSessionId)
-    } else {
+    } else if (targetIsCurrent()) {
       arenaStore.setPaneSession(props.paneId, '')
     }
     return
   }
-  if (props.runtime === 'claude') {
-    claudeStore.newSession(true)
-    if (claudeStore.activeSessionId) {
-      arenaStore.setPaneSession(props.paneId, claudeStore.activeSessionId)
-    } else {
+  if (runtime === 'claude') {
+    const sessionId = claudeStore.newSession(true)
+    if (sessionId && targetIsCurrent()) {
+      arenaStore.setPaneSession(props.paneId, sessionId)
+    } else if (targetIsCurrent()) {
       arenaStore.setPaneSession(props.paneId, '')
     }
     return
   }
-  const thread = await codexStore.newRuntimeThread(props.runtime, true)
-  if (thread?.id) {
+  const thread = await codexStore.newRuntimeThread(runtime, true)
+  if (thread?.id && targetIsCurrent()) {
     arenaStore.setPaneSession(props.paneId, thread.id)
   }
 }
@@ -393,7 +398,7 @@ watch(
         ? claudeStore.resolveSessionId(boundId)
         : codexStore.resolveThreadID(boundId)
     if (resolvedId && resolvedId !== boundId) {
-      arenaStore.setPaneSession(props.paneId, resolvedId)
+      arenaStore.promotePaneSession(props.paneId, boundId, resolvedId)
     }
   },
 )

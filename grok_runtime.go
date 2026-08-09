@@ -43,15 +43,16 @@ var grokRuntimeProbeCache = struct {
 }{}
 
 type GrokSessionSummary struct {
-	ID        string `json:"id"`
-	Backend   string `json:"backend"`
-	Workspace string `json:"workspace"`
-	Name      string `json:"name"`
-	Preview   string `json:"preview"`
-	Model     string `json:"model"`
-	Effort    string `json:"effort"`
-	CreatedAt int64  `json:"createdAt"`
-	UpdatedAt int64  `json:"updatedAt"`
+	ID           string `json:"id"`
+	Backend      string `json:"backend"`
+	Workspace    string `json:"workspace"`
+	Name         string `json:"name"`
+	Preview      string `json:"preview"`
+	Model        string `json:"model"`
+	Effort       string `json:"effort"`
+	CreatedAt    int64  `json:"createdAt"`
+	UpdatedAt    int64  `json:"updatedAt"`
+	ActiveTurnID string `json:"activeTurnId,omitempty"`
 }
 
 type GrokMessage struct {
@@ -83,6 +84,7 @@ type GrokSessionDetail struct {
 	HistoryTotal      int                `json:"historyTotal"`
 	HistoryTurnOffset int                `json:"historyTurnOffset"`
 	HasEarlier        bool               `json:"hasEarlier"`
+	ActiveTurnID      string             `json:"activeTurnId,omitempty"`
 }
 
 type GrokSendRequest struct {
@@ -379,7 +381,9 @@ func (s *AppService) ListGrokSessions(backend, workspace, search string) ([]Grok
 			if _, hidden := archived[item.ID]; hidden {
 				continue
 			}
-			result = append(result, s.applyGrokLocalName(item))
+			summary := s.applyGrokLocalName(item)
+			summary.ActiveTurnID = s.grokActiveTurnID(backend, summary.ID)
+			result = append(result, summary)
 		}
 		return result, nil
 	}
@@ -394,6 +398,7 @@ func (s *AppService) ListGrokSessions(backend, workspace, search string) ([]Grok
 			continue
 		}
 		summary := s.applyGrokLocalName(session.Summary)
+		summary.ActiveTurnID = s.grokActiveTurnID(backend, summary.ID)
 		haystack := strings.ToLower(summary.Name + "\n" + summary.Preview + "\n" + summary.Workspace)
 		if query != "" && !strings.Contains(haystack, query) {
 			continue
@@ -421,10 +426,13 @@ func (s *AppService) ReadGrokSessionHistory(backend, sessionID string, before in
 }
 
 func (s *AppService) readGrokSessionPage(backend, sessionID string, before int) (GrokSessionDetail, error) {
+	backend = normalizeGrokBackend(backend)
 	detail, err := s.readGrokSessionFull(backend, sessionID)
 	if err != nil {
 		return GrokSessionDetail{}, err
 	}
+	detail.ActiveTurnID = s.grokActiveTurnID(backend, sessionID)
+	detail.Summary.ActiveTurnID = detail.ActiveTurnID
 	return paginateGrokSession(detail, before), nil
 }
 
@@ -577,6 +585,9 @@ func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, erro
 	ctx, cancel := context.WithCancel(context.Background())
 	key := grokRunKey(request.Backend, request.SessionID)
 	s.mu.Lock()
+	if s.externalRuns == nil {
+		s.externalRuns = make(map[string]*externalRun)
+	}
 	// Never cancel an in-flight turn on a second Send — that looked like the agent
 	// "disconnecting" mid-run when the UI double-dispatched. Explicit stop uses Interrupt.
 	if previous := s.externalRuns[key]; previous != nil {
@@ -642,9 +653,21 @@ func (s *AppService) IsGrokTurnRunning(ref GrokTurnRef) bool {
 }
 
 func (s *AppService) isGrokSessionRunning(backend, sessionID string) bool {
+	return s.grokActiveTurnID(backend, sessionID) != ""
+}
+
+func (s *AppService) grokActiveTurnID(backend, sessionID string) string {
+	backend = normalizeGrokBackend(backend)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.externalRuns[grokRunKey(backend, sessionID)] != nil
+	if run := s.externalRuns[grokRunKey(backend, sessionID)]; run != nil {
+		return strings.TrimSpace(run.turnID)
+	}
+	return ""
 }
 
 func (s *AppService) DeleteGrokSession(backend, sessionID string) error {
