@@ -1334,16 +1334,17 @@ function formatGrokUpdated(value?: number | null): string {
             :open="!isGroupCollapsed(group)"
             @update:open="(open) => setGroupCollapsed(group, !open)"
           >
-            <div
-              class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
-              :class="[
-                group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
-                projectDropClass(group.path),
-              ]"
-              @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
-              @dragleave="(event: DragEvent) => clearProjectDropTarget(event, group.path)"
-              @drop="(event: DragEvent) => dropProject(event, group.path)"
-            >
+            <div class="sticky top-0 z-20 bg-sidebar">
+              <div
+                class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
+                :class="[
+                  group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
+                  projectDropClass(group.path),
+                ]"
+                @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
+                @dragleave="(event: DragEvent) => clearProjectDropTarget(event, group.path)"
+                @drop="(event: DragEvent) => dropProject(event, group.path)"
+              >
               <span
                 v-if="showProjectDropIndicator(group.path, 'before')"
                 aria-hidden="true"
@@ -1413,6 +1414,7 @@ function formatGrokUpdated(value?: number | null): string {
                   <TooltipContent side="top">{{ t('sidebar.newTaskInProject') }}</TooltipContent>
                 </Tooltip>
               </TooltipProvider>
+              </div>
             </div>
 
             <CollapsibleContent>
@@ -1573,16 +1575,17 @@ function formatGrokUpdated(value?: number | null): string {
           :open="!isGroupCollapsed(group)"
           @update:open="(open) => setGroupCollapsed(group, !open)"
         >
-          <div
-            class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
-            :class="[
-              group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
-              projectDropClass(group.path),
-            ]"
-            @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
-            @dragleave="(event: DragEvent) => clearProjectDropTarget(event, group.path)"
-            @drop="(event: DragEvent) => dropProject(event, group.path)"
-          >
+          <div class="sticky top-0 z-20 bg-sidebar">
+            <div
+              class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
+              :class="[
+                group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
+                projectDropClass(group.path),
+              ]"
+              @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
+              @dragleave="(event: DragEvent) => clearProjectDropTarget(event, group.path)"
+              @drop="(event: DragEvent) => dropProject(event, group.path)"
+            >
             <span
               v-if="showProjectDropIndicator(group.path, 'before')"
               aria-hidden="true"
@@ -1658,6 +1661,7 @@ function formatGrokUpdated(value?: number | null): string {
                 <TooltipContent side="top">{{ t('sidebar.newTaskInProject') }}</TooltipContent>
               </Tooltip>
             </TooltipProvider>
+            </div>
           </div>
 
           <CollapsibleContent>
@@ -1832,16 +1836,17 @@ function formatGrokUpdated(value?: number | null): string {
             :open="!isGroupCollapsed(group)"
             @update:open="(open) => setGroupCollapsed(group, !open)"
           >
-            <div
-              class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
-              :class="[
-                group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
-                projectDropClass(group.path),
-              ]"
-              @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
-              @dragleave="(event: DragEvent) => clearProjectDropTarget(event, group.path)"
-              @drop="(event: DragEvent) => dropProject(event, group.path)"
-            >
+            <div class="sticky top-0 z-20 bg-sidebar">
+              <div
+                class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
+                :class="[
+                  group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
+                  projectDropClass(group.path),
+                ]"
+                @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
+                @dragleave="(event: DragEvent) => clearProjectDropTarget(event, group.path)"
+                @drop="(event: DragEvent) => dropProject(event, group.path)"
+              >
               <span
                 v-if="showProjectDropIndicator(group.path, 'before')"
                 aria-hidden="true"
@@ -1911,6 +1916,7 @@ function formatGrokUpdated(value?: number | null): string {
                   <TooltipContent side="top">{{ t('sidebar.newTaskInProject') }}</TooltipContent>
                 </Tooltip>
               </TooltipProvider>
+              </div>
             </div>
 
             <CollapsibleContent>
