@@ -1068,7 +1068,14 @@ export const useCodexStore = defineStore('codex', () => {
     const cachedUpdatedAt = cachedHistory?.loadedUpdatedAt ?? 0
     const cacheIsCurrent = cachedTimeline
       && (!summary?.updatedAt || !cachedUpdatedAt || summary.updatedAt <= cachedUpdatedAt)
-    if (loadedThreadIDs.has(threadID) || (cacheIsCurrent && !isActiveStatus(summary?.status || activeSummary?.status || ''))) {
+    const hasKnownSummary = Boolean(summary || activeSummary)
+    if (
+      hasKnownSummary
+      && (
+        loadedThreadIDs.has(threadID)
+        || (cacheIsCurrent && !isActiveStatus(summary?.status || activeSummary?.status || ''))
+      )
+    ) {
       rememberLoadedThread(threadID)
       // Cache hit used to skip running-turn reconcile — switching Code/Cowork
       // (or reopening a background turn) left composer thinking the thread was idle.

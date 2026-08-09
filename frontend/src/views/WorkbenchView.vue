@@ -17,6 +17,7 @@ import TerminalPanel from '@/components/TerminalPanel.vue'
 import { overlayFade, springSoft } from '@/lib/motion'
 import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useShellStore, useTerminalStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
+import { sameWorkspacePath } from '@/utils/workspacePath'
 
 const route = useRoute()
 const router = useRouter()
@@ -61,20 +62,61 @@ async function activateFocusedArenaPane(allowRetainedSinglePane = false): Promis
     return
   }
   if (runtime === 'grok') {
-    if (grokStore.sameSession(grokStore.activeSessionId, sessionId)) return
+    const known = grokStore.sessions.find((item) => grokStore.sameSession(item.id, sessionId))
+    const hasTimeline = Object.keys(grokStore.messagesBySession)
+      .some((id) => grokStore.sameSession(id, sessionId))
+    if (
+      grokStore.sameSession(grokStore.activeSessionId, sessionId)
+      && known?.workspace
+      && sameWorkspacePath(known.workspace, appStore.currentWorkspacePath)
+      && hasTimeline
+    ) return
     await grokStore.openSession(sessionId)
+    if (!selectionIsCurrent()) return
+    const opened = grokStore.sessions.find((item) => grokStore.sameSession(item.id, sessionId))
+    if (opened?.workspace && !sameWorkspacePath(opened.workspace, appStore.currentWorkspacePath)) {
+      await grokStore.openSession(opened.id)
+    }
     return
   }
   if (runtime === 'claude') {
-    if (claudeStore.sameSession(claudeStore.activeSessionId, sessionId)) return
+    const known = claudeStore.sessions.find((item) => claudeStore.sameSession(item.id, sessionId))
+    const hasTimeline = Object.keys(claudeStore.itemsBySession)
+      .some((id) => claudeStore.sameSession(id, sessionId))
+    if (
+      claudeStore.sameSession(claudeStore.activeSessionId, sessionId)
+      && known?.workspace
+      && sameWorkspacePath(known.workspace, appStore.currentWorkspacePath)
+      && hasTimeline
+    ) return
     await claudeStore.openSession(sessionId)
+    if (!selectionIsCurrent()) return
+    const opened = claudeStore.sessions.find((item) => claudeStore.sameSession(item.id, sessionId))
+    if (opened?.workspace && !sameWorkspacePath(opened.workspace, appStore.currentWorkspacePath)) {
+      await claudeStore.openSession(opened.id)
+    }
     return
   }
-  if (codexStore.sameThread(codexStore.activeThreadId, sessionId)) return
   const thread = codexStore.threads.find((item) => codexStore.sameThread(item.id, sessionId))
     || Object.values(codexStore.projectThreads).flat().find((item) => codexStore.sameThread(item.id, sessionId))
+  const hasTimeline = Object.keys(codexStore.itemsByThread)
+    .some((id) => codexStore.sameThread(id, sessionId))
+  if (
+    codexStore.sameThread(codexStore.activeThreadId, sessionId)
+    && thread?.cwd
+    && sameWorkspacePath(thread.cwd, appStore.currentWorkspacePath)
+    && hasTimeline
+  ) return
   if (thread?.cwd) await codexStore.openProjectThread(thread.cwd, sessionId)
-  else await codexStore.openThread(sessionId, { runtime })
+  else {
+    await codexStore.openThread(sessionId, { runtime })
+    if (!selectionIsCurrent()) return
+    const opened = codexStore.threads.find((item) => codexStore.sameThread(item.id, sessionId))
+      || Object.values(codexStore.projectThreads).flat().find((item) => codexStore.sameThread(item.id, sessionId))
+    if (opened?.cwd && !sameWorkspacePath(opened.cwd, appStore.currentWorkspacePath)) {
+      await codexStore.openProjectThread(opened.cwd, opened.id, runtime)
+    }
+  }
 }
 
 watch(

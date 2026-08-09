@@ -700,6 +700,35 @@ func (s *AppService) DeleteClaudeSession(sessionID string) error {
 	return nil
 }
 
+func (s *AppService) validateClaudeSendWorkspace(sessionID, requestedWorkspace string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	s.mu.Lock()
+	local := s.claudeSessions[sessionID]
+	ownedWorkspace := ""
+	backendRef := ""
+	if local != nil {
+		ownedWorkspace = strings.TrimSpace(local.Workspace)
+		backendRef = strings.TrimSpace(local.BackendRef)
+	}
+	s.mu.Unlock()
+
+	if local == nil {
+		native, ok := findClaudeNativeSession(sessionID)
+		if !ok {
+			return errors.New("Claude session was not found")
+		}
+		ownedWorkspace = strings.TrimSpace(native.Summary.Workspace)
+	} else if ownedWorkspace == "" && backendRef != "" {
+		if native, ok := findClaudeNativeSession(backendRef); ok {
+			ownedWorkspace = strings.TrimSpace(native.Summary.Workspace)
+		}
+	}
+	if ownedWorkspace == "" || !samePath(ownedWorkspace, requestedWorkspace) {
+		return errors.New("Claude session belongs to a different workspace")
+	}
+	return nil
+}
+
 func (s *AppService) SendClaudeMessage(request ClaudeSendRequest) (ClaudeTurnRef, error) {
 	request.SessionID = strings.TrimSpace(request.SessionID)
 	clientSessionID := request.SessionID
@@ -711,8 +740,12 @@ func (s *AppService) SendClaudeMessage(request ClaudeSendRequest) (ClaudeTurnRef
 	if err != nil {
 		return ClaudeTurnRef{}, err
 	}
-	if request.SessionID == "" || strings.HasPrefix(request.SessionID, "pending-claude-") {
+	if request.SessionID == "" {
 		request.SessionID = newUUID()
+	} else if strings.HasPrefix(request.SessionID, "pending-claude-") {
+		request.SessionID = stablePendingSessionID("claude", request.SessionID, workspace)
+	} else if err := s.validateClaudeSendWorkspace(request.SessionID, workspace); err != nil {
+		return ClaudeTurnRef{}, err
 	}
 	request.Workspace = workspace
 	turnID := "claude-turn-" + newUUID()

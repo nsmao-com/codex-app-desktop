@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2312,6 +2313,15 @@ func newUUID() string {
 		now := uint64(time.Now().UnixNano())
 		return fmt.Sprintf("%08x-%04x-4000-8000-%012x", uint32(now>>32), uint16(now), now&0xffffffffffff)
 	}
+	value[6] = (value[6] & 0x0f) | 0x40
+	value[8] = (value[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		value[0:4], value[4:6], value[6:8], value[8:10], value[10:16])
+}
+
+func stablePendingSessionID(scope, clientID, workspace string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(scope) + "\x00" + workspaceKey(workspace) + "\x00" + strings.TrimSpace(clientID)))
+	value := digest[:16]
 	value[6] = (value[6] & 0x0f) | 0x40
 	value[8] = (value[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",

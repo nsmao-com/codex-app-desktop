@@ -124,9 +124,6 @@ func (s *AppService) listGrokAPISessions(workspace, search string) []GrokSession
 		if session == nil {
 			continue
 		}
-		if workspace != "" && !samePath(session.Workspace, workspace) {
-			continue
-		}
 		haystack := strings.ToLower(session.Name + "\n" + session.Preview)
 		if query != "" && !strings.Contains(haystack, query) {
 			continue
@@ -143,7 +140,14 @@ func (s *AppService) listGrokAPISessions(workspace, search string) []GrokSession
 			UpdatedAt: session.UpdatedAt,
 		})
 	}
-	sort.SliceStable(result, func(i, j int) bool { return result[i].UpdatedAt > result[j].UpdatedAt })
+	sort.SliceStable(result, func(i, j int) bool {
+		iActive := workspace != "" && samePath(result[i].Workspace, workspace)
+		jActive := workspace != "" && samePath(result[j].Workspace, workspace)
+		if iActive != jActive {
+			return iActive
+		}
+		return result[i].UpdatedAt > result[j].UpdatedAt
+	})
 	return result
 }
 

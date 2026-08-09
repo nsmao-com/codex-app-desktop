@@ -362,8 +362,8 @@ func (s *AppService) UseGrokWorkspace(path string) (WorkspaceInfo, error) {
 
 func (s *AppService) ListGrokSessions(backend, workspace, search string) ([]GrokSessionSummary, error) {
 	backend = normalizeGrokBackend(backend)
-	// Workspace is optional for native sessions: we return all projects so the sidebar
-	// can group like Codex. API sessions stay scoped when a workspace is provided.
+	// Return every project for both backends so restored arena panes can resolve
+	// their owning workspace before a send. The active workspace is sorted first.
 	cleanWorkspace := ""
 	if strings.TrimSpace(workspace) != "" {
 		if clean, err := validateWorkspace(workspace); err == nil {
@@ -559,6 +559,33 @@ func (s *AppService) clearGrokRun(turnID string) {
 	}
 }
 
+func (s *AppService) validateGrokSendWorkspace(backend, sessionID, requestedWorkspace string) error {
+	backend = normalizeGrokBackend(backend)
+	sessionID = strings.TrimSpace(sessionID)
+	ownedWorkspace := ""
+	if backend == grokBackendAPI {
+		s.mu.Lock()
+		session := s.grokAPISessions[sessionID]
+		if session != nil {
+			ownedWorkspace = strings.TrimSpace(session.Workspace)
+		}
+		s.mu.Unlock()
+		if ownedWorkspace == "" {
+			return errors.New("Grok API session was not found")
+		}
+	} else {
+		session, err := findGrokNativeSession(sessionID)
+		if err != nil {
+			return errors.New("Grok Build session was not found")
+		}
+		ownedWorkspace = strings.TrimSpace(session.Summary.Workspace)
+	}
+	if !samePath(ownedWorkspace, requestedWorkspace) {
+		return errors.New("Grok session belongs to a different workspace")
+	}
+	return nil
+}
+
 func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, error) {
 	request.Backend = normalizeGrokBackend(request.Backend)
 	request.SessionID = strings.TrimSpace(request.SessionID)
@@ -576,8 +603,12 @@ func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, erro
 	if err != nil {
 		return GrokTurnRef{}, err
 	}
-	if newSession {
+	if request.SessionID == "" {
 		request.SessionID = newUUID()
+	} else if strings.HasPrefix(request.SessionID, "pending-grok-") {
+		request.SessionID = stablePendingSessionID("grok:"+request.Backend, request.SessionID, workspace)
+	} else if err := s.validateGrokSendWorkspace(request.Backend, request.SessionID, workspace); err != nil {
+		return GrokTurnRef{}, err
 	}
 	request.Workspace = workspace
 	request.Images = images

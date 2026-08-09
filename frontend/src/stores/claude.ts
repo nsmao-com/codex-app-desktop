@@ -424,6 +424,24 @@ export const useClaudeStore = defineStore('claude', () => {
       if (!nextUsage[realId]) nextUsage[realId] = pendingUsage
       tokenUsageBySession.value = nextUsage
     }
+    sessionOpenSequence.delete(pendingId)
+    if (loadingSessionId.value && sameClaudeSession(loadingSessionId.value, realId)) {
+      loadingSessionId.value = realId
+    }
+    const mutationKey = Object.keys(sessionMutationBySession.value)
+      .find((id) => sameClaudeSession(id, realId))
+    if (mutationKey && mutationKey !== realId) {
+      const nextMutations = { ...sessionMutationBySession.value }
+      const mutation = nextMutations[mutationKey]
+      delete nextMutations[mutationKey]
+      if (mutation) nextMutations[realId] = mutation
+      sessionMutationBySession.value = nextMutations
+    }
+    const pendingStartedTurn = latestStartedTurnBySession.get(pendingId)
+    if (pendingStartedTurn && !latestStartedTurnBySession.has(realId)) {
+      latestStartedTurnBySession.set(realId, pendingStartedTurn)
+    }
+    latestStartedTurnBySession.delete(pendingId)
     loadedSessionIds.delete(pendingId)
     rememberLoadedClaudeSession(realId)
   }
@@ -1066,6 +1084,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const requestedId = resolveSessionId(sessionId) || sessionId.trim()
     if (!requestedId) return
     const activate = options?.activate !== false
+    if (!activate && isSessionLoading(requestedId)) return
     const previousSessionId = activeSessionId.value
     if (activate) activeSessionId.value = requestedId
     rememberLoadedClaudeSession(requestedId)
@@ -1110,6 +1129,7 @@ export const useClaudeStore = defineStore('claude', () => {
         || known.updatedAt <= (cachedHistory?.loadedUpdatedAt ?? 0)
       if (
         !options?.terminalStatus
+        && Boolean(known)
         && cachedHistory
         && hasCachedTimeline
         && cacheIsCurrent
@@ -1517,7 +1537,7 @@ export const useClaudeStore = defineStore('claude', () => {
     return id
   }
 
-  function ensureActiveSessionId(targetSessionId?: string): string {
+  function ensureActiveSessionId(targetSessionId?: string, targetWorkspace = workspacePath.value): string {
     let sessionId = targetSessionId === undefined
       ? activeSessionId.value
       : resolveSessionId(targetSessionId)
@@ -1529,7 +1549,7 @@ export const useClaudeStore = defineStore('claude', () => {
         const now = Math.floor(Date.now() / 1000)
         sessions.value = [{
           id: sessionId,
-          workspace: workspacePath.value,
+          workspace: targetWorkspace,
           name: translate('sidebar.newTask'),
           preview: '',
           model: appStore.settings.claudeModel || 'sonnet',
@@ -1548,7 +1568,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const now = Math.floor(Date.now() / 1000)
     sessions.value = [{
       id: sessionId,
-      workspace: workspacePath.value,
+      workspace: targetWorkspace,
       name: translate('sidebar.newTask'),
       preview: '',
       model: appStore.settings.claudeModel || 'sonnet',
@@ -1710,10 +1730,29 @@ export const useClaudeStore = defineStore('claude', () => {
     text: string,
     images: string[] = [],
     targetSessionId?: string,
+    targetWorkspace = '',
   ): Promise<boolean> {
     const content = text.trim()
     if (!content && images.length === 0) return false
-    if (!workspacePath.value) {
+    const requestedSessionId = targetSessionId === undefined
+      ? activeSessionId.value
+      : (resolveSessionId(targetSessionId) || targetSessionId.trim())
+    let summary = requestedSessionId
+      ? sessions.value.find((item) => sameClaudeSession(item.id, requestedSessionId))
+      : undefined
+    if (requestedSessionId && !requestedSessionId.startsWith('pending-claude-') && !summary) {
+      await openSession(requestedSessionId, { activate: false, switchWorkspace: false })
+      summary = sessions.value.find((item) => sameClaudeSession(item.id, requestedSessionId))
+      if (!summary) return false
+    }
+    const requestedWorkspace = targetWorkspace.trim()
+    if (
+      requestedWorkspace
+      && summary?.workspace
+      && !sameWorkspacePath(requestedWorkspace, summary.workspace)
+    ) return false
+    const sessionWorkspace = summary?.workspace || requestedWorkspace || workspacePath.value
+    if (!sessionWorkspace) {
       notify('error', translate('sidebar.claudeEmpty'), translate('app.needWorkspaceHintReady'))
       return false
     }
@@ -1722,13 +1761,12 @@ export const useClaudeStore = defineStore('claude', () => {
       return false
     }
 
-    const sessionId = ensureActiveSessionId(targetSessionId)
+    const sessionId = ensureActiveSessionId(targetSessionId, sessionWorkspace)
     const busy = isSessionBusy(sessionId)
     const blockingTurnId = activeTurnBySession.value[sessionId]?.turnId || ''
     // Always enter the per-session queue first. This keeps a send from
     // overtaking an older follow-up while terminal history is being hydrated.
-    const summary = sessions.value.find((item) => sameClaudeSession(item.id, sessionId))
-    const sessionWorkspace = summary?.workspace || workspacePath.value
+    summary = sessions.value.find((item) => sameClaudeSession(item.id, sessionId)) || summary
     enqueue(
       sessionId,
       content,

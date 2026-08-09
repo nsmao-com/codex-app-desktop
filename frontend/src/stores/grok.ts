@@ -789,6 +789,10 @@ export const useGrokStore = defineStore('grok', () => {
       if (wasActive && to) activeSessionId.value = to
       return to || from
     }
+    if (from === to) {
+      if (wasActive) activeSessionId.value = to
+      return to
+    }
 
     const messageKeys = relatedSessionKeys(messagesBySession.value, to)
     if (messageKeys.length) replaceSessionMessages(to, mergedSessionMessages(to))
@@ -924,20 +928,17 @@ export const useGrokStore = defineStore('grok', () => {
       deduped.set(patched.id, previous ? { ...patched, ...previous } : patched)
     }
     sessions.value = [...deduped.values()]
-    const openSequenceKeys = [...sessionOpenSequence.keys()].filter((key) => sameGrokSession(key, to))
-    if (openSequenceKeys.length) {
-      const openSequence = Math.max(...openSequenceKeys.map((key) => sessionOpenSequence.get(key) || 0))
-      for (const key of openSequenceKeys) sessionOpenSequence.delete(key)
-      sessionOpenSequence.set(to, openSequence)
-    }
-    const loadingSequenceKeys = [...loadingSequenceBySession.keys()].filter((key) => sameGrokSession(key, to))
-    if (loadingSequenceKeys.length) {
-      const loadingSequence = Math.max(...loadingSequenceKeys.map((key) => loadingSequenceBySession.get(key) || 0))
-      for (const key of loadingSequenceKeys) loadingSequenceBySession.delete(key)
-      loadingSequenceBySession.set(to, loadingSequence)
+    // Invalidate reads started under the optimistic id. Their finally blocks keep
+    // the original loading key until they return, so re-keying it here would leave
+    // the real session permanently stuck in a loading state.
+    for (const key of [...sessionOpenSequence.keys()]) {
+      if (key !== to && sameGrokSession(key, to)) sessionOpenSequence.delete(key)
     }
     if (loadingSessionId.value && sameGrokSession(loadingSessionId.value, to)) loadingSessionId.value = to
     if (wasActive) activeSessionId.value = to
+    for (const id of [...loadedSessionIds]) {
+      if (id !== to && sameGrokSession(id, to)) loadedSessionIds.delete(id)
+    }
     rememberLoadedGrokSession(to)
     return to
   }
@@ -1871,6 +1872,7 @@ export const useGrokStore = defineStore('grok', () => {
     if (!requestedId) return
     const id = resolveSessionId(requestedId) || requestedId
     const activate = options?.activate !== false
+    if (!activate && isSessionLoading(id)) return
     const previousSessionId = activeSessionId.value
     if (activate) activeSessionId.value = id
     rememberLoadedGrokSession(id)
@@ -1922,6 +1924,7 @@ export const useGrokStore = defineStore('grok', () => {
         || known.updatedAt <= (cachedHistory?.loadedUpdatedAt ?? 0)
       if (
         !options?.terminalStatus
+        && Boolean(known)
         && cachedHistory?.backend === requestedBackend
         && hasCachedMessages
         && cacheIsCurrent
@@ -2524,10 +2527,28 @@ export const useGrokStore = defineStore('grok', () => {
     text: string,
     images: string[] = [],
     targetSessionId?: string,
+    targetWorkspace = '',
   ): Promise<boolean> {
     const message = text.trim()
     if (!message && !images.length) return false
-    const workspace = workspacePath.value
+    const requestedSessionId = targetSessionId === undefined
+      ? activeSessionId.value
+      : (resolveSessionId(targetSessionId) || targetSessionId.trim())
+    let summary = requestedSessionId
+      ? sessions.value.find((item) => sameGrokSession(item.id, requestedSessionId))
+      : undefined
+    if (requestedSessionId && !requestedSessionId.startsWith('pending-grok-') && !summary) {
+      await openSession(requestedSessionId, { activate: false, switchWorkspace: false })
+      summary = sessions.value.find((item) => sameGrokSession(item.id, requestedSessionId))
+      if (!summary) return false
+    }
+    const requestedWorkspace = targetWorkspace.trim()
+    if (
+      requestedWorkspace
+      && summary?.workspace
+      && !sameWorkspacePath(requestedWorkspace, summary.workspace)
+    ) return false
+    const workspace = summary?.workspace || requestedWorkspace || workspacePath.value
     if (!workspace) {
       notify('warning', translate('app.needWorkspace'), translate('app.needWorkspaceHintReady'))
       return false
@@ -2538,7 +2559,7 @@ export const useGrokStore = defineStore('grok', () => {
     }
 
     const sessionId = ensureSession(message, workspace, targetSessionId)
-    const summary = sessions.value.find((item) => sameGrokSession(item.id, sessionId))
+    summary = sessions.value.find((item) => sameGrokSession(item.id, sessionId)) || summary
     const turnBackend = summary?.backend === 'api' ? 'api' : backendId.value
     const turnWorkspace = summary?.workspace || workspace
     const turnModel = summary?.model || (turnBackend === 'api'

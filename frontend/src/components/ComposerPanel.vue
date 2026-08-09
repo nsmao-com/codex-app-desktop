@@ -1087,6 +1087,21 @@ function composerSessionExists(runtime: WorkspaceRuntime, sessionId: string): bo
       .some((item) => codexStore.sameThread(item.id, sessionId))
 }
 
+function composerTargetWorkspace(runtime: WorkspaceRuntime, sessionId: string): string {
+  if (runtime === 'grok') {
+    const session = grokStore.sessions.find((item) => grokStore.sameSession(item.id, sessionId))
+    return session?.workspace || (sessionId ? '' : grokStore.workspacePath)
+  }
+  if (runtime === 'claude') {
+    const session = claudeStore.sessions.find((item) => claudeStore.sameSession(item.id, sessionId))
+    return session?.workspace || (sessionId ? '' : claudeStore.workspacePath)
+  }
+  const thread = codexStore.threads.find((item) => codexStore.sameThread(item.id, sessionId))
+    || Object.values(codexStore.projectThreads).flat()
+      .find((item) => codexStore.sameThread(item.id, sessionId))
+  return thread?.cwd || (sessionId ? '' : appStore.currentWorkspacePath)
+}
+
 function clearRemovedComposerSession(
   runtime: WorkspaceRuntime,
   arena: boolean,
@@ -1207,7 +1222,9 @@ async function prepareArenaSession(
   return sessionId
 }
 
-async function send(): Promise<void> {
+let sendAdmissionPending = false
+
+async function performSend(): Promise<void> {
   const message = modelValue.value.trim()
   const images = [...attachedImages.value]
   const draftKey = props.draftKey
@@ -1232,6 +1249,7 @@ async function send(): Promise<void> {
       message,
       images,
       targetSessionId || '',
+      composerTargetWorkspace(targetRuntime, targetSessionId || ''),
     )
     if (
       arena
@@ -1260,6 +1278,7 @@ async function send(): Promise<void> {
       message,
       images,
       targetSessionId || '',
+      composerTargetWorkspace(targetRuntime, targetSessionId || ''),
     )
     emit('sent')
     const ok = await sendPromise
@@ -1272,16 +1291,30 @@ async function send(): Promise<void> {
     return
   }
   if (!codexStore.isRuntimeReady(targetRuntime)) return
-  const targetThread = targetSessionId
+  let targetThread = targetSessionId
     ? (codexStore.activeThread && codexStore.sameThread(codexStore.activeThread.id, targetSessionId)
         ? codexStore.activeThread
         : codexStore.threads.find((thread) => codexStore.sameThread(thread.id, targetSessionId))
           || Object.values(codexStore.projectThreads).flat()
             .find((thread) => codexStore.sameThread(thread.id, targetSessionId)))
     : null
-  const targetWorkspace = targetThread?.cwd
-    || (!workspaceStore.switchingWorkspace ? appStore.currentWorkspacePath : '')
-  if (!targetWorkspace) return
+  if (targetSessionId && !targetSessionId.startsWith('pending-thread-') && !targetThread) {
+    await codexStore.openThread(targetSessionId, { activate: false, runtime: targetRuntime })
+    if (
+      arena
+      && !arenaComposerTargetIsCurrent(targetPaneId, targetRuntime, targetSessionId)
+    ) return
+    targetThread = codexStore.threads.find((thread) => codexStore.sameThread(thread.id, targetSessionId))
+      || Object.values(codexStore.projectThreads).flat()
+        .find((thread) => codexStore.sameThread(thread.id, targetSessionId))
+      || null
+    if (!targetThread) return
+  }
+  const codexTargetWorkspace = targetThread?.cwd
+    || (!workspaceStore.switchingWorkspace
+      ? composerTargetWorkspace(targetRuntime, targetSessionId || '')
+      : '')
+  if (!codexTargetWorkspace) return
   resetSentHistoryNavigation()
   modelValue.value = ''
   attachedImages.value = []
@@ -1290,7 +1323,7 @@ async function send(): Promise<void> {
     images,
     targetSessionId || '',
     targetRuntime,
-    targetWorkspace,
+    codexTargetWorkspace,
   )
   emit('sent')
   const ok = await sendPromise
@@ -1298,6 +1331,16 @@ async function send(): Promise<void> {
     emit('restore-draft', { draftKey, text: message, images })
   } else {
     releaseAttachmentPreviews(images)
+  }
+}
+
+async function send(): Promise<void> {
+  if (sendAdmissionPending) return
+  sendAdmissionPending = true
+  try {
+    await performSend()
+  } finally {
+    sendAdmissionPending = false
   }
 }
 
