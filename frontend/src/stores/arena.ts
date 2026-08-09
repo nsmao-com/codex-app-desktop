@@ -143,11 +143,14 @@ export const useArenaStore = defineStore('arena', () => {
 
   function setPaneSession(paneId: string, sessionId: string): void {
     if (!panes.value.some((pane) => pane.id === paneId)) return
+    const current = sessionForPane(paneId)
     const next = { ...sessionByPane.value }
     const clean = sessionId.trim()
+    if (current === clean) return
     if (!clean) delete next[paneId]
     else next[paneId] = clean
     sessionByPane.value = next
+    sessionSelectionRevision.value += 1
     persist()
   }
 
@@ -196,6 +199,7 @@ export const useArenaStore = defineStore('arena', () => {
     panes.value = next
     focusedPaneId.value = next[0]!.id
     sessionByPane.value = {}
+    sessionSelectionRevision.value += 1
     enabled.value = true
     dragPaneId.value = ''
     persist()
@@ -224,6 +228,7 @@ export const useArenaStore = defineStore('arena', () => {
     if (!current.some((pane) => pane.id === focusedPaneId.value)) {
       focusedPaneId.value = current[0]!.id
     }
+    sessionSelectionRevision.value += 1
     persist()
   }
 
@@ -239,6 +244,7 @@ export const useArenaStore = defineStore('arena', () => {
     const pane: ArenaPane = { id: newPaneId(), runtime: nextRuntime }
     panes.value = [...panes.value, pane]
     focusedPaneId.value = pane.id
+    sessionSelectionRevision.value += 1
     persist()
     return true
   }
@@ -256,6 +262,7 @@ export const useArenaStore = defineStore('arena', () => {
     next.splice(index + 1, 0, pane)
     panes.value = next
     focusedPaneId.value = pane.id
+    sessionSelectionRevision.value += 1
     // Do not copy session binding — same provider, independent chat.
     persist()
     return true
@@ -273,14 +280,22 @@ export const useArenaStore = defineStore('arena', () => {
       delete nextSessions[paneId]
       sessionByPane.value = nextSessions
     }
+    if (previous.runtime !== nextRuntime) sessionSelectionRevision.value += 1
     persist()
   }
 
   function focusPane(paneId: string): void {
     if (!panes.value.some((pane) => pane.id === paneId)) return
+    if (focusedPaneId.value === paneId) return
     sessionSelectionRevision.value += 1
     focusedPaneId.value = paneId
     persist()
+  }
+
+  /** Re-run focused-pane activation when an external control selects it again. */
+  function requestFocusedPaneActivation(): void {
+    if (!focusedPane.value) return
+    sessionSelectionRevision.value += 1
   }
 
   function closePane(paneId: string): void {
@@ -299,6 +314,7 @@ export const useArenaStore = defineStore('arena', () => {
       delete nextSessions[paneId]
       sessionByPane.value = nextSessions
     }
+    sessionSelectionRevision.value += 1
     persist()
   }
 
@@ -313,6 +329,7 @@ export const useArenaStore = defineStore('arena', () => {
     sessionByPane.value = focused && sessionByPane.value[focused.id]
       ? { [focused.id]: sessionByPane.value[focused.id]! }
       : {}
+    sessionSelectionRevision.value += 1
     dragPaneId.value = ''
     persist()
   }
@@ -375,6 +392,23 @@ export const useArenaStore = defineStore('arena', () => {
     setPaneRuntime(paneId, next)
   }
 
+  /** Remove deleted/archived sessions from every pane of the owning runtime. */
+  function clearSessionBindings(runtime: WorkspaceRuntime, sessionIds: string[]): void {
+    const ids = new Set(sessionIds.map((id) => id.trim()).filter(Boolean))
+    if (!ids.size) return
+    const next = { ...sessionByPane.value }
+    let changed = false
+    for (const pane of panes.value) {
+      if (pane.runtime !== runtime || !ids.has(sessionForPane(pane.id))) continue
+      delete next[pane.id]
+      changed = true
+    }
+    if (!changed) return
+    sessionByPane.value = next
+    sessionSelectionRevision.value += 1
+    persist()
+  }
+
   return {
     enabled,
     panes,
@@ -396,6 +430,7 @@ export const useArenaStore = defineStore('arena', () => {
     duplicatePane,
     setPaneRuntime,
     focusPane,
+    requestFocusedPaneActivation,
     closePane,
     closeArena,
     movePane,
@@ -407,6 +442,7 @@ export const useArenaStore = defineStore('arena', () => {
     sessionForPane,
     setPaneSession,
     selectPaneSession,
+    clearSessionBindings,
     isSessionTakenByOtherPane,
   }
 })

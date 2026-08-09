@@ -120,13 +120,29 @@ const composerSessionId = computed(() => {
   return codexStore.activeThreadId
 })
 
+function matchingCodexThreadKey(record: Record<string, unknown>, threadId: string): string {
+  return Object.keys(record).find((id) => codexStore.sameThread(id, threadId)) || ''
+}
+
 const composerCodexThread = computed(() => {
   const id = composerSessionId.value
   if (!id) return null
-  if (codexStore.activeThread?.id === id) return codexStore.activeThread
-  return codexStore.threads.find((thread) => thread.id === id)
-    || Object.values(codexStore.projectThreads).flat().find((thread) => thread.id === id)
+  if (codexStore.activeThread && codexStore.sameThread(codexStore.activeThread.id, id)) return codexStore.activeThread
+  return codexStore.threads.find((thread) => codexStore.sameThread(thread.id, id))
+    || Object.values(codexStore.projectThreads).flat().find((thread) => codexStore.sameThread(thread.id, id))
     || null
+})
+const composerGrokSession = computed(() => {
+  const id = composerSessionId.value
+  return grokStore.sessions.find((session) => grokStore.sameSession(session.id, id)) || null
+})
+const composerClaudeSession = computed(() => {
+  const id = composerSessionId.value
+  return claudeStore.sessions.find((session) => claudeStore.sameSession(session.id, id)) || null
+})
+const composerTimelineThread = computed(() => {
+  const thread = composerCodexThread.value
+  return thread && codexStore.runtimeIDForThread(thread.id) === paneRuntime.value ? thread : null
 })
 
 function claudeSessionItems(sessionId: string) {
@@ -139,11 +155,12 @@ function claudeSessionItems(sessionId: string) {
 
 const sentMessageHistory = computed(() => {
   const sessionId = composerSessionId.value
+  const codexKey = matchingCodexThreadKey(codexStore.itemsByThread, sessionId)
   const items = isGrokMode.value
     ? grokStore.itemsForSession(sessionId)
     : isClaudeMode.value
       ? claudeSessionItems(sessionId)
-      : (codexStore.itemsByThread[sessionId] || [])
+      : ((codexKey && codexStore.itemsByThread[codexKey]) || [])
   return items
     .filter((item) => item.type === 'userMessage' && item.text.trim())
     .map((item) => item.text.trim())
@@ -185,13 +202,13 @@ const slashCommands = computed<SlashCommand[]>(() => {
         id: 'archive',
         label: '/archive',
         description: t('slash.archive'),
-        run: () => grokStore.archiveSession(composerSessionId.value),
+        run: archiveComposerSession,
       },
       {
         id: 'delete',
         label: '/delete',
         description: t('slash.delete'),
-        run: () => grokStore.deleteSession(composerSessionId.value),
+        run: deleteComposerSession,
       },
       {
         id: 'mcp',
@@ -207,7 +224,7 @@ const slashCommands = computed<SlashCommand[]>(() => {
         id: 'archive',
         label: '/archive',
         description: t('slash.archive'),
-        run: () => claudeStore.archiveSession(composerSessionId.value),
+        run: archiveComposerSession,
       },
       {
         id: 'rename',
@@ -219,7 +236,7 @@ const slashCommands = computed<SlashCommand[]>(() => {
         id: 'delete',
         label: '/delete',
         description: t('slash.delete'),
-        run: () => claudeStore.deleteSession(composerSessionId.value),
+        run: deleteComposerSession,
       },
     ]
   }
@@ -247,25 +264,31 @@ const slashCommands = computed<SlashCommand[]>(() => {
         id: 'compact',
         label: '/compact',
         description: t('slash.compact'),
-        run: () => codexStore.compactThread(composerSessionId.value),
+        run: compactComposerSession,
       },
       {
         id: 'fork',
         label: '/fork',
         description: t('slash.fork'),
-        run: () => codexStore.forkThread(composerSessionId.value),
+        run: forkComposerSession,
       },
       {
         id: 'archive',
         label: '/archive',
         description: t('slash.archive'),
-        run: () => codexStore.archiveThread(composerSessionId.value),
+        run: archiveComposerSession,
       },
       {
         id: 'rename',
         label: '/rename',
         description: t('slash.rename'),
         run: () => codexStore.renameThread(composerSessionId.value),
+      },
+      {
+        id: 'delete',
+        label: '/delete',
+        description: t('slash.delete'),
+        run: deleteComposerSession,
       },
       {
         id: 'mcp',
@@ -298,25 +321,25 @@ const slashCommands = computed<SlashCommand[]>(() => {
     id: 'review',
     label: '/review',
     description: t('slash.review'),
-    run: () => codexStore.startReview({ targetType: 'uncommittedChanges', delivery: 'inline' }),
+    run: reviewComposerSession,
   },
   {
     id: 'compact',
     label: '/compact',
     description: t('slash.compact'),
-    run: () => codexStore.compactThread(composerSessionId.value),
+    run: compactComposerSession,
   },
   {
     id: 'fork',
     label: '/fork',
     description: t('slash.fork'),
-    run: () => codexStore.forkThread(composerSessionId.value),
+    run: forkComposerSession,
   },
   {
     id: 'archive',
     label: '/archive',
     description: t('slash.archive'),
-    run: () => codexStore.archiveThread(composerSessionId.value),
+    run: archiveComposerSession,
   },
   {
     id: 'rename',
@@ -328,7 +351,7 @@ const slashCommands = computed<SlashCommand[]>(() => {
     id: 'delete',
     label: '/delete',
     description: t('slash.delete'),
-    run: () => codexStore.deleteThread(composerSessionId.value),
+    run: deleteComposerSession,
   },
   {
     id: 'mcp',
@@ -431,7 +454,8 @@ const activeTokenUsage = computed(() => {
       .find((id) => claudeStore.sameSession(id, sessionId))
     return key ? (claudeStore.tokenUsageBySession[key] || null) : null
   }
-  return codexStore.tokenUsageByThread[sessionId] || null
+  const key = matchingCodexThreadKey(codexStore.tokenUsageByThread, sessionId)
+  return (key && codexStore.tokenUsageByThread[key]) || null
 })
 const contextUsage = computed(() => buildContextUsageView(
   activeTokenUsage.value,
@@ -497,27 +521,27 @@ const externalModelCatalog = computed(() => {
 })
 const displayModel = computed(() => {
   if (isGrokMode.value) {
-    return appStore.settings.grokBackend === 'api'
+    return composerGrokSession.value?.model || (appStore.settings.grokBackend === 'api'
       ? (appStore.settings.grokAPIModel || appStore.settings.grokBuildModel || 'grok-4.5')
-      : (appStore.settings.grokBuildModel || appStore.settings.grokAPIModel || 'grok-4.5')
+      : (appStore.settings.grokBuildModel || appStore.settings.grokAPIModel || 'grok-4.5'))
   }
   if (isClaudeMode.value) {
-    return appStore.settings.claudeModel || 'sonnet'
+    return composerClaudeSession.value?.model || appStore.settings.claudeModel || 'sonnet'
   }
-  if (isGeminiMode.value) return appStore.settings.geminiModel || 'gemini-2.5-pro'
-  if (isOpenCodeMode.value) return appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6'
-  return sessionLocked.value
-    ? (composerCodexThread.value?.model || appStore.settings.model)
-    : appStore.settings.model
+  if (isGeminiMode.value) {
+    return composerTimelineThread.value?.model || appStore.settings.geminiModel || 'gemini-2.5-pro'
+  }
+  if (isOpenCodeMode.value) {
+    return composerTimelineThread.value?.model || appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6'
+  }
+  return composerTimelineThread.value?.model || appStore.settings.model
 })
 const displayEffort = computed(() => {
-  if (isGrokMode.value) return appStore.settings.grokEffort || 'high'
-  if (isClaudeMode.value) return appStore.settings.claudeEffort || 'high'
-  if (isGeminiMode.value) return appStore.settings.geminiEffort || 'auto'
-  if (isOpenCodeMode.value) return appStore.settings.openCodeEffort || 'high'
-  return sessionLocked.value
-    ? (composerCodexThread.value?.effort || appStore.settings.effort)
-    : appStore.settings.effort
+  if (isGrokMode.value) return composerGrokSession.value?.effort || appStore.settings.grokEffort || 'high'
+  if (isClaudeMode.value) return composerClaudeSession.value?.effort || appStore.settings.claudeEffort || 'high'
+  if (isGeminiMode.value) return composerTimelineThread.value?.effort || appStore.settings.geminiEffort || 'auto'
+  if (isOpenCodeMode.value) return composerTimelineThread.value?.effort || appStore.settings.openCodeEffort || 'high'
+  return composerTimelineThread.value?.effort || appStore.settings.effort
 })
 const selectedModel = computed(() => {
   if (isGeminiMode.value || isOpenCodeMode.value) {
@@ -660,7 +684,8 @@ const activeQueuedMessages = computed(() => {
       .find((id) => claudeStore.sameSession(id, sessionId))
     return key ? (claudeStore.queueBySession[key] || []) : []
   }
-  return codexStore.queuedMessagesByThread[sessionId] || []
+  const key = matchingCodexThreadKey(codexStore.queuedMessagesByThread, sessionId)
+  return (key && codexStore.queuedMessagesByThread[key]) || []
 })
 /** Only show the queue strip when something is actually waiting / failed — not the in-flight send. */
 const showQueueStrip = computed(() =>
@@ -669,12 +694,12 @@ const showQueueStrip = computed(() =>
 const activeSelectionLoading = computed(() => {
   const sessionId = composerSessionId.value
   if (isGrokMode.value) {
-    return Boolean(sessionId && grokStore.sameSession(grokStore.loadingSessionId, sessionId))
+    return grokStore.isSessionLoading(sessionId)
   }
   if (isClaudeMode.value) {
-    return Boolean(sessionId && claudeStore.sameSession(claudeStore.loadingSessionId, sessionId))
+    return claudeStore.isSessionLoading(sessionId)
   }
-  return Boolean(sessionId && codexStore.loadingThreadId === sessionId)
+  return codexStore.threadIsLoading(sessionId)
 })
 /**
  * Follow-ups stay sendable while a turn runs. Codex may steer only when the
@@ -683,14 +708,14 @@ const activeSelectionLoading = computed(() => {
 const canSend = computed(() => {
   const hasContent = Boolean(modelValue.value.trim()) || attachedImages.value.length > 0
   if (attachingImages.value) return false
-  if (workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return false
+  if (!isArenaPane.value && workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return false
   if (isGrokMode.value) {
     return hasContent && grokStore.isReady
   }
   if (isClaudeMode.value) {
     return hasContent && claudeStore.isReady && Boolean(claudeStore.workspacePath)
   }
-  return hasContent && codexStore.isReady && !codexStore.creatingThread
+  return hasContent && codexStore.isRuntimeReady(paneRuntime.value) && !codexStore.creatingThread
 })
 
 function canMoveQueued(index: number, direction: 'up' | 'down'): boolean {
@@ -739,28 +764,25 @@ const willQueueOnSend = computed(() => {
     const running = claudeStore.runningSessionIds.some((id) => claudeStore.sameSession(id, sessionId))
     return loadingActiveSession || running || activeQueuedMessages.value.some((item) => item.state === 'sending') || showQueueStrip.value
   }
-  return Boolean(sessionId && (
-    codexStore.activeTurnByThread[sessionId]
-    || codexStore.sendingThreadIds.includes(sessionId)
-  )) || showQueueStrip.value
+  return Boolean(sessionId && codexStore.threadHasActiveWork(sessionId)) || showQueueStrip.value
 })
 const activeRuntimeTurnRunning = computed(() => {
   const sessionId = composerSessionId.value
   if (isGrokMode.value) return grokStore.runningSessionIds.some((id) => grokStore.sameSession(id, sessionId))
   if (isClaudeMode.value) return claudeStore.runningSessionIds.some((id) => claudeStore.sameSession(id, sessionId))
-  return Boolean(sessionId && codexStore.activeTurnByThread[sessionId])
+  return codexStore.threadHasActiveWork(sessionId)
 })
 const activeRuntimeSending = computed(() => {
   if (isGrokMode.value || isClaudeMode.value) {
     return activeQueuedMessages.value.some((item) => item.state === 'sending')
   }
-  return codexStore.sendingThreadIds.includes(composerSessionId.value)
+  return codexStore.isThreadSubmitting(composerSessionId.value)
 })
 const stopDisabled = computed(() => {
-  if (workspaceStore.switchingWorkspace) return true
-  if (isGrokMode.value) return grokStore.interrupting
-  if (isClaudeMode.value) return claudeStore.interrupting
-  return codexStore.interruptingTurn
+  if (!isArenaPane.value && workspaceStore.switchingWorkspace) return true
+  if (isGrokMode.value) return grokStore.isSessionInterrupting(composerSessionId.value)
+  if (isClaudeMode.value) return claudeStore.isSessionInterrupting(composerSessionId.value)
+  return codexStore.isThreadInterrupting(composerSessionId.value)
 })
 const sendButtonLabel = computed(() => {
   if (willQueueOnSend.value) return t('chat.queueSend')
@@ -1056,9 +1078,72 @@ async function togglePlanMode(): Promise<void> {
   )
 }
 
+function composerSessionExists(sessionId: string): boolean {
+  if (isGrokMode.value) {
+    return grokStore.sessions.some((item) => grokStore.sameSession(item.id, sessionId))
+  }
+  if (isClaudeMode.value) {
+    return claudeStore.sessions.some((item) => claudeStore.sameSession(item.id, sessionId))
+  }
+  return codexStore.threads.some((item) => codexStore.sameThread(item.id, sessionId))
+    || Object.values(codexStore.projectThreads).flat()
+      .some((item) => codexStore.sameThread(item.id, sessionId))
+}
+
+function clearRemovedComposerSession(sessionId: string, resolvedId: string): void {
+  if (!isArenaPane.value || composerSessionExists(resolvedId || sessionId)) return
+  arenaStore.clearSessionBindings(paneRuntime.value, [sessionId, resolvedId])
+}
+
+async function archiveComposerSession(): Promise<void> {
+  const sessionId = composerSessionId.value
+  if (!sessionId) return
+  const resolvedId = isGrokMode.value
+    ? grokStore.resolveSessionId(sessionId)
+    : isClaudeMode.value
+      ? claudeStore.resolveSessionId(sessionId)
+      : codexStore.resolveThreadID(sessionId)
+  if (isGrokMode.value) await grokStore.archiveSession(sessionId)
+  else if (isClaudeMode.value) await claudeStore.archiveSession(sessionId)
+  else await codexStore.archiveThread(sessionId)
+  clearRemovedComposerSession(sessionId, resolvedId)
+}
+
+async function deleteComposerSession(): Promise<void> {
+  const sessionId = composerSessionId.value
+  if (!sessionId) return
+  const resolvedId = isGrokMode.value
+    ? grokStore.resolveSessionId(sessionId)
+    : isClaudeMode.value
+      ? claudeStore.resolveSessionId(sessionId)
+      : codexStore.resolveThreadID(sessionId)
+  if (isGrokMode.value) await grokStore.deleteSession(sessionId)
+  else if (isClaudeMode.value) await claudeStore.deleteSession(sessionId)
+  else await codexStore.deleteThread(sessionId)
+  clearRemovedComposerSession(sessionId, resolvedId)
+}
+
+function compactComposerSession(): void {
+  const sessionId = composerSessionId.value
+  if (sessionId) void codexStore.compactThread(sessionId, !isArenaPane.value)
+}
+
+function reviewComposerSession(): void {
+  const sessionId = composerSessionId.value
+  if (!sessionId) return
+  void codexStore.startReview(
+    { targetType: 'uncommittedChanges', delivery: 'inline' },
+    sessionId,
+  )
+}
+
+async function forkComposerSession(): Promise<void> {
+  const thread = await codexStore.forkThread(composerSessionId.value, !isArenaPane.value)
+  if (isArenaPane.value && thread?.id) arenaStore.selectPaneSession(paneId.value, thread.id)
+}
+
 async function prepareArenaSession(): Promise<string | null> {
   if (!isArenaPane.value) return composerSessionId.value
-  if (!await appStore.setActiveRuntime(paneRuntime.value)) return null
 
   let sessionId = boundSessionId.value
   if (
@@ -1072,30 +1157,17 @@ async function prepareArenaSession(): Promise<string | null> {
     sessionId = ''
   }
 
-  if (sessionId) {
-    if (isGrokMode.value) {
-      await grokStore.openSession(sessionId)
-    } else if (isClaudeMode.value) {
-      await claudeStore.openSession(sessionId)
-    } else {
-      if (sessionId.startsWith('pending-thread-')) return sessionId
-      const thread = codexStore.threads.find((item) => item.id === sessionId)
-        || Object.values(codexStore.projectThreads).flat().find((item) => item.id === sessionId)
-      if (thread?.cwd) await codexStore.openProjectThread(thread.cwd, sessionId)
-      else await codexStore.openThread(sessionId)
-    }
-    return sessionId
-  }
+  if (sessionId) return sessionId
 
   if (isGrokMode.value) {
     grokStore.newSession()
     return ''
   }
   if (isClaudeMode.value) {
-    claudeStore.newSession()
+    claudeStore.newSession(true)
     sessionId = claudeStore.activeSessionId
   } else {
-    const thread = await codexStore.newThread(true)
+    const thread = await codexStore.newRuntimeThread(paneRuntime.value, true)
     sessionId = thread?.id || ''
   }
   if (!sessionId) return isGrokMode.value ? '' : null
@@ -1109,7 +1181,7 @@ async function send(): Promise<void> {
   const draftKey = props.draftKey
   if (!message && !images.length) return
   if (attachingImages.value) return
-  if (workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return
+  if (!isArenaPane.value && workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return
   const targetSessionId = await prepareArenaSession()
   if (isArenaPane.value && targetSessionId === null) return
   if (isGrokMode.value) {
@@ -1159,7 +1231,7 @@ async function send(): Promise<void> {
     }
     return
   }
-  if (!codexStore.isReady) return
+  if (!codexStore.isRuntimeReady(paneRuntime.value)) return
   resetSentHistoryNavigation()
   modelValue.value = ''
   attachedImages.value = []
@@ -1167,6 +1239,7 @@ async function send(): Promise<void> {
     message,
     images,
     isArenaPane.value ? targetSessionId || '' : undefined,
+    isArenaPane.value ? paneRuntime.value : undefined,
   )
   emit('sent')
   const ok = await sendPromise
@@ -1178,7 +1251,7 @@ async function send(): Promise<void> {
 }
 
 function onStop(): void {
-  if (workspaceStore.switchingWorkspace) return
+  if (!isArenaPane.value && workspaceStore.switchingWorkspace) return
   if (isGrokMode.value) {
     void grokStore.interruptTurn(composerSessionId.value)
     return
@@ -1371,17 +1444,25 @@ async function applyModelSelection(value: string): Promise<void> {
     } else {
       appStore.updateGrokPreferences({ grokBuildModel: modelID })
     }
+    if (composerSessionId.value) {
+      grokStore.patchSessionPreferences(composerSessionId.value, modelID, displayEffort.value)
+    }
     return
   }
   if (isClaudeMode.value) {
     appStore.patchSettings({ claudeModel: modelID })
+    if (composerSessionId.value) {
+      claudeStore.patchSessionPreferences(composerSessionId.value, modelID, displayEffort.value)
+    }
     return
   }
   if (isGeminiMode.value) {
     appStore.patchSettings({ geminiModel: modelID })
-    if (sessionLocked.value && composerCodexThread.value) {
-      codexStore.patchSessionPreferences(composerCodexThread.value.id, modelID, displayEffort.value)
-      void codexStore.updateSessionPreferences({ sessionId: composerCodexThread.value.id, model: modelID, effort: displayEffort.value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+    if (composerTimelineThread.value) {
+      codexStore.patchSessionPreferences(composerTimelineThread.value.id, modelID, displayEffort.value)
+      if (!composerTimelineThread.value.id.startsWith('pending-thread-')) {
+        void codexStore.updateSessionPreferences({ sessionId: composerTimelineThread.value.id, model: modelID, effort: displayEffort.value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+      }
     }
     return
   }
@@ -1391,9 +1472,11 @@ async function applyModelSelection(value: string): Promise<void> {
       openCodeModel: modelID,
       ...(provider ? { openCodeProvider: provider } : {}),
     })
-    if (sessionLocked.value && composerCodexThread.value) {
-      codexStore.patchSessionPreferences(composerCodexThread.value.id, modelID, displayEffort.value)
-      void codexStore.updateSessionPreferences({ sessionId: composerCodexThread.value.id, model: modelID, effort: displayEffort.value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+    if (composerTimelineThread.value) {
+      codexStore.patchSessionPreferences(composerTimelineThread.value.id, modelID, displayEffort.value)
+      if (!composerTimelineThread.value.id.startsWith('pending-thread-')) {
+        void codexStore.updateSessionPreferences({ sessionId: composerTimelineThread.value.id, model: modelID, effort: displayEffort.value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+      }
     }
     return
   }
@@ -1435,25 +1518,35 @@ async function applyModelSelection(value: string): Promise<void> {
 function onEffortChange(value: string): void {
   if (isGrokMode.value) {
     appStore.updateGrokPreferences({ grokEffort: value })
+    if (composerSessionId.value) {
+      grokStore.patchSessionPreferences(composerSessionId.value, displayModel.value, value)
+    }
     return
   }
   if (isClaudeMode.value) {
     appStore.patchSettings({ claudeEffort: value })
+    if (composerSessionId.value) {
+      claudeStore.patchSessionPreferences(composerSessionId.value, displayModel.value, value)
+    }
     return
   }
   if (isGeminiMode.value) {
     appStore.patchSettings({ geminiEffort: value })
-    if (sessionLocked.value && composerCodexThread.value) {
-      codexStore.patchSessionPreferences(composerCodexThread.value.id, displayModel.value, value)
-      void codexStore.updateSessionPreferences({ sessionId: composerCodexThread.value.id, model: displayModel.value, effort: value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+    if (composerTimelineThread.value) {
+      codexStore.patchSessionPreferences(composerTimelineThread.value.id, displayModel.value, value)
+      if (!composerTimelineThread.value.id.startsWith('pending-thread-')) {
+        void codexStore.updateSessionPreferences({ sessionId: composerTimelineThread.value.id, model: displayModel.value, effort: value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+      }
     }
     return
   }
   if (isOpenCodeMode.value) {
     appStore.patchSettings({ openCodeEffort: value })
-    if (sessionLocked.value && composerCodexThread.value) {
-      codexStore.patchSessionPreferences(composerCodexThread.value.id, displayModel.value, value)
-      void codexStore.updateSessionPreferences({ sessionId: composerCodexThread.value.id, model: displayModel.value, effort: value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+    if (composerTimelineThread.value) {
+      codexStore.patchSessionPreferences(composerTimelineThread.value.id, displayModel.value, value)
+      if (!composerTimelineThread.value.id.startsWith('pending-thread-')) {
+        void codexStore.updateSessionPreferences({ sessionId: composerTimelineThread.value.id, model: displayModel.value, effort: value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+      }
     }
     return
   }

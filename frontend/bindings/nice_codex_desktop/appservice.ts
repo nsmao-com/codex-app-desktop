@@ -95,6 +95,14 @@ export function CreateGitBranch(request: $models.GitBranchRequest): $Cancellable
     return $Call.ByID(376396278, request);
 }
 
+/**
+ * CreateRuntimeThread allocates a lazy local session for one arena pane without
+ * relying on the globally focused runtime changing while another pane is sending.
+ */
+export function CreateRuntimeThread(runtimeID: string, workspace: string): $CancellablePromise<{ [_ in string]?: any } | null> {
+    return $Call.ByID(1507699650, runtimeID, workspace);
+}
+
 export function CreateThread(): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(1065248874);
 }
@@ -243,6 +251,10 @@ export function ListPlugins(): $CancellablePromise<{ [_ in string]?: any } | nul
     return $Call.ByID(442045366);
 }
 
+export function ListRuntimeWorkspaceThreads(runtimeID: string, workspace: string, search: string): $CancellablePromise<{ [_ in string]?: any } | null> {
+    return $Call.ByID(775825556, runtimeID, workspace, search);
+}
+
 export function ListScheduledTasks(): $CancellablePromise<$models.ScheduledTask[] | null> {
     return $Call.ByID(2711200733);
 }
@@ -316,6 +328,14 @@ export function OpenMemoriesFolder(): $CancellablePromise<void> {
 
 export function OpenTerminal(): $CancellablePromise<void> {
     return $Call.ByID(3614603658);
+}
+
+/**
+ * OpenWorkspaceLocalPath keeps file links in a background arena pane scoped to
+ * that conversation's project instead of the globally focused runtime folder.
+ */
+export function OpenWorkspaceLocalPath(rawPath: string, workspace: string): $CancellablePromise<void> {
+    return $Call.ByID(1396600385, rawPath, workspace);
 }
 
 /**

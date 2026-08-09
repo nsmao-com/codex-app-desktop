@@ -193,6 +193,25 @@ function matchShortcut(event: KeyboardEvent, binding: string): boolean {
   return event.key.toLowerCase() === key.toLowerCase()
 }
 
+async function createShortcutSession(): Promise<void> {
+  const pane = arenaStore.isArenaMode ? arenaStore.focusedPane : null
+  const runtime = pane?.runtime || appStore.activeRuntime
+  if (runtime === 'grok') {
+    grokStore.newSession()
+    if (pane) arenaStore.setPaneSession(pane.id, grokStore.activeSessionId)
+    return
+  }
+  if (runtime === 'claude') {
+    claudeStore.newSession(Boolean(pane))
+    if (pane && claudeStore.activeSessionId) arenaStore.setPaneSession(pane.id, claudeStore.activeSessionId)
+    return
+  }
+  const thread = pane
+    ? await codexStore.newRuntimeThread(runtime, true)
+    : await codexStore.newThread()
+  if (pane && thread?.id) arenaStore.setPaneSession(pane.id, thread.id)
+}
+
 function onGlobalKeydown(event: KeyboardEvent): void {
   const settings = appStore.settings
   const paletteBinding = settings.shortcutCommandPalette || 'Ctrl+K'
@@ -217,19 +236,7 @@ function onGlobalKeydown(event: KeyboardEvent): void {
   const newThreadBinding = settings.shortcutNewThread || 'Ctrl+N'
   if (matchShortcut(event, newThreadBinding)) {
     event.preventDefault()
-    if (appStore.isGrokMode) {
-      grokStore.newSession()
-      return
-    }
-    if (appStore.isClaudeMode) {
-      claudeStore.newSession()
-      return
-    }
-    if (appStore.isGeminiMode || appStore.isOpenCodeMode) {
-      void codexStore.newThread()
-      return
-    }
-    if (codexStore.isReady) void codexStore.newThread()
+    void createShortcutSession()
   }
 }
 </script>

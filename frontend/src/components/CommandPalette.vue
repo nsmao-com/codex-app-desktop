@@ -20,14 +20,28 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { useAppStore, useBrowserStore, useCodexStore, useShellStore, useTerminalStore, useWorkspaceStore } from '@/stores'
+import {
+  useAppStore,
+  useArenaStore,
+  useBrowserStore,
+  useClaudeStore,
+  useCodexStore,
+  useGrokStore,
+  useShellStore,
+  useTerminalStore,
+  useWorkspaceStore,
+} from '@/stores'
+import type { WorkspaceRuntime } from '@/stores/app'
 
 const open = defineModel<boolean>('open', { default: false })
 
 const { t } = useI18n()
 const router = useRouter()
 const appStore = useAppStore()
+const arenaStore = useArenaStore()
 const codexStore = useCodexStore()
+const grokStore = useGrokStore()
+const claudeStore = useClaudeStore()
 const shellStore = useShellStore()
 const terminalStore = useTerminalStore()
 const browserStore = useBrowserStore()
@@ -44,6 +58,157 @@ type PaletteCommand = {
   icon: typeof Command
   run: () => void | Promise<void>
   keywords?: string
+  disabled?: boolean
+}
+
+const palettePane = computed(() => arenaStore.isArenaMode ? arenaStore.focusedPane : null)
+const paletteRuntime = computed<WorkspaceRuntime>(() => palettePane.value?.runtime || appStore.activeRuntime)
+const paletteSessionId = computed(() => {
+  const pane = palettePane.value
+  if (pane) return arenaStore.sessionForPane(pane.id)
+  if (paletteRuntime.value === 'grok') return grokStore.activeSessionId
+  if (paletteRuntime.value === 'claude') return claudeStore.activeSessionId
+  return codexStore.activeThreadId
+})
+const paletteThread = computed(() => {
+  const id = paletteSessionId.value
+  if (!id || paletteRuntime.value === 'grok' || paletteRuntime.value === 'claude') return null
+  if (codexStore.activeThread && codexStore.sameThread(codexStore.activeThread.id, id)) {
+    return codexStore.activeThread
+  }
+  return codexStore.threads.find((thread) => codexStore.sameThread(thread.id, id))
+    || Object.values(codexStore.projectThreads).flat()
+      .find((thread) => codexStore.sameThread(thread.id, id))
+    || null
+})
+const paletteSessionBusy = computed(() => {
+  const id = paletteSessionId.value
+  if (!id) return false
+  if (paletteRuntime.value === 'grok') {
+    return Boolean(grokStore.sessionMutationForSession(id)) || grokStore.isSessionBusy(id)
+  }
+  if (paletteRuntime.value === 'claude') {
+    return Boolean(claudeStore.sessionMutationForSession(id)) || claudeStore.isSessionBusy(id)
+  }
+  return Boolean(codexStore.threadMutationForThread(id))
+    || codexStore.threadIsBusy(id)
+    || (codexStore.queuedMessagesByThread[id]?.length ?? 0) > 0
+})
+const paletteNewSessionDisabled = computed(() => {
+  if (paletteRuntime.value === 'grok') return !grokStore.workspacePath
+  if (paletteRuntime.value === 'claude') return !claudeStore.workspacePath
+  return !codexStore.isRuntimeReady(paletteRuntime.value) || codexStore.creatingThread
+})
+const paletteCanCompact = computed(() => Boolean(
+  paletteRuntime.value !== 'grok'
+  && paletteRuntime.value !== 'claude'
+  && paletteSessionId.value
+  && !paletteSessionId.value.startsWith('pending-thread-')
+  && !paletteSessionBusy.value,
+))
+const paletteCanReview = computed(() => Boolean(
+  paletteRuntime.value === 'codex'
+  && paletteSessionId.value
+  && !paletteSessionId.value.startsWith('pending-thread-')
+  && !paletteSessionBusy.value,
+))
+
+function bindPaletteSession(runtime: WorkspaceRuntime, sessionId: string): boolean {
+  const pane = palettePane.value
+  if (!pane || pane.runtime !== runtime) return false
+  arenaStore.selectPaneSession(pane.id, sessionId)
+  return true
+}
+
+async function syncPaletteRuntime(): Promise<boolean> {
+  const runtime = paletteRuntime.value
+  return appStore.activeRuntime === runtime
+    ? appStore.ensureActiveRuntimeSynced(runtime)
+    : appStore.setActiveRuntime(runtime)
+}
+
+async function createPaletteSession(): Promise<void> {
+  if (paletteNewSessionDisabled.value) return
+  const pane = palettePane.value
+  const runtime = paletteRuntime.value
+  if (runtime === 'grok') {
+    grokStore.newSession()
+    if (pane) arenaStore.setPaneSession(pane.id, grokStore.activeSessionId)
+    return
+  }
+  if (runtime === 'claude') {
+    claudeStore.newSession(Boolean(pane))
+    if (pane && claudeStore.activeSessionId) arenaStore.setPaneSession(pane.id, claudeStore.activeSessionId)
+    return
+  }
+  const thread = pane
+    ? await codexStore.newRuntimeThread(runtime, true)
+    : await codexStore.newThread()
+  if (pane && thread?.id) arenaStore.setPaneSession(pane.id, thread.id)
+}
+
+async function selectPaletteWorkspace(): Promise<void> {
+  if (workspaceStore.switchingWorkspace || !await syncPaletteRuntime()) return
+  const runtime = paletteRuntime.value
+  if (runtime === 'grok') {
+    const path = await workspaceStore.selectWorkspace()
+    if (!path) return
+    await grokStore.loadSessions(true)
+    const group = grokStore.sessionGroups.find((item) => item.active)
+    const target = group?.sessions.find((item) => grokStore.sameSession(item.id, grokStore.activeSessionId))
+      || group?.sessions[0]
+    if (target) {
+      if (!bindPaletteSession(runtime, target.id)) {
+        await grokStore.openSession(target.id, { switchWorkspace: false })
+      }
+    } else {
+      grokStore.newSession()
+      bindPaletteSession(runtime, grokStore.activeSessionId)
+    }
+    return
+  }
+  if (runtime === 'claude') {
+    const path = await workspaceStore.selectWorkspace()
+    if (!path) return
+    await claudeStore.loadSessions()
+    const group = claudeStore.sessionGroups.find((item) => item.active)
+    const target = group?.sessions.find((item) => claudeStore.sameSession(item.id, claudeStore.activeSessionId))
+      || group?.sessions[0]
+    if (target) {
+      if (!bindPaletteSession(runtime, target.id)) {
+        await claudeStore.openSession(target.id, { switchWorkspace: false })
+      }
+    } else {
+      claudeStore.newSession(Boolean(palettePane.value))
+      bindPaletteSession(runtime, claudeStore.activeSessionId)
+    }
+    return
+  }
+  await codexStore.selectProject()
+  const pane = palettePane.value
+  if (pane) arenaStore.setPaneSession(pane.id, codexStore.activeThreadId)
+}
+
+function reviewPaletteSession(): void {
+  if (!paletteCanReview.value) return
+  void codexStore.startReview(
+    { targetType: 'uncommittedChanges', delivery: 'inline' },
+    paletteSessionId.value,
+  )
+}
+
+function compactPaletteSession(): void {
+  if (!paletteCanCompact.value) return
+  void codexStore.compactThread(paletteSessionId.value, !palettePane.value)
+}
+
+function togglePalettePlanMode(): void {
+  if (paletteRuntime.value !== 'codex' || !paletteThread.value || paletteSessionBusy.value) return
+  const isPlan = (paletteThread.value.collaborationMode || appStore.settings.collaborationMode) === 'plan'
+  void codexStore.setCollaborationMode(
+    isPlan ? 'default' : 'plan',
+    paletteSessionId.value,
+  )
 }
 
 const commands = computed<PaletteCommand[]>(() => [
@@ -53,7 +218,8 @@ const commands = computed<PaletteCommand[]>(() => [
     hint: 'Ctrl+N',
     icon: MessageSquarePlus,
     keywords: 'new chat thread 新建',
-    run: () => { if (codexStore.isReady) void codexStore.newThread() },
+    disabled: paletteNewSessionDisabled.value,
+    run: createPaletteSession,
   },
   {
     id: 'terminal',
@@ -101,7 +267,8 @@ const commands = computed<PaletteCommand[]>(() => [
     hint: '',
     icon: FolderOpen,
     keywords: 'workspace folder 工作区',
-    run: () => { void workspaceStore.selectWorkspace() },
+    disabled: workspaceStore.switchingWorkspace,
+    run: selectPaletteWorkspace,
   },
   {
     id: 'sidebar',
@@ -117,7 +284,8 @@ const commands = computed<PaletteCommand[]>(() => [
     hint: '/review',
     icon: Command,
     keywords: 'review git',
-    run: () => { void codexStore.startReview({ targetType: 'uncommittedChanges', delivery: 'inline' }) },
+    disabled: !paletteCanReview.value,
+    run: reviewPaletteSession,
   },
   {
     id: 'compact',
@@ -125,7 +293,8 @@ const commands = computed<PaletteCommand[]>(() => [
     hint: '/compact',
     icon: Command,
     keywords: 'compact',
-    run: () => { void codexStore.compactActiveThread() },
+    disabled: !paletteCanCompact.value,
+    run: compactPaletteSession,
   },
   {
     id: 'memories',
@@ -141,10 +310,8 @@ const commands = computed<PaletteCommand[]>(() => [
     hint: 'Shift+Tab',
     icon: Command,
     keywords: 'plan mode',
-    run: () => {
-      const isPlan = (codexStore.activeThread?.collaborationMode || appStore.settings.collaborationMode) === 'plan'
-      void codexStore.setCollaborationMode(isPlan ? 'default' : 'plan')
-    },
+    disabled: paletteRuntime.value !== 'codex' || !paletteThread.value || paletteSessionBusy.value,
+    run: togglePalettePlanMode,
   },
 ])
 
@@ -175,7 +342,7 @@ function onOpenChange(value: boolean): void {
 }
 
 async function runCommand(command?: PaletteCommand): Promise<void> {
-  if (!command) return
+  if (!command || command.disabled) return
   open.value = false
   await command.run()
 }
@@ -226,7 +393,12 @@ function onKeydown(event: KeyboardEvent): void {
           :key="command.id"
           type="button"
           class="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm transition-colors"
-          :class="i === index ? 'bg-muted text-foreground' : 'text-foreground/85 hover:bg-muted/60'"
+          :class="command.disabled
+            ? 'cursor-not-allowed text-muted-foreground/45'
+            : i === index
+              ? 'bg-muted text-foreground'
+              : 'text-foreground/85 hover:bg-muted/60'"
+          :disabled="command.disabled"
           @mouseenter="index = i"
           @click="runCommand(command)"
         >

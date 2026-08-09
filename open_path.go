@@ -26,19 +26,24 @@ func openPathInOS(path string) error {
 // OpenLocalPath opens a workspace-local file or folder with the OS default handler.
 // Accepts absolute paths, workspace-relative paths, and file:// URLs.
 func (s *AppService) OpenLocalPath(rawPath string) error {
+	return s.OpenWorkspaceLocalPath(rawPath, s.Settings().Workspace)
+}
+
+// OpenWorkspaceLocalPath keeps file links in a background arena pane scoped to
+// that conversation's project instead of the globally focused runtime folder.
+func (s *AppService) OpenWorkspaceLocalPath(rawPath string, workspace string) error {
 	path, err := normalizeLocalOpenPath(rawPath)
 	if err != nil {
 		return err
 	}
-	workspace := strings.TrimSpace(s.Settings().Workspace)
+	workspace = strings.TrimSpace(workspace)
 	if workspace == "" {
 		return errors.New("choose a workspace before opening local files")
 	}
-	workspaceAbs, err := filepath.Abs(workspace)
+	workspaceAbs, err := validateWorkspace(workspace)
 	if err != nil {
 		return err
 	}
-	workspaceAbs = filepath.Clean(workspaceAbs)
 
 	absolute, err := resolveWorkspaceOpenPath(workspaceAbs, path)
 	if err != nil {

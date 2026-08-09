@@ -139,6 +139,22 @@ func (s *AppService) sessionFor(sessionID, workspace string) *SessionRecord {
 	return cloneSession(record)
 }
 
+func (s *AppService) sessionForID(sessionID string) *SessionRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.sessions[sessionID]
+	if record == nil || record.Archived {
+		return nil
+	}
+	return cloneSession(record)
+}
+
+func (s *AppService) sessionForIDAny(sessionID string) *SessionRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cloneSession(s.sessions[sessionID])
+}
+
 func (s *AppService) upsertSessionLocked(record *SessionRecord) {
 	if record == nil || record.ID == "" {
 		return

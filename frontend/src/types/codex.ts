@@ -41,6 +41,7 @@ export type QueuedMessageState = 'queued' | 'sending' | 'failed'
 export interface QueuedMessage {
   id: string
   threadId: string
+  runtime: 'codex' | 'gemini' | 'opencode'
   workspace: string
   text: string
   images: string[]

@@ -3243,7 +3243,11 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                       variant="outline"
                       size="sm"
                       class="h-7 shrink-0 text-xs"
-                      :disabled="appStore.isGrokMode ? Boolean(grokStore.sessionMutation) : Boolean(codexStore.threadMutation)"
+                      :disabled="appStore.isGrokMode
+                        ? Boolean(grokStore.sessionMutationForSession(thread.id))
+                        : appStore.isClaudeMode
+                          ? Boolean(claudeStore.sessionMutationForSession(thread.id))
+                          : Boolean(codexStore.threadMutationForThread(thread.id))"
                       @click="restoreArchived(thread.id)"
                     >
                       {{ t('sidebar.restore') }}
@@ -3253,7 +3257,11 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                       variant="ghost"
                       size="sm"
                       class="h-7 shrink-0 text-xs text-destructive hover:text-destructive"
-                      :disabled="appStore.isGrokMode ? Boolean(grokStore.sessionMutation) : Boolean(codexStore.threadMutation)"
+                      :disabled="appStore.isGrokMode
+                        ? Boolean(grokStore.sessionMutationForSession(thread.id))
+                        : appStore.isClaudeMode
+                          ? Boolean(claudeStore.sessionMutationForSession(thread.id))
+                          : Boolean(codexStore.threadMutationForThread(thread.id))"
                       @click="deleteArchived(thread.id)"
                     >
                       <Trash2 :size="13" class="mr-1" />

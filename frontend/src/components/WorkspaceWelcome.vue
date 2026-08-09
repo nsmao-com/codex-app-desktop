@@ -5,11 +5,13 @@ import { useI18n } from 'vue-i18n'
 
 import { Button } from '@/components/ui/button'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
-import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
 
 const appStore = useAppStore()
 const {
   runtime: paneRuntime,
+  isArenaPane,
+  paneId,
   isCodexMode,
   isClaudeMode,
   isGrokMode,
@@ -19,6 +21,7 @@ const {
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
+const arenaStore = useArenaStore()
 const workspaceStore = useWorkspaceStore()
 const { t } = useI18n()
 
@@ -63,7 +66,14 @@ const runtimeWarning = computed(() => {
   if (appStore.codexAvailable) return ''
   return appStore.codexVersion || t('welcome.cliRequired')
 })
-const needsWorkspace = computed(() => !workspaceStore.workspace)
+const runtimeWorkspacePath = computed(() => {
+  if (isGrok.value) return grokStore.workspacePath
+  if (isClaude.value) return claudeStore.workspacePath
+  if (isGemini.value) return appStore.settings.geminiWorkspace || appStore.settings.workspace
+  if (isOpenCode.value) return appStore.settings.openCodeWorkspace || appStore.settings.workspace
+  return appStore.settings.workspace
+})
+const needsWorkspace = computed(() => !runtimeWorkspacePath.value)
 const kickerText = computed(() => {
   if (isGrok.value) return t('chat.grokReadyHere')
   if (isClaude.value) return t('chat.claudeReadyHere')
@@ -77,15 +87,50 @@ const descriptionText = computed(() => {
   return isCowork.value ? t('chat.coworkDescription') : t('chat.description')
 })
 
-function chooseWorkspace(): void {
-  if (isGrok.value || isClaude.value) {
-    void workspaceStore.selectWorkspace().then(() => {
-      if (isGrok.value) void grokStore.loadSessions()
-      else void claudeStore.loadSessions()
-    })
+async function chooseWorkspace(): Promise<void> {
+  const runtime = paneRuntime.value
+  const ready = appStore.activeRuntime === runtime
+    ? await appStore.ensureActiveRuntimeSynced(runtime)
+    : await appStore.setActiveRuntime(runtime)
+  if (!ready) return
+  if (isGrok.value) {
+    const path = await workspaceStore.selectWorkspace()
+    if (!path) return
+    await grokStore.loadSessions(true)
+    const group = grokStore.sessionGroups.find((item) => item.active)
+    const target = group?.sessions.find((item) => grokStore.sameSession(item.id, grokStore.activeSessionId))
+      || group?.sessions[0]
+    if (target) {
+      if (isArenaPane.value) arenaStore.selectPaneSession(paneId.value, target.id)
+      else await grokStore.openSession(target.id, { switchWorkspace: false })
+    } else {
+      grokStore.newSession()
+      if (isArenaPane.value) arenaStore.setPaneSession(paneId.value, grokStore.activeSessionId)
+    }
     return
   }
-  void codexStore.selectProject()
+  if (isClaude.value) {
+    const path = await workspaceStore.selectWorkspace()
+    if (!path) return
+    await claudeStore.loadSessions()
+    const group = claudeStore.sessionGroups.find((item) => item.active)
+    const target = group?.sessions.find((item) => claudeStore.sameSession(item.id, claudeStore.activeSessionId))
+      || group?.sessions[0]
+    if (target) {
+      if (isArenaPane.value) arenaStore.selectPaneSession(paneId.value, target.id)
+      else await claudeStore.openSession(target.id, { switchWorkspace: false })
+    } else {
+      claudeStore.newSession(isArenaPane.value)
+      if (isArenaPane.value && claudeStore.activeSessionId) {
+        arenaStore.setPaneSession(paneId.value, claudeStore.activeSessionId)
+      }
+    }
+    return
+  }
+  await codexStore.selectProject()
+  if (isArenaPane.value && codexStore.activeThreadId) {
+    arenaStore.selectPaneSession(paneId.value, codexStore.activeThreadId)
+  }
 }
 </script>
 

@@ -10,8 +10,6 @@ import { useAppStore } from '@/stores/app'
 
 const emit = defineEmits<{
   'show-inspector': []
-  'focus-runtime': [runtime: string]
-  'open-pane-session': [payload: { runtime: string; sessionId: string }]
 }>()
 
 const { t } = useI18n()
@@ -31,16 +29,8 @@ function gridClassForCount(n: number): string {
   return 'grid-cols-2 lg:grid-cols-4'
 }
 
-async function onFocusPane(paneId: string): Promise<void> {
+function onFocusPane(paneId: string): void {
   arenaStore.focusPane(paneId)
-  const pane = arenaStore.panes.find((item) => item.id === paneId)
-  if (!pane) return
-  if (appStore.activeRuntime !== pane.runtime) {
-    emit('focus-runtime', pane.runtime)
-  }
-  const sessionId = arenaStore.sessionForPane(paneId)
-  // Empty panes still invalidate an older in-flight open from another pane.
-  emit('open-pane-session', { runtime: pane.runtime, sessionId })
 }
 
 function onDragStart(paneId: string): void {
@@ -98,12 +88,12 @@ function addPane(): void {
   const seed = arenaStore.focusedPane?.runtime || appStore.activeRuntime
   if (!arenaStore.addPane(seed)) return
   const pane = arenaStore.focusedPane
-  if (pane) void onFocusPane(pane.id)
+  if (pane) onFocusPane(pane.id)
 }
 
 function onDuplicate(paneId: string): void {
   if (!arenaStore.duplicatePane(paneId)) return
-  void onFocusPane(arenaStore.focusedPaneId)
+  onFocusPane(arenaStore.focusedPaneId)
 }
 </script>
 
@@ -195,7 +185,7 @@ function onDuplicate(paneId: string): void {
           :focused="pane.id === arenaStore.focusedPaneId"
           :dragging="arenaStore.dragPaneId === pane.id"
           class="h-full min-h-0 min-w-0"
-          @focus="void onFocusPane(pane.id)"
+          @focus="onFocusPane(pane.id)"
           @show-inspector="emit('show-inspector')"
           @drag-start-pane="onDragStart"
           @drag-end-pane="onDragEnd"

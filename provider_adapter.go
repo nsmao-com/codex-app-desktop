@@ -350,16 +350,34 @@ func (s *AppService) syncCodexThreadsIntoSessions(response map[string]any, works
 }
 
 func (s *AppService) listSessionsForWorkspace(workspace, search, workMode string) map[string]any {
-	return s.listSessionsForWorkspaceFiltered(workspace, search, workMode, false)
+	return s.listSessionsForWorkspaceRuntimeFiltered(
+		workspace,
+		search,
+		workMode,
+		false,
+		normalizeRuntime(s.Settings().ActiveRuntime),
+	)
 }
 
 func (s *AppService) listArchivedSessionsForWorkspace(workspace, search, workMode string) map[string]any {
-	return s.listSessionsForWorkspaceFiltered(workspace, search, workMode, true)
+	return s.listSessionsForWorkspaceRuntimeFiltered(
+		workspace,
+		search,
+		workMode,
+		true,
+		normalizeRuntime(s.Settings().ActiveRuntime),
+	)
 }
 
-func (s *AppService) listSessionsForWorkspaceFiltered(workspace, search, workMode string, archivedOnly bool) map[string]any {
+func (s *AppService) listSessionsForWorkspaceRuntimeFiltered(
+	workspace string,
+	search string,
+	workMode string,
+	archivedOnly bool,
+	runtimeID string,
+) map[string]any {
 	workMode = normalizeWorkMode(workMode)
-	activeRuntime := normalizeRuntime(s.Settings().ActiveRuntime)
+	activeRuntime := normalizeRuntime(runtimeID)
 	s.mu.Lock()
 	candidates := make([]*SessionRecord, 0, len(s.sessions))
 	for _, record := range s.sessions {

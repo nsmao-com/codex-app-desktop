@@ -2,7 +2,8 @@ import { onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
-import { useCodexStore, useNavigationStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useGrokStore, useNavigationStore, useWorkspaceStore } from '@/stores'
+import type { WorkspaceRuntime } from '@/stores/app'
 import type { NavEntry } from '@/stores/navigation'
 
 function routeLabel(name: string | symbol | null | undefined, t: (key: string) => string): string {
@@ -23,11 +24,64 @@ export function useNavigationHistory(): void {
   const route = useRoute()
   const router = useRouter()
   const nav = useNavigationStore()
+  const appStore = useAppStore()
+  const arenaStore = useArenaStore()
   const codexStore = useCodexStore()
+  const grokStore = useGrokStore()
+  const claudeStore = useClaudeStore()
   const workspaceStore = useWorkspaceStore()
 
+  function currentSessionContext(): {
+    runtime: WorkspaceRuntime
+    paneId: string
+    threadId: string
+    threadName: string
+    workspacePath: string
+  } {
+    const pane = arenaStore.isArenaMode ? arenaStore.focusedPane : null
+    const runtime = pane?.runtime || appStore.activeRuntime
+    const paneId = pane?.id || ''
+    const threadId = pane
+      ? arenaStore.sessionForPane(pane.id)
+      : runtime === 'grok'
+        ? grokStore.activeSessionId
+        : runtime === 'claude'
+          ? claudeStore.activeSessionId
+          : codexStore.activeThreadId
+    if (runtime === 'grok') {
+      const session = grokStore.sessions.find((item) => grokStore.sameSession(item.id, threadId))
+      return {
+        runtime,
+        paneId,
+        threadId,
+        threadName: session?.name || session?.preview || '',
+        workspacePath: session?.workspace || grokStore.workspacePath,
+      }
+    }
+    if (runtime === 'claude') {
+      const session = claudeStore.sessions.find((item) => claudeStore.sameSession(item.id, threadId))
+      return {
+        runtime,
+        paneId,
+        threadId,
+        threadName: session?.name || session?.preview || '',
+        workspacePath: session?.workspace || claudeStore.workspacePath,
+      }
+    }
+    const thread = codexStore.threads.find((item) => codexStore.sameThread(item.id, threadId))
+      || Object.values(codexStore.projectThreads).flat().find((item) => codexStore.sameThread(item.id, threadId))
+    return {
+      runtime,
+      paneId,
+      threadId,
+      threadName: thread?.name || thread?.preview || '',
+      workspacePath: thread?.cwd || appStore.currentWorkspacePath,
+    }
+  }
+
   function makeRouteEntry(): NavEntry {
-    const threadName = codexStore.activeThread?.name
+    const context = currentSessionContext()
+    const threadName = context.threadName
     const base = routeLabel(route.name, t)
     const label = route.name === 'workbench' && threadName
       ? `${base} · ${threadName}`
@@ -39,25 +93,30 @@ export function useNavigationHistory(): void {
       detail: route.fullPath,
       routeName: String(route.name || 'workbench'),
       routeFullPath: route.fullPath,
-      threadId: codexStore.activeThreadId || undefined,
-      workspacePath: workspaceStore.workspace?.path || undefined,
+      threadId: context.threadId || undefined,
+      workspacePath: context.workspacePath || undefined,
+      runtime: context.runtime,
+      paneId: context.paneId || undefined,
     }
   }
 
-  function makeThreadEntry(threadID: string, threadName: string): NavEntry {
+  function makeThreadEntry(context = currentSessionContext()): NavEntry {
     return {
-      id: `thread-${threadID}-${Date.now()}`,
+      id: `thread-${context.runtime}-${context.paneId}-${context.threadId}-${Date.now()}`,
       kind: 'thread',
-      label: threadName || t('sidebar.newTask'),
+      label: context.threadName || t('sidebar.newTask'),
       detail: t('window.historyThread'),
       routeName: 'workbench',
       routeFullPath: '/workbench',
-      threadId: threadID,
-      workspacePath: workspaceStore.workspace?.path || undefined,
+      threadId: context.threadId,
+      workspacePath: context.workspacePath || undefined,
+      runtime: context.runtime,
+      paneId: context.paneId || undefined,
     }
   }
 
   function makeWorkspaceEntry(path: string, name: string): NavEntry {
+    const context = currentSessionContext()
     return {
       id: `workspace-${path}-${Date.now()}`,
       kind: 'workspace',
@@ -66,14 +125,52 @@ export function useNavigationHistory(): void {
       routeName: 'workbench',
       routeFullPath: '/workbench',
       workspacePath: path,
-      threadId: codexStore.activeThreadId || undefined,
+      threadId: context.threadId || undefined,
+      runtime: context.runtime,
+      paneId: context.paneId || undefined,
     }
+  }
+
+  async function applySessionEntry(entry: NavEntry): Promise<void> {
+    const runtime = entry.runtime || appStore.activeRuntime
+    const threadId = entry.threadId || ''
+    if (arenaStore.isArenaMode) {
+      const pane = arenaStore.panes.find((item) => item.id === entry.paneId) || arenaStore.focusedPane
+      if (!pane) return
+      if (pane.runtime !== runtime) arenaStore.setPaneRuntime(pane.id, runtime)
+      arenaStore.focusPane(pane.id)
+      if (threadId) arenaStore.selectPaneSession(pane.id, threadId)
+      else arenaStore.setPaneSession(pane.id, '')
+      return
+    }
+
+    if (appStore.activeRuntime !== runtime && !await appStore.setActiveRuntime(runtime)) return
+    if (!threadId) return
+    if (runtime === 'grok') {
+      await grokStore.openSession(threadId)
+      return
+    }
+    if (runtime === 'claude') {
+      await claudeStore.openSession(threadId)
+      return
+    }
+    if (entry.workspacePath) {
+      await codexStore.openProjectThread(entry.workspacePath, threadId)
+      return
+    }
+    await codexStore.openThread(threadId, { runtime })
   }
 
   async function applyEntry(entry: NavEntry): Promise<void> {
     if (entry.kind === 'workspace' && entry.workspacePath) {
+      if (entry.runtime && appStore.activeRuntime !== entry.runtime) {
+        if (!await appStore.setActiveRuntime(entry.runtime)) return
+      }
       const ok = await workspaceStore.useWorkspace(entry.workspacePath)
-      if (ok) await codexStore.activateProject(entry.workspacePath, entry.threadId || '')
+      if (ok) {
+        if (entry.runtime === 'grok' || entry.runtime === 'claude') await applySessionEntry(entry)
+        else await codexStore.activateProject(entry.workspacePath, entry.threadId || '')
+      }
       if (route.name !== 'workbench') await router.push({ name: 'workbench' })
       return
     }
@@ -82,28 +179,20 @@ export function useNavigationHistory(): void {
       if (entry.routeFullPath && entry.routeFullPath !== route.fullPath) {
         await router.push(entry.routeFullPath)
       }
-      if (entry.threadId && entry.threadId !== codexStore.activeThreadId && !entry.threadId.startsWith('pending-thread-')) {
-        await codexStore.openThread(entry.threadId)
-      }
+      if (entry.threadId) await applySessionEntry(entry)
       return
     }
 
     if (route.name !== 'workbench') await router.push({ name: 'workbench' })
-    if (entry.threadId && !entry.threadId.startsWith('pending-thread-')) {
-      await codexStore.openThread(entry.threadId)
-    } else if (entry.threadId?.startsWith('pending-thread-')) {
-      await codexStore.newThread()
-    }
+    await applySessionEntry(entry)
   }
 
   onMounted(() => {
     nav.setApplyHandler(applyEntry)
     if (nav.index < 0) {
-      if (codexStore.activeThreadId) {
-        nav.reset(makeThreadEntry(
-          codexStore.activeThreadId,
-          codexStore.activeThread?.name || t('sidebar.newTask'),
-        ))
+      const context = currentSessionContext()
+      if (context.threadId) {
+        nav.reset(makeThreadEntry(context))
       } else {
         nav.reset(makeRouteEntry())
       }
@@ -122,24 +211,26 @@ export function useNavigationHistory(): void {
   )
 
   watch(
-    () => codexStore.activeThreadId,
-    (threadID, previous) => {
-      if (!threadID || threadID === previous) return
-      if (threadID.startsWith('pending-thread-')) {
-        nav.push(makeThreadEntry(threadID, t('sidebar.newTask')))
-        return
-      }
-      const name = codexStore.activeThread?.name
-        || codexStore.threads.find((item) => item.id === threadID)?.name
-        || t('sidebar.recents')
-      nav.push(makeThreadEntry(threadID, name))
+    () => {
+      const context = currentSessionContext()
+      return [
+        context.runtime,
+        context.paneId,
+        context.threadId,
+        context.threadName,
+        context.workspacePath,
+      ] as const
+    },
+    ([, , threadId]) => {
+      if (!threadId) return
+      nav.push(makeThreadEntry())
     },
   )
 
   watch(
     () => workspaceStore.workspace?.path || '',
     (path, previous) => {
-      if (!path || path === previous) return
+      if (!path || path === previous || arenaStore.isArenaMode) return
       nav.push(makeWorkspaceEntry(path, workspaceStore.workspace?.name || path))
     },
   )

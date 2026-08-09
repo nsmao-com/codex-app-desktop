@@ -31,27 +31,35 @@ const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
 let arenaSessionOpenSequence = 0
 
-async function focusArenaRuntime(runtime: string): Promise<void> {
-  arenaSessionOpenSequence += 1
-  const next = runtime as WorkspaceRuntime
-  if (appStore.activeRuntime === next) return
-  await appStore.setActiveRuntime(next)
-}
-
-async function openArenaPaneSession(payload: { runtime: string; sessionId: string }): Promise<void> {
+async function activateFocusedArenaPane(allowRetainedSinglePane = false): Promise<void> {
+  if (appStore.bootstrapping || (!arenaStore.isArenaMode && !allowRetainedSinglePane)) return
+  const pane = arenaStore.focusedPane
+  if (!pane) return
+  const expectedArenaMode = arenaStore.isArenaMode
   const sequence = ++arenaSessionOpenSequence
   const selectionRevision = arenaStore.sessionSelectionRevision
-  const runtime = payload.runtime as WorkspaceRuntime
-  const sessionId = payload.sessionId.trim()
-  if (!sessionId) return
+  const paneId = pane.id
+  const runtime = pane.runtime as WorkspaceRuntime
+  const sessionId = arenaStore.sessionForPane(paneId)
+  const selectionIsCurrent = () => (
+    sequence === arenaSessionOpenSequence
+    && selectionRevision === arenaStore.sessionSelectionRevision
+    && arenaStore.isArenaMode === expectedArenaMode
+    && arenaStore.focusedPaneId === paneId
+    && arenaStore.focusedPane?.runtime === runtime
+    && arenaStore.sessionForPane(paneId) === sessionId
+  )
   const runtimeReady = appStore.activeRuntime === runtime
     ? await appStore.ensureActiveRuntimeSynced(runtime)
     : await appStore.setActiveRuntime(runtime)
-  if (
-    !runtimeReady
-    || sequence !== arenaSessionOpenSequence
-    || selectionRevision !== arenaStore.sessionSelectionRevision
-  ) return
+  if (!runtimeReady || !selectionIsCurrent()) return
+
+  if (!sessionId) {
+    if (runtime === 'grok') grokStore.activeSessionId = ''
+    else if (runtime === 'claude') claudeStore.activeSessionId = ''
+    else await codexStore.clearActiveSession()
+    return
+  }
   if (runtime === 'grok') {
     if (grokStore.sameSession(grokStore.activeSessionId, sessionId)) return
     await grokStore.openSession(sessionId)
@@ -63,8 +71,36 @@ async function openArenaPaneSession(payload: { runtime: string; sessionId: strin
     return
   }
   if (codexStore.sameThread(codexStore.activeThreadId, sessionId)) return
-  await codexStore.openThread(sessionId)
+  const thread = codexStore.threads.find((item) => codexStore.sameThread(item.id, sessionId))
+    || Object.values(codexStore.projectThreads).flat().find((item) => codexStore.sameThread(item.id, sessionId))
+  if (thread?.cwd) await codexStore.openProjectThread(thread.cwd, sessionId)
+  else await codexStore.openThread(sessionId, { runtime })
 }
+
+watch(
+  () => {
+    const pane = arenaStore.focusedPane
+    return [
+      appStore.bootstrapping,
+      arenaStore.isArenaMode,
+      pane?.id || '',
+      pane?.runtime || '',
+      pane ? arenaStore.sessionForPane(pane.id) : '',
+      arenaStore.sessionSelectionRevision,
+    ] as const
+  },
+  (current, previous) => {
+    if (arenaStore.isArenaMode) {
+      void activateFocusedArenaPane()
+      return
+    }
+    arenaSessionOpenSequence += 1
+    if (previous?.[1] === true && current[1] === false) {
+      void activateFocusedArenaPane(true)
+    }
+  },
+  { immediate: true, flush: 'post' },
+)
 
 const isMobile = shallowRef(window.innerWidth < 768)
 const inspectorCollapsed = shallowRef(true)
@@ -135,8 +171,6 @@ watch(() => route.query.openBrowser, () => consumeOpenBrowserQuery())
             <ArenaChatLayout
               v-if="arenaStore.isArenaMode"
               @show-inspector="inspectorCollapsed = false"
-              @focus-runtime="(runtime) => void focusArenaRuntime(runtime)"
-              @open-pane-session="(payload) => void openArenaPaneSession(payload)"
             />
             <ChatWorkspace
               v-else

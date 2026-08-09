@@ -26,10 +26,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { easeOutQuick } from '@/lib/motion'
-import { useAppStore, useBrowserStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
-import { Motion } from 'motion-v'
 import { workspaceKey } from '@/utils/workspacePath'
 
 const appStore = useAppStore()
@@ -42,8 +40,10 @@ const {
   isOpenCodeMode,
   usesCodexTimeline: paneUsesCodexTimeline,
   isArenaPane,
+  paneId,
   boundSessionId,
 } = useRuntimeMode()
+const arenaStore = useArenaStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
@@ -89,7 +89,11 @@ const activeComposerContext = computed<ComposerDraftContext>(() => {
     ? grokStore.workspacePath
     : runtime === 'claude'
       ? claudeStore.workspacePath
-      : appStore.settings.workspace
+      : runtime === 'gemini'
+        ? (appStore.settings.geminiWorkspace || appStore.settings.workspace)
+        : runtime === 'opencode'
+          ? (appStore.settings.openCodeWorkspace || appStore.settings.workspace)
+          : appStore.settings.workspace
   const identity = sessionId
     ? ['session', sessionId.trim()]
     : ['workspace', workspaceKey(workspace)]
@@ -199,6 +203,47 @@ const paneSessionId = computed(() => {
   if (isClaudeMode.value) return claudeStore.activeSessionId
   return codexStore.activeThreadId
 })
+
+function matchingCodexThreadKey(record: Record<string, unknown>, threadId: string): string {
+  return Object.keys(record).find((id) => codexStore.sameThread(id, threadId)) || ''
+}
+
+const paneSessionBusy = computed(() => {
+  const id = paneSessionId.value
+  if (!id) return false
+  if (isGrokMode.value) {
+    return Boolean(grokStore.sessionMutationForSession(id))
+      || grokStore.sendingSessionIds.some((candidate) => grokStore.sameSession(candidate, id))
+      || grokStore.runningSessionIds.some((candidate) => grokStore.sameSession(candidate, id))
+      || grokStore.isSessionLoading(id)
+      || Object.entries(grokStore.queuedBySession).some(([candidate, queue]) =>
+        grokStore.sameSession(candidate, id) && queue.length > 0,
+      )
+  }
+  if (isClaudeMode.value) {
+    return Boolean(claudeStore.sessionMutationForSession(id))
+      || claudeStore.sendingSessionIds.some((candidate) => claudeStore.sameSession(candidate, id))
+      || claudeStore.runningSessionIds.some((candidate) => claudeStore.sameSession(candidate, id))
+      || claudeStore.isSessionLoading(id)
+      || Object.entries(claudeStore.queueBySession).some(([candidate, queue]) =>
+        claudeStore.sameSession(candidate, id) && queue.length > 0,
+      )
+  }
+  const queueKey = matchingCodexThreadKey(codexStore.queuedMessagesByThread, id)
+  return codexStore.threadIsBusy(id)
+    || Boolean(codexStore.threadMutationForThread(id))
+    || Boolean(queueKey && codexStore.queuedMessagesByThread[queueKey]?.length)
+})
+const paneSessionPending = computed(() => {
+  const id = paneSessionId.value
+  if (isGrokMode.value) return id.startsWith('pending-grok-')
+  if (isClaudeMode.value) return id.startsWith('pending-claude-')
+  return id.startsWith('pending-thread-')
+})
+const panePendingRequest = computed(() => isArenaPane.value
+  ? codexStore.pendingRequestForThread(paneSessionId.value)
+  : codexStore.pendingRequest)
+const paneIsFocused = computed(() => !isArenaPane.value || arenaStore.focusedPaneId === paneId.value)
 const hasConversation = computed(() => {
   const id = paneSessionId.value
   if (!id) return false
@@ -214,7 +259,8 @@ const hasConversation = computed(() => {
     }
     return Boolean(id)
   }
-  return Boolean((codexStore.itemsByThread[id] || []).length || id)
+  const key = matchingCodexThreadKey(codexStore.itemsByThread, id)
+  return Boolean((key && codexStore.itemsByThread[key]?.length) || id)
 })
 
 watch(
@@ -239,7 +285,8 @@ function onMessageSent(): void {
 function onRetry(itemID: string): void {
   if (!isCodexMode.value) return
   const threadID = paneSessionId.value
-  const item = (codexStore.itemsByThread[threadID] || []).find((candidate) => candidate.id === itemID)
+  const key = matchingCodexThreadKey(codexStore.itemsByThread, threadID)
+  const item = ((key && codexStore.itemsByThread[key]) || []).find((candidate) => candidate.id === itemID)
   if (!item?.text) return
   void codexStore.retryMessage(itemID, item.text, threadID)
 }
@@ -255,7 +302,8 @@ function onInspectDiff(payload: { path: string; diff: string }): void {
 
 function openFullDiff(): void {
   const threadID = paneSessionId.value
-  const live = threadID ? (codexStore.latestDiffByThread[threadID] || '') : ''
+  const key = matchingCodexThreadKey(codexStore.latestDiffByThread, threadID)
+  const live = key ? (codexStore.latestDiffByThread[key] || '') : ''
   if (live.trim()) {
     workspaceStore.openLiveTurnDiff(live)
     return
@@ -269,41 +317,71 @@ function openFullDiff(): void {
 }
 
 function onResolveApproval(action: 'once' | 'session' | 'deny' | 'cancel'): void {
-  void codexStore.resolveApproval(action)
+  const requestKey = panePendingRequest.value?.requestKey
+  if (requestKey) void codexStore.resolveApproval(action, requestKey)
 }
 
 function onAnswer(answers: Record<string, string[]>): void {
-  void codexStore.resolveUserInput(answers)
+  const requestKey = panePendingRequest.value?.requestKey
+  if (requestKey) void codexStore.resolveUserInput(answers, requestKey)
 }
 
 function onMcpSubmit(action: 'accept' | 'decline' | 'cancel', content: Record<string, unknown> | null): void {
-  void codexStore.resolveMcpElicitation(action, content)
+  const requestKey = panePendingRequest.value?.requestKey
+  if (requestKey) void codexStore.resolveMcpElicitation(action, content, requestKey)
+}
+
+function onCancelUserInput(): void {
+  const requestKey = panePendingRequest.value?.requestKey
+  if (requestKey) void codexStore.resolveUserInput({}, requestKey)
 }
 
 function onOpenUrl(url: string): void {
   void browserStore.openBrowser(url)
 }
 
-function archiveThread(): void {
+function sessionExists(sessionId: string): boolean {
+  if (isGrokMode.value) return grokStore.sessions.some((item) => grokStore.sameSession(item.id, sessionId))
+  if (isClaudeMode.value) return claudeStore.sessions.some((item) => claudeStore.sameSession(item.id, sessionId))
+  return codexStore.threads.some((item) => codexStore.sameThread(item.id, sessionId))
+    || Object.values(codexStore.projectThreads).flat().some((item) => codexStore.sameThread(item.id, sessionId))
+}
+
+function clearRemovedArenaSession(sessionId: string, resolvedId: string): void {
+  if (!isArenaPane.value || sessionExists(resolvedId || sessionId)) return
+  arenaStore.clearSessionBindings(paneRuntime.value, [sessionId, resolvedId])
+}
+
+async function archiveThread(): Promise<void> {
   const sessionId = paneSessionId.value
   if (!sessionId) return
+  const resolvedId = isGrokMode.value
+    ? grokStore.resolveSessionId(sessionId)
+    : isClaudeMode.value
+      ? claudeStore.resolveSessionId(sessionId)
+      : codexStore.resolveThreadID(sessionId)
   if (isGrokMode.value) {
-    void grokStore.archiveSession(sessionId)
+    await grokStore.archiveSession(sessionId)
+    clearRemovedArenaSession(sessionId, resolvedId)
     return
   }
   if (isClaudeMode.value) {
-    void claudeStore.archiveSession(sessionId)
+    await claudeStore.archiveSession(sessionId)
+    clearRemovedArenaSession(sessionId, resolvedId)
     return
   }
-  void codexStore.archiveThread(sessionId)
+  await codexStore.archiveThread(sessionId)
+  clearRemovedArenaSession(sessionId, resolvedId)
 }
 
 function compactThread(): void {
-  if (paneSessionId.value) void codexStore.compactThread(paneSessionId.value)
+  if (paneSessionId.value) void codexStore.compactThread(paneSessionId.value, !isArenaPane.value)
 }
 
-function forkThread(): void {
-  if (paneSessionId.value) void codexStore.forkThread(paneSessionId.value)
+async function forkThread(): Promise<void> {
+  if (!paneSessionId.value) return
+  const thread = await codexStore.forkThread(paneSessionId.value, !isArenaPane.value)
+  if (isArenaPane.value && thread?.id) arenaStore.selectPaneSession(paneId.value, thread.id)
 }
 
 function renameThread(): void {
@@ -320,18 +398,26 @@ function renameThread(): void {
   void codexStore.renameThread(sessionId)
 }
 
-function deleteThread(): void {
+async function deleteThread(): Promise<void> {
   const sessionId = paneSessionId.value
   if (!sessionId) return
+  const resolvedId = isGrokMode.value
+    ? grokStore.resolveSessionId(sessionId)
+    : isClaudeMode.value
+      ? claudeStore.resolveSessionId(sessionId)
+      : codexStore.resolveThreadID(sessionId)
   if (isGrokMode.value) {
-    void grokStore.deleteSession(sessionId)
+    await grokStore.deleteSession(sessionId)
+    clearRemovedArenaSession(sessionId, resolvedId)
     return
   }
   if (isClaudeMode.value) {
-    void claudeStore.deleteSession(sessionId)
+    await claudeStore.deleteSession(sessionId)
+    clearRemovedArenaSession(sessionId, resolvedId)
     return
   }
-  void codexStore.deleteThread(sessionId)
+  await codexStore.deleteThread(sessionId)
+  clearRemovedArenaSession(sessionId, resolvedId)
 }
 
 const activeSessionTitle = computed(() => {
@@ -345,8 +431,8 @@ const activeSessionTitle = computed(() => {
     const session = claudeStore.sessions.find((item) => claudeStore.sameSession(item.id, id))
     return session?.name || id
   }
-  return codexStore.threads.find((item) => item.id === id)?.name
-    || Object.values(codexStore.projectThreads || {}).flat().find((item) => item.id === id)?.name
+  return codexStore.threads.find((item) => codexStore.sameThread(item.id, id))?.name
+    || Object.values(codexStore.projectThreads || {}).flat().find((item) => codexStore.sameThread(item.id, id))?.name
     || id
 })
 
@@ -356,9 +442,17 @@ const paneOwnsActiveCodexThread = computed(() => Boolean(
   && codexStore.sameThread(paneSessionId.value, codexStore.activeThreadId)
   && appStore.activeRuntime === 'codex',
 ))
+const paneOwnsPlanPrompt = computed(() => Boolean(
+  paneSessionId.value
+  && codexStore.planImplementPrompt?.threadId
+  && codexStore.sameThread(paneSessionId.value, codexStore.planImplementPrompt.threadId),
+))
 
 function reviewChanges(): void {
-  void codexStore.startReview({ targetType: 'uncommittedChanges', delivery: 'inline' })
+  void codexStore.startReview(
+    { targetType: 'uncommittedChanges', delivery: 'inline' },
+    paneSessionId.value,
+  )
 }
 
 function commitFromBar(): void {
@@ -380,7 +474,7 @@ function commitFromBar(): void {
 <template>
   <div class="relative flex h-full flex-col">
     <div
-      v-if="usesCodexTimeline && codexStore.creatingThread"
+      v-if="usesCodexTimeline && paneIsFocused && codexStore.creatingThread"
       class="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center"
     >
       <div class="flex items-center gap-2 rounded-full border bg-card/95 px-3 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
@@ -462,11 +556,7 @@ function commitFromBar(): void {
             size="icon-sm"
             class="size-7 text-muted-foreground"
             :aria-label="t('threadActions.title')"
-            :disabled="isGrokMode
-              ? Boolean(grokStore.sessionMutation) || grokStore.isTurnRunning
-              : isClaudeMode
-                ? claudeStore.isTurnRunning
-                : codexStore.activeThreadBusy"
+            :disabled="paneSessionBusy"
           >
             <MoreHorizontal :size="15" />
           </Button>
@@ -494,9 +584,7 @@ function commitFromBar(): void {
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
-            :disabled="(isGrokMode && grokStore.activeSessionId.startsWith('pending-grok-'))
-              || (isClaudeMode && claudeStore.activeSessionId.startsWith('pending-claude-'))
-              || (usesCodexTimeline && codexStore.activeThreadId.startsWith('pending-thread-'))"
+            :disabled="paneSessionPending"
             @click="archiveThread"
           >
             <Archive :size="14" class="mr-2" />
@@ -511,30 +599,22 @@ function commitFromBar(): void {
     </div>
 
     <div class="min-h-0 flex-1 overflow-hidden">
-      <Motion
-        :key="paneSessionId || `welcome-${paneRuntime}-${welcomeEpoch}`"
-        class="h-full"
-        :initial="{ opacity: 0, y: 8 }"
-        :animate="{ opacity: 1, y: 0 }"
-        :transition="easeOutQuick"
-      >
-        <WorkspaceWelcome
-          v-if="!hasConversation && !paneSessionId"
-          :key="`welcome-${paneRuntime}-${welcomeEpoch}`"
-          @suggestion="useSuggestion"
-        />
-        <ChatTimeline
-          v-else
-          :sent-epoch="messageSentEpoch"
-          @retry="onRetry"
-          @rollback="onRollback"
-          @inspect-diff="onInspectDiff"
-        />
-      </Motion>
+      <WorkspaceWelcome
+        v-if="!hasConversation && !paneSessionId"
+        :key="`welcome-${paneRuntime}-${welcomeEpoch}`"
+        @suggestion="useSuggestion"
+      />
+      <ChatTimeline
+        v-else
+        :sent-epoch="messageSentEpoch"
+        @retry="onRetry"
+        @rollback="onRollback"
+        @inspect-diff="onInspectDiff"
+      />
     </div>
 
     <div
-      v-if="isCodexMode && paneOwnsActiveCodexThread && ((changesCount && codexStore.activeThread) || codexStore.planImplementPrompt?.threadId === paneSessionId)"
+      v-if="isCodexMode && paneOwnsActiveCodexThread && ((changesCount && codexStore.activeThread) || paneOwnsPlanPrompt)"
       class="border-t border-border/70 px-4 py-1.5"
     >
       <div class="mx-auto flex max-w-[680px] flex-col gap-1.5">
@@ -581,7 +661,7 @@ function commitFromBar(): void {
 
         <!-- Official Codex: after a plan turn, ask whether to implement -->
         <div
-          v-if="codexStore.planImplementPrompt?.threadId === paneSessionId"
+          v-if="paneOwnsPlanPrompt"
           class="flex flex-col gap-1.5 rounded-lg border border-primary/20 bg-primary/[0.04] px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
         >
           <div class="min-w-0">
@@ -620,11 +700,12 @@ function commitFromBar(): void {
     />
 
     <ApprovalDialog
-      :request="codexStore.pendingRequest"
+      :request="panePendingRequest"
       @resolve="onResolveApproval"
       @answer="onAnswer"
       @mcp-submit="onMcpSubmit"
       @open-url="onOpenUrl"
+      @cancel="onCancelUserInput"
     />
   </div>
 </template>

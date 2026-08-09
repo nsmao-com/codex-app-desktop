@@ -233,6 +233,7 @@ export const useClaudeStore = defineStore('claude', () => {
   const itemsBySession = shallowRef<Record<string, TimelineItem[]>>({})
   const historyBySession = shallowRef<Record<string, ClaudeHistoryState>>({})
   const loadingSessionId = shallowRef('')
+  const sessionMutationBySession = shallowRef<Record<string, string>>({})
   const sendingSessionIds = shallowRef<string[]>([])
   const interruptingSessionIds = shallowRef<string[]>([])
   const search = shallowRef('')
@@ -858,10 +859,9 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   function markRunning(sessionId: string, running: boolean): void {
-    const set = new Set(runningSessionIds.value)
-    if (running) set.add(sessionId)
-    else set.delete(sessionId)
-    runningSessionIds.value = [...set]
+    const next = runningSessionIds.value.filter((id) => !sameClaudeSession(id, sessionId))
+    if (running) next.push(resolveSessionId(sessionId) || sessionId)
+    runningSessionIds.value = next
   }
 
   function markSending(sessionId: string, active: boolean): void {
@@ -931,6 +931,7 @@ export const useClaudeStore = defineStore('claude', () => {
           sameClaudeSession(activeSessionId.value, item.id)
           || isSessionBusy(item.id)
           || (queueBySession.value[item.id] || []).length > 0
+          || Object.prototype.hasOwnProperty.call(itemsBySession.value, item.id)
         ),
       )
       const pendingIds = new Set(pending.map((item) => item.id))
@@ -1381,8 +1382,7 @@ export const useClaudeStore = defineStore('claude', () => {
       || (itemsBySession.value[sessionId] || []).length > 0
   }
 
-  function newSession(): void {
-    if (workspaceStore.switchingWorkspace) return
+  function newSession(preserveOtherDrafts = false): void {
     if (!workspacePath.value) {
       notify('error', translate('sidebar.claudeEmpty'), translate('app.needWorkspaceHintReady'))
       return
@@ -1399,9 +1399,12 @@ export const useClaudeStore = defineStore('claude', () => {
       createdAt: now,
       updatedAt: now,
     }
-    sessions.value = [summary, ...sessions.value.filter((item) =>
-      !item.id.startsWith('pending-claude-') || keepPendingSession(item.id),
-    )]
+    const existing = preserveOtherDrafts
+      ? sessions.value
+      : sessions.value.filter((item) =>
+          !item.id.startsWith('pending-claude-') || keepPendingSession(item.id),
+        )
+    sessions.value = [summary, ...existing]
     activeSessionId.value = id
     itemsBySession.value = { ...itemsBySession.value, [id]: [] }
     rememberLoadedClaudeSession(id)
@@ -1411,7 +1414,28 @@ export const useClaudeStore = defineStore('claude', () => {
     let sessionId = targetSessionId === undefined
       ? activeSessionId.value
       : resolveSessionId(targetSessionId)
-    if (sessionId) return sessionId
+    if (sessionId) {
+      if (
+        sessionId.startsWith('pending-claude-')
+        && !sessions.value.some((item) => sameClaudeSession(item.id, sessionId))
+      ) {
+        const now = Math.floor(Date.now() / 1000)
+        sessions.value = [{
+          id: sessionId,
+          workspace: workspacePath.value,
+          name: translate('sidebar.newTask'),
+          preview: '',
+          model: appStore.settings.claudeModel || 'sonnet',
+          effort: appStore.settings.claudeEffort || 'high',
+          createdAt: now,
+          updatedAt: now,
+        }, ...sessions.value]
+        if (!itemsBySession.value[sessionId]) {
+          itemsBySession.value = { ...itemsBySession.value, [sessionId]: [] }
+        }
+      }
+      return sessionId
+    }
     sessionId = `pending-claude-${Date.now()}-${++queuedSequence}`
     activeSessionId.value = sessionId
     const now = Math.floor(Date.now() / 1000)
@@ -1448,6 +1472,46 @@ export const useClaudeStore = defineStore('claude', () => {
   function isSessionBusy(sessionId: string): boolean {
     return isSessionLoading(sessionId) || isSessionTurnBusy(sessionId)
   }
+
+  function isSessionInterrupting(sessionId: string): boolean {
+    return interruptingSessionIds.value.some((id) => sameClaudeSession(id, sessionId))
+  }
+
+  function patchSessionPreferences(sessionId: string, model: string, effort: string): void {
+    if (!sessionId) return
+    sessions.value = sessions.value.map((session) =>
+      sameClaudeSession(session.id, sessionId)
+        ? { ...session, model: model || session.model, effort: effort || session.effort }
+        : session,
+    )
+  }
+
+  function sessionMutationForSession(sessionId: string): string {
+    if (!sessionId) return ''
+    const entry = Object.entries(sessionMutationBySession.value)
+      .find(([id]) => sameClaudeSession(id, sessionId))
+    return entry?.[1] ?? ''
+  }
+
+  function beginSessionMutation(sessionId: string, mutation: string): boolean {
+    if (!sessionId || sessionMutationForSession(sessionId)) return false
+    sessionMutationBySession.value = {
+      ...sessionMutationBySession.value,
+      [sessionId]: mutation,
+    }
+    return true
+  }
+
+  function endSessionMutation(sessionId: string): void {
+    const key = Object.keys(sessionMutationBySession.value)
+      .find((id) => sameClaudeSession(id, sessionId))
+    if (!key) return
+    const next = { ...sessionMutationBySession.value }
+    delete next[key]
+    sessionMutationBySession.value = next
+  }
+
+  const sessionMutation = computed(() => sessionMutationForSession(activeSessionId.value))
 
   function rememberLoadedClaudeSession(sessionId: string): void {
     const id = sessionAlias.get(sessionId) || sessionId.trim()
@@ -1556,15 +1620,15 @@ export const useClaudeStore = defineStore('claude', () => {
     const blockingTurnId = activeTurnBySession.value[sessionId]?.turnId || ''
     // Always enter the per-session queue first. This keeps a send from
     // overtaking an older follow-up while terminal history is being hydrated.
-    const sessionWorkspace = sessions.value.find((item) => sameClaudeSession(item.id, sessionId))?.workspace
-      || workspacePath.value
+    const summary = sessions.value.find((item) => sameClaudeSession(item.id, sessionId))
+    const sessionWorkspace = summary?.workspace || workspacePath.value
     enqueue(
       sessionId,
       content,
       images,
       sessionWorkspace,
-      appStore.settings.claudeModel || 'sonnet',
-      appStore.settings.claudeEffort || 'high',
+      summary?.model || appStore.settings.claudeModel || 'sonnet',
+      summary?.effort || appStore.settings.claudeEffort || 'high',
       blockingTurnId,
     )
     if (!busy) await flushQueue(sessionId)
@@ -1724,22 +1788,23 @@ export const useClaudeStore = defineStore('claude', () => {
 
   function remapSessionBusy(fromId: string, toId: string): void {
     if (!fromId || !toId || fromId === toId) return
-    if (sendingSessionIds.value.includes(fromId)) {
+    if (sendingSessionIds.value.some((id) => sameClaudeSession(id, fromId))) {
       markSending(fromId, false)
       markSending(toId, true)
     }
-    if (runningSessionIds.value.includes(fromId)) {
+    if (runningSessionIds.value.some((id) => sameClaudeSession(id, fromId))) {
       markRunning(fromId, false)
       markRunning(toId, true)
     }
-    if (interruptingSessionIds.value.includes(fromId)) {
+    if (interruptingSessionIds.value.some((id) => sameClaudeSession(id, fromId))) {
       markInterrupting(fromId, false)
       markInterrupting(toId, true)
     }
-    const turn = activeTurnBySession.value[fromId]
+    const turnKey = Object.keys(activeTurnBySession.value).find((id) => sameClaudeSession(id, fromId)) || ''
+    const turn = turnKey ? activeTurnBySession.value[turnKey] : undefined
     if (turn) {
       const next = { ...activeTurnBySession.value }
-      delete next[fromId]
+      delete next[turnKey]
       next[toId] = { ...turn, sessionId: toId }
       activeTurnBySession.value = next
     }
@@ -2151,7 +2216,7 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   function canMutateClaudeSession(sessionId: string): boolean {
-    if (!isSessionTurnBusy(sessionId)) return true
+    if (!isSessionBusy(sessionId)) return true
     notify(
       'warning',
       translate('threadActions.busyActionBlocked'),
@@ -2161,7 +2226,8 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function deleteSession(sessionId: string): Promise<void> {
-    if (!sessionId || !canMutateClaudeSession(sessionId)) return
+    if (!sessionId || sessionMutationForSession(sessionId) || !canMutateClaudeSession(sessionId)) return
+    if (!beginSessionMutation(sessionId, 'delete')) return
     try {
       if (!sessionId.startsWith('pending-claude-')) {
         await deleteClaudeSessionApi(sessionId)
@@ -2171,6 +2237,8 @@ export const useClaudeStore = defineStore('claude', () => {
       discardClaudeSessionState(sessionId)
     } catch (error) {
       notify('error', translate('threadActions.deleteFailed'), errorMessage(error))
+    } finally {
+      endSessionMutation(sessionId)
     }
   }
 
@@ -2180,6 +2248,7 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function renameSession(sessionId: string, name?: string): Promise<boolean> {
+    if (!sessionId || sessionMutationForSession(sessionId)) return false
     const current = sessions.value.find((item) => item.id === sessionId)
       || archivedSessions.value.find((item) => item.id === sessionId)
     let nextName = name
@@ -2196,7 +2265,17 @@ export const useClaudeStore = defineStore('claude', () => {
     }
     nextName = nextName.trim()
     if (!nextName || nextName === current?.name) return false
+    if (!beginSessionMutation(sessionId, 'rename')) return false
     try {
+      if (sessionId.startsWith('pending-claude-')) {
+        sessions.value = sessions.value.map((item) =>
+          item.id === sessionId
+            ? { ...item, name: nextName!, updatedAt: Math.floor(Date.now() / 1000) }
+            : item,
+        )
+        notify('success', translate('threadActions.renamed'), '')
+        return true
+      }
       await renameClaudeSessionApi(sessionId, nextName)
       sessions.value = sessions.value.map((item) =>
         item.id === sessionId ? { ...item, name: nextName!, updatedAt: Math.floor(Date.now() / 1000) } : item,
@@ -2206,6 +2285,8 @@ export const useClaudeStore = defineStore('claude', () => {
     } catch (error) {
       notify('error', translate('threadActions.renameFailed'), errorMessage(error))
       return false
+    } finally {
+      endSessionMutation(sessionId)
     }
   }
 
@@ -2215,7 +2296,8 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function archiveSession(sessionId: string): Promise<void> {
-    if (!sessionId || !canMutateClaudeSession(sessionId)) return
+    if (!sessionId || sessionMutationForSession(sessionId) || !canMutateClaudeSession(sessionId)) return
+    if (!beginSessionMutation(sessionId, 'archive')) return
     try {
       if (sessionId.startsWith('pending-claude-')) {
         sessions.value = sessions.value.filter((item) => item.id !== sessionId)
@@ -2228,6 +2310,8 @@ export const useClaudeStore = defineStore('claude', () => {
       notify('success', translate('threadActions.archived'), translate('threadActions.archivedHint'))
     } catch (error) {
       notify('error', translate('threadActions.archiveFailed'), errorMessage(error))
+    } finally {
+      endSessionMutation(sessionId)
     }
   }
 
@@ -2237,6 +2321,8 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function unarchiveSession(sessionId: string): Promise<void> {
+    if (!sessionId || sessionMutationForSession(sessionId)) return
+    if (!beginSessionMutation(sessionId, 'unarchive')) return
     try {
       await unarchiveClaudeSessionApi(sessionId)
       discardedSessionIds.delete(sessionId)
@@ -2245,6 +2331,8 @@ export const useClaudeStore = defineStore('claude', () => {
       notify('success', translate('threadActions.unarchived'), translate('threadActions.unarchivedHint'))
     } catch (error) {
       notify('error', translate('threadActions.unarchiveFailed'), errorMessage(error))
+    } finally {
+      endSessionMutation(sessionId)
     }
   }
 
@@ -2261,6 +2349,7 @@ export const useClaudeStore = defineStore('claude', () => {
     loadingSessionId,
     sending,
     interrupting,
+    sessionMutation,
     search,
     runningSessionIds,
     activeTurnMetrics,
@@ -2278,6 +2367,12 @@ export const useClaudeStore = defineStore('claude', () => {
     sessionGroups,
     sameSession: sameClaudeSession,
     resolveSessionId,
+    isSessionBusy,
+    isSessionLoading,
+    sessionMutationForSession,
+    patchSessionPreferences,
+    isSessionTurnBusy,
+    isSessionInterrupting,
     bootstrapEvents,
     dispose,
     enterRuntime,

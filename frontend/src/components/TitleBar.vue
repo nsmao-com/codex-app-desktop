@@ -21,18 +21,46 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { SimpleTooltip } from '@/components/ui/tooltip'
-import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useNavigationStore, useShellStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useGrokStore, useNavigationStore, useShellStore, useWorkspaceStore } from '@/stores'
 
 const { t } = useI18n()
 const router = useRouter()
 const appStore = useAppStore()
+const arenaStore = useArenaStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const shellStore = useShellStore()
 const navStore = useNavigationStore()
-const usesCodexTimeline = computed(() => appStore.isCodexMode || appStore.isGeminiMode || appStore.isOpenCodeMode)
+const titlebarRuntime = computed(() => arenaStore.isArenaMode
+  ? (arenaStore.focusedPane?.runtime || appStore.activeRuntime)
+  : appStore.activeRuntime)
+const titlebarSessionId = computed(() => {
+  const pane = arenaStore.isArenaMode ? arenaStore.focusedPane : null
+  if (pane) return arenaStore.sessionForPane(pane.id)
+  if (titlebarRuntime.value === 'grok') return grokStore.activeSessionId
+  if (titlebarRuntime.value === 'claude') return claudeStore.activeSessionId
+  return codexStore.activeThreadId
+})
+const titlebarSessionBusy = computed(() => {
+  const id = titlebarSessionId.value
+  if (!id) return false
+  if (titlebarRuntime.value === 'grok') {
+    return Boolean(grokStore.sessionMutationForSession(id)) || grokStore.isSessionBusy(id)
+  }
+  if (titlebarRuntime.value === 'claude') {
+    return Boolean(claudeStore.sessionMutationForSession(id)) || claudeStore.isSessionBusy(id)
+  }
+  return Boolean(codexStore.threadMutationForThread(id))
+    || codexStore.threadIsBusy(id)
+    || (codexStore.queuedMessagesByThread[id]?.length ?? 0) > 0
+})
+const newSessionDisabled = computed(() => {
+  if (titlebarRuntime.value === 'grok') return !grokStore.workspacePath
+  if (titlebarRuntime.value === 'claude') return !claudeStore.workspacePath
+  return !codexStore.isRuntimeReady(titlebarRuntime.value) || codexStore.creatingThread
+})
 
 const maximised = shallowRef(false)
 
@@ -113,6 +141,107 @@ function openReleases(): void {
 function openGitHub(): void {
   void appStore.openGitHubRepo()
 }
+
+async function createTitlebarSession(): Promise<void> {
+  const pane = arenaStore.isArenaMode ? arenaStore.focusedPane : null
+  const runtime = titlebarRuntime.value
+  if (runtime === 'grok') {
+    grokStore.newSession()
+    if (pane) arenaStore.setPaneSession(pane.id, grokStore.activeSessionId)
+    return
+  }
+  if (runtime === 'claude') {
+    claudeStore.newSession(Boolean(pane))
+    if (pane && claudeStore.activeSessionId) {
+      arenaStore.setPaneSession(pane.id, claudeStore.activeSessionId)
+    }
+    return
+  }
+  const thread = pane
+    ? await codexStore.newRuntimeThread(runtime, true)
+    : await codexStore.newThread()
+  if (pane && thread?.id) arenaStore.setPaneSession(pane.id, thread.id)
+}
+
+async function selectTitlebarWorkspace(): Promise<void> {
+  const pane = arenaStore.isArenaMode ? arenaStore.focusedPane : null
+  const runtime = titlebarRuntime.value
+  const ready = appStore.activeRuntime === runtime
+    ? await appStore.ensureActiveRuntimeSynced(runtime)
+    : await appStore.setActiveRuntime(runtime)
+  if (!ready) return
+  if (runtime === 'grok') {
+    const path = await workspaceStore.selectWorkspace()
+    if (!path) return
+    await grokStore.loadSessions(true)
+    const group = grokStore.sessionGroups.find((item) => item.active)
+    const target = group?.sessions.find((item) => grokStore.sameSession(item.id, grokStore.activeSessionId))
+      || group?.sessions[0]
+    if (target) {
+      if (pane) arenaStore.selectPaneSession(pane.id, target.id)
+      else await grokStore.openSession(target.id, { switchWorkspace: false })
+    } else {
+      grokStore.newSession()
+      if (pane) arenaStore.setPaneSession(pane.id, grokStore.activeSessionId)
+    }
+    return
+  }
+  if (runtime === 'claude') {
+    const path = await workspaceStore.selectWorkspace()
+    if (!path) return
+    await claudeStore.loadSessions()
+    const group = claudeStore.sessionGroups.find((item) => item.active)
+    const target = group?.sessions.find((item) => claudeStore.sameSession(item.id, claudeStore.activeSessionId))
+      || group?.sessions[0]
+    if (target) {
+      if (pane) arenaStore.selectPaneSession(pane.id, target.id)
+      else await claudeStore.openSession(target.id, { switchWorkspace: false })
+    } else {
+      claudeStore.newSession(Boolean(pane))
+      if (pane && claudeStore.activeSessionId) arenaStore.setPaneSession(pane.id, claudeStore.activeSessionId)
+    }
+    return
+  }
+  await codexStore.selectProject()
+  if (pane) arenaStore.setPaneSession(pane.id, codexStore.activeThreadId)
+}
+
+function titlebarSessionExists(runtime: typeof titlebarRuntime.value, sessionId: string): boolean {
+  if (runtime === 'grok') {
+    return grokStore.sessions.some((item) => grokStore.sameSession(item.id, sessionId))
+  }
+  if (runtime === 'claude') {
+    return claudeStore.sessions.some((item) => claudeStore.sameSession(item.id, sessionId))
+  }
+  return codexStore.threads.some((item) => codexStore.sameThread(item.id, sessionId))
+    || Object.values(codexStore.projectThreads).flat()
+      .some((item) => codexStore.sameThread(item.id, sessionId))
+}
+
+async function mutateTitlebarSession(action: 'archive' | 'delete'): Promise<void> {
+  const runtime = titlebarRuntime.value
+  const sessionId = titlebarSessionId.value
+  if (!sessionId || titlebarSessionBusy.value) return
+  const resolvedId = runtime === 'grok'
+    ? grokStore.resolveSessionId(sessionId)
+    : runtime === 'claude'
+      ? claudeStore.resolveSessionId(sessionId)
+      : codexStore.resolveThreadID(sessionId)
+  if (runtime === 'grok') {
+    if (action === 'archive') await grokStore.archiveSession(sessionId)
+    else await grokStore.deleteSession(sessionId)
+  } else if (runtime === 'claude') {
+    if (action === 'archive') await claudeStore.archiveSession(sessionId)
+    else await claudeStore.deleteSession(sessionId)
+  } else if (action === 'archive') {
+    await codexStore.archiveThread(sessionId)
+  } else {
+    await codexStore.deleteThread(sessionId)
+  }
+  if (arenaStore.isArenaMode && !titlebarSessionExists(runtime, resolvedId || sessionId)) {
+    arenaStore.clearSessionBindings(runtime, [sessionId, resolvedId])
+  }
+}
 </script>
 
 <template>
@@ -166,62 +295,27 @@ function openGitHub(): void {
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" class="min-w-44">
           <DropdownMenuItem
-            :disabled="appStore.isGrokMode
-              ? !grokStore.workspacePath
-              : appStore.isClaudeMode
-                ? !claudeStore.workspacePath
-                : !codexStore.isReady"
-            @click="appStore.isGrokMode
-              ? grokStore.newSession()
-              : appStore.isClaudeMode
-                ? claudeStore.newSession()
-                : void codexStore.newThread()"
+            :disabled="newSessionDisabled"
+            @click="void createTitlebarSession()"
           >
             {{ t('sidebar.newTask') }}
           </DropdownMenuItem>
           <DropdownMenuItem
-            @click="appStore.isGrokMode
-              ? void workspaceStore.selectWorkspace().then(() => void grokStore.loadSessions())
-              : appStore.isClaudeMode
-                ? void workspaceStore.selectWorkspace().then(() => void claudeStore.loadSessions())
-                : void codexStore.selectProject()"
+            @click="void selectTitlebarWorkspace()"
           >
             {{ t('welcome.chooseWorkspace') }}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
-            v-if="usesCodexTimeline"
-            :disabled="!codexStore.activeThread || Boolean(codexStore.threadMutation) || codexStore.activeThreadBusy"
-            @click="void codexStore.archiveActiveThread()"
-          >
-            {{ t('threadActions.archive') }}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            v-else-if="appStore.isClaudeMode"
-            :disabled="!claudeStore.activeSessionId"
-            @click="void claudeStore.archiveActiveSession()"
-          >
-            {{ t('threadActions.archive') }}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            v-else-if="appStore.isGrokMode"
-            :disabled="!grokStore.activeSessionId || grokStore.isTurnRunning"
-            @click="void grokStore.archiveActiveSession()"
+            :disabled="!titlebarSessionId || titlebarSessionBusy"
+            @click="void mutateTitlebarSession('archive')"
           >
             {{ t('threadActions.archive') }}
           </DropdownMenuItem>
           <DropdownMenuItem
             class="text-destructive focus:text-destructive"
-            :disabled="appStore.isGrokMode
-              ? (!grokStore.activeSessionId || grokStore.isTurnRunning)
-              : appStore.isClaudeMode
-                ? !claudeStore.activeSessionId
-                : (!codexStore.activeThread || Boolean(codexStore.threadMutation) || codexStore.activeThreadBusy)"
-            @click="appStore.isGrokMode
-              ? void grokStore.deleteSession(grokStore.activeSessionId)
-              : appStore.isClaudeMode
-                ? void claudeStore.deleteActiveSession()
-                : void codexStore.deleteActiveThread()"
+            :disabled="!titlebarSessionId || titlebarSessionBusy"
+            @click="void mutateTitlebarSession('delete')"
           >
             {{ t('threadActions.delete') }}
           </DropdownMenuItem>

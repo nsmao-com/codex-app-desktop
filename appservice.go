@@ -59,11 +59,11 @@ type AppService struct {
 	// not yet bound). A map keeps concurrent allocations in different workspaces
 	// from clobbering each other's pending slot.
 	pendingCodexSessions map[string]string
-	codexHistoryCache      map[string]*codexHistorySnapshot
-	claudeHistoryCache     map[string]*claudeHistorySnapshot
-	grokHistoryCache       map[string]*grokHistorySnapshot
-	nativeHistoryCache     map[string]nativeHistoryCacheEntry
-	providerRouter         *providerRouter
+	codexHistoryCache    map[string]*codexHistorySnapshot
+	claudeHistoryCache   map[string]*claudeHistorySnapshot
+	grokHistoryCache     map[string]*grokHistorySnapshot
+	nativeHistoryCache   map[string]nativeHistoryCacheEntry
+	providerRouter       *providerRouter
 }
 
 const defaultCodexModel = "gpt-5.6-sol"
@@ -207,9 +207,9 @@ type UserSettings struct {
 	ShortcutBrowser          string   `json:"shortcutBrowser"`
 	// CodexClient* is the app-server initialize clientInfo sent upstream as User-Agent.
 	// Empty values fall back to official Codex Desktop defaults (or NICE_CODEX_CLIENT_* env).
-	CodexClientName     string `json:"codexClientName"`
-	CodexClientTitle    string `json:"codexClientTitle"`
-	CodexClientVersion  string `json:"codexClientVersion"`
+	CodexClientName    string `json:"codexClientName"`
+	CodexClientTitle   string `json:"codexClientTitle"`
+	CodexClientVersion string `json:"codexClientVersion"`
 	// NetworkProxy* lets users point Codex / CLI traffic at Clash (or similar)
 	// HTTP mixed ports without enabling TUN. Applied as process env + child inherit.
 	NetworkProxyEnabled bool   `json:"networkProxyEnabled"`
@@ -777,15 +777,20 @@ func (s *AppService) ListThreads(search string) (map[string]any, error) {
 }
 
 func (s *AppService) ListWorkspaceThreads(workspace string, search string) (map[string]any, error) {
+	return s.ListRuntimeWorkspaceThreads(normalizeRuntime(s.Settings().ActiveRuntime), workspace, search)
+}
+
+func (s *AppService) ListRuntimeWorkspaceThreads(runtimeID string, workspace string, search string) (map[string]any, error) {
 	cleanWorkspace, err := validateWorkspace(workspace)
 	if err != nil {
 		return nil, err
 	}
+	runtimeID = normalizeRuntime(runtimeID)
 	settings := s.Settings()
-	activeWorkspace := activeWorkspaceForRuntime(settings)
+	activeWorkspace := workspaceForRuntime(settings, runtimeID)
 	allowed := samePath(cleanWorkspace, activeWorkspace)
 	if !allowed {
-		for _, recent := range recentWorkspacesForRuntime(settings) {
+		for _, recent := range recentWorkspacesForRuntimeID(settings, runtimeID) {
 			if samePath(cleanWorkspace, recent) {
 				allowed = true
 				break
@@ -795,13 +800,21 @@ func (s *AppService) ListWorkspaceThreads(workspace string, search string) (map[
 	if !allowed {
 		return nil, errors.New("workspace is not in the recent workspace list")
 	}
-	return s.listThreadsForWorkspace(cleanWorkspace, search)
+	return s.listThreadsForWorkspaceRuntime(cleanWorkspace, search, runtimeID)
 }
 
 func (s *AppService) listThreadsForWorkspace(workspace string, search string) (map[string]any, error) {
 	settings := s.Settings()
+	return s.listThreadsForWorkspaceRuntime(workspace, search, normalizeRuntime(settings.ActiveRuntime))
+}
+
+func (s *AppService) listThreadsForWorkspaceRuntime(workspace string, search string, runtimeID string) (map[string]any, error) {
+	settings := s.Settings()
 	workMode := normalizeWorkMode(settings.WorkMode)
-	activeRuntime := normalizeRuntime(settings.ActiveRuntime)
+	activeRuntime := normalizeRuntime(runtimeID)
+	if activeRuntime != "codex" {
+		workMode = "code"
+	}
 	// Only Codex owns an app-server thread index. External runtimes use the
 	// NiceCodex session store and must not probe a stopped Codex process during
 	// every runtime/workspace switch (which otherwise adds a long timeout).
@@ -823,7 +836,7 @@ func (s *AppService) listThreadsForWorkspace(workspace string, search string) (m
 	if activeRuntime == "gemini" || activeRuntime == "opencode" {
 		s.syncNativeExternalSessions(activeRuntime, workspace)
 	}
-	return s.listSessionsForWorkspace(workspace, search, workMode), nil
+	return s.listSessionsForWorkspaceRuntimeFiltered(workspace, search, workMode, false, activeRuntime), nil
 }
 
 func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest) error {
@@ -834,10 +847,6 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 	if strings.HasPrefix(sessionID, "pending-thread-") {
 		return nil
 	}
-	workspace, err := validateWorkspace(s.activeWorkspacePath())
-	if err != nil {
-		return err
-	}
 	model := strings.TrimSpace(request.Model)
 	effort := strings.TrimSpace(request.Effort)
 	collaborationMode := normalizeCollaborationMode(request.CollaborationMode)
@@ -847,8 +856,8 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record := s.sessions[sessionID]
-	if record == nil || record.Archived || !samePath(record.Workspace, workspace) {
-		return errors.New("session not found in the current workspace")
+	if record == nil || record.Archived {
+		return errors.New("session not found")
 	}
 	if model != "" {
 		record.Model = model
@@ -881,10 +890,29 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 
 func (s *AppService) CreateThread() (map[string]any, error) {
 	settings := s.Settings()
-	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
+	runtimeID := normalizeRuntime(settings.ActiveRuntime)
+	workspace, err := validateWorkspace(workspaceForRuntime(settings, runtimeID))
 	if err != nil {
 		return nil, err
 	}
+	return s.createThreadForRuntime(settings, runtimeID, workspace)
+}
+
+// CreateRuntimeThread allocates a lazy local session for one arena pane without
+// relying on the globally focused runtime changing while another pane is sending.
+func (s *AppService) CreateRuntimeThread(runtimeID string, workspace string) (map[string]any, error) {
+	runtimeID = normalizeRuntime(runtimeID)
+	if runtimeID != "codex" && runtimeID != "gemini" && runtimeID != "opencode" {
+		return nil, errors.New("runtime does not use Codex-compatible sessions")
+	}
+	cleanWorkspace, err := validateWorkspace(workspace)
+	if err != nil {
+		return nil, err
+	}
+	return s.createThreadForRuntime(s.Settings(), runtimeID, cleanWorkspace)
+}
+
+func (s *AppService) createThreadForRuntime(settings UserSettings, runtimeID string, workspace string) (map[string]any, error) {
 	workMode := normalizeWorkMode(settings.WorkMode)
 	collaborationMode := strings.TrimSpace(settings.CollaborationMode)
 	if collaborationMode == "" {
@@ -898,7 +926,7 @@ func (s *AppService) CreateThread() (map[string]any, error) {
 	providerID := ""
 	model := settings.Model
 	effort := settings.Effort
-	switch normalizeRuntime(settings.ActiveRuntime) {
+	switch normalizeRuntime(runtimeID) {
 	case "gemini":
 		provider, providerID = "gemini", externalProviderID("gemini")
 		model, effort = settings.GeminiModel, settings.GeminiEffort
@@ -937,7 +965,10 @@ func (s *AppService) ResumeThread(threadID string) (map[string]any, error) {
 	}
 	settings := s.Settings()
 	workspace := activeWorkspaceForRuntime(settings)
-	session := s.sessionFor(threadID, workspace)
+	session := s.sessionForID(threadID)
+	if session != nil {
+		workspace = session.Workspace
+	}
 	if session != nil && isExternalSession(session) {
 		s.rememberThread(threadID, workspace)
 		return s.sessionResponse(session), nil
@@ -965,11 +996,15 @@ func (s *AppService) ResumeThread(threadID string) (map[string]any, error) {
 func (s *AppService) ForkThread(threadID string) (map[string]any, error) {
 	threadID = strings.TrimSpace(threadID)
 	settings := s.Settings()
-	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
+	source := s.sessionForID(threadID)
+	workspace := activeWorkspaceForRuntime(settings)
+	if source != nil {
+		workspace = source.Workspace
+	}
+	workspace, err := validateWorkspace(workspace)
 	if err != nil {
 		return nil, err
 	}
-	source := s.sessionFor(threadID, workspace)
 	if source != nil && isExternalSession(source) {
 		return s.forkExternalSession(source)
 	}
@@ -1016,7 +1051,10 @@ func (s *AppService) ForkThread(threadID string) (map[string]any, error) {
 func (s *AppService) ArchiveThread(threadID string) error {
 	threadID = strings.TrimSpace(threadID)
 	workspace := s.activeWorkspacePath()
-	session := s.sessionFor(threadID, workspace)
+	session := s.sessionForID(threadID)
+	if session != nil {
+		workspace = session.Workspace
+	}
 	// Local directory is authoritative.
 	s.markSessionArchived(threadID)
 	if session == nil || isExternalSession(session) || session.BackendRef == "" {
@@ -1037,11 +1075,11 @@ func (s *AppService) UnarchiveThread(threadID string) (map[string]any, error) {
 	if threadID == "" {
 		return nil, errors.New("thread id is required")
 	}
-	workspace := s.activeWorkspacePath()
-	session := s.sessionForAny(threadID, workspace)
+	session := s.sessionForIDAny(threadID)
 	if session == nil {
 		return nil, errors.New("session not found")
 	}
+	workspace := session.Workspace
 	if isExternalSession(session) {
 		restored := s.markSessionUnarchived(threadID)
 		if restored == nil {
@@ -1068,8 +1106,11 @@ func (s *AppService) DeleteThread(threadID string) error {
 	if threadID == "" {
 		return errors.New("thread id is required")
 	}
+	session := s.sessionForIDAny(threadID)
 	workspace := s.activeWorkspacePath()
-	session := s.sessionForAny(threadID, workspace)
+	if session != nil {
+		workspace = session.Workspace
+	}
 	deleted := s.deleteSession(threadID)
 	if deleted == nil && session == nil {
 		return errors.New("session not found")
@@ -1099,11 +1140,11 @@ func (s *AppService) SetThreadName(threadID string, name string) (map[string]any
 	if name == "" {
 		return nil, errors.New("thread name is required")
 	}
-	workspace := s.activeWorkspacePath()
-	session := s.sessionFor(threadID, workspace)
+	session := s.sessionForID(threadID)
 	if session == nil {
 		return nil, errors.New("session not found")
 	}
+	workspace := session.Workspace
 	if isExternalSession(session) {
 		updated := s.renameSession(threadID, name)
 		if updated == nil {
@@ -1133,8 +1174,11 @@ func (s *AppService) StartReview(request ReviewStartRequest) (map[string]any, er
 	if threadID == "" {
 		return nil, errors.New("thread id is required")
 	}
+	session := s.sessionForID(threadID)
 	workspace := s.activeWorkspacePath()
-	session := s.sessionFor(threadID, workspace)
+	if session != nil {
+		workspace = session.Workspace
+	}
 	if session != nil && isExternalSession(session) {
 		return nil, errors.New("change review is available only for Codex sessions")
 	}
@@ -1234,7 +1278,11 @@ func (s *AppService) ListArchivedThreads(search string) (map[string]any, error) 
 func (s *AppService) CompactThread(threadID string) error {
 	threadID = strings.TrimSpace(threadID)
 	workspace := s.activeWorkspacePath()
-	if session := s.sessionFor(threadID, workspace); session != nil && isExternalSession(session) {
+	session := s.sessionForID(threadID)
+	if session != nil {
+		workspace = session.Workspace
+	}
+	if session != nil && isExternalSession(session) {
 		return s.compactExternalSession(session)
 	}
 	backendID := s.codexBackendID(threadID, workspace)
@@ -1254,7 +1302,11 @@ func (s *AppService) RollbackThread(threadID string, numTurns int) (map[string]a
 		return nil, errors.New("rollback turn count must be between 1 and 1000")
 	}
 	workspace := s.activeWorkspacePath()
-	if session := s.sessionFor(threadID, workspace); session != nil && isExternalSession(session) {
+	session := s.sessionForID(threadID)
+	if session != nil {
+		workspace = session.Workspace
+	}
+	if session != nil && isExternalSession(session) {
 		return s.rollbackExternalSession(session, numTurns)
 	}
 	backendID := s.codexBackendID(threadID, workspace)
@@ -1273,7 +1325,10 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 	}
 	settings := s.Settings()
 	workspace := activeWorkspaceForRuntime(settings)
-	session := s.sessionFor(threadID, workspace)
+	session := s.sessionForID(threadID)
+	if session != nil {
+		workspace = session.Workspace
+	}
 	if session != nil && isExternalSession(session) {
 		s.rememberThread(threadID, workspace)
 		if session.Native {
@@ -1335,7 +1390,10 @@ func (s *AppService) ReadThreadHistory(threadID string, before int) (map[string]
 	}
 	settings := s.Settings()
 	workspace := activeWorkspaceForRuntime(settings)
-	session := s.sessionFor(threadID, workspace)
+	session := s.sessionForID(threadID)
+	if session != nil {
+		workspace = session.Workspace
+	}
 	if session == nil && !s.threadAllowed(threadID, workspace) {
 		return nil, errors.New("open this thread in the current workspace before reading its history")
 	}
@@ -1657,7 +1715,12 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 		return nil, errors.New("thread id is required")
 	}
 	settings := s.Settings()
-	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
+	session := s.sessionForID(request.ThreadID)
+	workspace := activeWorkspaceForRuntime(settings)
+	if session != nil {
+		workspace = session.Workspace
+	}
+	workspace, err := validateWorkspace(workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -1670,7 +1733,6 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 		}
 	}
 
-	session := s.sessionFor(request.ThreadID, workspace)
 	if session != nil && isExternalSession(session) {
 		return s.runExternalTurn(request.ThreadID, session.Provider, workspace, settings, request.Text, request.Images)
 	}
@@ -1834,14 +1896,20 @@ func (s *AppService) SteerTurn(request SteerTurnRequest) (map[string]any, error)
 	if request.ThreadID == "" || request.TurnID == "" {
 		return nil, errors.New("thread id and active turn id are required")
 	}
-	workspace, err := validateWorkspace(s.Settings().Workspace)
+	settings := s.Settings()
+	session := s.sessionForID(request.ThreadID)
+	workspace := settings.Workspace
+	if session != nil {
+		workspace = session.Workspace
+	}
+	workspace, err := validateWorkspace(workspace)
 	if err != nil {
 		return nil, err
 	}
 	if !s.threadAllowed(request.ThreadID, workspace) {
 		return nil, errors.New("open this thread in the current workspace before steering the turn")
 	}
-	if session := s.sessionFor(request.ThreadID, workspace); session != nil && isExternalSession(session) {
+	if session != nil && isExternalSession(session) {
 		return nil, errors.New("steer is only available for Codex sessions; message will be queued instead")
 	}
 	backendID := s.codexBackendID(request.ThreadID, workspace)
@@ -3914,6 +3982,9 @@ func (s *AppService) ensureThreadInWorkspace(threadID string, workspace string) 
 
 func (s *AppService) rememberThread(threadID string, workspace string) {
 	s.mu.Lock()
+	if s.allowedThreads == nil {
+		s.allowedThreads = make(map[string]string)
+	}
 	s.allowedThreads[threadID] = filepath.Clean(workspace)
 	s.mu.Unlock()
 }
@@ -4024,6 +4095,9 @@ func (s *AppService) ensureCodexBackendThread(session *SessionRecord, settings U
 	defer s.codexThreadStartMu.Unlock()
 
 	s.mu.Lock()
+	if s.pendingCodexSessions == nil {
+		s.pendingCodexSessions = make(map[string]string)
+	}
 	record := s.sessions[session.ID]
 	if record == nil || record.Archived {
 		s.mu.Unlock()
@@ -4202,6 +4276,9 @@ func (s *AppService) claimPendingCodexSession(backendID, eventWorkspace string) 
 	}
 	record.BackendRef = backendID
 	record.UpdatedAt = time.Now().Unix()
+	if s.allowedThreads == nil {
+		s.allowedThreads = make(map[string]string)
+	}
 	s.allowedThreads[sessionID] = record.Workspace
 	s.allowedThreads[backendID] = record.Workspace
 	delete(s.pendingCodexSessions, workspaceKey(record.Workspace))

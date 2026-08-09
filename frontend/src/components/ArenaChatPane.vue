@@ -4,12 +4,13 @@ import {
   Folder,
   FolderOpen,
   GripVertical,
+  LoaderCircle,
   MessageSquareText,
   Plus,
   SquareStack,
   X,
 } from '@lucide/vue'
-import { computed, onMounted, provide, toRef, watch, type Component } from 'vue'
+import { computed, provide, shallowRef, toRef, watch, type Component } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import ChatWorkspace from '@/components/ChatWorkspace.vue'
@@ -57,6 +58,9 @@ const appStore = useAppStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
+const sessionsLoading = shallowRef(false)
+const sessionsLoadFailed = shallowRef(false)
+let sessionsLoadSequence = 0
 
 const runtimeRef = toRef(props, 'runtime')
 const paneIdRef = toRef(props, 'paneId')
@@ -191,7 +195,7 @@ const sessionGroups = computed<SessionGroupOption[]>(() => {
   }
 
   // Codex / Gemini / OpenCode share thread groups by project.
-  for (const group of codexStore.threadGroups) {
+  for (const group of codexStore.arenaThreadGroups) {
     if (total >= MAX_TOTAL_SESSIONS) break
     const sessions = group.threads
       .filter((thread) => codexStore.runtimeIDForThread(thread.id) === props.runtime)
@@ -233,11 +237,17 @@ const sessionGroups = computed<SessionGroupOption[]>(() => {
 
 const selectedSessionId = computed(() => arenaStore.sessionForPane(props.paneId))
 
+function samePaneSession(left: string, right: string): boolean {
+  if (props.runtime === 'grok') return grokStore.sameSession(left, right)
+  if (props.runtime === 'claude') return claudeStore.sameSession(left, right)
+  return codexStore.sameThread(left, right)
+}
+
 const selectedSession = computed(() => {
   const id = selectedSessionId.value
   if (!id) return null
   for (const group of sessionGroups.value) {
-    const hit = group.sessions.find((item) => item.value === id)
+    const hit = group.sessions.find((item) => samePaneSession(item.value, id))
     if (hit) return { ...hit, groupName: group.name, groupPath: group.path }
   }
   return {
@@ -283,14 +293,8 @@ async function onSessionChange(value: unknown): Promise<void> {
 }
 
 async function createNewSession(): Promise<void> {
-  const previousSessionId = selectedSessionId.value
   arenaStore.setPaneSession(props.paneId, '')
   emit('focus')
-  if (!await appStore.setActiveRuntime(props.runtime)) {
-    if (previousSessionId) arenaStore.setPaneSession(props.paneId, previousSessionId)
-    emit('focus')
-    return
-  }
   if (props.runtime === 'grok') {
     await grokStore.newSession()
     if (grokStore.activeSessionId) {
@@ -301,7 +305,7 @@ async function createNewSession(): Promise<void> {
     return
   }
   if (props.runtime === 'claude') {
-    claudeStore.newSession()
+    claudeStore.newSession(true)
     if (claudeStore.activeSessionId) {
       arenaStore.setPaneSession(props.paneId, claudeStore.activeSessionId)
     } else {
@@ -309,9 +313,33 @@ async function createNewSession(): Promise<void> {
     }
     return
   }
-  const thread = await codexStore.newThread(true)
+  const thread = await codexStore.newRuntimeThread(props.runtime, true)
   if (thread?.id) {
     arenaStore.setPaneSession(props.paneId, thread.id)
+  }
+}
+
+function loadPaneSessions(runtime = props.runtime): void {
+  const sequence = ++sessionsLoadSequence
+  sessionsLoading.value = true
+  sessionsLoadFailed.value = false
+  const request = runtime === 'grok'
+    ? grokStore.loadSessions()
+    : runtime === 'claude'
+      ? claudeStore.loadSessions()
+      : codexStore.loadArenaRuntimeThreads(runtime)
+  void Promise.resolve(request)
+    .catch(() => {
+      if (sequence === sessionsLoadSequence) sessionsLoadFailed.value = true
+    })
+    .finally(() => {
+      if (sequence === sessionsLoadSequence) sessionsLoading.value = false
+    })
+}
+
+function onSessionMenuOpen(open: boolean): void {
+  if (open && !sessionsLoading.value && sessionGroups.value.length === 0) {
+    loadPaneSessions()
   }
 }
 
@@ -336,17 +364,8 @@ function onGripDragEnd(): void {
   emit('drag-end-pane')
 }
 
-onMounted(() => {
-  if (props.runtime === 'grok') void grokStore.loadSessions()
-  else if (props.runtime === 'claude') void claudeStore.loadSessions()
-  else {
-    void codexStore.loadThreads()
-    void codexStore.loadRecentProjectThreads()
-  }
-})
-
 watch(
-  [selectedSessionId, () => props.runtime, () => codexStore.threadGroups],
+  [selectedSessionId, () => props.runtime, () => codexStore.arenaThreadGroups],
   ([sessionId, runtime]) => {
     if (!sessionId || runtime === 'grok' || runtime === 'claude') return
     const knownRuntime = codexStore.knownRuntimeIDForThread(sessionId)
@@ -380,15 +399,12 @@ watch(
 )
 
 watch(
-  () => props.runtime,
-  (runtime) => {
-    if (runtime === 'grok') void grokStore.loadSessions()
-    else if (runtime === 'claude') void claudeStore.loadSessions()
-    else {
-      void codexStore.loadThreads()
-      void codexStore.loadRecentProjectThreads()
-    }
+  [() => props.runtime, () => appStore.bootstrapping],
+  ([runtime, bootstrapping]) => {
+    if (bootstrapping) return
+    loadPaneSessions(runtime)
   },
+  { immediate: true },
 )
 </script>
 
@@ -396,7 +412,7 @@ watch(
   <section
     class="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-border/70 bg-card transition-[opacity,box-shadow] duration-150"
     :class="[
-      focused ? 'ring-1 ring-inset ring-primary/40' : 'opacity-[0.96]',
+      focused ? 'ring-1 ring-inset ring-primary/40' : '',
       dragging ? 'opacity-55 shadow-lg ring-1 ring-inset ring-primary/25' : '',
     ]"
     @pointerdown="emit('focus')"
@@ -470,31 +486,26 @@ watch(
         <Select
           :model-value="selectedSessionId || undefined"
           @update:model-value="(value) => void onSessionChange(value)"
+          @update:open="onSessionMenuOpen"
         >
-          <SimpleTooltip
-            :content="selectedSessionTooltip"
-            side="bottom"
-            :delay-duration="350"
-            content-class="z-[120] max-w-[320px] whitespace-pre-line break-words text-left"
+          <SelectTrigger
+            class="h-8 min-w-0 w-full max-w-full flex-1 overflow-hidden border bg-background/60 px-1.5 text-[11px] shadow-none"
+            :aria-label="selectedSessionLabel"
+            :title="selectedSessionTooltip"
           >
-            <SelectTrigger
-              class="h-8 min-w-0 w-full max-w-full flex-1 overflow-hidden border bg-background/60 px-1.5 text-[11px] shadow-none"
-              :aria-label="selectedSessionLabel"
-            >
-              <SelectValue>
-                <span class="flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden">
-                  <component
-                    :is="currentOption.icon"
-                    :size="11"
-                    class="shrink-0 opacity-70"
-                  />
-                  <span class="min-w-0 flex-1 truncate text-left">
-                    {{ selectedSessionLabel }}
-                  </span>
+            <SelectValue>
+              <span class="flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden">
+                <component
+                  :is="currentOption.icon"
+                  :size="11"
+                  class="shrink-0 opacity-70"
+                />
+                <span class="min-w-0 flex-1 truncate text-left">
+                  {{ selectedSessionLabel }}
                 </span>
-              </SelectValue>
-            </SelectTrigger>
-          </SimpleTooltip>
+              </span>
+            </SelectValue>
+          </SelectTrigger>
 
           <!-- Compact, icon-rich menu; fixed width so it never fills the page. -->
           <SelectContent
@@ -593,10 +604,24 @@ watch(
                 v-if="!sessionGroups.length"
                 class="flex flex-col items-center gap-1.5 px-3 py-6 text-center"
               >
-                <SquareStack :size="18" class="opacity-40" />
+                <LoaderCircle v-if="sessionsLoading" :size="18" class="animate-spin opacity-55" />
+                <SquareStack v-else :size="18" class="opacity-40" />
                 <p class="text-[11px] text-muted-foreground">
-                  {{ t('arena.noSessions') }}
+                  {{ sessionsLoading
+                    ? t('common.loading')
+                    : sessionsLoadFailed
+                      ? t('sidebar.projectLoadFailed')
+                      : t('arena.noSessions') }}
                 </p>
+                <Button
+                  v-if="sessionsLoadFailed && !sessionsLoading"
+                  type="button"
+                  variant="outline"
+                  size="xs"
+                  @click.stop="loadPaneSessions()"
+                >
+                  {{ t('common.retry') }}
+                </Button>
               </div>
             </div>
           </SelectContent>

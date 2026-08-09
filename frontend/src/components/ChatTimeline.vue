@@ -41,6 +41,26 @@ const timelineThreadId = computed(() => {
   if (isClaudeMode.value) return claudeStore.activeSessionId
   return codexStore.activeThreadId
 })
+const timelineWorkspacePath = computed(() => {
+  const id = timelineThreadId.value
+  if (isGrokMode.value) {
+    return grokStore.sessions.find((item) => grokStore.sameSession(item.id, id))?.workspace
+      || grokStore.workspacePath
+  }
+  if (isClaudeMode.value) {
+    return claudeStore.sessions.find((item) => claudeStore.sameSession(item.id, id))?.workspace
+      || claudeStore.workspacePath
+  }
+  return codexStore.threads.find((item) => codexStore.sameThread(item.id, id))?.cwd
+    || Object.values(codexStore.projectThreads).flat()
+      .find((item) => codexStore.sameThread(item.id, id))?.cwd
+    || ''
+})
+
+function matchingCodexThreadKey(record: Record<string, unknown>, threadId: string): string {
+  return Object.keys(record).find((id) => codexStore.sameThread(id, threadId)) || ''
+}
+
 const timelineItems = computed(() => {
   const id = timelineThreadId.value
   if (!id) return []
@@ -49,21 +69,40 @@ const timelineItems = computed(() => {
   }
   if (isClaudeMode.value) {
     if (claudeStore.sameSession(id, claudeStore.activeSessionId)) return claudeStore.activeItems
-    return claudeStore.itemsBySession?.[id] || []
+    const key = matchingClaudeSessionKey(claudeStore.itemsBySession, id)
+    return (key && claudeStore.itemsBySession[key]) || []
   }
-  return codexStore.itemsByThread[id] ?? []
+  const key = matchingCodexThreadKey(codexStore.itemsByThread, id)
+  return (key && codexStore.itemsByThread[key]) || []
 })
 const timelineLoading = computed(() => {
   const id = timelineThreadId.value
   if (!id) return false
   if (isGrokMode.value) {
-    return Boolean(grokStore.loadingSessionId && grokStore.sameSession(grokStore.loadingSessionId, id))
+    return grokStore.isSessionLoading(id)
   }
   if (isClaudeMode.value) {
-    return Boolean(claudeStore.loadingSessionId && claudeStore.sameSession(claudeStore.loadingSessionId, id))
+    return claudeStore.isSessionLoading(id)
   }
-  return codexStore.loadingThreadId === id
+  return codexStore.threadIsLoading(id)
 })
+
+watch(
+  [isArenaPane, timelineThreadId, paneRuntime],
+  ([arena, sessionId, runtime]) => {
+    if (!arena || !sessionId || /^(pending-thread|pending-grok|pending-claude)-/.test(sessionId)) return
+    if (runtime === 'grok') {
+      void grokStore.openSession(sessionId, { activate: false, switchWorkspace: false })
+      return
+    }
+    if (runtime === 'claude') {
+      void claudeStore.openSession(sessionId, { activate: false, switchWorkspace: false })
+      return
+    }
+    void codexStore.openThread(sessionId, { activate: false, runtime })
+  },
+  { immediate: true },
+)
 const timelineTurnRunning = computed(() => {
   const id = timelineThreadId.value
   if (!id) return false
@@ -73,7 +112,7 @@ const timelineTurnRunning = computed(() => {
   if (isClaudeMode.value) {
     return claudeStore.runningSessionIds.some((sessionId) => claudeStore.sameSession(sessionId, id))
   }
-  return Boolean(codexStore.activeTurnByThread?.[id] || codexStore.runningThreadIds?.includes(id))
+  return codexStore.threadHasActiveWork(id)
 })
 
 function matchingGrokSessionKey(record: Record<string, unknown>, sessionId: string): string {
@@ -93,12 +132,17 @@ const timelineSending = computed(() => {
   if (isClaudeMode.value) {
     return claudeStore.sendingSessionIds.some((sessionId) => claudeStore.sameSession(sessionId, id))
   }
-  return codexStore.sendingThreadIds.includes(id)
+  return codexStore.isThreadSubmitting(id)
 })
 
 const timelineTurnFeedback = computed(() => {
   const id = timelineThreadId.value
-  return id ? (codexStore.turnFeedbackByThread[id] || null) : null
+  return id ? codexStore.threadFeedback(id) : null
+})
+const timelineCodexTurnMetrics = computed(() => {
+  const id = timelineThreadId.value
+  const key = id ? matchingCodexThreadKey(codexStore.turnMetricsByThread, id) : ''
+  return (key && codexStore.turnMetricsByThread[key]) || {}
 })
 
 const emit = defineEmits<{
@@ -135,6 +179,7 @@ const settleFollowUpTimers: number[] = []
 let loadTakingLongTimer: number | null = null
 
 const isLoading = timelineLoading
+const showLoadingPlaceholder = computed(() => isLoading.value && timelineItems.value.length === 0)
 const historyHasEarlier = computed(() => {
   const id = timelineThreadId.value
   if (isGrokMode.value) {
@@ -145,7 +190,8 @@ const historyHasEarlier = computed(() => {
     const key = matchingClaudeSessionKey(claudeStore.historyBySession, id)
     return Boolean(key && claudeStore.historyBySession[key]?.hasEarlier)
   }
-  return Boolean(id && codexStore.historyByThread[id]?.hasEarlier)
+  const key = id ? matchingCodexThreadKey(codexStore.historyByThread, id) : ''
+  return Boolean(key && codexStore.historyByThread[key]?.hasEarlier)
 })
 const historyEarlierCount = computed(() => {
   const id = timelineThreadId.value
@@ -157,7 +203,8 @@ const historyEarlierCount = computed(() => {
     const key = matchingClaudeSessionKey(claudeStore.historyBySession, id)
     return key ? (claudeStore.historyBySession[key]?.turnOffset ?? 0) : 0
   }
-  return id ? (codexStore.historyByThread[id]?.turnOffset ?? 0) : 0
+  const key = id ? matchingCodexThreadKey(codexStore.historyByThread, id) : ''
+  return key ? (codexStore.historyByThread[key]?.turnOffset ?? 0) : 0
 })
 const historyLoadingEarlier = computed(() => {
   const id = timelineThreadId.value
@@ -169,7 +216,8 @@ const historyLoadingEarlier = computed(() => {
     const key = matchingClaudeSessionKey(claudeStore.historyBySession, id)
     return Boolean(key && claudeStore.historyBySession[key]?.loadingEarlier)
   }
-  return Boolean(id && codexStore.historyByThread[id]?.loadingEarlier)
+  const key = id ? matchingCodexThreadKey(codexStore.historyByThread, id) : ''
+  return Boolean(key && codexStore.historyByThread[key]?.loadingEarlier)
 })
 
 interface MessageGroup {
@@ -381,7 +429,8 @@ const activeTurnKey = computed(() => {
     const key = matchingClaudeSessionKey(claudeStore.activeTurnBySession, id)
     return (key && claudeStore.activeTurnBySession[key]?.turnId) || id
   }
-  return codexStore.activeTurnByThread[id] || timelineTurnFeedback.value?.turnId || ''
+  const key = matchingCodexThreadKey(codexStore.activeTurnByThread, id)
+  return (key && codexStore.activeTurnByThread[key]) || timelineTurnFeedback.value?.turnId || ''
 })
 
 function findLastAgentGroup(turnId: string): MessageGroup | undefined {
@@ -511,10 +560,19 @@ async function recoverCurrentThread(): Promise<void> {
   try {
     const threadId = timelineThreadId.value
     const recovery = isGrokMode.value
-      ? grokStore.openSession(threadId)
+      ? grokStore.openSession(threadId, {
+          activate: !isArenaPane.value,
+          switchWorkspace: !isArenaPane.value,
+        })
       : isClaudeMode.value
-        ? claudeStore.openSession(threadId)
-        : codexStore.openThread(threadId)
+        ? claudeStore.openSession(threadId, {
+            activate: !isArenaPane.value,
+            switchWorkspace: !isArenaPane.value,
+          })
+        : codexStore.openThread(threadId, {
+            activate: !isArenaPane.value,
+            runtime: paneRuntime.value,
+          })
     await Promise.race([
       recovery,
       new Promise<void>((resolve) => window.setTimeout(resolve, 10000)),
@@ -1028,7 +1086,7 @@ onUnmounted(() => {
   <div class="relative h-full min-h-0">
     <div ref="scrollAreaRef" class="scrollbar-thin h-full overflow-y-auto pr-10">
       <div ref="contentRef" class="mx-auto max-w-[680px] space-y-6 px-4 pb-8 pt-5 sm:px-6">
-        <div v-if="isLoading" class="space-y-5" :aria-busy="true" :aria-label="$t('chat.loadingThread')">
+        <div v-if="showLoadingPlaceholder" class="space-y-5" :aria-busy="true" :aria-label="$t('chat.loadingThread')">
           <p class="text-[12px] text-muted-foreground">{{ $t('chat.loadingThread') }}</p>
           <div class="space-y-3.5">
             <Skeleton class="ml-auto h-10 w-3/4 max-w-md rounded-md" />
@@ -1068,7 +1126,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- Hide real messages while loading so we never pin scroll to partial mid-thread. -->
+        <!-- Keep a cached/live timeline visible while its background refresh runs. -->
         <template v-else>
           <div
             v-if="groups.length === 0"
@@ -1108,15 +1166,17 @@ onUnmounted(() => {
             <ChatMessageGroup
               :kind="entry.group.kind"
               :items="entry.group.items"
+              :workspace-path="timelineWorkspacePath"
               :metrics="isGrokMode
                 ? grokStore.turnMetricsByKey[entry.group.turnId]
                 : isClaudeMode
                   ? claudeStore.activeTurnMetrics[entry.group.turnId]
-                  : codexStore.turnMetricsByThread[timelineThreadId]?.[entry.group.turnId]"
+                  : timelineCodexTurnMetrics[entry.group.turnId]"
               :animated="entry.index >= groups.length - 2"
               :streaming="entry.group.kind === 'agent' && entry.group.turnId === lastStreamingTurnId"
               :turn-diff="isCodexMode ? (codexStore.diffsByTurn[entry.group.turnId] || '') : ''"
               :allow-turn-actions="isCodexMode"
+              :turn-actions-disabled="isCodexMode && Boolean(codexStore.threadMutationForThread(timelineThreadId))"
               :turn-index="entry.turnIndex"
               :turn-count="entry.turnCount"
               @retry="emit('retry', $event)"

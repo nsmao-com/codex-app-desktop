@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, shallowRef } from 'vue'
+import type { WorkspaceRuntime } from './app'
 
 export type NavKind = 'route' | 'thread' | 'workspace'
 
@@ -12,6 +13,8 @@ export type NavEntry = {
   routeFullPath?: string
   threadId?: string
   workspacePath?: string
+  runtime?: WorkspaceRuntime
+  paneId?: string
 }
 
 const MAX_ENTRIES = 80
@@ -20,8 +23,13 @@ function sameEntry(a: NavEntry | undefined, b: NavEntry): boolean {
   if (!a) return false
   if (a.kind !== b.kind) return false
   if (a.kind === 'route') return a.routeFullPath === b.routeFullPath
-  if (a.kind === 'thread') return a.threadId === b.threadId && a.workspacePath === b.workspacePath
-  return a.workspacePath === b.workspacePath
+  if (a.kind === 'thread') {
+    return a.threadId === b.threadId
+      && a.workspacePath === b.workspacePath
+      && a.runtime === b.runtime
+      && a.paneId === b.paneId
+  }
+  return a.workspacePath === b.workspacePath && a.runtime === b.runtime && a.paneId === b.paneId
 }
 
 export const useNavigationStore = defineStore('navigation', () => {

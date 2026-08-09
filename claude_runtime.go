@@ -1289,7 +1289,11 @@ func normalizeClaudeEffort(value string) string {
 
 // ensure activeWorkspacePath knows Claude (used by various helpers).
 func activeWorkspaceForRuntime(settings UserSettings) string {
-	switch normalizeRuntime(settings.ActiveRuntime) {
+	return workspaceForRuntime(settings, normalizeRuntime(settings.ActiveRuntime))
+}
+
+func workspaceForRuntime(settings UserSettings, runtimeID string) string {
+	switch normalizeRuntime(runtimeID) {
 	case "grok":
 		return settings.GrokWorkspace
 	case "claude":
@@ -1310,7 +1314,11 @@ func activeWorkspaceForRuntime(settings UserSettings) string {
 }
 
 func recentWorkspacesForRuntime(settings UserSettings) []string {
-	switch normalizeRuntime(settings.ActiveRuntime) {
+	return recentWorkspacesForRuntimeID(settings, normalizeRuntime(settings.ActiveRuntime))
+}
+
+func recentWorkspacesForRuntimeID(settings UserSettings, runtimeID string) []string {
+	switch normalizeRuntime(runtimeID) {
 	case "grok":
 		if len(settings.GrokRecentWorkspaces) > 0 {
 			return settings.GrokRecentWorkspaces

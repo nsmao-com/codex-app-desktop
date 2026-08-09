@@ -34,7 +34,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
-import { useAppStore, useCodexStore } from '@/stores'
+import { useAppStore } from '@/stores'
 import type { TimelineItem, TurnMetrics } from '@/types/codex'
 import { extractFileDiff, parseUnifiedDiff } from '@/utils/diff'
 import { formatToolPayload, renderToolPayloadHTML } from '@/utils/formatPayload'
@@ -51,6 +51,8 @@ const props = defineProps<{
   streaming?: boolean
   turnDiff?: string
   allowTurnActions?: boolean
+  turnActionsDisabled?: boolean
+  workspacePath?: string
   /** Precomputed in ChatTimeline to avoid per-group O(n) scans. */
   turnIndex?: number
   turnCount?: number
@@ -64,11 +66,11 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const appStore = useAppStore()
-const codexStore = useCodexStore()
 const openRows = shallowRef<Record<string, boolean>>({})
 const copiedKey = shallowRef('')
 const attachmentPreviews = shallowRef<Record<string, string>>({})
 const parsedTurnDiffCache = new Map<string, ReturnType<typeof parseUnifiedDiff>>()
+const displayWorkspacePath = computed(() => props.workspacePath || appStore.currentWorkspacePath)
 
 /** Soft enter for live/recent groups only — history mounts stay instant. */
 const animateEnter = computed(() => Boolean(props.streaming || props.animated))
@@ -104,12 +106,11 @@ function markdownHTML(source: string, _item?: { id?: string; status?: string } |
 const turnId = computed(() => props.items[0]?.turnId ?? '')
 const turnIndex = computed(() => {
   if (typeof props.turnIndex === 'number' && props.turnIndex >= 0) return props.turnIndex
-  const ids = [...new Set(codexStore.activeItems.map((item) => item.turnId).filter(Boolean))]
-  return ids.indexOf(turnId.value)
+  return -1
 })
 const turnCount = computed(() => {
   if (typeof props.turnCount === 'number' && props.turnCount > 0) return props.turnCount
-  return [...new Set(codexStore.activeItems.map((item) => item.turnId).filter(Boolean))].length
+  return 0
 })
 const isLastTurn = computed(() => turnIndex.value >= 0 && turnIndex.value === turnCount.value - 1)
 const turnsFromHere = computed(() => {
@@ -751,7 +752,11 @@ async function openMarkdownHref(href: string): Promise<void> {
       return
     }
     if (looksLikeLocalPath(value)) {
-      await backend.OpenLocalPath(value)
+      if (displayWorkspacePath.value) {
+        await backend.OpenWorkspaceLocalPath(value, displayWorkspacePath.value)
+      } else {
+        await backend.OpenLocalPath(value)
+      }
       return
     }
     notify('error', t('notifications.linkOpenFailed'), t('notifications.linkUnsupported'))
@@ -1146,7 +1151,7 @@ function diffStats(diff: string): { add: number; del: number } {
                   <SimpleTooltip
                     v-for="change in patchChanges(block.item)"
                     :key="`${block.item.id}:${change.path}`"
-                    :content="fullDisplayPath(change.path, appStore.currentWorkspacePath)"
+                    :content="fullDisplayPath(change.path, displayWorkspacePath)"
                     content-class="max-w-sm break-all font-mono text-[10px]"
                   >
                     <button
@@ -1157,7 +1162,7 @@ function diffStats(diff: string): { add: number; del: number } {
                       <Pencil :size="12" class="shrink-0 opacity-50" />
                       <span class="shrink-0">{{ fileActionLabel(change.kind) }}</span>
                       <span class="min-w-0 truncate font-medium text-foreground/80 underline decoration-dotted decoration-muted-foreground/50 underline-offset-2">
-                        {{ compactDisplayPath(change.path, appStore.currentWorkspacePath) }}
+                        {{ compactDisplayPath(change.path, displayWorkspacePath) }}
                       </span>
                       <span class="shrink-0 tabular-nums text-[11px] text-positive">+{{ change.add }}</span>
                       <span class="shrink-0 tabular-nums text-[11px] text-destructive">-{{ change.del }}</span>
@@ -1353,7 +1358,7 @@ function diffStats(diff: string): { add: number; del: number } {
               <SimpleTooltip
                 v-for="change in visibleResolvedFileChanges"
                 :key="change.path"
-                :content="fullDisplayPath(change.path, appStore.currentWorkspacePath)"
+                :content="fullDisplayPath(change.path, displayWorkspacePath)"
                 content-class="max-w-sm break-all font-mono text-[10px]"
               >
                 <button
@@ -1364,7 +1369,7 @@ function diffStats(diff: string): { add: number; del: number } {
                   <Pencil :size="12" class="shrink-0 opacity-50" />
                   <span class="shrink-0">{{ fileActionLabel(change.kind) }}</span>
                   <span class="min-w-0 flex-1 truncate font-medium text-foreground/80 underline decoration-dotted decoration-muted-foreground/50 underline-offset-2">
-                    {{ compactDisplayPath(change.path, appStore.currentWorkspacePath) }}
+                    {{ compactDisplayPath(change.path, displayWorkspacePath) }}
                   </span>
                   <span class="shrink-0 tabular-nums text-[11px] text-positive">+{{ change.add }}</span>
                   <span class="shrink-0 tabular-nums text-[11px] text-destructive">-{{ change.del }}</span>
@@ -1454,7 +1459,7 @@ function diffStats(diff: string): { add: number; del: number } {
                 size="icon-xs"
                 class="size-6 text-muted-foreground"
                 :aria-label="t('timeline.rollback')"
-                :disabled="codexStore.threadMutation === 'rollback'"
+                :disabled="turnActionsDisabled"
               >
                 <RotateCcw :size="12" />
               </Button>

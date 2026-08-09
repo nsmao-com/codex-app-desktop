@@ -420,7 +420,7 @@ export const useGrokStore = defineStore('grok', () => {
   const messagesBySession = shallowRef<Record<string, GrokMessage[]>>({})
   const historyBySession = shallowRef<Record<string, GrokHistoryState>>({})
   const loadingSessionId = shallowRef('')
-  const sessionMutation = shallowRef('')
+  const sessionMutationBySession = shallowRef<Record<string, string>>({})
   const sendingSessionIds = shallowRef<string[]>([])
   const runningSessionIdsState = shallowRef<string[]>([])
   const interruptingSessionIds = shallowRef<string[]>([])
@@ -552,6 +552,46 @@ export const useGrokStore = defineStore('grok', () => {
     if (!id) return false
     return isSessionLoading(id) || isSessionTurnBusy(id)
   }
+
+  function isSessionInterrupting(sessionId: string): boolean {
+    return interruptingSessionIds.value.some((id) => sameGrokSession(id, sessionId))
+  }
+
+  function patchSessionPreferences(sessionId: string, model: string, effort: string): void {
+    if (!sessionId) return
+    sessions.value = sessions.value.map((session) =>
+      sameGrokSession(session.id, sessionId)
+        ? { ...session, model: model || session.model, effort: effort || session.effort }
+        : session,
+    )
+  }
+
+  function sessionMutationForSession(sessionId: string): string {
+    if (!sessionId) return ''
+    const entry = Object.entries(sessionMutationBySession.value)
+      .find(([id]) => sameGrokSession(id, sessionId))
+    return entry?.[1] ?? ''
+  }
+
+  function beginSessionMutation(sessionId: string, mutation: string): boolean {
+    if (!sessionId || sessionMutationForSession(sessionId)) return false
+    sessionMutationBySession.value = {
+      ...sessionMutationBySession.value,
+      [sessionId]: mutation,
+    }
+    return true
+  }
+
+  function endSessionMutation(sessionId: string): void {
+    const key = Object.keys(sessionMutationBySession.value)
+      .find((id) => sameGrokSession(id, sessionId))
+    if (!key) return
+    const next = { ...sessionMutationBySession.value }
+    delete next[key]
+    sessionMutationBySession.value = next
+  }
+
+  const sessionMutation = computed(() => sessionMutationForSession(activeSessionId.value))
 
   function rememberLoadedGrokSession(sessionId: string): void {
     const id = resolveSessionId(sessionId) || sessionId.trim()
@@ -2021,7 +2061,6 @@ export const useGrokStore = defineStore('grok', () => {
   }
 
   function newSession(): void {
-    if (workspaceStore.switchingWorkspace) return
     activeSessionId.value = ''
   }
 
@@ -2421,10 +2460,10 @@ export const useGrokStore = defineStore('grok', () => {
     const summary = sessions.value.find((item) => sameGrokSession(item.id, sessionId))
     const turnBackend = summary?.backend === 'api' ? 'api' : backendId.value
     const turnWorkspace = summary?.workspace || workspace
-    const turnModel = turnBackend === 'api'
+    const turnModel = summary?.model || (turnBackend === 'api'
       ? (appStore.settings.grokAPIModel || '')
-      : (appStore.settings.grokBuildModel || '')
-    const turnEffort = appStore.settings.grokEffort || 'high'
+      : (appStore.settings.grokBuildModel || ''))
+    const turnEffort = summary?.effort || appStore.settings.grokEffort || 'high'
     const busy = isSessionBusy(sessionId)
     const activeTurnId = turnForSession(sessionId)?.turnId || ''
     // Queue-first admission preserves FIFO when a terminal event and a new send
@@ -2564,7 +2603,7 @@ export const useGrokStore = defineStore('grok', () => {
 
   async function renameSession(sessionID: string, name?: string): Promise<boolean> {
     const id = sessionID.trim()
-    if (!id || sessionMutation.value) return false
+    if (!id || sessionMutationForSession(id)) return false
     const sessionBackend = backendForSession(id)
     const current = sessions.value.find((item) => item.id === id)
       || archivedSessions.value.find((item) => item.id === id)
@@ -2583,7 +2622,7 @@ export const useGrokStore = defineStore('grok', () => {
     nextName = nextName.trim()
     if (!nextName || nextName === current?.name) return false
 
-    sessionMutation.value = 'rename'
+    if (!beginSessionMutation(id, 'rename')) return false
     try {
       if (id.startsWith('pending-grok-')) {
         sessions.value = sessions.value.map((item) =>
@@ -2602,7 +2641,7 @@ export const useGrokStore = defineStore('grok', () => {
       notify('error', translate('threadActions.renameFailed'), errorMessage(error))
       return false
     } finally {
-      sessionMutation.value = ''
+      endSessionMutation(id)
     }
   }
 
@@ -2630,9 +2669,9 @@ export const useGrokStore = defineStore('grok', () => {
 
   async function archiveSession(sessionID: string): Promise<void> {
     const id = sessionID.trim()
-    if (!id || sessionMutation.value || !canMutateSession(id)) return
+    if (!id || sessionMutationForSession(id) || !canMutateSession(id)) return
     const sessionBackend = backendForSession(id)
-    sessionMutation.value = 'archive'
+    if (!beginSessionMutation(id, 'archive')) return
     try {
       const current = sessions.value.find((item) => item.id === id)
       if (!id.startsWith('pending-grok-')) {
@@ -2647,7 +2686,7 @@ export const useGrokStore = defineStore('grok', () => {
     } catch (error) {
       notify('error', translate('threadActions.archiveFailed'), errorMessage(error))
     } finally {
-      sessionMutation.value = ''
+      endSessionMutation(id)
     }
   }
 
@@ -2659,9 +2698,9 @@ export const useGrokStore = defineStore('grok', () => {
 
   async function unarchiveSession(sessionID: string): Promise<void> {
     const id = sessionID.trim()
-    if (!id || sessionMutation.value) return
+    if (!id || sessionMutationForSession(id)) return
     const sessionBackend = backendForSession(id)
-    sessionMutation.value = 'unarchive'
+    if (!beginSessionMutation(id, 'unarchive')) return
     try {
       const summary = await unarchiveGrokSessionApi(sessionBackend, id)
       archivedSessions.value = archivedSessions.value.filter((item) => item.id !== id)
@@ -2673,7 +2712,7 @@ export const useGrokStore = defineStore('grok', () => {
     } catch (error) {
       notify('error', translate('threadActions.unarchiveFailed'), errorMessage(error))
     } finally {
-      sessionMutation.value = ''
+      endSessionMutation(id)
     }
   }
 
@@ -2688,7 +2727,7 @@ export const useGrokStore = defineStore('grok', () => {
 
   async function deleteSession(sessionID: string, options: { confirm?: boolean } = {}): Promise<void> {
     const id = sessionID.trim()
-    if (!id || sessionMutation.value || !canMutateSession(id)) return
+    if (!id || sessionMutationForSession(id) || !canMutateSession(id)) return
     const sessionBackend = backendForSession(id)
     const needsConfirm = options.confirm !== false
     if (needsConfirm) {
@@ -2701,7 +2740,7 @@ export const useGrokStore = defineStore('grok', () => {
       if (!confirmed) return
     }
 
-    sessionMutation.value = 'delete'
+    if (!beginSessionMutation(id, 'delete')) return
     try {
       if (!id.startsWith('pending-grok-')) {
         await deleteGrokSessionApi(sessionBackend, id)
@@ -2711,7 +2750,7 @@ export const useGrokStore = defineStore('grok', () => {
     } catch (error) {
       notify('error', translate('threadActions.deleteFailed'), errorMessage(error))
     } finally {
-      sessionMutation.value = ''
+      endSessionMutation(id)
     }
   }
 
@@ -2747,6 +2786,8 @@ export const useGrokStore = defineStore('grok', () => {
     loadingSessionId,
     sending,
     sessionMutation,
+    sessionMutationForSession,
+    patchSessionPreferences,
     activeTurn,
     activeTurnBySession,
     sendingSessionIds,
@@ -2771,6 +2812,10 @@ export const useGrokStore = defineStore('grok', () => {
     runningSessionIds,
     sameSession: sameGrokSession,
     resolveSessionId,
+    isSessionBusy,
+    isSessionLoading,
+    isSessionTurnBusy,
+    isSessionInterrupting,
     isReady,
     bootstrapEvents,
     dispose,

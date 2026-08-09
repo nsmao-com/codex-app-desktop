@@ -241,7 +241,7 @@ func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCu
 func (s *AppService) currentRuntimeWorkspace(runtime string) string {
 	settings := s.Settings()
 	if runtime == "gemini" || runtime == "opencode" {
-		return strings.TrimSpace(activeWorkspaceForRuntime(settings))
+		return strings.TrimSpace(workspaceForRuntime(settings, runtime))
 	}
 	return ""
 }
