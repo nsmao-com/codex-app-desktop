@@ -39,10 +39,11 @@ export function useRuntimeMode() {
   })
 
   const paneId = computed(() => paneIdRef?.value || '')
+  const isArenaPane = computed(() => Boolean(paneId.value) && arenaStore.isArenaMode)
 
   /** Session/thread bound to this arena pane (independent of global active selection). */
   const boundSessionId = computed(() => {
-    if (!paneId.value || !arenaStore.isArenaMode) return ''
+    if (!isArenaPane.value) return ''
     return arenaStore.sessionForPane(paneId.value)
   })
 
@@ -58,6 +59,7 @@ export function useRuntimeMode() {
   return {
     runtime,
     paneId,
+    isArenaPane,
     boundSessionId,
     isCodexMode,
     isClaudeMode,

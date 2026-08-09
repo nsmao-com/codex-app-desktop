@@ -310,6 +310,10 @@ export const useClaudeStore = defineStore('claude', () => {
     return raw
   }
 
+  function resolveSessionId(sessionId: string): string {
+    return sessionAlias.get(sessionId.trim()) || sessionId.trim()
+  }
+
   /**
    * Move pending timeline → real session id without scrambling order.
    * Early stream deltas may already live under the real id; keep user bubbles first.
@@ -1188,8 +1192,7 @@ export const useClaudeStore = defineStore('claude', () => {
     }
   }
 
-  async function loadEarlierHistory(): Promise<boolean> {
-    const sessionId = activeSessionId.value
+  async function loadEarlierHistory(sessionId = activeSessionId.value): Promise<boolean> {
     const state = historyBySession.value[sessionId]
     if (!sessionId || !state?.hasEarlier || state.loadingEarlier) return false
     const before = state.start
@@ -1404,8 +1407,10 @@ export const useClaudeStore = defineStore('claude', () => {
     rememberLoadedClaudeSession(id)
   }
 
-  function ensureActiveSessionId(): string {
-    let sessionId = activeSessionId.value
+  function ensureActiveSessionId(targetSessionId?: string): string {
+    let sessionId = targetSessionId === undefined
+      ? activeSessionId.value
+      : resolveSessionId(targetSessionId)
     if (sessionId) return sessionId
     sessionId = `pending-claude-${Date.now()}-${++queuedSequence}`
     activeSessionId.value = sessionId
@@ -1530,7 +1535,11 @@ export const useClaudeStore = defineStore('claude', () => {
   /**
    * Public send: idle → dispatch CLI turn; busy → enqueue follow-up (never double-fire CLI).
    */
-  async function sendMessage(text: string, images: string[] = []): Promise<boolean> {
+  async function sendMessage(
+    text: string,
+    images: string[] = [],
+    targetSessionId?: string,
+  ): Promise<boolean> {
     const content = text.trim()
     if (!content && images.length === 0) return false
     if (!workspacePath.value) {
@@ -1542,7 +1551,7 @@ export const useClaudeStore = defineStore('claude', () => {
       return false
     }
 
-    const sessionId = ensureActiveSessionId()
+    const sessionId = ensureActiveSessionId(targetSessionId)
     const busy = isSessionBusy(sessionId)
     const blockingTurnId = activeTurnBySession.value[sessionId]?.turnId || ''
     // Always enter the per-session queue first. This keeps a send from
@@ -2045,8 +2054,8 @@ export const useClaudeStore = defineStore('claude', () => {
     }
   }
 
-  async function interruptActiveTurn(): Promise<void> {
-    const ref = turnRefForSession(activeSessionId.value)
+  async function interruptActiveTurn(sessionId = activeSessionId.value): Promise<void> {
+    const ref = turnRefForSession(sessionId)
     if (!ref) return
     if (interruptingSessionIds.value.some((id) => sameClaudeSession(id, ref.sessionId))) return
     markInterrupting(ref.sessionId, true)
@@ -2245,6 +2254,10 @@ export const useClaudeStore = defineStore('claude', () => {
     archivedSessions,
     activeSessionId,
     itemsBySession,
+    queueBySession,
+    historyBySession,
+    activeTurnBySession,
+    sendingSessionIds,
     loadingSessionId,
     sending,
     interrupting,
@@ -2264,6 +2277,7 @@ export const useClaudeStore = defineStore('claude', () => {
     activeTurn,
     sessionGroups,
     sameSession: sameClaudeSession,
+    resolveSessionId,
     bootstrapEvents,
     dispose,
     enterRuntime,

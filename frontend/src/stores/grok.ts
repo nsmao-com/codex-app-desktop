@@ -1932,8 +1932,7 @@ export const useGrokStore = defineStore('grok', () => {
     }
   }
 
-  async function loadEarlierHistory(): Promise<boolean> {
-    const sessionId = activeSessionId.value
+  async function loadEarlierHistory(sessionId = activeSessionId.value): Promise<boolean> {
     const key = sessionStateKey(historyBySession.value, sessionId)
     const state = key ? historyBySession.value[key] : undefined
     if (!sessionId || !key || !state?.hasEarlier || state.loadingEarlier) return false
@@ -2026,8 +2025,10 @@ export const useGrokStore = defineStore('grok', () => {
     activeSessionId.value = ''
   }
 
-  function ensureSession(message: string, workspace: string): string {
-    let sessionId = activeSessionId.value
+  function ensureSession(message: string, workspace: string, targetSessionId?: string): string {
+    let sessionId = targetSessionId === undefined
+      ? activeSessionId.value
+      : resolveSessionId(targetSessionId)
     if (sessionId) return sessionId
     sessionId = `pending-grok-${Date.now()}-${++queuedSequence}`
     activeSessionId.value = sessionId
@@ -2399,7 +2400,11 @@ export const useGrokStore = defineStore('grok', () => {
    * Send immediately when idle; otherwise enqueue (Codex follow-up queue).
    * Composer must stay enabled while a turn runs so users can queue.
    */
-  async function sendMessage(text: string, images: string[] = []): Promise<boolean> {
+  async function sendMessage(
+    text: string,
+    images: string[] = [],
+    targetSessionId?: string,
+  ): Promise<boolean> {
     const message = text.trim()
     if (!message && !images.length) return false
     const workspace = workspacePath.value
@@ -2412,7 +2417,7 @@ export const useGrokStore = defineStore('grok', () => {
       return false
     }
 
-    const sessionId = ensureSession(message, workspace)
+    const sessionId = ensureSession(message, workspace, targetSessionId)
     const summary = sessions.value.find((item) => sameGrokSession(item.id, sessionId))
     const turnBackend = summary?.backend === 'api' ? 'api' : backendId.value
     const turnWorkspace = summary?.workspace || workspace
@@ -2743,7 +2748,11 @@ export const useGrokStore = defineStore('grok', () => {
     sending,
     sessionMutation,
     activeTurn,
+    activeTurnBySession,
+    sendingSessionIds,
+    historyBySession,
     queuedBySession,
+    tokenUsageBySession,
     turnMetricsByKey,
     search,
     backendId,
@@ -2761,6 +2770,7 @@ export const useGrokStore = defineStore('grok', () => {
     interrupting,
     runningSessionIds,
     sameSession: sameGrokSession,
+    resolveSessionId,
     isReady,
     bootstrapEvents,
     dispose,

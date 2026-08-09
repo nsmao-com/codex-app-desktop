@@ -308,15 +308,28 @@ function closeArenaContextMenu(): void {
   arenaContextMenu.value = null
 }
 
+function activeSessionForArenaSeed(runtime: WorkspaceRuntime): string {
+  if (runtime !== appStore.activeRuntime) return ''
+  if (runtime === 'grok') return grokStore.activeSessionId
+  if (runtime === 'claude') return claudeStore.activeSessionId
+  const threadId = codexStore.activeThreadId
+  return threadId && codexStore.runtimeIDForThread(threadId) === runtime ? threadId : ''
+}
+
 function startArena(columns: 2 | 3 | 4 | 6 | 8): void {
   const seed = arenaContextMenu.value?.runtime || appStore.activeRuntime
+  const sessionId = activeSessionForArenaSeed(seed)
   arenaStore.openArena(columns, seed)
+  if (sessionId && arenaStore.panes[0]) {
+    arenaStore.setPaneSession(arenaStore.panes[0].id, sessionId)
+  }
   closeArenaContextMenu()
   void setActiveRuntime(seed)
 }
 
 function startArenaSameProvider(columns: 2 | 3 | 4): void {
   const seed = arenaContextMenu.value?.runtime || appStore.activeRuntime
+  const sessionId = activeSessionForArenaSeed(seed)
   arenaStore.openArena(2, seed)
   // Force every pane to the same provider so multi-tab same-model works.
   for (const pane of arenaStore.panes) {
@@ -324,6 +337,9 @@ function startArenaSameProvider(columns: 2 | 3 | 4): void {
   }
   while (arenaStore.panes.length < columns && arenaStore.canAddPane) {
     arenaStore.addPane(seed)
+  }
+  if (sessionId && arenaStore.panes[0]) {
+    arenaStore.setPaneSession(arenaStore.panes[0].id, sessionId)
   }
   closeArenaContextMenu()
   void setActiveRuntime(seed)

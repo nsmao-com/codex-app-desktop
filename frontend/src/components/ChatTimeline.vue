@@ -23,6 +23,7 @@ const props = defineProps<{
 
 const {
   runtime: paneRuntime,
+  isArenaPane,
   isCodexMode,
   isClaudeMode,
   isGrokMode,
@@ -35,7 +36,7 @@ const { t } = useI18n()
 
 /** Prefer arena-bound session so non-focused panes do not mirror the focused store pointer. */
 const timelineThreadId = computed(() => {
-  if (boundSessionId.value) return boundSessionId.value
+  if (isArenaPane.value) return boundSessionId.value
   if (isGrokMode.value) return grokStore.activeSessionId
   if (isClaudeMode.value) return claudeStore.activeSessionId
   return codexStore.activeThreadId
@@ -75,6 +76,31 @@ const timelineTurnRunning = computed(() => {
   return Boolean(codexStore.activeTurnByThread?.[id] || codexStore.runningThreadIds?.includes(id))
 })
 
+function matchingGrokSessionKey(record: Record<string, unknown>, sessionId: string): string {
+  return Object.keys(record).find((id) => grokStore.sameSession(id, sessionId)) || ''
+}
+
+function matchingClaudeSessionKey(record: Record<string, unknown>, sessionId: string): string {
+  return Object.keys(record).find((id) => claudeStore.sameSession(id, sessionId)) || ''
+}
+
+const timelineSending = computed(() => {
+  const id = timelineThreadId.value
+  if (!id) return false
+  if (isGrokMode.value) {
+    return grokStore.sendingSessionIds.some((sessionId) => grokStore.sameSession(sessionId, id))
+  }
+  if (isClaudeMode.value) {
+    return claudeStore.sendingSessionIds.some((sessionId) => claudeStore.sameSession(sessionId, id))
+  }
+  return codexStore.sendingThreadIds.includes(id)
+})
+
+const timelineTurnFeedback = computed(() => {
+  const id = timelineThreadId.value
+  return id ? (codexStore.turnFeedbackByThread[id] || null) : null
+})
+
 const emit = defineEmits<{
   retry: [itemID: string]
   rollback: [payload: { turnId: string; mode: 'single' | 'fromHere' }]
@@ -110,19 +136,40 @@ let loadTakingLongTimer: number | null = null
 
 const isLoading = timelineLoading
 const historyHasEarlier = computed(() => {
-  if (isGrokMode.value) return grokStore.activeHistoryHasEarlier
-  if (isClaudeMode.value) return claudeStore.activeHistoryHasEarlier
-  return codexStore.activeHistoryHasEarlier
+  const id = timelineThreadId.value
+  if (isGrokMode.value) {
+    const key = matchingGrokSessionKey(grokStore.historyBySession, id)
+    return Boolean(key && grokStore.historyBySession[key]?.hasEarlier)
+  }
+  if (isClaudeMode.value) {
+    const key = matchingClaudeSessionKey(claudeStore.historyBySession, id)
+    return Boolean(key && claudeStore.historyBySession[key]?.hasEarlier)
+  }
+  return Boolean(id && codexStore.historyByThread[id]?.hasEarlier)
 })
 const historyEarlierCount = computed(() => {
-  if (isGrokMode.value) return grokStore.activeHistoryEarlierCount
-  if (isClaudeMode.value) return claudeStore.activeHistoryEarlierCount
-  return codexStore.activeHistoryEarlierCount
+  const id = timelineThreadId.value
+  if (isGrokMode.value) {
+    const key = matchingGrokSessionKey(grokStore.historyBySession, id)
+    return key ? (grokStore.historyBySession[key]?.turnOffset ?? 0) : 0
+  }
+  if (isClaudeMode.value) {
+    const key = matchingClaudeSessionKey(claudeStore.historyBySession, id)
+    return key ? (claudeStore.historyBySession[key]?.turnOffset ?? 0) : 0
+  }
+  return id ? (codexStore.historyByThread[id]?.turnOffset ?? 0) : 0
 })
 const historyLoadingEarlier = computed(() => {
-  if (isGrokMode.value) return grokStore.activeHistoryLoadingEarlier
-  if (isClaudeMode.value) return claudeStore.activeHistoryLoadingEarlier
-  return codexStore.activeHistoryLoadingEarlier
+  const id = timelineThreadId.value
+  if (isGrokMode.value) {
+    const key = matchingGrokSessionKey(grokStore.historyBySession, id)
+    return Boolean(key && grokStore.historyBySession[key]?.loadingEarlier)
+  }
+  if (isClaudeMode.value) {
+    const key = matchingClaudeSessionKey(claudeStore.historyBySession, id)
+    return Boolean(key && claudeStore.historyBySession[key]?.loadingEarlier)
+  }
+  return Boolean(id && codexStore.historyByThread[id]?.loadingEarlier)
 })
 
 interface MessageGroup {
@@ -324,9 +371,17 @@ const lastItemSignature = computed(() => {
 })
 
 const activeTurnKey = computed(() => {
-  if (isGrokMode.value) return grokStore.activeTurn?.turnId || grokStore.activeSessionId || ''
-  if (isClaudeMode.value) return claudeStore.activeTurn?.turnId || claudeStore.activeSessionId || ''
-  return codexStore.activeTurnId || codexStore.activeTurnFeedback?.turnId || ''
+  const id = timelineThreadId.value
+  if (!id) return ''
+  if (isGrokMode.value) {
+    const key = matchingGrokSessionKey(grokStore.activeTurnBySession, id)
+    return (key && grokStore.activeTurnBySession[key]?.turnId) || id
+  }
+  if (isClaudeMode.value) {
+    const key = matchingClaudeSessionKey(claudeStore.activeTurnBySession, id)
+    return (key && claudeStore.activeTurnBySession[key]?.turnId) || id
+  }
+  return codexStore.activeTurnByThread[id] || timelineTurnFeedback.value?.turnId || ''
 })
 
 function findLastAgentGroup(turnId: string): MessageGroup | undefined {
@@ -356,9 +411,7 @@ function isLiveExternalItem(item: TimelineItem): boolean {
  */
 const lastStreamingTurnId = computed(() => {
   if (isGrokMode.value || isClaudeMode.value) {
-    const running = isGrokMode.value
-      ? (grokStore.isTurnRunning || grokStore.sending)
-      : (claudeStore.isTurnRunning || claudeStore.sending)
+    const running = timelineTurnRunning.value || timelineSending.value
     if (!running) return ''
     // Runtime busy state can arrive before the optimistic user row. Do not
     // reactivate the previous completed group during that short window.
@@ -368,7 +421,7 @@ const lastStreamingTurnId = computed(() => {
     }
     return ''
   }
-  if (!codexStore.isTurnRunning && codexStore.activeTurnFeedback?.state !== 'running') return ''
+  if (!timelineTurnRunning.value && timelineTurnFeedback.value?.state !== 'running') return ''
   const turnID = activeTurnKey.value
   if (!turnID) return ''
   const agentGroup = findLastAgentGroup(turnID)
@@ -381,14 +434,14 @@ const showThinking = computed(() => {
   if (lastStreamingTurnId.value) return false
   if (isGrokMode.value) {
     // Mirror Codex: show footer shimmer until the first live agent activity lands.
-    return grokStore.sending || grokStore.isTurnRunning
+    return timelineSending.value || timelineTurnRunning.value
   }
   if (isClaudeMode.value) {
-    return claudeStore.sending || claudeStore.isTurnRunning
+    return timelineSending.value || timelineTurnRunning.value
   }
-  const feedback = codexStore.activeTurnFeedback
-  const waiting = codexStore.sendingMessage
-    || codexStore.isTurnRunning
+  const feedback = timelineTurnFeedback.value
+  const waiting = timelineSending.value
+    || timelineTurnRunning.value
     || feedback?.state === 'submitting'
     || feedback?.state === 'running'
   if (!waiting) return false
@@ -413,7 +466,7 @@ const showThinking = computed(() => {
 
 const thinkingLabel = computed(() => {
   if (isGrokMode.value || isClaudeMode.value) return t('chat.thinking')
-  const feedback = codexStore.activeTurnFeedback
+  const feedback = timelineTurnFeedback.value
   if (feedback?.message) return feedback.message
   return t('chat.thinking')
 })
@@ -456,11 +509,12 @@ async function recoverCurrentThread(): Promise<void> {
   recoveringThread.value = true
   loadTakingLong.value = false
   try {
+    const threadId = timelineThreadId.value
     const recovery = isGrokMode.value
-      ? grokStore.recoverActiveSession()
+      ? grokStore.openSession(threadId)
       : isClaudeMode.value
-        ? claudeStore.recoverActiveSession()
-        : codexStore.recoverActiveThread()
+        ? claudeStore.openSession(threadId)
+        : codexStore.openThread(threadId)
     await Promise.race([
       recovery,
       new Promise<void>((resolve) => window.setTimeout(resolve, 10000)),
@@ -746,10 +800,10 @@ async function loadEarlierHistoryPage(): Promise<void> {
   windowShiftPending = true
   try {
     const loaded = isGrokMode.value
-      ? await grokStore.loadEarlierHistory()
+      ? await grokStore.loadEarlierHistory(requestedThreadId)
       : isClaudeMode.value
-        ? await claudeStore.loadEarlierHistory()
-        : await codexStore.loadEarlierHistory()
+        ? await claudeStore.loadEarlierHistory(requestedThreadId)
+        : await codexStore.loadEarlierHistory(requestedThreadId)
     if (!loaded) return
     if (paneRuntime.value !== requestedRuntime || timelineThreadId.value !== requestedThreadId) return
     await nextTick()
@@ -865,7 +919,7 @@ watch(showThinking, (visible) => {
 })
 // Planning shimmer / final agent group height changes while stick is on.
 watch(
-  () => codexStore.activeTurnFeedback?.state,
+  () => timelineTurnFeedback.value?.state,
   (state, prev) => {
     if (isGrokMode.value || !stickToBottom.value) return
     if (prev === 'running' || prev === 'submitting') {
@@ -1055,10 +1109,10 @@ onUnmounted(() => {
               :kind="entry.group.kind"
               :items="entry.group.items"
               :metrics="isGrokMode
-                ? grokStore.activeTurnMetrics[entry.group.turnId]
+                ? grokStore.turnMetricsByKey[entry.group.turnId]
                 : isClaudeMode
                   ? claudeStore.activeTurnMetrics[entry.group.turnId]
-                  : codexStore.activeTurnMetrics[entry.group.turnId]"
+                  : codexStore.turnMetricsByThread[timelineThreadId]?.[entry.group.turnId]"
               :animated="entry.index >= groups.length - 2"
               :streaming="entry.group.kind === 'agent' && entry.group.turnId === lastStreamingTurnId"
               :turn-diff="isCodexMode ? (codexStore.diffsByTurn[entry.group.turnId] || '') : ''"

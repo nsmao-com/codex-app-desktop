@@ -32,7 +32,7 @@ import {
 import { SimpleTooltip } from '@/components/ui/tooltip'
 import { ArenaPaneIdKey, ArenaPaneRuntimeKey } from '@/composables/useRuntimeMode'
 import { useArenaStore } from '@/stores/arena'
-import type { WorkspaceRuntime } from '@/stores/app'
+import { useAppStore, type WorkspaceRuntime } from '@/stores/app'
 import { useClaudeStore, useCodexStore, useGrokStore } from '@/stores'
 import { notify } from '@/utils/notify'
 
@@ -53,6 +53,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const arenaStore = useArenaStore()
+const appStore = useAppStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
@@ -193,6 +194,7 @@ const sessionGroups = computed<SessionGroupOption[]>(() => {
   for (const group of codexStore.threadGroups) {
     if (total >= MAX_TOTAL_SESSIONS) break
     const sessions = group.threads
+      .filter((thread) => codexStore.runtimeIDForThread(thread.id) === props.runtime)
       .slice(0, PER_GROUP_LIMIT)
       .map((thread) => {
         const label = thread.name || thread.preview || thread.id
@@ -276,6 +278,7 @@ async function onSessionChange(value: unknown): Promise<void> {
     notify('warning', t('arena.sessionInUseTitle'), t('arena.sessionInUseHint'))
     return
   }
+  if (!await appStore.setActiveRuntime(props.runtime)) return
   arenaStore.setPaneSession(props.paneId, value)
   emit('focus')
   if (props.runtime === 'grok') {
@@ -298,10 +301,13 @@ async function onSessionChange(value: unknown): Promise<void> {
 
 async function createNewSession(): Promise<void> {
   emit('focus')
+  if (!await appStore.setActiveRuntime(props.runtime)) return
   if (props.runtime === 'grok') {
     await grokStore.newSession()
     if (grokStore.activeSessionId) {
       arenaStore.setPaneSession(props.paneId, grokStore.activeSessionId)
+    } else {
+      arenaStore.setPaneSession(props.paneId, '')
     }
     return
   }
@@ -314,7 +320,7 @@ async function createNewSession(): Promise<void> {
     }
     return
   }
-  const thread = await codexStore.newThread()
+  const thread = await codexStore.newThread(true)
   if (thread?.id) {
     arenaStore.setPaneSession(props.paneId, thread.id)
   }
@@ -348,20 +354,41 @@ onMounted(() => {
     void codexStore.loadThreads()
     void codexStore.loadRecentProjectThreads()
   }
-  if (
-    props.focused
-    && !arenaStore.sessionForPane(props.paneId)
-  ) {
-    const active = props.runtime === 'grok'
-      ? grokStore.activeSessionId
-      : props.runtime === 'claude'
-        ? claudeStore.activeSessionId
-        : codexStore.activeThreadId
-    if (active && !arenaStore.isSessionTakenByOtherPane(props.paneId, active, props.runtime)) {
-      arenaStore.setPaneSession(props.paneId, active)
-    }
-  }
 })
+
+watch(
+  [selectedSessionId, () => props.runtime, () => codexStore.threadGroups],
+  ([sessionId, runtime]) => {
+    if (!sessionId || runtime === 'grok' || runtime === 'claude') return
+    const knownRuntime = codexStore.knownRuntimeIDForThread(sessionId)
+    if (knownRuntime && knownRuntime !== runtime) {
+      arenaStore.setPaneSession(props.paneId, '')
+    }
+  },
+  { immediate: true },
+)
+
+// Keep the owning pane aligned when a provider promotes its optimistic id.
+watch(
+  [
+    selectedSessionId,
+    () => props.runtime,
+    () => codexStore.itemsByThread,
+    () => grokStore.messagesBySession,
+    () => claudeStore.itemsBySession,
+  ],
+  ([boundId, runtime]) => {
+    if (!boundId) return
+    const resolvedId = runtime === 'grok'
+      ? grokStore.resolveSessionId(boundId)
+      : runtime === 'claude'
+        ? claudeStore.resolveSessionId(boundId)
+        : codexStore.resolveThreadID(boundId)
+    if (resolvedId && resolvedId !== boundId) {
+      arenaStore.setPaneSession(props.paneId, resolvedId)
+    }
+  },
+)
 
 watch(
   () => props.runtime,
