@@ -4163,16 +4163,17 @@ func (s *AppService) ensureCodexBackendThread(session *SessionRecord, settings U
 		return "", errors.New("Codex did not return a thread id")
 	}
 	s.mu.Lock()
-	if record := s.sessions[session.ID]; record != nil {
-		record.BackendRef = backendID
-		record.UpdatedAt = time.Now().Unix()
-		if name, ok := result["thread"].(map[string]any); ok {
-			if value, _ := name["name"].(string); value != "" && (record.Name == "" || record.Name == "New task") {
-				record.Name = value
-			}
-		}
-		s.persistSessionsLocked()
+	if !s.bindCodexBackendThreadLocked(session.ID, backendID) {
+		s.mu.Unlock()
+		return "", errors.New("session could not claim the allocated Codex thread")
 	}
+	record = s.sessions[session.ID]
+	if name, ok := result["thread"].(map[string]any); ok {
+		if value, _ := name["name"].(string); value != "" && (record.Name == "" || record.Name == "New task") {
+			record.Name = value
+		}
+	}
+	s.persistSessionsLocked()
 	s.mu.Unlock()
 	s.rememberThread(session.ID, workspace)
 	s.rememberThread(backendID, workspace)
@@ -4263,6 +4264,48 @@ func (s *AppService) sessionIDForBackendRef(backendID string) string {
 	return s.sessionIDForBackendRefLocked(backendID)
 }
 
+// bindCodexBackendThreadLocked gives one NiceCodex UUID exclusive ownership of
+// a Codex app-server thread and removes a raw thread-id mirror in the same lock.
+// It must only be called while s.mu is held.
+func (s *AppService) bindCodexBackendThreadLocked(sessionID, backendID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	backendID = strings.TrimSpace(backendID)
+	if sessionID == "" || backendID == "" {
+		return false
+	}
+	record := s.sessions[sessionID]
+	if record == nil || record.Archived || isExternalSession(record) {
+		return false
+	}
+
+	if mirror := s.sessions[backendID]; mirror != nil && mirror != record &&
+		!isExternalSession(mirror) && samePath(mirror.Workspace, record.Workspace) {
+		if (record.Name == "" || record.Name == "New task") && mirror.Name != "" {
+			record.Name = mirror.Name
+		}
+		if record.Preview == "" {
+			record.Preview = mirror.Preview
+		}
+		if record.Model == "" {
+			record.Model = mirror.Model
+		}
+		if record.ProviderID == "" {
+			record.ProviderID = mirror.ProviderID
+		}
+		delete(s.sessions, backendID)
+	}
+
+	record.BackendRef = backendID
+	record.UpdatedAt = time.Now().Unix()
+	if s.allowedThreads == nil {
+		s.allowedThreads = make(map[string]string)
+	}
+	s.allowedThreads[sessionID] = record.Workspace
+	s.allowedThreads[backendID] = record.Workspace
+	delete(s.pendingCodexSessions, workspaceKey(record.Workspace))
+	return true
+}
+
 func (s *AppService) claimPendingCodexSession(backendID, eventWorkspace string) string {
 	backendID = strings.TrimSpace(backendID)
 	if backendID == "" {
@@ -4281,12 +4324,19 @@ func (s *AppService) claimPendingCodexSession(backendID, eventWorkspace string) 
 
 	sessionID := s.pendingCodexSessions[workspaceKey(eventWorkspace)]
 	if eventWorkspace == "" {
-		// Fall back to the single pending session when the event omits a cwd.
-		sessionID = ""
+		// A cwd-less event is safe to infer only when exactly one distinct pending
+		// session exists. Map iteration order must never choose a random workspace.
+		var candidateID string
 		for _, candidate := range s.pendingCodexSessions {
-			sessionID = candidate
-			break
+			if candidate == "" {
+				continue
+			}
+			if candidateID != "" && candidateID != candidate {
+				return ""
+			}
+			candidateID = candidate
 		}
+		sessionID = candidateID
 	}
 	record := s.sessions[sessionID]
 	if sessionID == "" || record == nil || record.Archived || isExternalSession(record) {
@@ -4298,14 +4348,9 @@ func (s *AppService) claimPendingCodexSession(backendID, eventWorkspace string) 
 	if ref := strings.TrimSpace(record.BackendRef); ref != "" && ref != backendID {
 		return ""
 	}
-	record.BackendRef = backendID
-	record.UpdatedAt = time.Now().Unix()
-	if s.allowedThreads == nil {
-		s.allowedThreads = make(map[string]string)
+	if !s.bindCodexBackendThreadLocked(sessionID, backendID) {
+		return ""
 	}
-	s.allowedThreads[sessionID] = record.Workspace
-	s.allowedThreads[backendID] = record.Workspace
-	delete(s.pendingCodexSessions, workspaceKey(record.Workspace))
 	s.persistSessionsLocked()
 	return sessionID
 }

@@ -692,16 +692,11 @@ const activeQueuedMessages = computed(() => {
 const showQueueStrip = computed(() =>
   activeQueuedMessages.value.some((message) => message.state === 'queued' || message.state === 'failed'),
 )
-const activeSelectionLoading = computed(() => {
-  const sessionId = composerSessionId.value
-  if (isGrokMode.value) {
-    return grokStore.isSessionLoading(sessionId)
-  }
-  if (isClaudeMode.value) {
-    return claudeStore.isSessionLoading(sessionId)
-  }
-  return codexStore.threadIsLoading(sessionId)
-})
+const canSendDuringWorkspaceSwitch = computed(() => Boolean(
+  (isCodexMode.value || isGeminiMode.value || isOpenCodeMode.value)
+  && composerCodexThread.value?.cwd
+  && codexStore.threadIsWorkspaceSelectionPending(composerSessionId.value),
+))
 /**
  * Follow-ups stay sendable while a turn runs. Codex may steer only when the
  * store has a stable live owner; every uncertain state remains queue-first.
@@ -709,7 +704,8 @@ const activeSelectionLoading = computed(() => {
 const canSend = computed(() => {
   const hasContent = Boolean(modelValue.value.trim()) || attachedImages.value.length > 0
   if (attachingImages.value) return false
-  if (!isArenaPane.value && workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return false
+  if (!isArenaPane.value && workspaceStore.switchingWorkspace && !canSendDuringWorkspaceSwitch.value) return false
+  if (isArenaPane.value && workspaceStore.switchingWorkspace && !composerSessionId.value) return false
   if (isGrokMode.value) {
     return hasContent && grokStore.isReady
   }
@@ -1217,7 +1213,8 @@ async function send(): Promise<void> {
   const draftKey = props.draftKey
   if (!message && !images.length) return
   if (attachingImages.value) return
-  if (!isArenaPane.value && workspaceStore.switchingWorkspace && !activeSelectionLoading.value) return
+  if (!isArenaPane.value && workspaceStore.switchingWorkspace && !canSendDuringWorkspaceSwitch.value) return
+  if (isArenaPane.value && workspaceStore.switchingWorkspace && !composerSessionId.value) return
   const arena = isArenaPane.value
   const targetPaneId = paneId.value
   const targetRuntime = paneRuntime.value
@@ -1234,7 +1231,7 @@ async function send(): Promise<void> {
     const sendPromise = grokStore.sendMessage(
       message,
       images,
-      arena ? targetSessionId || '' : undefined,
+      targetSessionId || '',
     )
     if (
       arena
@@ -1262,7 +1259,7 @@ async function send(): Promise<void> {
     const sendPromise = claudeStore.sendMessage(
       message,
       images,
-      arena ? targetSessionId || '' : undefined,
+      targetSessionId || '',
     )
     emit('sent')
     const ok = await sendPromise
@@ -1275,14 +1272,25 @@ async function send(): Promise<void> {
     return
   }
   if (!codexStore.isRuntimeReady(targetRuntime)) return
+  const targetThread = targetSessionId
+    ? (codexStore.activeThread && codexStore.sameThread(codexStore.activeThread.id, targetSessionId)
+        ? codexStore.activeThread
+        : codexStore.threads.find((thread) => codexStore.sameThread(thread.id, targetSessionId))
+          || Object.values(codexStore.projectThreads).flat()
+            .find((thread) => codexStore.sameThread(thread.id, targetSessionId)))
+    : null
+  const targetWorkspace = targetThread?.cwd
+    || (!workspaceStore.switchingWorkspace ? appStore.currentWorkspacePath : '')
+  if (!targetWorkspace) return
   resetSentHistoryNavigation()
   modelValue.value = ''
   attachedImages.value = []
   const sendPromise = codexStore.sendMessage(
     message,
     images,
-    arena ? targetSessionId || '' : undefined,
-    arena ? targetRuntime : undefined,
+    targetSessionId || '',
+    targetRuntime,
+    targetWorkspace,
   )
   emit('sent')
   const ok = await sendPromise

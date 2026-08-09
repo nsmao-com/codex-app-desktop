@@ -760,6 +760,12 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 			usage = nativeUsage
 		}
 	}
+	// Some CLI versions expose the native session only in their final result.
+	// Bind it while this run is still the authoritative owner so a native-history
+	// refresh cannot import a second row between process exit and final persistence.
+	if sessionID != "" {
+		s.bindExternalSession(threadID, provider, sessionID)
+	}
 	cancel()
 	s.mu.Lock()
 	currentRun := s.externalRuns[threadID]
