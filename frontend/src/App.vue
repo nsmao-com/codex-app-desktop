@@ -104,7 +104,7 @@ async function activateRuntime(runtime: WorkspaceRuntime): Promise<void> {
     const remembered = rememberedID
       ? codexStore.threadGroups.flatMap((group) => group.threads).find((thread) => thread.id === rememberedID)
       : undefined
-    if (remembered && sequence === runtimeActivationSequence && appStore.activeRuntime === runtime) {
+    if (!arenaKeepSessions && remembered && sequence === runtimeActivationSequence && appStore.activeRuntime === runtime) {
       await codexStore.openThread(remembered.id)
     }
     return
@@ -121,7 +121,7 @@ async function activateRuntime(runtime: WorkspaceRuntime): Promise<void> {
   const remembered = rememberedID
     ? codexStore.threadGroups.flatMap((group) => group.threads).find((thread) => thread.id === rememberedID)
     : undefined
-  if (remembered && sequence === runtimeActivationSequence && appStore.activeRuntime === runtime) {
+  if (!arenaKeepSessions && remembered && sequence === runtimeActivationSequence && appStore.activeRuntime === runtime) {
     await codexStore.openThread(remembered.id)
   }
   if (

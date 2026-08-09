@@ -76,6 +76,7 @@ import {
   formatUsageDateLabel,
   type UsageRangeDays,
 } from '@/utils/accountUsage'
+import { notify } from '@/utils/notify'
 import { sameWorkspacePath } from '@/utils/workspacePath'
 
 const router = useRouter()
@@ -231,6 +232,15 @@ const groups = computed(() => codexStore.filteredThreadGroups)
 const grokGroups = computed(() => grokStore.sessionGroups)
 const claudeGroups = computed(() => claudeStore.sessionGroups)
 const usesCodexTimeline = computed(() => appStore.isCodexMode || appStore.isGeminiMode || appStore.isOpenCodeMode)
+const activeSidebarSessionId = computed(() => {
+  if (arenaStore.isArenaMode) {
+    const pane = arenaStore.focusedPane
+    if (pane?.runtime === appStore.activeRuntime) return arenaStore.sessionForPane(pane.id)
+  }
+  if (appStore.isGrokMode) return grokStore.activeSessionId
+  if (appStore.isClaudeMode) return claudeStore.activeSessionId
+  return codexStore.activeThreadId
+})
 const creatingInProject = shallowRef('')
 const renamingThreadId = shallowRef('')
 const renameDraft = shallowRef('')
@@ -285,12 +295,30 @@ async function setWorkMode(mode: 'code' | 'cowork'): Promise<void> {
 
 async function setActiveRuntime(runtime: WorkspaceRuntime): Promise<void> {
   if (appStore.activeRuntime === runtime) return
-  // Only flip the flag here. App.vue watch defers hydrate/load so the tab animation isn't blocked.
-  await appStore.setActiveRuntime(runtime)
+  // Persist the runtime first; App.vue continues runtime-scoped hydration independently.
+  if (!await appStore.setActiveRuntime(runtime)) return
   // Keep arena focused pane in sync when switching from the sidebar tabs.
   if (arenaStore.isArenaMode) {
     const match = arenaStore.panes.find((pane) => pane.runtime === runtime)
-    if (match) arenaStore.focusPane(match.id)
+    if (!match) return
+    arenaStore.focusPane(match.id)
+    const sessionId = arenaStore.sessionForPane(match.id)
+    if (!sessionId) return
+    if (runtime === 'grok') {
+      if (!grokStore.sameSession(grokStore.activeSessionId, sessionId)) {
+        await grokStore.openSession(sessionId)
+      }
+      return
+    }
+    if (runtime === 'claude') {
+      if (!claudeStore.sameSession(claudeStore.activeSessionId, sessionId)) {
+        await claudeStore.openSession(sessionId)
+      }
+      return
+    }
+    if (!codexStore.sameThread(codexStore.activeThreadId, sessionId)) {
+      await codexStore.openThread(sessionId)
+    }
   }
 }
 
@@ -415,12 +443,41 @@ function visibleClaudeSessions(group: { path: string; sessions: Array<{
 /** Open a session; if it lives under another project folder, switch workspace first (Codex-style). */
 async function openClaudeSession(group: { path: string; active: boolean }, sessionId: string): Promise<void> {
   void group
+  bindFocusedArenaSession('claude', sessionId)
   await claudeStore.openSession(sessionId)
 }
 
 async function openGrokSession(group: { path: string; active: boolean }, sessionId: string): Promise<void> {
   void group
+  bindFocusedArenaSession('grok', sessionId)
   await grokStore.openSession(sessionId)
+}
+
+async function createSidebarSession(): Promise<void> {
+  const runtime = appStore.activeRuntime
+  if (runtime === 'grok') {
+    grokStore.newSession()
+    bindFocusedArenaSession(runtime, grokStore.activeSessionId)
+    return
+  }
+  if (runtime === 'claude') {
+    claudeStore.newSession()
+    bindFocusedArenaSession(runtime, claudeStore.activeSessionId)
+    return
+  }
+  const thread = await codexStore.newThread(arenaStore.isArenaMode)
+  if (thread?.id) bindFocusedArenaSession(runtime, thread.id)
+}
+
+function bindFocusedArenaSession(runtime: WorkspaceRuntime, sessionId: string): void {
+  if (!arenaStore.isArenaMode) return
+  const pane = arenaStore.focusedPane
+  if (!pane) return
+  if (pane.runtime !== runtime) arenaStore.setPaneRuntime(pane.id, runtime)
+  const previousOwner = arenaStore.selectPaneSession(pane.id, sessionId)
+  if (previousOwner) {
+    notify('info', t('arena.sessionInUseTitle'), t('arena.sessionInUseHint'))
+  }
 }
 
 async function newInClaudeProject(group: { path: string; active: boolean }, event?: Event): Promise<void> {
@@ -431,6 +488,7 @@ async function newInClaudeProject(group: { path: string; active: boolean }, even
     if (!await workspaceStore.useWorkspace(group.path)) return
   }
   claudeStore.newSession()
+  bindFocusedArenaSession('claude', claudeStore.activeSessionId)
 }
 
 async function newInGrokProject(group: { path: string; active: boolean }, event?: Event): Promise<void> {
@@ -441,6 +499,7 @@ async function newInGrokProject(group: { path: string; active: boolean }, event?
     if (!await workspaceStore.useWorkspace(group.path)) return
   }
   grokStore.newSession()
+  bindFocusedArenaSession('grok', grokStore.activeSessionId)
 }
 
 function archiveClaudeSession(sessionID: string, event?: Event): void {
@@ -459,8 +518,12 @@ function formatClaudeUpdated(value: number): string {
   return formatGrokUpdated(value)
 }
 
-function openThread(group: ThreadGroup, thread: ThreadSummary): void {
-  codexStore.openProjectThread(group.path, thread.id)
+async function openThread(group: ThreadGroup, thread: ThreadSummary): Promise<void> {
+  const runtime = codexStore.knownRuntimeIDForThread(thread.id)
+    || (usesCodexTimeline.value ? appStore.activeRuntime : 'codex')
+  bindFocusedArenaSession(runtime, thread.id)
+  if (appStore.activeRuntime !== runtime && !await appStore.setActiveRuntime(runtime)) return
+  await codexStore.openProjectThread(group.path, thread.id)
 }
 
 async function switchWorkspace(path: string): Promise<void> {
@@ -478,8 +541,13 @@ async function switchWorkspace(path: string): Promise<void> {
     const activeGroup = grokStore.sessionGroups.find((group) => group.active)
     const target = activeGroup?.sessions.find((session) => session.id === grokStore.activeSessionId)
       ?? activeGroup?.sessions[0]
-    if (target) await grokStore.openSession(target.id, { switchWorkspace: false })
-    else grokStore.newSession()
+    if (target) {
+      bindFocusedArenaSession(runtime, target.id)
+      await grokStore.openSession(target.id, { switchWorkspace: false })
+    } else {
+      grokStore.newSession()
+      bindFocusedArenaSession(runtime, grokStore.activeSessionId)
+    }
     return
   }
   if (runtime === 'claude') {
@@ -490,11 +558,17 @@ async function switchWorkspace(path: string): Promise<void> {
     const activeGroup = claudeStore.sessionGroups.find((group) => group.active)
     const target = activeGroup?.sessions.find((session) => session.id === claudeStore.activeSessionId)
       ?? activeGroup?.sessions[0]
-    if (target) await claudeStore.openSession(target.id, { switchWorkspace: false })
-    else claudeStore.newSession()
+    if (target) {
+      bindFocusedArenaSession(runtime, target.id)
+      await claudeStore.openSession(target.id, { switchWorkspace: false })
+    } else {
+      claudeStore.newSession()
+      bindFocusedArenaSession(runtime, claudeStore.activeSessionId)
+    }
     return
   }
   await codexStore.switchProject(path)
+  bindFocusedArenaSession(runtime, codexStore.activeThreadId)
 }
 
 function chooseWorkspace(): void {
@@ -512,8 +586,13 @@ function chooseWorkspace(): void {
       const activeGroup = grokStore.sessionGroups.find((group) => group.active)
       const target = activeGroup?.sessions.find((session) => session.id === grokStore.activeSessionId)
         ?? activeGroup?.sessions[0]
-      if (target) await grokStore.openSession(target.id, { switchWorkspace: false })
-      else grokStore.newSession()
+      if (target) {
+        bindFocusedArenaSession(runtime, target.id)
+        await grokStore.openSession(target.id, { switchWorkspace: false })
+      } else {
+        grokStore.newSession()
+        bindFocusedArenaSession(runtime, grokStore.activeSessionId)
+      }
     })
     return
   }
@@ -525,12 +604,19 @@ function chooseWorkspace(): void {
       const activeGroup = claudeStore.sessionGroups.find((group) => group.active)
       const target = activeGroup?.sessions.find((session) => session.id === claudeStore.activeSessionId)
         ?? activeGroup?.sessions[0]
-      if (target) await claudeStore.openSession(target.id, { switchWorkspace: false })
-      else claudeStore.newSession()
+      if (target) {
+        bindFocusedArenaSession(runtime, target.id)
+        await claudeStore.openSession(target.id, { switchWorkspace: false })
+      } else {
+        claudeStore.newSession()
+        bindFocusedArenaSession(runtime, claudeStore.activeSessionId)
+      }
     })
     return
   }
-  void codexStore.selectProject()
+  void codexStore.selectProject().then(() => {
+    bindFocusedArenaSession(runtime, codexStore.activeThreadId)
+  })
 }
 
 function archiveThread(threadID: string, event?: Event): void {
@@ -604,7 +690,8 @@ async function newInProject(group: ThreadGroup, event?: Event): Promise<void> {
   try {
     // Expand the project so the new draft is visible.
     setGroupCollapsed(group, false)
-    await codexStore.newThreadInProject(group.path)
+    const thread = await codexStore.newThreadInProject(group.path, arenaStore.isArenaMode)
+    if (thread?.id) bindFocusedArenaSession(appStore.activeRuntime, thread.id)
   } finally {
     creatingInProject.value = ''
   }
@@ -1006,11 +1093,7 @@ function formatGrokUpdated(value?: number | null): string {
             : appStore.isClaudeMode
               ? !claudeStore.workspacePath
               : (!codexStore.isReady || codexStore.creatingThread)"
-          @click="appStore.isGrokMode
-            ? grokStore.newSession()
-            : appStore.isClaudeMode
-              ? claudeStore.newSession()
-              : void codexStore.newThread()"
+          @click="void createSidebarSession()"
         >
           <LoaderCircle v-if="usesCodexTimeline && codexStore.creatingThread" :size="14" class="mr-1.5 animate-spin" />
           <Plus v-else :size="14" class="mr-1.5" />
@@ -1147,7 +1230,7 @@ function formatGrokUpdated(value?: number | null): string {
                     role="button"
                     tabindex="0"
                     class="flex h-auto min-h-11 w-full cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors"
-                    :class="group.active && session.id === grokStore.activeSessionId
+                    :class="group.active && session.id === activeSidebarSessionId
                       ? 'bg-accent text-accent-foreground shadow-sm'
                       : 'hover:bg-sidebar-accent/50'"
                     @click="renamingThreadId === session.id ? undefined : openGrokSession(group, session.id)"
@@ -1194,7 +1277,7 @@ function formatGrokUpdated(value?: number | null): string {
                       <span
                         v-if="renamingThreadId !== session.id"
                         class="mt-0.5 block truncate text-[10px] leading-4 text-muted-foreground"
-                        :class="{ 'text-accent-foreground/70': group.active && session.id === grokStore.activeSessionId }"
+                        :class="{ 'text-accent-foreground/70': group.active && session.id === activeSidebarSessionId }"
                       >
                         {{ session.preview || session.model || session.backend || t('sidebar.noPreview') }}
                       </span>
@@ -1202,7 +1285,7 @@ function formatGrokUpdated(value?: number | null): string {
                     <span
                       v-if="renamingThreadId !== session.id"
                       class="relative mt-0.5 flex h-5 w-10 shrink-0 items-center justify-end"
-                      :class="{ 'text-accent-foreground/70': group.active && session.id === grokStore.activeSessionId }"
+                      :class="{ 'text-accent-foreground/70': group.active && session.id === activeSidebarSessionId }"
                     >
                       <span
                         v-if="grokStore.loadingSessionId === session.id"
@@ -1398,7 +1481,7 @@ function formatGrokUpdated(value?: number | null): string {
                   role="button"
                   tabindex="0"
                   class="flex h-auto min-h-11 w-full cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors"
-                  :class="group.active && thread.id === codexStore.activeThreadId
+                  :class="group.active && thread.id === activeSidebarSessionId
                     ? 'bg-accent text-accent-foreground shadow-sm'
                     : 'hover:bg-sidebar-accent/50'"
                   :whileHover="{ x: 2 }"
@@ -1452,7 +1535,7 @@ function formatGrokUpdated(value?: number | null): string {
                     <span
                       v-if="renamingThreadId !== thread.id"
                       class="mt-0.5 block truncate text-[10px] leading-4 text-muted-foreground"
-                      :class="{ 'text-accent-foreground/70': group.active && thread.id === codexStore.activeThreadId }"
+                      :class="{ 'text-accent-foreground/70': group.active && thread.id === activeSidebarSessionId }"
                     >
                       {{ thread.model || thread.preview || t('sidebar.noPreview') }}
                     </span>
@@ -1461,7 +1544,7 @@ function formatGrokUpdated(value?: number | null): string {
                   <span
                     v-if="renamingThreadId !== thread.id"
                     class="relative mt-0.5 flex h-5 w-10 shrink-0 items-center justify-end"
-                    :class="{ 'text-accent-foreground/70': group.active && thread.id === codexStore.activeThreadId }"
+                    :class="{ 'text-accent-foreground/70': group.active && thread.id === activeSidebarSessionId }"
                   >
                     <span
                       v-if="codexStore.loadingThreadId === thread.id"
@@ -1642,7 +1725,7 @@ function formatGrokUpdated(value?: number | null): string {
                     role="button"
                     tabindex="0"
                     class="flex h-auto min-h-11 w-full cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors"
-                    :class="group.active && session.id === claudeStore.activeSessionId
+                    :class="group.active && session.id === activeSidebarSessionId
                       ? 'bg-accent text-accent-foreground shadow-sm'
                       : 'hover:bg-sidebar-accent/50'"
                     @click="renamingThreadId === session.id ? undefined : openClaudeSession(group, session.id)"
@@ -1689,7 +1772,7 @@ function formatGrokUpdated(value?: number | null): string {
                       <span
                         v-if="renamingThreadId !== session.id"
                         class="mt-0.5 block truncate text-[10px] leading-4 text-muted-foreground"
-                        :class="{ 'text-accent-foreground/70': group.active && session.id === claudeStore.activeSessionId }"
+                        :class="{ 'text-accent-foreground/70': group.active && session.id === activeSidebarSessionId }"
                       >
                         {{ session.preview || session.model || t('sidebar.noPreview') }}
                       </span>
@@ -1697,7 +1780,7 @@ function formatGrokUpdated(value?: number | null): string {
                     <span
                       v-if="renamingThreadId !== session.id"
                       class="relative mt-0.5 flex h-5 w-10 shrink-0 items-center justify-end"
-                      :class="{ 'text-accent-foreground/70': group.active && session.id === claudeStore.activeSessionId }"
+                      :class="{ 'text-accent-foreground/70': group.active && session.id === activeSidebarSessionId }"
                     >
                       <span
                         v-if="claudeStore.loadingSessionId === session.id"

@@ -274,34 +274,23 @@ async function onSessionChange(value: unknown): Promise<void> {
     return
   }
   if (!value) return
-  if (arenaStore.isSessionTakenByOtherPane(props.paneId, value, props.runtime)) {
-    notify('warning', t('arena.sessionInUseTitle'), t('arena.sessionInUseHint'))
-    return
+  const previousOwner = arenaStore.selectPaneSession(props.paneId, value)
+  if (previousOwner) {
+    notify('info', t('arena.sessionInUseTitle'), t('arena.sessionInUseHint'))
   }
-  if (!await appStore.setActiveRuntime(props.runtime)) return
-  arenaStore.setPaneSession(props.paneId, value)
+  // Focus after binding so the layout opens the newly selected session, not the old one.
   emit('focus')
-  if (props.runtime === 'grok') {
-    await grokStore.openSession(value)
-    return
-  }
-  if (props.runtime === 'claude') {
-    await claudeStore.openSession(value)
-    return
-  }
-  const group = sessionGroups.value.find((item) =>
-    item.sessions.some((session) => session.value === value),
-  )
-  if (group?.path) {
-    await codexStore.openProjectThread(group.path, value)
-    return
-  }
-  await codexStore.openThread(value)
 }
 
 async function createNewSession(): Promise<void> {
+  const previousSessionId = selectedSessionId.value
+  arenaStore.setPaneSession(props.paneId, '')
   emit('focus')
-  if (!await appStore.setActiveRuntime(props.runtime)) return
+  if (!await appStore.setActiveRuntime(props.runtime)) {
+    if (previousSessionId) arenaStore.setPaneSession(props.paneId, previousSessionId)
+    emit('focus')
+    return
+  }
   if (props.runtime === 'grok') {
     await grokStore.newSession()
     if (grokStore.activeSessionId) {
@@ -563,8 +552,6 @@ watch(
                   :key="option.value"
                   :value="option.value"
                   class="items-start rounded-md py-1.5"
-                  :class="option.taken ? 'opacity-55' : ''"
-                  :disabled="option.taken && option.value !== selectedSessionId"
                 >
                   <SimpleTooltip
                     :content="option.tooltip"

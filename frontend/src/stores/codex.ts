@@ -787,7 +787,7 @@ export const useCodexStore = defineStore('codex', () => {
     return optimistic
   }
 
-  async function newThreadInProject(path: string): Promise<ThreadSummary | null> {
+  async function newThreadInProject(path: string, preserveOtherDrafts = false): Promise<ThreadSummary | null> {
     if (!path) return null
     if (!sameWorkspace(path, appStore.currentWorkspacePath)) {
       await switchProject(path)
@@ -797,7 +797,7 @@ export const useCodexStore = defineStore('codex', () => {
       const connected = await connect(path)
       if (!connected) return null
     }
-    return newThread()
+    return newThread(preserveOtherDrafts)
   }
 
   function isThreadPinned(threadID: string): boolean {

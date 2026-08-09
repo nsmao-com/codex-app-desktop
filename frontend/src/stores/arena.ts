@@ -111,6 +111,7 @@ export const useArenaStore = defineStore('arena', () => {
   )
   const focusedPaneId = shallowRef(persisted?.focusedPaneId || panes.value[0]?.id || 'main')
   const sessionByPane = shallowRef<Record<string, string>>(persisted?.sessionByPane || {})
+  const sessionSelectionRevision = shallowRef(0)
   const dragPaneId = shallowRef('')
 
   const focusedPane = computed(() =>
@@ -148,6 +149,33 @@ export const useArenaStore = defineStore('arena', () => {
     else next[paneId] = clean
     sessionByPane.value = next
     persist()
+  }
+
+  /** Assign a session to a pane, swapping with its current owner when necessary. */
+  function selectPaneSession(paneId: string, sessionId: string): string {
+    const targetPane = panes.value.find((pane) => pane.id === paneId)
+    if (!targetPane) return ''
+    sessionSelectionRevision.value += 1
+    const clean = sessionId.trim()
+    if (!clean) {
+      setPaneSession(paneId, '')
+      return ''
+    }
+
+    const previousSession = sessionForPane(paneId)
+    const previousOwner = panes.value.find((pane) =>
+      pane.id !== paneId
+      && pane.runtime === targetPane.runtime
+      && sessionForPane(pane.id) === clean,
+    )
+    const next = { ...sessionByPane.value, [paneId]: clean }
+    if (previousOwner) {
+      if (previousSession && previousSession !== clean) next[previousOwner.id] = previousSession
+      else delete next[previousOwner.id]
+    }
+    sessionByPane.value = next
+    persist()
+    return previousOwner?.id || ''
   }
 
   /** True if another pane already binds this session for the same runtime. */
@@ -250,6 +278,7 @@ export const useArenaStore = defineStore('arena', () => {
 
   function focusPane(paneId: string): void {
     if (!panes.value.some((pane) => pane.id === paneId)) return
+    sessionSelectionRevision.value += 1
     focusedPaneId.value = paneId
     persist()
   }
@@ -356,6 +385,7 @@ export const useArenaStore = defineStore('arena', () => {
     canAddPane,
     canRemovePane,
     sessionByPane,
+    sessionSelectionRevision,
     dragPaneId,
     maxPanes: ARENA_MAX_PANES,
     minPanes: ARENA_MIN_PANES,
@@ -376,6 +406,7 @@ export const useArenaStore = defineStore('arena', () => {
     cyclePaneRuntime,
     sessionForPane,
     setPaneSession,
+    selectPaneSession,
     isSessionTakenByOtherPane,
   }
 })

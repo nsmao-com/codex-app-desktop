@@ -29,28 +29,40 @@ const browserStore = useBrowserStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
+let arenaSessionOpenSequence = 0
 
 async function focusArenaRuntime(runtime: string): Promise<void> {
+  arenaSessionOpenSequence += 1
   const next = runtime as WorkspaceRuntime
   if (appStore.activeRuntime === next) return
   await appStore.setActiveRuntime(next)
 }
 
 async function openArenaPaneSession(payload: { runtime: string; sessionId: string }): Promise<void> {
+  const sequence = ++arenaSessionOpenSequence
+  const selectionRevision = arenaStore.sessionSelectionRevision
   const runtime = payload.runtime as WorkspaceRuntime
   const sessionId = payload.sessionId.trim()
   if (!sessionId) return
-  if (appStore.activeRuntime !== runtime) {
-    await appStore.setActiveRuntime(runtime)
-  }
+  const runtimeReady = appStore.activeRuntime === runtime
+    ? await appStore.ensureActiveRuntimeSynced(runtime)
+    : await appStore.setActiveRuntime(runtime)
+  if (
+    !runtimeReady
+    || sequence !== arenaSessionOpenSequence
+    || selectionRevision !== arenaStore.sessionSelectionRevision
+  ) return
   if (runtime === 'grok') {
+    if (grokStore.sameSession(grokStore.activeSessionId, sessionId)) return
     await grokStore.openSession(sessionId)
     return
   }
   if (runtime === 'claude') {
+    if (claudeStore.sameSession(claudeStore.activeSessionId, sessionId)) return
     await claudeStore.openSession(sessionId)
     return
   }
+  if (codexStore.sameThread(codexStore.activeThreadId, sessionId)) return
   await codexStore.openThread(sessionId)
 }
 

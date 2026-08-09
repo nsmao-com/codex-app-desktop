@@ -39,7 +39,7 @@ async function onFocusPane(paneId: string): Promise<void> {
     emit('focus-runtime', pane.runtime)
   }
   const sessionId = arenaStore.sessionForPane(paneId)
-  if (!sessionId) return
+  // Empty panes still invalidate an older in-flight open from another pane.
   emit('open-pane-session', { runtime: pane.runtime, sessionId })
 }
 
