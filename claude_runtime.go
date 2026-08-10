@@ -806,6 +806,15 @@ func claudeRunKey(sessionID string) string {
 	return "claude:" + strings.TrimSpace(sessionID)
 }
 
+func (s *AppService) clearClaudeRun(sessionID, turnID string) {
+	key := claudeRunKey(sessionID)
+	s.mu.Lock()
+	if run := s.externalRuns[key]; run != nil && run.turnID == turnID {
+		delete(s.externalRuns, key)
+	}
+	s.mu.Unlock()
+}
+
 func (s *AppService) emitClaudeEvent(kind, sessionID, turnID string, data map[string]any) {
 	payload := map[string]any{
 		"kind":      kind,
@@ -820,14 +829,7 @@ func (s *AppService) emitClaudeEvent(kind, sessionID, turnID string, data map[st
 
 func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFunc, turnID string, request ClaudeSendRequest) {
 	defer cancel()
-	key := claudeRunKey(request.SessionID)
-	defer func() {
-		s.mu.Lock()
-		if run := s.externalRuns[key]; run != nil && run.turnID == turnID {
-			delete(s.externalRuns, key)
-		}
-		s.mu.Unlock()
-	}()
+	defer s.clearClaudeRun(request.SessionID, turnID)
 
 	settings := s.Settings()
 	model := strings.TrimSpace(request.Model)
@@ -1085,6 +1087,9 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 		}
 		payload["usage"] = usage
 	}
+	// Session reload follows the terminal event immediately. Release the native
+	// run first so that snapshot cannot resurrect a turn that already finished.
+	s.clearClaudeRun(request.SessionID, turnID)
 	s.emitClaudeEvent("turn.completed", request.SessionID, turnID, payload)
 }
 

@@ -28,7 +28,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
-import { workspaceKey } from '@/utils/workspacePath'
+import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
 
 const appStore = useAppStore()
 const {
@@ -217,7 +217,8 @@ const paneSessionBusy = computed(() => {
       || grokStore.runningSessionIds.some((candidate) => grokStore.sameSession(candidate, id))
       || grokStore.isSessionLoading(id)
       || Object.entries(grokStore.queuedBySession).some(([candidate, queue]) =>
-        grokStore.sameSession(candidate, id) && queue.length > 0,
+        grokStore.sameSession(candidate, id)
+        && queue.some((message) => message.state === 'queued' || message.state === 'sending'),
       )
   }
   if (isClaudeMode.value) {
@@ -226,13 +227,15 @@ const paneSessionBusy = computed(() => {
       || claudeStore.runningSessionIds.some((candidate) => claudeStore.sameSession(candidate, id))
       || claudeStore.isSessionLoading(id)
       || Object.entries(claudeStore.queueBySession).some(([candidate, queue]) =>
-        claudeStore.sameSession(candidate, id) && queue.length > 0,
+        claudeStore.sameSession(candidate, id)
+        && queue.some((message) => message.state === 'queued' || message.state === 'sending'),
       )
   }
   const queueKey = matchingCodexThreadKey(codexStore.queuedMessagesByThread, id)
   return codexStore.threadIsBusy(id)
     || Boolean(codexStore.threadMutationForThread(id))
-    || Boolean(queueKey && codexStore.queuedMessagesByThread[queueKey]?.length)
+    || Boolean(queueKey && codexStore.queuedMessagesByThread[queueKey]
+      ?.some((message) => message.state === 'queued' || message.state === 'sending'))
 })
 const paneSessionPending = computed(() => {
   const id = paneSessionId.value
@@ -270,9 +273,38 @@ watch(
   },
 )
 
-const workspaceTag = computed(() => workspaceStore.workspace?.name || '')
-const branchLabel = computed(() => workspaceStore.branch || 'detached')
-const changesCount = computed(() => workspaceStore.changes.length)
+const paneWorkspacePath = computed(() => {
+  const id = paneSessionId.value
+  if (isGrokMode.value) {
+    return grokStore.sessions.find((session) => grokStore.sameSession(session.id, id))?.workspace
+      || (!id ? grokStore.workspacePath : '')
+  }
+  if (isClaudeMode.value) {
+    return claudeStore.sessions.find((session) => claudeStore.sameSession(session.id, id))?.workspace
+      || (!id ? claudeStore.workspacePath : '')
+  }
+  return codexStore.threads.find((thread) => codexStore.sameThread(thread.id, id))?.cwd
+    || Object.values(codexStore.projectThreads).flat()
+      .find((thread) => codexStore.sameThread(thread.id, id))?.cwd
+    || (!id ? activeComposerContext.value.workspace : '')
+})
+const paneWorkspaceIsCurrent = computed(() => Boolean(
+  paneWorkspacePath.value
+  && workspaceStore.currentPath
+  && sameWorkspacePath(paneWorkspacePath.value, workspaceStore.currentPath),
+))
+const workspaceTag = computed(() => {
+  if (paneWorkspaceIsCurrent.value && workspaceStore.workspace?.name) {
+    return workspaceStore.workspace.name
+  }
+  const clean = paneWorkspacePath.value.replace(/[\\/]+$/, '')
+  return clean.split(/[\\/]/).filter(Boolean).at(-1) || ''
+})
+const branchLabel = computed(() => paneWorkspaceIsCurrent.value
+  ? (workspaceStore.branch || 'detached')
+  : '')
+const changesCount = computed(() => paneWorkspaceIsCurrent.value ? workspaceStore.changes.length : 0)
+const paneWorkspaceSwitching = computed(() => paneIsFocused.value && workspaceStore.switchingWorkspace)
 
 function useSuggestion(prompt: string): void {
   draft.value = prompt
@@ -504,12 +536,12 @@ function commitFromBar(): void {
     </div>
 
     <div
-      v-if="!hideChrome && (paneSessionId || workspaceStore.switchingWorkspace)"
+      v-if="!hideChrome && (paneSessionId || paneWorkspaceSwitching)"
       class="flex h-9 shrink-0 items-center justify-between border-b border-border/70 px-4"
     >
       <div class="flex min-w-0 items-center gap-2">
         <div
-          v-if="workspaceStore.switchingWorkspace"
+          v-if="paneWorkspaceSwitching"
           class="flex items-center gap-1.5 text-[11px] text-muted-foreground"
         >
           <LoaderCircle :size="12" class="animate-spin" />
@@ -555,7 +587,7 @@ function commitFromBar(): void {
             OpenCode
           </Badge>
           <div
-            v-if="workspaceStore.workspace"
+            v-if="paneWorkspaceIsCurrent && workspaceStore.workspace"
             class="hidden items-center gap-1.5 text-[11px] text-muted-foreground sm:flex"
           >
             <GitBranch :size="11" />

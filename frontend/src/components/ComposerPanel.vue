@@ -672,21 +672,29 @@ const selectedEffortLabel = computed(() => {
   if (!effort) return ''
   return effort.charAt(0).toUpperCase() + effort.slice(1)
 })
+
+function relatedQueueRows<T extends { id: string; createdAt: number }>(
+  record: Record<string, T[]>,
+  sessionId: string,
+  sameSession: (left: string, right: string) => boolean,
+): T[] {
+  const rows = Object.entries(record)
+    .filter(([id]) => sameSession(id, sessionId))
+    .flatMap(([, queue]) => queue)
+    .sort((left, right) => left.createdAt - right.createdAt)
+  return [...new Map(rows.map((row) => [row.id, row])).values()]
+}
+
 const activeQueuedMessages = computed(() => {
   const sessionId = composerSessionId.value
   if (!sessionId) return []
   if (isGrokMode.value) {
-    const key = Object.keys(grokStore.queuedBySession)
-      .find((id) => grokStore.sameSession(id, sessionId))
-    return key ? (grokStore.queuedBySession[key] || []) : []
+    return relatedQueueRows(grokStore.queuedBySession, sessionId, grokStore.sameSession)
   }
   if (isClaudeMode.value) {
-    const key = Object.keys(claudeStore.queueBySession)
-      .find((id) => claudeStore.sameSession(id, sessionId))
-    return key ? (claudeStore.queueBySession[key] || []) : []
+    return relatedQueueRows(claudeStore.queueBySession, sessionId, claudeStore.sameSession)
   }
-  const key = matchingCodexThreadKey(codexStore.queuedMessagesByThread, sessionId)
-  return (key && codexStore.queuedMessagesByThread[key]) || []
+  return relatedQueueRows(codexStore.queuedMessagesByThread, sessionId, codexStore.sameThread)
 })
 /** Only show the queue strip when something is actually waiting / failed — not the in-flight send. */
 const showQueueStrip = computed(() =>
@@ -710,7 +718,9 @@ const canSend = computed(() => {
     return hasContent && grokStore.isReady
   }
   if (isClaudeMode.value) {
-    return hasContent && claudeStore.isReady && Boolean(claudeStore.workspacePath)
+    return hasContent
+      && claudeStore.isReady
+      && Boolean(composerTargetWorkspace('claude', composerSessionId.value))
   }
   return hasContent && codexStore.isRuntimeReady(paneRuntime.value) && !codexStore.creatingThread
 })

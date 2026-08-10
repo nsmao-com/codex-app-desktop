@@ -946,7 +946,17 @@ export const useGrokStore = defineStore('grok', () => {
   function clearTurnState(sessionId = '', turnId = ''): void {
     const key = sessionStateKey(activeTurnBySession.value, sessionId)
     const turn = (key && activeTurnBySession.value[key]) || null
-    if (!turn) return
+    if (!turn) {
+      // A terminal event may arrive after the turn map was already reconciled.
+      // Its per-session sending/running markers are still safe to release when
+      // no newer turn owns this session.
+      if (sessionId) {
+        markSessionState(sendingSessionIds, sessionId, false)
+        markSessionState(runningSessionIdsState, sessionId, false)
+        markSessionState(interruptingSessionIds, sessionId, false)
+      }
+      return
+    }
     // Stale completion/interrupt must not kill a newer turn on the same session.
     if (turnId && turn.turnId && turn.turnId !== turnId) {
       return
@@ -1570,11 +1580,18 @@ export const useGrokStore = defineStore('grok', () => {
       return
     }
     if (type === 'turn.completed' || type === 'turn.failed' || type === 'turn.interrupted') {
-      if (turnId && finalizedTurnIds.has(turnId)) return
+      if (turnId && finalizedTurnIds.has(turnId)) {
+        clearTurnState(sessionId, turnId)
+        void drainQueue(sessionId)
+        return
+      }
       flushLiveStreams()
       // Ignore stale completion for a turn that is no longer active (or never was).
       const terminalTurn = turnForSession(sessionId)
       if (turnId && terminalTurn?.turnId && terminalTurn.turnId !== turnId && !terminalTurn.turnId.startsWith('grok-turn-pending-')) {
+        // The old turn still releases queue rows explicitly blocked by its id,
+        // but it must not clear the newer turn that now owns this session.
+        rememberFinalizedGrokTurn(turnId)
         return
       }
       if (turnId && terminalTurn?.turnId.startsWith('grok-turn-pending-') && terminalTurn.turnId !== turnId) {

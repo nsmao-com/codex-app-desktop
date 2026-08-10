@@ -348,6 +348,42 @@ export const useClaudeStore = defineStore('claude', () => {
     return Object.keys(bucket).find((key) => sameClaudeSession(key, id)) || resolved || id
   }
 
+  function clearClaudeTurnState(sessionId: string, turnId = ''): boolean {
+    const related = Object.entries(activeTurnBySession.value)
+      .filter(([id]) => sameClaudeSession(id, sessionId))
+    const matching = turnId
+      ? related.filter(([, turn]) => !turn?.turnId || turn.turnId === turnId)
+      : related
+    // A delayed terminal event must not release a newer turn on the same session.
+    if (turnId && related.length && !matching.length) return false
+
+    if (matching.length) {
+      const next = { ...activeTurnBySession.value }
+      for (const [id] of matching) delete next[id]
+      activeTurnBySession.value = next
+    }
+    const stillActive = Object.keys(activeTurnBySession.value)
+      .some((id) => sameClaudeSession(id, sessionId))
+    if (!stillActive) {
+      markRunning(sessionId, false)
+      markSending(sessionId, false)
+      markInterrupting(sessionId, false)
+    }
+    return !stillActive
+  }
+
+  function setClaudeTurnState(sessionId: string, turn: ClaudeTurnRef): void {
+    const id = resolveSessionId(sessionId) || sessionId.trim()
+    if (!id) return
+    const next = { ...activeTurnBySession.value }
+    for (const key of Object.keys(next)) {
+      if (key !== id && sameClaudeSession(key, id)) delete next[key]
+    }
+    next[id] = { ...turn, sessionId: id }
+    activeTurnBySession.value = next
+    markRunning(id, true)
+  }
+
   /**
    * Move pending timeline → real session id without scrambling order.
    * Early stream deltas may already live under the real id; keep user bubbles first.
@@ -638,11 +674,9 @@ export const useClaudeStore = defineStore('claude', () => {
       // Turn ids are unique; delayed bridge delivery must not revive a turn whose
       // terminal event was already processed.
       if (turnId && finalizedTurnIds.has(turnId)) {
-        const activeTurn = activeTurnBySession.value[sessionId]
+        const activeTurn = turnRefForSession(sessionId)
         if (activeTurn?.turnId && activeTurn.turnId !== turnId) return
-        markRunning(sessionId, false)
-        markSending(sessionId, false)
-        markInterrupting(sessionId, false)
+        clearClaudeTurnState(sessionId, turnId)
         return
       }
       if (turnId) {
@@ -651,11 +685,7 @@ export const useClaudeStore = defineStore('claude', () => {
           if (key.startsWith(`${turnId}:`)) streamSequenceByItem.delete(key)
         }
       }
-      markRunning(sessionId, true)
-      activeTurnBySession.value = {
-        ...activeTurnBySession.value,
-        [sessionId]: { sessionId, turnId },
-      }
+      setClaudeTurnState(sessionId, { sessionId, turnId })
       if (turnId) {
         const startedAt = Date.now()
         turnStartedAtById.value = {
@@ -780,20 +810,22 @@ export const useClaudeStore = defineStore('claude', () => {
     }
 
     if (kind === 'turn.completed') {
-      if (turnId && finalizedTurnIds.has(turnId)) return
+      if (turnId && finalizedTurnIds.has(turnId)) {
+        if (clearClaudeTurnState(sessionId, turnId)) void flushQueue(sessionId)
+        return
+      }
       flushStreamPatches()
-      const activeTurn = activeTurnBySession.value[sessionId]
-      if (turnId && activeTurn?.turnId && activeTurn.turnId !== turnId) return
       rememberFinalizedClaudeTurn(turnId)
+      const activeTurn = turnRefForSession(sessionId)
+      if (turnId && activeTurn?.turnId && activeTurn.turnId !== turnId) return
       streamedAssistantTurns.delete(turnId)
       for (const key of [...streamSequenceByItem.keys()]) {
         if (key.startsWith(`${turnId}:`)) streamSequenceByItem.delete(key)
       }
-      markRunning(sessionId, false)
-      markInterrupting(sessionId, false)
       const message = data.message as ClaudeMessage | undefined
       if (message) {
-        const list = [...(itemsBySession.value[sessionId] || [])]
+        const itemKey = sessionStateKey(itemsBySession.value, sessionId)
+        const list = [...(itemsBySession.value[itemKey] || [])]
         const id = message.id || `${turnId}:agent`
         let index = list.findIndex((item) => item.id === id)
         if (index < 0 && turnId) {
@@ -813,27 +845,23 @@ export const useClaudeStore = defineStore('claude', () => {
         } else if (finalText) {
           list.push(messageToItem({ ...message, id, text: finalText }, turnId || sessionId))
         }
-        itemsBySession.value = { ...itemsBySession.value, [sessionId]: list }
+        itemsBySession.value = { ...itemsBySession.value, [itemKey]: list }
       }
       if (Array.isArray(data.activity)) {
+        const activityKey = sessionStateKey(liveActivityBySession.value, sessionId)
         liveActivityBySession.value = {
           ...liveActivityBySession.value,
-          [sessionId]: data.activity as ClaudeMessage[],
+          [activityKey]: data.activity as ClaudeMessage[],
         }
       }
       materializeLiveActivity(sessionId, turnId)
       const nextActivity = { ...liveActivityBySession.value }
-      delete nextActivity[sessionId]
+      for (const id of Object.keys(nextActivity)) {
+        if (sameClaudeSession(id, sessionId)) delete nextActivity[id]
+      }
       liveActivityBySession.value = nextActivity
       applyTurnMetrics(sessionId, turnId, data as Record<string, unknown>)
-      const nextTurns = { ...activeTurnBySession.value }
-      const currentTurn = nextTurns[sessionId]
-      // Do not let a stale terminal event clear a newer turn that has already
-      // started under the same session (possible while pending ids are promoted).
-      if (!turnId || !currentTurn?.turnId || currentTurn.turnId === turnId) {
-        delete nextTurns[sessionId]
-        activeTurnBySession.value = nextTurns
-      }
+      clearClaudeTurnState(sessionId, turnId)
       if (data.error) {
         notify('error', translate('chat.turnFailed'), String(data.error))
       }
@@ -928,12 +956,14 @@ export const useClaudeStore = defineStore('claude', () => {
 
   function materializeLiveActivity(sessionId: string, turnId: string): void {
     if (!sessionId || !turnId) return
-    const messages = liveActivityBySession.value[sessionId] || []
+    const activityKey = sessionStateKey(liveActivityBySession.value, sessionId)
+    const itemKey = sessionStateKey(itemsBySession.value, sessionId)
+    const messages = liveActivityBySession.value[activityKey] || []
     if (!messages.length) return
-    const list = itemsBySession.value[sessionId] || []
+    const list = itemsBySession.value[itemKey] || []
     itemsBySession.value = {
       ...itemsBySession.value,
-      [sessionId]: mergeClaudeLiveActivity(list, messages, turnId),
+      [itemKey]: mergeClaudeLiveActivity(list, messages, turnId),
     }
   }
 
@@ -964,7 +994,9 @@ export const useClaudeStore = defineStore('claude', () => {
       const current = key ? activeTurnBySession.value[key] : undefined
       if (current?.turnId !== snapshot || key !== id) {
         const next = { ...activeTurnBySession.value }
-        if (key) delete next[key]
+        for (const candidate of Object.keys(next)) {
+          if (sameClaudeSession(candidate, id)) delete next[candidate]
+        }
         next[id] = { sessionId: id, turnId: snapshot }
         activeTurnBySession.value = next
       }
@@ -983,12 +1015,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const key = sessionStateKey(activeTurnBySession.value, id)
     const current = key ? activeTurnBySession.value[key] : undefined
     if (current?.turnId !== observedTurnId) return
-    const next = { ...activeTurnBySession.value }
-    delete next[key]
-    activeTurnBySession.value = next
-    markRunning(id, false)
-    markSending(id, false)
-    markInterrupting(id, false)
+    clearClaudeTurnState(id, observedTurnId)
   }
 
   function sameClaudeSession(left: string, right: string): boolean {
@@ -1122,8 +1149,10 @@ export const useClaudeStore = defineStore('claude', () => {
       // Claude session id. Keep its empty/optimistic timeline without a false error.
       if (requestedId.startsWith('pending-claude-')) return
 
-      const cachedHistory = historyBySession.value[requestedId]
-      const hasCachedTimeline = Object.prototype.hasOwnProperty.call(itemsBySession.value, requestedId)
+      const historyKey = sessionStateKey(historyBySession.value, requestedId)
+      const itemKey = sessionStateKey(itemsBySession.value, requestedId)
+      const cachedHistory = historyBySession.value[historyKey]
+      const hasCachedTimeline = Object.prototype.hasOwnProperty.call(itemsBySession.value, itemKey)
       const cacheIsCurrent = !known
         || !known.updatedAt
         || known.updatedAt <= (cachedHistory?.loadedUpdatedAt ?? 0)
@@ -1146,8 +1175,8 @@ export const useClaudeStore = defineStore('claude', () => {
       // Re-read live state after the await. A new turn can start while the native
       // transcript is loading; using the pre-request snapshot would overwrite its
       // optimistic user row with stale disk history.
-      const cached = itemsBySession.value[requestedId] || []
-      const liveTurn = activeTurnBySession.value[requestedId]
+      const cached = itemsBySession.value[itemKey] || []
+      const liveTurn = turnRefForSession(requestedId)
       const isLive = runningSessionIds.value.some((id) => sameClaudeSession(id, requestedId)) || Boolean(liveTurn)
       const currentHistory = historyBySession.value[requestedId]
       const keepLoadedPrefix = Boolean(
@@ -1763,7 +1792,7 @@ export const useClaudeStore = defineStore('claude', () => {
 
     const sessionId = ensureActiveSessionId(targetSessionId, sessionWorkspace)
     const busy = isSessionBusy(sessionId)
-    const blockingTurnId = activeTurnBySession.value[sessionId]?.turnId || ''
+    const blockingTurnId = turnRefForSession(sessionId)?.turnId || ''
     // Always enter the per-session queue first. This keeps a send from
     // overtaking an older follow-up while terminal history is being hydrated.
     summary = sessions.value.find((item) => sameClaudeSession(item.id, sessionId)) || summary
@@ -1853,20 +1882,10 @@ export const useClaudeStore = defineStore('claude', () => {
       // The CLI can finish before the Wails send Promise resolves. Never let a
       // late response resurrect a turn that its terminal event already closed.
       if (ref.turnId && finalizedTurnIds.has(ref.turnId)) {
-        markRunning(nextSessionId, false)
-        const currentTurn = activeTurnBySession.value[nextSessionId]
-        if (currentTurn?.turnId === ref.turnId) {
-          const nextTurns = { ...activeTurnBySession.value }
-          delete nextTurns[nextSessionId]
-          activeTurnBySession.value = nextTurns
-        }
+        clearClaudeTurnState(nextSessionId, ref.turnId)
         return 'sent'
       }
-      markRunning(nextSessionId, true)
-      activeTurnBySession.value = {
-        ...activeTurnBySession.value,
-        [nextSessionId]: ref,
-      }
+      setClaudeTurnState(nextSessionId, ref)
       if (ref.turnId) {
         const startedAt = Date.now()
         turnStartedAtById.value = {
@@ -2026,7 +2045,8 @@ export const useClaudeStore = defineStore('claude', () => {
   }
 
   async function flushQueue(sessionId: string): Promise<void> {
-    const list = queueBySession.value[sessionId] || []
+    const queueSessionId = sessionStateKey(queueBySession.value, sessionId)
+    const list = queueBySession.value[queueSessionId] || []
     // Keep failed rows available for explicit retry without parking every later
     // prompt behind a request that never reached Claude.
     const next = list.find((item) => item.state === 'queued')
