@@ -392,9 +392,9 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 	stream := newExternalStreamCoalescer(func(_ string, delta string) {
 		assistant.WriteString(delta)
 		streamSequence++
-		s.emitGrokEvent("text.delta", grokBackendAPI, request.SessionID, turnID, map[string]any{
+		s.emitGrokEvent("text.delta", grokBackendAPI, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{
 			"delta": delta, "text": assistant.String(), "mode": "replace", "sequence": streamSequence,
-		})
+		}))
 	})
 	defer stream.Flush()
 	scanner := bufio.NewScanner(resp.Body)

@@ -88,13 +88,14 @@ type GrokSessionDetail struct {
 }
 
 type GrokSendRequest struct {
-	Backend   string   `json:"backend"`
-	SessionID string   `json:"sessionId"`
-	Workspace string   `json:"workspace"`
-	Text      string   `json:"text"`
-	Images    []string `json:"images"`
-	Model     string   `json:"model"`
-	Effort    string   `json:"effort"`
+	Backend      string   `json:"backend"`
+	SessionID    string   `json:"sessionId"`
+	Workspace    string   `json:"workspace"`
+	Text         string   `json:"text"`
+	Images       []string `json:"images"`
+	Model        string   `json:"model"`
+	Effort       string   `json:"effort"`
+	ClientTurnID string   `json:"clientTurnId,omitempty"`
 }
 
 type GrokTurnRef struct {
@@ -628,7 +629,7 @@ func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, erro
 	}
 	s.externalRuns[key] = &externalRun{turnID: turnID, cancel: cancel}
 	s.mu.Unlock()
-	startedPayload := map[string]any{"text": request.Text}
+	startedPayload := grokClientTurnPayload(request.ClientTurnID, map[string]any{"text": request.Text})
 	if clientSessionID != "" && clientSessionID != request.SessionID {
 		startedPayload["clientSessionId"] = clientSessionID
 	}
@@ -755,7 +756,7 @@ func (s *AppService) runGrokTurn(ctx context.Context, cancel context.CancelFunc,
 	} else {
 		usage, err = s.runGrokBuildTurn(ctx, turnID, request, newSession)
 	}
-	payload := grokTurnUsagePayload(usage)
+	payload := grokClientTurnPayload(request.ClientTurnID, grokTurnUsagePayload(usage))
 	if b := breakdownFromUsageMap(usage); b.valid() {
 		// Grok spend is stored under the grok runtime bucket (never mixed with Codex).
 		s.persistTurnUsage("grok", request.SessionID, turnID, b, time.Now())
@@ -835,29 +836,29 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 			pollSessionID = delta
 			go func() {
 				defer close(toolPollingDone)
-				s.pollGrokBuildActivity(pollCtx, request.SessionID, turnID, delta, request.Text, historyStart)
+				s.pollGrokBuildActivity(pollCtx, request.SessionID, turnID, delta, request.Text, request.ClientTurnID, historyStart)
 			}()
 			return
 		}
 		if kind == "thought" {
 			streamedThought.WriteString(delta)
 			thoughtSequence++
-			s.emitGrokEvent("thought.delta", grokBackendBuild, request.SessionID, turnID, map[string]any{
+			s.emitGrokEvent("thought.delta", grokBackendBuild, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{
 				"delta": delta, "text": streamedThought.String(), "mode": "replace", "sequence": thoughtSequence,
-			})
+			}))
 			return
 		}
 		streamedText.WriteString(delta)
 		streamSequence++
-		s.emitGrokEvent("text.delta", grokBackendBuild, request.SessionID, turnID, map[string]any{
+		s.emitGrokEvent("text.delta", grokBackendBuild, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{
 			"delta": delta, "text": streamedText.String(), "mode": "replace", "sequence": streamSequence,
-		})
+		}))
 	})
 	stopToolPolling()
 	if toolPollingStarted {
 		<-toolPollingDone
 		// Capture a result written immediately before process exit.
-		s.emitGrokBuildActivitySnapshot(request.SessionID, turnID, pollSessionID, request.Text, historyStart)
+		s.emitGrokBuildActivitySnapshot(request.SessionID, turnID, pollSessionID, request.Text, request.ClientTurnID, historyStart)
 	}
 	bindNativeSession := err == nil
 	if !bindNativeSession && nativeID != "" {
@@ -867,7 +868,7 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 	if bindNativeSession && nativeID != "" && nativeID != request.SessionID {
 		// Re-key the live run under the native session id so Interrupt works after bind.
 		s.rekeyGrokRun(request.Backend, request.SessionID, nativeID, turnID)
-		s.emitGrokEvent("session.bound", grokBackendBuild, request.SessionID, turnID, map[string]any{"sessionId": nativeID})
+		s.emitGrokEvent("session.bound", grokBackendBuild, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{"sessionId": nativeID}))
 	}
 	return usage, err
 }
@@ -877,7 +878,7 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 // not-yet-persisted tail and is never overwritten by this snapshot.
 func (s *AppService) pollGrokBuildActivity(
 	ctx context.Context,
-	eventSessionID, turnID, nativeSessionID, prompt string,
+	eventSessionID, turnID, nativeSessionID, prompt, clientTurnID string,
 	historyStart int64,
 ) {
 	ticker := time.NewTicker(180 * time.Millisecond)
@@ -915,9 +916,9 @@ func (s *AppService) pollGrokBuildActivity(
 			return
 		}
 		lastSignature = signature
-		s.emitGrokEvent("activity.snapshot", grokBackendBuild, eventSessionID, turnID, map[string]any{
+		s.emitGrokEvent("activity.snapshot", grokBackendBuild, eventSessionID, turnID, grokClientTurnPayload(clientTurnID, map[string]any{
 			"messages": activity,
-		})
+		}))
 	}
 
 	for {
@@ -930,14 +931,14 @@ func (s *AppService) pollGrokBuildActivity(
 	}
 }
 
-func (s *AppService) emitGrokBuildActivitySnapshot(eventSessionID, turnID, nativeSessionID, prompt string, historyStart int64) {
+func (s *AppService) emitGrokBuildActivitySnapshot(eventSessionID, turnID, nativeSessionID, prompt, clientTurnID string, historyStart int64) {
 	activity, err := readGrokCurrentTurnActivity(nativeSessionID, prompt, historyStart)
 	if err != nil {
 		return
 	}
-	s.emitGrokEvent("activity.snapshot", grokBackendBuild, eventSessionID, turnID, map[string]any{
+	s.emitGrokEvent("activity.snapshot", grokBackendBuild, eventSessionID, turnID, grokClientTurnPayload(clientTurnID, map[string]any{
 		"messages": activity,
-	})
+	}))
 }
 
 func readGrokCurrentTurnActivity(sessionID, prompt string, historyStart int64) ([]GrokMessage, error) {
@@ -1076,6 +1077,18 @@ func (s *AppService) emitGrokEvent(eventType, backend, sessionID, turnID string,
 	s.app.Event.Emit("grok:event", map[string]any{
 		"type": eventType, "backend": backend, "sessionId": sessionID, "turnId": turnID, "data": data,
 	})
+}
+
+func grokClientTurnPayload(clientTurnID string, payload map[string]any) map[string]any {
+	clientTurnID = strings.TrimSpace(clientTurnID)
+	if clientTurnID == "" {
+		return payload
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["clientTurnId"] = clientTurnID
+	return payload
 }
 
 func grokRunKey(backend, sessionID string) string {

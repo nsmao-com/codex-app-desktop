@@ -230,6 +230,7 @@ export interface ClaudeSessionDetail {
     "historyTotal": number;
     "historyTurnOffset": number;
     "hasEarlier": boolean;
+    "activeTurnId"?: string;
 }
 
 /**
@@ -244,6 +245,7 @@ export interface ClaudeSessionSummary {
     "effort": string;
     "createdAt": number;
     "updatedAt": number;
+    "activeTurnId"?: string;
 }
 
 /**
@@ -508,6 +510,7 @@ export interface GrokSendRequest {
     "images": string[] | null;
     "model": string;
     "effort": string;
+    "clientTurnId"?: string;
 }
 
 export interface GrokSessionDetail {
@@ -517,6 +520,7 @@ export interface GrokSessionDetail {
     "historyTotal": number;
     "historyTurnOffset": number;
     "hasEarlier": boolean;
+    "activeTurnId"?: string;
 }
 
 export interface GrokSessionSummary {
@@ -529,6 +533,7 @@ export interface GrokSessionSummary {
     "effort": string;
     "createdAt": number;
     "updatedAt": number;
+    "activeTurnId"?: string;
 }
 
 /**

@@ -441,6 +441,7 @@ export const useGrokStore = defineStore('grok', () => {
   const pendingLiveText = new Map<string, string>()
   const pendingLiveThought = new Map<string, string | null>()
   const finalizedTurnIds = new Set<string>()
+  const clientTurnIdByTurnId = new Map<string, string>()
   const latestStartedTurnBySession = new Map<string, string>()
   /** Timeline turnId (`session:tN`) → metrics (tokens + duration). */
   const turnMetricsByKey = shallowRef<Record<string, TurnMetrics>>({})
@@ -471,7 +472,38 @@ export const useGrokStore = defineStore('grok', () => {
       const oldest = finalizedTurnIds.values().next().value
       if (!oldest) break
       finalizedTurnIds.delete(oldest)
+      clientTurnIdByTurnId.delete(oldest)
     }
+  }
+
+  function rememberGrokTurnClientId(turnId: string, clientTurnId: string): void {
+    if (!turnId || !clientTurnId) return
+    clientTurnIdByTurnId.delete(turnId)
+    clientTurnIdByTurnId.set(turnId, clientTurnId)
+    while (clientTurnIdByTurnId.size > 1024) {
+      const oldest = clientTurnIdByTurnId.keys().next().value
+      if (!oldest) break
+      clientTurnIdByTurnId.delete(oldest)
+    }
+  }
+
+  function clientTurnIdForTurn(turn: GrokTurnRef | null): string {
+    if (!turn?.turnId) return ''
+    if (turn.turnId.startsWith('grok-turn-pending-')) return turn.turnId
+    return clientTurnIdByTurnId.get(turn.turnId) || ''
+  }
+
+  function grokEventMatchesCurrentTurn(sessionId: string, turnId: string, clientTurnId: string): boolean {
+    const currentTurn = turnForSession(sessionId)
+    if (!currentTurn?.turnId || !turnId || currentTurn.turnId === turnId) return true
+    const currentClientTurnId = clientTurnIdForTurn(currentTurn)
+    const incomingClientTurnId = clientTurnId || clientTurnIdByTurnId.get(turnId) || ''
+    if (currentClientTurnId && incomingClientTurnId) {
+      return currentClientTurnId === incomingClientTurnId
+    }
+    // Different provider turn ids cannot own the same session concurrently.
+    // Keep compatibility for an early delta whose pending id has not been echoed yet.
+    return currentTurn.turnId.startsWith('grok-turn-pending-')
   }
 
   const backendId = computed(() => {
@@ -508,6 +540,7 @@ export const useGrokStore = defineStore('grok', () => {
     pendingLiveText.clear()
     pendingLiveThought.clear()
     finalizedTurnIds.clear()
+    clientTurnIdByTurnId.clear()
     latestStartedTurnBySession.clear()
     sessionOpenSequence.clear()
     loadingSequenceBySession.clear()
@@ -1414,6 +1447,8 @@ export const useGrokStore = defineStore('grok', () => {
     const data = (payload.data && typeof payload.data === 'object' && !Array.isArray(payload.data))
       ? payload.data as Record<string, unknown>
       : {}
+    const eventClientTurnId = String(data.clientTurnId || '')
+    if (turnId && eventClientTurnId) rememberGrokTurnClientId(turnId, eventClientTurnId)
 
     if (type === 'turn.started') {
       const clientSessionId = String(data.clientSessionId || '')
@@ -1424,13 +1459,27 @@ export const useGrokStore = defineStore('grok', () => {
       ) {
         promoteSessionState(clientSessionId, sessionId)
       }
+      const currentTurn = turnForSession(sessionId)
+      const currentClientTurnId = clientTurnIdForTurn(currentTurn)
+      if (
+        eventClientTurnId
+        && currentClientTurnId
+        && currentClientTurnId !== eventClientTurnId
+      ) {
+        // A delayed start from the interrupted turn must not replace the new
+        // pending/active turn created by an immediate resend.
+        return
+      }
       const startedSessionId = liveWriteKey(sessionId) || sessionId
       if (startedSessionId && turnId) latestStartedTurnBySession.set(startedSessionId, turnId)
       // A very fast terminal event may beat this notification across the bridge.
       // Turn ids are unique, so never resurrect one that is already finalized.
       if (turnId && finalizedTurnIds.has(turnId)) {
         const pendingTurn = turnForSession(sessionId)
-        if (pendingTurn?.turnId.startsWith('grok-turn-pending-')) {
+        if (
+          pendingTurn?.turnId.startsWith('grok-turn-pending-')
+          && (!eventClientTurnId || pendingTurn.turnId === eventClientTurnId)
+        ) {
           remapQueuedBlockingTurn(sessionId, pendingTurn.turnId, turnId)
           rememberFinalizedGrokTurn(pendingTurn.turnId)
           clearTurnState(sessionId, pendingTurn.turnId)
@@ -1442,7 +1491,6 @@ export const useGrokStore = defineStore('grok', () => {
         streamSequenceByTurn.delete(`${turnId}:text`)
         streamSequenceByTurn.delete(`${turnId}:thought`)
       }
-      const currentTurn = turnForSession(sessionId)
       const sameTurn = Boolean(
         currentTurn
         && turnId
@@ -1453,7 +1501,8 @@ export const useGrokStore = defineStore('grok', () => {
       const upgradingFromPending = Boolean(
         currentTurn
         && turnId
-        && currentTurn.turnId.startsWith('grok-turn-pending-'),
+        && currentTurn.turnId.startsWith('grok-turn-pending-')
+        && (!eventClientTurnId || currentTurn.turnId === eventClientTurnId),
       )
       if (upgradingFromPending && currentTurn?.turnId && turnId) {
         remapQueuedBlockingTurn(sessionId, currentTurn.turnId, turnId)
@@ -1487,6 +1536,7 @@ export const useGrokStore = defineStore('grok', () => {
     }
     if (type === 'thought.delta') {
       if (turnId && finalizedTurnIds.has(turnId)) return
+      if (!grokEventMatchesCurrentTurn(sessionId, turnId, eventClientTurnId)) return
       const delta = String(data.delta || data.text || data.data || '')
       if (!sessionId || !delta) return
       const key = liveWriteKey(sessionId) || sessionId
@@ -1520,14 +1570,8 @@ export const useGrokStore = defineStore('grok', () => {
     if (type === 'activity.snapshot') {
       if (turnId && finalizedTurnIds.has(turnId)) return
       if (!sessionId) return
+      if (!grokEventMatchesCurrentTurn(sessionId, turnId, eventClientTurnId)) return
       const key = liveWriteKey(sessionId) || sessionId
-      const currentTurn = turnForSession(sessionId)
-      if (
-        turnId
-        && currentTurn?.turnId
-        && currentTurn.turnId !== turnId
-        && !currentTurn.turnId.startsWith('grok-turn-pending-')
-      ) return
       // A snapshot can cross the bridge before chat_history contains the new
       // user row. Never append rows already owned by committed history; doing so
       // briefly duplicates the previous assistant answer after the new prompt.
@@ -1541,6 +1585,7 @@ export const useGrokStore = defineStore('grok', () => {
     }
     if (type === 'text.delta') {
       if (turnId && finalizedTurnIds.has(turnId)) return
+      if (!grokEventMatchesCurrentTurn(sessionId, turnId, eventClientTurnId)) return
       const delta = String(data.delta || data.text || data.data || '')
       if (!sessionId || !delta) return
       const key = liveWriteKey(sessionId) || sessionId
@@ -1571,6 +1616,7 @@ export const useGrokStore = defineStore('grok', () => {
       return
     }
     if (type === 'session.bound') {
+      if (!grokEventMatchesCurrentTurn(sessionId, turnId, eventClientTurnId)) return
       flushLiveStreams()
       const nextId = String(data.sessionId || '')
       if (nextId && nextId !== sessionId) {
@@ -1580,6 +1626,23 @@ export const useGrokStore = defineStore('grok', () => {
       return
     }
     if (type === 'turn.completed' || type === 'turn.failed' || type === 'turn.interrupted') {
+      const terminalTurn = turnForSession(sessionId)
+      const activeClientTurnId = clientTurnIdForTurn(terminalTurn)
+      if (
+        eventClientTurnId
+        && activeClientTurnId
+        && activeClientTurnId !== eventClientTurnId
+      ) {
+        // The interrupted turn finished after a resend already claimed this
+        // session. Finalize only the old blocker; preserve the new turn state.
+        rememberFinalizedGrokTurn(turnId)
+        streamSequenceByTurn.delete(`${turnId}:text`)
+        streamSequenceByTurn.delete(`${turnId}:thought`)
+        applyTurnUsageMetrics(liveWriteKey(sessionId) || sessionId, turnId, data)
+        void appStore.loadLocalUsage()
+        void drainQueue(sessionId)
+        return
+      }
       if (turnId && finalizedTurnIds.has(turnId)) {
         clearTurnState(sessionId, turnId)
         void drainQueue(sessionId)
@@ -1587,7 +1650,6 @@ export const useGrokStore = defineStore('grok', () => {
       }
       flushLiveStreams()
       // Ignore stale completion for a turn that is no longer active (or never was).
-      const terminalTurn = turnForSession(sessionId)
       if (turnId && terminalTurn?.turnId && terminalTurn.turnId !== turnId && !terminalTurn.turnId.startsWith('grok-turn-pending-')) {
         // The old turn still releases queue rows explicitly blocked by its id,
         // but it must not clear the newer turn that now owns this session.
@@ -2322,6 +2384,7 @@ export const useGrokStore = defineStore('grok', () => {
     const pendingTurnId = options?.alreadyLocked && lockedTurn?.turnId?.startsWith('grok-turn-pending-')
       ? lockedTurn.turnId
       : `grok-turn-pending-${Date.now()}-${++queuedSequence}`
+    rememberGrokTurnClientId(pendingTurnId, pendingTurnId)
     if (!options?.alreadyLocked) {
       resetLiveSessionState(sessionId)
       markSessionState(sendingSessionIds, sessionId, true)
@@ -2342,6 +2405,7 @@ export const useGrokStore = defineStore('grok', () => {
         backend: turnBackend,
         // The backend allocates a real id and echoes this pending id on turn.started
         // so the event can bind the optimistic timeline before the RPC resolves.
+        clientTurnId: pendingTurnId,
         sessionId: sessionId.startsWith('pending-grok-') ? sessionId : resolveSessionId(sessionId),
         workspace,
         text: message,
@@ -2352,6 +2416,7 @@ export const useGrokStore = defineStore('grok', () => {
         effort: options?.effort || appStore.settings.grokEffort || 'high',
       })
       const nextTurnId = ref.turnId || pendingTurnId
+      rememberGrokTurnClientId(nextTurnId, pendingTurnId)
       if (nextTurnId !== pendingTurnId) remapQueuedBlockingTurn(sessionId, pendingTurnId, nextTurnId)
       // Preserve start clock across pending → real turn id.
       if (nextTurnId !== pendingTurnId && turnStartedAtById.value[pendingTurnId]) {
@@ -2362,10 +2427,11 @@ export const useGrokStore = defineStore('grok', () => {
       }
       // Only adopt the API turn if we still own this pending lock (not interrupted).
       const currentTurn = turnForSession(sessionId)
+      const currentClientTurnId = clientTurnIdForTurn(currentTurn)
       const ownsPendingTurn = Boolean(currentTurn && (
         currentTurn.turnId === pendingTurnId
         || currentTurn.turnId === nextTurnId
-        || currentTurn.turnId.startsWith('grok-turn-pending-')
+        || currentClientTurnId === pendingTurnId
       ))
       // A very fast turn can complete before the Wails call Promise resolves.
       // Still bind its pending UI session so optimistic messages and queued turns
@@ -2379,7 +2445,7 @@ export const useGrokStore = defineStore('grok', () => {
         if (finalizedTurn && (
           finalizedTurn.turnId === pendingTurnId
           || finalizedTurn.turnId === nextTurnId
-          || finalizedTurn.turnId.startsWith('grok-turn-pending-')
+          || clientTurnIdForTurn(finalizedTurn) === pendingTurnId
         )) {
           clearTurnState(targetSessionId, finalizedTurn.turnId)
         }
@@ -2475,7 +2541,13 @@ export const useGrokStore = defineStore('grok', () => {
       return
     }
     if (outcome === 'deferred') {
-      patchQueuedMessage(queueSessionId, next.id, { state: 'queued', error: '' })
+      patchQueuedMessage(queueSessionId, next.id, {
+        state: 'queued',
+        error: '',
+        // dispatchTurn removes this attempt's optimistic row when the old
+        // backend turn is still releasing. The next drain must append it again.
+        localAppended: localMessageId ? false : next.localAppended,
+      })
       return
     }
     patchQueuedMessage(queueSessionId, next.id, {
