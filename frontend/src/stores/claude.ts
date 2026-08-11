@@ -7,6 +7,7 @@ import {
   archiveClaudeSession as archiveClaudeSessionApi,
   deleteClaudeSession as deleteClaudeSessionApi,
   interruptClaudeTurn as interruptClaudeTurnApi,
+  isClaudeTurnRunning as isClaudeTurnRunningApi,
   listArchivedClaudeSessions,
   listClaudeSessionTurnUsages,
   listClaudeSessions,
@@ -52,6 +53,9 @@ const emptyTurnMetrics = (): TurnMetrics => ({
   completedAt: null,
   durationMs: null,
 })
+
+const CLAUDE_TURN_WATCHDOG_MS = 2500
+const CLAUDE_TURN_WATCHDOG_CONFIRM_MS = 450
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message
@@ -261,6 +265,7 @@ export const useClaudeStore = defineStore('claude', () => {
   const streamedAssistantTurns = new Set<string>()
   const finalizedTurnIds = new Set<string>()
   const latestStartedTurnBySession = new Map<string, string>()
+  const turnWatchdogTimers = new Map<string, number>()
   const discardedSessionIds = new Set<string>()
   const loadedSessionIds = new Set<string>()
   let eventUnsub: (() => void) | null = null
@@ -271,6 +276,7 @@ export const useClaudeStore = defineStore('claude', () => {
 
   function rememberFinalizedClaudeTurn(turnId: string): void {
     if (!turnId) return
+    cancelClaudeTurnWatchdog(turnId)
     finalizedTurnIds.delete(turnId)
     finalizedTurnIds.add(turnId)
     while (finalizedTurnIds.size > 512) {
@@ -355,12 +361,20 @@ export const useClaudeStore = defineStore('claude', () => {
       ? related.filter(([, turn]) => !turn?.turnId || turn.turnId === turnId)
       : related
     // A delayed terminal event must not release a newer turn on the same session.
-    if (turnId && related.length && !matching.length) return false
+    if (turnId && related.length && !matching.length) {
+      cancelClaudeTurnWatchdog(turnId)
+      return false
+    }
 
     if (matching.length) {
       const next = { ...activeTurnBySession.value }
-      for (const [id] of matching) delete next[id]
+      for (const [id, turn] of matching) {
+        cancelClaudeTurnWatchdog(turn?.turnId || turnId)
+        delete next[id]
+      }
       activeTurnBySession.value = next
+    } else {
+      cancelClaudeTurnWatchdog(turnId)
     }
     const stillActive = Object.keys(activeTurnBySession.value)
       .some((id) => sameClaudeSession(id, sessionId))
@@ -382,6 +396,105 @@ export const useClaudeStore = defineStore('claude', () => {
     next[id] = { ...turn, sessionId: id }
     activeTurnBySession.value = next
     markRunning(id, true)
+    scheduleClaudeTurnWatchdog({ ...turn, sessionId: id })
+  }
+
+  function cancelClaudeTurnWatchdog(turnId: string): void {
+    const id = turnId.trim()
+    if (!id) return
+    const timer = turnWatchdogTimers.get(id)
+    if (timer) window.clearTimeout(timer)
+    turnWatchdogTimers.delete(id)
+  }
+
+  function cancelAllClaudeTurnWatchdogs(): void {
+    for (const timer of turnWatchdogTimers.values()) window.clearTimeout(timer)
+    turnWatchdogTimers.clear()
+  }
+
+  function scheduleClaudeTurnWatchdog(
+    ref: ClaudeTurnRef,
+    delay = CLAUDE_TURN_WATCHDOG_MS,
+    confirmingMissing = false,
+  ): void {
+    const turnId = ref.turnId.trim()
+    if (
+      !turnId
+      || turnId.startsWith('claude-local-')
+      || turnId.startsWith('claude-turn-pending-')
+      || finalizedTurnIds.has(turnId)
+    ) return
+    cancelClaudeTurnWatchdog(turnId)
+    let timer = 0
+    timer = window.setTimeout(() => {
+      if (turnWatchdogTimers.get(turnId) !== timer) return
+      turnWatchdogTimers.delete(turnId)
+      void reconcileClaudeTurnLiveness(ref, confirmingMissing)
+    }, delay)
+    turnWatchdogTimers.set(turnId, timer)
+  }
+
+  async function reconcileClaudeTurnLiveness(ref: ClaudeTurnRef, confirmingMissing: boolean): Promise<void> {
+    const current = turnRefForSession(ref.sessionId)
+    if (!current || current.turnId !== ref.turnId || finalizedTurnIds.has(ref.turnId)) return
+    try {
+      if (await isClaudeTurnRunningApi(ref)) {
+        scheduleClaudeTurnWatchdog(current)
+        return
+      }
+    } catch {
+      const latest = turnRefForSession(ref.sessionId)
+      if (latest?.turnId === ref.turnId) scheduleClaudeTurnWatchdog(latest)
+      return
+    }
+
+    const latest = turnRefForSession(ref.sessionId)
+    if (!latest || latest.turnId !== ref.turnId || finalizedTurnIds.has(ref.turnId)) return
+    if (!confirmingMissing) {
+      scheduleClaudeTurnWatchdog(latest, CLAUDE_TURN_WATCHDOG_CONFIRM_MS, true)
+      return
+    }
+    recoverMissingClaudeTerminal(latest)
+  }
+
+  function recoverMissingClaudeTerminal(ref: ClaudeTurnRef): void {
+    const current = turnRefForSession(ref.sessionId)
+    if (!current || current.turnId !== ref.turnId || finalizedTurnIds.has(ref.turnId)) return
+    const sessionId = resolveSessionId(current.sessionId) || current.sessionId
+    rememberFinalizedClaudeTurn(ref.turnId)
+    flushStreamPatches()
+    materializeLiveActivity(sessionId, ref.turnId)
+    const nextActivity = { ...liveActivityBySession.value }
+    for (const id of Object.keys(nextActivity)) {
+      if (sameClaudeSession(id, sessionId)) delete nextActivity[id]
+    }
+    liveActivityBySession.value = nextActivity
+    applyTurnMetrics(sessionId, ref.turnId, {})
+    clearClaudeTurnState(sessionId, ref.turnId)
+    const itemKey = sessionStateKey(itemsBySession.value, sessionId)
+    if (itemKey && itemsBySession.value[itemKey]) {
+      itemsBySession.value = {
+        ...itemsBySession.value,
+        [itemKey]: finalizeTimelineItemStatuses(itemsBySession.value[itemKey], 'completed'),
+      }
+    }
+    void appStore.loadLocalUsage().catch(() => undefined)
+    void (async () => {
+      try {
+        if (sessionId && !sessionId.startsWith('pending-claude-')) {
+          await openSession(sessionId, {
+            switchWorkspace: false,
+            terminalStatus: 'completed',
+            activate: false,
+          })
+        } else {
+          await loadSessions()
+        }
+      } catch {
+        // The run is already gone; queue release must not depend on history refresh.
+      }
+      await flushQueue(sessionId)
+    })()
   }
 
   /**
@@ -589,6 +702,7 @@ export const useClaudeStore = defineStore('claude', () => {
     eventUnsub = null
     if (streamFlushTimer) window.clearTimeout(streamFlushTimer)
     streamFlushTimer = 0
+    cancelAllClaudeTurnWatchdogs()
     pendingStreamPatches.clear()
   }
 
@@ -1009,6 +1123,7 @@ export const useClaudeStore = defineStore('claude', () => {
           [snapshot]: { ...(activeTurnMetrics.value[snapshot] ?? emptyTurnMetrics()), startedAt },
         }
       }
+      scheduleClaudeTurnWatchdog({ sessionId: id, turnId: snapshot })
       return
     }
     if (!observedTurnId || observedTurnId.startsWith('claude-turn-pending-')) return
@@ -1971,6 +2086,7 @@ export const useClaudeStore = defineStore('claude', () => {
       delete next[turnKey]
       next[toId] = { ...turn, sessionId: toId }
       activeTurnBySession.value = next
+      scheduleClaudeTurnWatchdog({ ...turn, sessionId: toId })
     }
   }
 
@@ -2353,6 +2469,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const nextMetrics = { ...activeTurnMetrics.value }
     const nextStarts = { ...turnStartedAtById.value }
     for (const turnId of turnIds) {
+      cancelClaudeTurnWatchdog(turnId)
       delete nextMetrics[turnId]
       delete nextStarts[turnId]
       finalizedTurnIds.delete(turnId)

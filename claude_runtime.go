@@ -785,6 +785,15 @@ func (s *AppService) InterruptClaudeTurn(ref ClaudeTurnRef) error {
 	return nil
 }
 
+func (s *AppService) IsClaudeTurnRunning(ref ClaudeTurnRef) bool {
+	sessionID := strings.TrimSpace(ref.SessionID)
+	turnID := strings.TrimSpace(ref.TurnID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	run := s.externalRuns[claudeRunKey(sessionID)]
+	return run != nil && (turnID == "" || run.turnID == turnID)
+}
+
 func (s *AppService) isClaudeSessionRunning(sessionID string) bool {
 	return s.claudeActiveTurnID(sessionID) != ""
 }

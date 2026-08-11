@@ -168,6 +168,10 @@ export function InterruptTurn(threadID: string, turnID: string): $CancellablePro
     return $Call.ByID(935266466, threadID, turnID);
 }
 
+export function IsClaudeTurnRunning(ref: $models.ClaudeTurnRef): $CancellablePromise<boolean> {
+    return $Call.ByID(2635517826, ref);
+}
+
 export function IsGrokTurnRunning(ref: $models.GrokTurnRef): $CancellablePromise<boolean> {
     return $Call.ByID(625464937, ref);
 }

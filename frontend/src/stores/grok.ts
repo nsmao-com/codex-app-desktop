@@ -44,6 +44,9 @@ const emptyTurnMetrics = (): TurnMetrics => ({
   durationMs: null,
 })
 
+const GROK_TURN_WATCHDOG_MS = 2500
+const GROK_TURN_WATCHDOG_CONFIRM_MS = 450
+
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message
   return String(error || translate('notifications.unexpected'))
@@ -443,6 +446,7 @@ export const useGrokStore = defineStore('grok', () => {
   const finalizedTurnIds = new Set<string>()
   const clientTurnIdByTurnId = new Map<string, string>()
   const latestStartedTurnBySession = new Map<string, string>()
+  const turnWatchdogTimers = new Map<string, number>()
   /** Timeline turnId (`session:tN`) → metrics (tokens + duration). */
   const turnMetricsByKey = shallowRef<Record<string, TurnMetrics>>({})
   /** Backend turnId → wall-clock start for duration when completed. */
@@ -466,6 +470,7 @@ export const useGrokStore = defineStore('grok', () => {
 
   function rememberFinalizedGrokTurn(turnId: string): void {
     if (!turnId) return
+    cancelGrokTurnWatchdog(turnId)
     finalizedTurnIds.delete(turnId)
     finalizedTurnIds.add(turnId)
     while (finalizedTurnIds.size > 512) {
@@ -518,6 +523,7 @@ export const useGrokStore = defineStore('grok', () => {
   function resetBackendConversationState(): void {
     if (liveStreamFlushTimer) window.clearTimeout(liveStreamFlushTimer)
     liveStreamFlushTimer = 0
+    cancelAllGrokTurnWatchdogs()
     activeSessionId.value = ''
     loadingSessionId.value = ''
     sessions.value = []
@@ -943,6 +949,7 @@ export const useGrokStore = defineStore('grok', () => {
       for (const key of turnKeys) delete next[key]
       if (turn) next[to] = { ...turn, sessionId: to }
       activeTurnBySession.value = next
+      if (turn) scheduleGrokTurnWatchdog({ ...turn, sessionId: to })
     }
     const wasSending = sendingSessionIds.value.some((id) => sameGrokSession(id, to))
     const wasRunning = runningSessionIdsState.value.some((id) => sameGrokSession(id, to))
@@ -980,6 +987,7 @@ export const useGrokStore = defineStore('grok', () => {
     const key = sessionStateKey(activeTurnBySession.value, sessionId)
     const turn = (key && activeTurnBySession.value[key]) || null
     if (!turn) {
+      cancelGrokTurnWatchdog(turnId)
       // A terminal event may arrive after the turn map was already reconciled.
       // Its per-session sending/running markers are still safe to release when
       // no newer turn owns this session.
@@ -992,11 +1000,13 @@ export const useGrokStore = defineStore('grok', () => {
     }
     // Stale completion/interrupt must not kill a newer turn on the same session.
     if (turnId && turn.turnId && turn.turnId !== turnId) {
+      cancelGrokTurnWatchdog(turnId)
       return
     }
     if (sessionId && !sameGrokSession(turn.sessionId, sessionId)) {
       return
     }
+    cancelGrokTurnWatchdog(turn.turnId)
     const next = { ...activeTurnBySession.value }
     delete next[key]
     activeTurnBySession.value = next
@@ -1010,6 +1020,85 @@ export const useGrokStore = defineStore('grok', () => {
     markSessionState(sendingSessionIds, turn.sessionId, false)
     markSessionState(runningSessionIdsState, turn.sessionId, false)
     markSessionState(interruptingSessionIds, turn.sessionId, false)
+  }
+
+  function cancelGrokTurnWatchdog(turnId: string): void {
+    const id = turnId.trim()
+    if (!id) return
+    const timer = turnWatchdogTimers.get(id)
+    if (timer) window.clearTimeout(timer)
+    turnWatchdogTimers.delete(id)
+  }
+
+  function cancelAllGrokTurnWatchdogs(): void {
+    for (const timer of turnWatchdogTimers.values()) window.clearTimeout(timer)
+    turnWatchdogTimers.clear()
+  }
+
+  function scheduleGrokTurnWatchdog(
+    ref: GrokTurnRef,
+    delay = GROK_TURN_WATCHDOG_MS,
+    confirmingMissing = false,
+  ): void {
+    const turnId = ref.turnId.trim()
+    if (!turnId || turnId.startsWith('grok-turn-pending-') || finalizedTurnIds.has(turnId)) return
+    cancelGrokTurnWatchdog(turnId)
+    let timer = 0
+    timer = window.setTimeout(() => {
+      if (turnWatchdogTimers.get(turnId) !== timer) return
+      turnWatchdogTimers.delete(turnId)
+      void reconcileGrokTurnLiveness(ref, confirmingMissing)
+    }, delay)
+    turnWatchdogTimers.set(turnId, timer)
+  }
+
+  async function reconcileGrokTurnLiveness(ref: GrokTurnRef, confirmingMissing: boolean): Promise<void> {
+    const current = turnForSession(ref.sessionId)
+    if (!current || current.turnId !== ref.turnId || finalizedTurnIds.has(ref.turnId)) return
+    try {
+      if (await isGrokTurnRunningApi(ref)) {
+        scheduleGrokTurnWatchdog(current)
+        return
+      }
+    } catch {
+      const latest = turnForSession(ref.sessionId)
+      if (latest?.turnId === ref.turnId) scheduleGrokTurnWatchdog(latest)
+      return
+    }
+
+    const latest = turnForSession(ref.sessionId)
+    if (!latest || latest.turnId !== ref.turnId || finalizedTurnIds.has(ref.turnId)) return
+    if (!confirmingMissing) {
+      scheduleGrokTurnWatchdog(latest, GROK_TURN_WATCHDOG_CONFIRM_MS, true)
+      return
+    }
+    recoverMissingGrokTerminal(latest)
+  }
+
+  function recoverMissingGrokTerminal(ref: GrokTurnRef): void {
+    const current = turnForSession(ref.sessionId)
+    if (!current || current.turnId !== ref.turnId || finalizedTurnIds.has(ref.turnId)) return
+    const sessionId = resolveSessionId(current.sessionId) || current.sessionId
+    rememberFinalizedGrokTurn(ref.turnId)
+    flushLiveStreams()
+    applyTurnUsageMetrics(sessionId, ref.turnId, {})
+    clearTurnState(sessionId, ref.turnId)
+    resetLiveSessionState(sessionId)
+    void appStore.loadLocalUsage()
+    void (async () => {
+      if (current.backend === backendId.value) {
+        try {
+          if (sessionId && !sessionId.startsWith('pending-grok-')) {
+            await openSession(sessionId, { terminalStatus: 'completed', activate: false })
+          } else {
+            await loadSessions(true)
+          }
+        } catch {
+          // The run is already gone; queue release must not depend on history refresh.
+        }
+      }
+      await drainQueue(sessionId)
+    })()
   }
 
   function snapshotActiveTurnId(value: unknown): string {
@@ -1037,6 +1126,7 @@ export const useGrokStore = defineStore('grok', () => {
         turnStartedAtById.value = { ...turnStartedAtById.value, [snapshot]: Date.now() }
         seedTurnStartMetrics(id, snapshot)
       }
+      scheduleGrokTurnWatchdog({ backend, sessionId: id, turnId: snapshot })
       return
     }
     if (!observedTurnId || observedTurnId.startsWith('grok-turn-pending-')) return
@@ -1385,6 +1475,7 @@ export const useGrokStore = defineStore('grok', () => {
     eventUnsub = null
     if (liveStreamFlushTimer) window.clearTimeout(liveStreamFlushTimer)
     liveStreamFlushTimer = 0
+    cancelAllGrokTurnWatchdogs()
     pendingLiveText.clear()
     pendingLiveThought.clear()
   }
@@ -1512,6 +1603,7 @@ export const useGrokStore = defineStore('grok', () => {
         sessionId: key,
         turnId,
       })
+      scheduleGrokTurnWatchdog({ backend: eventBackend, sessionId: key, turnId })
       markSessionState(sendingSessionIds, key, true)
       if (!sameTurn && !upgradingFromPending) {
         pendingLiveText.delete(key)
@@ -1548,6 +1640,7 @@ export const useGrokStore = defineStore('grok', () => {
           turnId: turnId || `grok-turn-${Date.now()}`,
         })
         markSessionState(sendingSessionIds, key, true)
+        if (turnId) scheduleGrokTurnWatchdog({ backend: eventBackend, sessionId: key, turnId })
       }
       const pendingThought = pendingLiveThought.get(key)
       const prev = pendingThought === null
@@ -1598,6 +1691,7 @@ export const useGrokStore = defineStore('grok', () => {
           turnId: turnId || `grok-turn-${Date.now()}`,
         })
         markSessionState(sendingSessionIds, key, true)
+        if (turnId) scheduleGrokTurnWatchdog({ backend: eventBackend, sessionId: key, turnId })
       }
       const streamKey = `${turnId || key}:text`
       const sequence = Number(data.sequence || 0)
@@ -2457,6 +2551,11 @@ export const useGrokStore = defineStore('grok', () => {
           sessionId: targetSessionId,
           turnId: nextTurnId,
         })
+        scheduleGrokTurnWatchdog({
+          backend: ref.backend || turnBackend,
+          sessionId: targetSessionId,
+          turnId: nextTurnId,
+        })
       }
       return 'sent'
     } catch (error) {
@@ -2764,6 +2863,9 @@ export const useGrokStore = defineStore('grok', () => {
     sendingSessionIds.value = sendingSessionIds.value.filter((id) => !matches(id))
     runningSessionIdsState.value = runningSessionIdsState.value.filter((id) => !matches(id))
     interruptingSessionIds.value = interruptingSessionIds.value.filter((id) => !matches(id))
+    for (const [id, turn] of Object.entries(activeTurnBySession.value)) {
+      if (matches(id) && turn?.turnId) cancelGrokTurnWatchdog(turn.turnId)
+    }
 
     const withoutRelated = <T>(bucket: Record<string, T>): Record<string, T> =>
       Object.fromEntries(Object.entries(bucket).filter(([id]) => !matches(id)))

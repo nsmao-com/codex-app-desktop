@@ -91,6 +91,8 @@ type CollaborationMode = 'default' | 'plan'
 type LocalUsageRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
 
 const PENDING_SUBMISSION_ERROR_GRACE_MS = 750
+const TURN_LIVENESS_WATCHDOG_MS = 3000
+const TURN_LIVENESS_CONFIRM_MS = 450
 
 const emptyTurnMetrics = (): TurnMetrics => ({
   tokenUsage: null,
@@ -177,6 +179,7 @@ export const useCodexStore = defineStore('codex', () => {
   const sessionPreferenceWrites = new Map<string, Promise<void>>()
   const planOfferRetryTimers = new Map<string, number[]>()
   const idleReconcileTimers = new Map<string, number>()
+  const turnLivenessTimers = new Map<string, { timer: number, turnID: string }>()
   const recentCompactionByThread = new Map<string, number>()
   const trackedTimeouts = new Set<number>()
 
@@ -484,6 +487,7 @@ export const useCodexStore = defineStore('codex', () => {
     pendingDiffs.clear()
     pendingTokenUsage.clear()
     idleReconcileTimers.clear()
+    turnLivenessTimers.clear()
     planOfferRetryTimers.clear()
     completedTurns.clear()
     completedTurnStatus.clear()
@@ -4442,17 +4446,47 @@ export const useCodexStore = defineStore('codex', () => {
     resetOrphanedInFlightSends()
   }
 
-  function scheduleIdleThreadReconcile(threadID: string, turnID: string): void {
+  function scheduleIdleThreadReconcile(threadID: string, turnID: string, delay = 150): void {
     const previous = idleReconcileTimers.get(threadID)
     if (previous) clearTrackedTimeout(previous)
     const timer = trackedTimeout(() => {
       idleReconcileTimers.delete(threadID)
       void reconcileIdleThread(threadID, turnID)
-    }, 150)
+    }, delay)
     idleReconcileTimers.set(threadID, timer)
   }
 
-  async function reconcileIdleThread(threadID: string, turnID: string): Promise<void> {
+  function cancelTurnLivenessReconcile(threadID: string, turnID = ''): void {
+    for (const [id, entry] of [...turnLivenessTimers.entries()]) {
+      if (id !== threadID && !sameThreadSession(id, threadID)) continue
+      if (turnID && entry.turnID !== turnID) continue
+      clearTrackedTimeout(entry.timer)
+      turnLivenessTimers.delete(id)
+    }
+  }
+
+  function scheduleTurnLivenessReconcile(
+    threadID: string,
+    turnID: string,
+    delay = TURN_LIVENESS_WATCHDOG_MS,
+  ): void {
+    if (!threadID || !turnID || completedTurns.has(turnID)) return
+    cancelTurnLivenessReconcile(threadID)
+    let timer = 0
+    timer = trackedTimeout(() => {
+      const entry = turnLivenessTimers.get(threadID)
+      if (!entry || entry.timer !== timer || entry.turnID !== turnID) return
+      turnLivenessTimers.delete(threadID)
+      void reconcileIdleThread(threadID, turnID, true)
+    }, delay)
+    turnLivenessTimers.set(threadID, { timer, turnID })
+  }
+
+  async function reconcileIdleThread(
+    threadID: string,
+    turnID: string,
+    confirmTerminal = false,
+  ): Promise<void> {
     if (!turnID || completedTurns.has(turnID) || threadTurnID(threadID) !== turnID) {
       scheduleThreadQueueDrain(threadID)
       return
@@ -4488,6 +4522,14 @@ export const useCodexStore = defineStore('codex', () => {
     } catch {
       // A failed/read-fallback snapshot is not proof that a live turn ended.
       // Keep follow-ups queued until turn/completed or an explicit terminal snapshot.
+      if (threadTurnID(threadID) === turnID) scheduleTurnLivenessReconcile(threadID, turnID)
+      return
+    }
+
+    if (confirmTerminal) {
+      // The backend releases ownership immediately before its terminal event.
+      // Confirm once more so a transient/stale snapshot cannot clear a live turn.
+      scheduleIdleThreadReconcile(threadID, turnID, TURN_LIVENESS_CONFIRM_MS)
       return
     }
 
@@ -4754,6 +4796,8 @@ export const useCodexStore = defineStore('codex', () => {
       delete nextTurns[fromID]
       if (!nextTurns[toID]) nextTurns[toID] = fromTurn
       activeTurnByThread.value = nextTurns
+      const migratedTurn = nextTurns[toID]
+      if (migratedTurn) scheduleTurnLivenessReconcile(toID, migratedTurn)
     }
     const fromFeedback = turnFeedbackByThread.value[fromID]
     if (fromFeedback) {
@@ -4944,6 +4988,8 @@ export const useCodexStore = defineStore('codex', () => {
     }
     if (turnID) next[threadID] = turnID
     activeTurnByThread.value = next
+    if (turnID && !completedTurns.has(turnID)) scheduleTurnLivenessReconcile(threadID, turnID)
+    else cancelTurnLivenessReconcile(threadID)
   }
 
   function setTurnFeedback(threadID: string, feedback: TurnFeedback): void {
@@ -5008,6 +5054,7 @@ export const useCodexStore = defineStore('codex', () => {
     clearAllTrackedTimeouts()
     planOfferRetryTimers.clear()
     idleReconcileTimers.clear()
+    turnLivenessTimers.clear()
     planImplementPrompt.value = null
     deltaTimer = 0
     diffTimer = 0

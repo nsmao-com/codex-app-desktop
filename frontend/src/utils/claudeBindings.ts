@@ -239,6 +239,15 @@ export function interruptClaudeTurn(ref: ClaudeTurnRef): Promise<void> {
   return byIdOrName('InterruptClaudeTurn', () => (backend as any).InterruptClaudeTurn(ref), ref)
 }
 
+export function isClaudeTurnRunning(ref: ClaudeTurnRef): Promise<boolean> {
+  const method = (backend as any).IsClaudeTurnRunning
+  return byIdOrName(
+    'IsClaudeTurnRunning',
+    typeof method === 'function' ? () => method(ref) : undefined,
+    ref,
+  )
+}
+
 export function deleteClaudeSession(sessionID: string): Promise<void> {
   return byIdOrName('DeleteClaudeSession', () => (backend as any).DeleteClaudeSession(sessionID), sessionID)
 }
