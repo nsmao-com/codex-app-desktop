@@ -50,8 +50,9 @@ type externalTurn struct {
 }
 
 type externalRun struct {
-	turnID string
-	cancel context.CancelFunc
+	turnID       string
+	clientTurnID string
+	cancel       context.CancelFunc
 }
 
 const (

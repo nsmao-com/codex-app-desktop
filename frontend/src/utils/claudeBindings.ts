@@ -54,6 +54,7 @@ export interface ClaudeSendRequest {
   images: string[]
   model: string
   effort: string
+  clientTurnId?: string
 }
 
 export interface ClaudeTurnRef {
@@ -244,6 +245,23 @@ export function isClaudeTurnRunning(ref: ClaudeTurnRef): Promise<boolean> {
   return byIdOrName(
     'IsClaudeTurnRunning',
     typeof method === 'function' ? () => method(ref) : undefined,
+    ref,
+  )
+}
+
+export interface TurnLivenessView {
+  running: boolean
+  turnId: string
+  latestTurnId: string
+  latestTurnStatus: string
+  runtime: string
+  state: string
+}
+
+export function readClaudeTurnLiveness(ref: ClaudeTurnRef): Promise<TurnLivenessView> {
+  return byIdOrName(
+    'ReadClaudeTurnLiveness',
+    () => (backend as any).ReadClaudeTurnLiveness(ref),
     ref,
   )
 }

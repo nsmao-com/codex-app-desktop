@@ -20,6 +20,7 @@ import {
   listGrokSessions,
   readGrokSession,
   readGrokSessionHistory,
+  readGrokTurnLiveness,
   refreshGrokRuntime,
   refreshGrokRuntimeQuick,
   renameGrokSession as renameGrokSessionApi,
@@ -1041,7 +1042,7 @@ export const useGrokStore = defineStore('grok', () => {
     confirmingMissing = false,
   ): void {
     const turnId = ref.turnId.trim()
-    if (!turnId || turnId.startsWith('grok-turn-pending-') || finalizedTurnIds.has(turnId)) return
+    if (!turnId || finalizedTurnIds.has(turnId)) return
     cancelGrokTurnWatchdog(turnId)
     let timer = 0
     timer = window.setTimeout(() => {
@@ -1056,8 +1057,28 @@ export const useGrokStore = defineStore('grok', () => {
     const current = turnForSession(ref.sessionId)
     if (!current || current.turnId !== ref.turnId || finalizedTurnIds.has(ref.turnId)) return
     try {
-      if (await isGrokTurnRunningApi(ref)) {
-        scheduleGrokTurnWatchdog(current)
+      const liveness = await readGrokTurnLiveness(ref)
+      if (liveness.running) {
+        const latestBeforeApply = turnForSession(ref.sessionId)
+        if (!latestBeforeApply) return
+        if (latestBeforeApply.turnId !== ref.turnId) {
+          if (liveness.turnId === latestBeforeApply.turnId) scheduleGrokTurnWatchdog(latestBeforeApply)
+          return
+        }
+        const runningTurnId = liveness.turnId || latestBeforeApply.turnId
+        if (runningTurnId !== latestBeforeApply.turnId) {
+          rememberGrokTurnClientId(runningTurnId, clientTurnIdForTurn(latestBeforeApply) || latestBeforeApply.turnId)
+          remapQueuedBlockingTurn(latestBeforeApply.sessionId, latestBeforeApply.turnId, runningTurnId)
+          const startedAt = turnStartedAtById.value[latestBeforeApply.turnId]
+          if (startedAt) {
+            const nextStarts = { ...turnStartedAtById.value, [runningTurnId]: startedAt }
+            delete nextStarts[latestBeforeApply.turnId]
+            turnStartedAtById.value = nextStarts
+          }
+          setSessionTurn(latestBeforeApply.sessionId, { ...latestBeforeApply, turnId: runningTurnId })
+        }
+        const latest = turnForSession(latestBeforeApply.sessionId)
+        if (latest) scheduleGrokTurnWatchdog(latest)
         return
       }
     } catch {
@@ -2493,6 +2514,7 @@ export const useGrokStore = defineStore('grok', () => {
       turnStartedAtById.value = { ...turnStartedAtById.value, [pendingTurnId]: Date.now() }
       seedTurnStartMetrics(sessionId, pendingTurnId)
     }
+    scheduleGrokTurnWatchdog({ backend: turnBackend, sessionId, turnId: pendingTurnId })
     const startedTurnBeforeSend = latestStartedTurnForSession(sessionId)
     try {
       const ref = await sendGrokMessageApi({
@@ -2530,7 +2552,7 @@ export const useGrokStore = defineStore('grok', () => {
       // A very fast turn can complete before the Wails call Promise resolves.
       // Still bind its pending UI session so optimistic messages and queued turns
       // cannot remain stranded under the temporary id.
-      const alreadyFinalized = finalizedTurnIds.has(nextTurnId)
+      const alreadyFinalized = finalizedTurnIds.has(pendingTurnId) || finalizedTurnIds.has(nextTurnId)
       const targetSessionId = ref.sessionId && ref.sessionId !== sessionId && (ownsPendingTurn || alreadyFinalized)
         ? promoteSessionState(sessionId, ref.sessionId)
         : sessionId

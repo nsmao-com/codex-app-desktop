@@ -7,12 +7,12 @@ import {
   archiveClaudeSession as archiveClaudeSessionApi,
   deleteClaudeSession as deleteClaudeSessionApi,
   interruptClaudeTurn as interruptClaudeTurnApi,
-  isClaudeTurnRunning as isClaudeTurnRunningApi,
   listArchivedClaudeSessions,
   listClaudeSessionTurnUsages,
   listClaudeSessions,
   readClaudeSession,
   readClaudeSessionHistory,
+  readClaudeTurnLiveness,
   refreshClaudeRuntime,
   renameClaudeSession as renameClaudeSessionApi,
   sendClaudeMessage as sendClaudeMessageApi,
@@ -420,8 +420,6 @@ export const useClaudeStore = defineStore('claude', () => {
     const turnId = ref.turnId.trim()
     if (
       !turnId
-      || turnId.startsWith('claude-local-')
-      || turnId.startsWith('claude-turn-pending-')
       || finalizedTurnIds.has(turnId)
     ) return
     cancelClaudeTurnWatchdog(turnId)
@@ -438,8 +436,42 @@ export const useClaudeStore = defineStore('claude', () => {
     const current = turnRefForSession(ref.sessionId)
     if (!current || current.turnId !== ref.turnId || finalizedTurnIds.has(ref.turnId)) return
     try {
-      if (await isClaudeTurnRunningApi(ref)) {
-        scheduleClaudeTurnWatchdog(current)
+      const liveness = await readClaudeTurnLiveness(ref)
+      if (liveness.running) {
+        const latestBeforeApply = turnRefForSession(ref.sessionId)
+        if (!latestBeforeApply) return
+        if (latestBeforeApply.turnId !== ref.turnId) {
+          if (liveness.turnId === latestBeforeApply.turnId) scheduleClaudeTurnWatchdog(latestBeforeApply)
+          return
+        }
+        const runningTurnId = liveness.turnId || latestBeforeApply.turnId
+        if (runningTurnId !== latestBeforeApply.turnId) {
+          const itemKey = sessionStateKey(itemsBySession.value, latestBeforeApply.sessionId)
+          const items = itemKey ? itemsBySession.value[itemKey] : undefined
+          if (itemKey && items) {
+            itemsBySession.value = {
+              ...itemsBySession.value,
+              [itemKey]: items.map((item) =>
+                item.turnId === latestBeforeApply.turnId ? { ...item, turnId: runningTurnId } : item,
+              ),
+            }
+          }
+          const startedAt = turnStartedAtById.value[latestBeforeApply.turnId]
+          if (startedAt) {
+            const nextStarts = { ...turnStartedAtById.value, [runningTurnId]: startedAt }
+            delete nextStarts[latestBeforeApply.turnId]
+            turnStartedAtById.value = nextStarts
+          }
+          const metrics = activeTurnMetrics.value[latestBeforeApply.turnId]
+          if (metrics) {
+            const nextMetrics = { ...activeTurnMetrics.value, [runningTurnId]: metrics }
+            delete nextMetrics[latestBeforeApply.turnId]
+            activeTurnMetrics.value = nextMetrics
+          }
+          setClaudeTurnState(latestBeforeApply.sessionId, { sessionId: latestBeforeApply.sessionId, turnId: runningTurnId })
+        }
+        const latest = turnRefForSession(latestBeforeApply.sessionId)
+        if (latest) scheduleClaudeTurnWatchdog(latest)
         return
       }
     } catch {
@@ -770,6 +802,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const kind = String(data.kind || '')
     const rawSessionId = String(data.sessionId || '')
     const turnId = String(data.turnId || '')
+    const clientTurnId = String(data.clientTurnId || '')
     if (rawSessionId && discardedSessionIds.has(rawSessionId)) return
     let sessionId = resolveEventSessionId(rawSessionId, turnId)
     if (!sessionId) return
@@ -785,6 +818,18 @@ export const useClaudeStore = defineStore('claude', () => {
         sessionId = resolveEventSessionId(rawSessionId, turnId)
       }
       if (turnId) latestStartedTurnBySession.set(sessionId, turnId)
+      if (clientTurnId && turnId && clientTurnId !== turnId) {
+        const itemKey = sessionStateKey(itemsBySession.value, sessionId)
+        const items = itemKey ? itemsBySession.value[itemKey] : undefined
+        if (itemKey && items) {
+          itemsBySession.value = {
+            ...itemsBySession.value,
+            [itemKey]: items.map((item) =>
+              item.turnId === clientTurnId ? { ...item, turnId } : item,
+            ),
+          }
+        }
+      }
       // Turn ids are unique; delayed bridge delivery must not revive a turn whose
       // terminal event was already processed.
       if (turnId && finalizedTurnIds.has(turnId)) {
@@ -924,6 +969,15 @@ export const useClaudeStore = defineStore('claude', () => {
     }
 
     if (kind === 'turn.completed') {
+      const activeBeforeTerminal = turnRefForSession(sessionId)
+      if (
+        clientTurnId
+        && activeBeforeTerminal?.turnId === clientTurnId
+        && turnId
+        && clientTurnId !== turnId
+      ) {
+        setClaudeTurnState(sessionId, { sessionId, turnId })
+      }
       if (turnId && finalizedTurnIds.has(turnId)) {
         if (clearClaudeTurnState(sessionId, turnId)) void flushQueue(sessionId)
         return
@@ -1939,6 +1993,7 @@ export const useClaudeStore = defineStore('claude', () => {
     const now = Math.floor(Date.now() / 1000)
     const localSequence = ++queuedSequence
     const localTurnId = `claude-local-${Date.now()}-${localSequence}`
+    setClaudeTurnState(sessionId, { sessionId, turnId: localTurnId })
     const userItem: TimelineItem = {
       ...messageToItem({
       id: `${sessionId}:local-user-${Date.now()}-${localSequence}`,
@@ -1964,6 +2019,7 @@ export const useClaudeStore = defineStore('claude', () => {
         images,
         model: options?.model ?? appStore.settings.claudeModel ?? '',
         effort: options?.effort || appStore.settings.claudeEffort || 'high',
+        clientTurnId: localTurnId,
       })
       attachedTurn = true
 
@@ -1996,7 +2052,7 @@ export const useClaudeStore = defineStore('claude', () => {
       if (sameClaudeSession(activeSessionId.value, sessionId)) activeSessionId.value = nextSessionId
       // The CLI can finish before the Wails send Promise resolves. Never let a
       // late response resurrect a turn that its terminal event already closed.
-      if (ref.turnId && finalizedTurnIds.has(ref.turnId)) {
+      if (finalizedTurnIds.has(localTurnId) || (ref.turnId && finalizedTurnIds.has(ref.turnId))) {
         clearClaudeTurnState(nextSessionId, ref.turnId)
         return 'sent'
       }
@@ -2050,7 +2106,7 @@ export const useClaudeStore = defineStore('claude', () => {
         return 'sent'
       }
       if (!attachedTurn) {
-        markRunning(sessionId, false)
+        clearClaudeTurnState(sessionId, localTurnId)
         // Drop optimistic user row for this failed attempt.
         const list = itemsBySession.value[sessionId] || []
         itemsBySession.value = {

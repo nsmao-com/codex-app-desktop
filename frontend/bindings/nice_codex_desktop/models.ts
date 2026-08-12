@@ -218,6 +218,7 @@ export interface ClaudeSendRequest {
     "images": string[] | null;
     "model": string;
     "effort": string;
+    "clientTurnId"?: string;
 }
 
 /**
@@ -740,6 +741,19 @@ export interface TerminalProfile {
     "name": string;
     "description": string;
     "available": boolean;
+}
+
+/**
+ * TurnLivenessView is the authoritative process/app-server state for one session.
+ * It intentionally excludes cached history, which can retain stale in-progress rows.
+ */
+export interface TurnLivenessView {
+    "running": boolean;
+    "turnId"?: string;
+    "latestTurnId"?: string;
+    "latestTurnStatus"?: string;
+    "runtime": string;
+    "state": string;
 }
 
 export interface UpdateInfo {

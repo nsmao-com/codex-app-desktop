@@ -391,6 +391,10 @@ export function ReadClaudeSessionHistory(sessionID: string, before: number): $Ca
     return $Call.ByID(325508716, sessionID, before);
 }
 
+export function ReadClaudeTurnLiveness(ref: $models.ClaudeTurnRef): $CancellablePromise<$models.TurnLivenessView> {
+    return $Call.ByID(2190616074, ref);
+}
+
 export function ReadCodexFeatureFlags(): $CancellablePromise<$models.CodexFeatureFlags> {
     return $Call.ByID(1079251556);
 }
@@ -433,6 +437,10 @@ export function ReadGrokSessionHistory(backend: string, sessionID: string, befor
     return $Call.ByID(1433908917, backend, sessionID, before);
 }
 
+export function ReadGrokTurnLiveness(ref: $models.GrokTurnRef): $CancellablePromise<$models.TurnLivenessView> {
+    return $Call.ByID(946330735, ref);
+}
+
 /**
  * ReadProjectInstructions returns the current workspace AGENTS.md content.
  */
@@ -455,6 +463,14 @@ export function ReadThread(threadID: string): $CancellablePromise<{ [_ in string
  */
 export function ReadThreadHistory(threadID: string, before: number): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(2666883278, threadID, before);
+}
+
+/**
+ * ReadThreadLiveness bypasses ReadThread's display cache and answers only
+ * whether this exact session still owns backend work.
+ */
+export function ReadThreadLiveness(threadID: string): $CancellablePromise<$models.TurnLivenessView> {
+    return $Call.ByID(556638031, threadID);
 }
 
 export function ReadWorkspaceDiff(relativePath: string): $CancellablePromise<string> {

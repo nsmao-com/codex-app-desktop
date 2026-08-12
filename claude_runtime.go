@@ -58,12 +58,13 @@ type ClaudeSessionDetail struct {
 
 // ClaudeSendRequest starts a Claude Code turn.
 type ClaudeSendRequest struct {
-	SessionID string   `json:"sessionId"`
-	Workspace string   `json:"workspace"`
-	Text      string   `json:"text"`
-	Images    []string `json:"images"`
-	Model     string   `json:"model"`
-	Effort    string   `json:"effort"`
+	SessionID    string   `json:"sessionId"`
+	Workspace    string   `json:"workspace"`
+	Text         string   `json:"text"`
+	Images       []string `json:"images"`
+	Model        string   `json:"model"`
+	Effort       string   `json:"effort"`
+	ClientTurnID string   `json:"clientTurnId,omitempty"`
 }
 
 // ClaudeTurnRef identifies a running turn.
@@ -762,9 +763,12 @@ func (s *AppService) SendClaudeMessage(request ClaudeSendRequest) (ClaudeTurnRef
 		cancel()
 		return ClaudeTurnRef{}, errors.New("Claude turn already running for this session")
 	}
-	s.externalRuns[key] = &externalRun{turnID: turnID, cancel: cancel}
+	s.externalRuns[key] = &externalRun{turnID: turnID, clientTurnID: request.ClientTurnID, cancel: cancel}
 	s.mu.Unlock()
 	startedPayload := map[string]any{"text": request.Text}
+	if request.ClientTurnID != "" {
+		startedPayload["clientTurnId"] = request.ClientTurnID
+	}
 	if clientSessionID != "" && clientSessionID != request.SessionID {
 		startedPayload["clientSessionId"] = clientSessionID
 	}
@@ -792,6 +796,30 @@ func (s *AppService) IsClaudeTurnRunning(ref ClaudeTurnRef) bool {
 	defer s.mu.Unlock()
 	run := s.externalRuns[claudeRunKey(sessionID)]
 	return run != nil && (turnID == "" || run.turnID == turnID)
+}
+
+func (s *AppService) ReadClaudeTurnLiveness(ref ClaudeTurnRef) TurnLivenessView {
+	sessionID := strings.TrimSpace(ref.SessionID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	find := func(run *externalRun) TurnLivenessView {
+		if run == nil {
+			return TurnLivenessView{Runtime: "claude", State: "idle"}
+		}
+		return TurnLivenessView{Running: true, TurnID: strings.TrimSpace(run.turnID), Runtime: "claude", State: "running"}
+	}
+	if run := s.externalRuns[claudeRunKey(sessionID)]; run != nil {
+		return find(run)
+	}
+	for _, run := range s.externalRuns {
+		if run == nil {
+			continue
+		}
+		if ref.TurnID != "" && (run.turnID == ref.TurnID || run.clientTurnID == ref.TurnID) {
+			return find(run)
+		}
+	}
+	return find(nil)
 }
 
 func (s *AppService) isClaudeSessionRunning(sessionID string) bool {
@@ -1084,6 +1112,9 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 		"message":  assistantMsg,
 		"activity": finalActivity,
 		"status":   status,
+	}
+	if request.ClientTurnID != "" {
+		payload["clientTurnId"] = request.ClientTurnID
 	}
 	if errText != "" {
 		payload["error"] = errText

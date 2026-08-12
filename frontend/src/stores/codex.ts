@@ -180,6 +180,12 @@ export const useCodexStore = defineStore('codex', () => {
   const planOfferRetryTimers = new Map<string, number[]>()
   const idleReconcileTimers = new Map<string, number>()
   const turnLivenessTimers = new Map<string, { timer: number, turnID: string }>()
+  const submissionLivenessTimers = new Map<string, {
+    timer: number
+    submission: PendingThreadSubmission
+    confirmingIdle: boolean
+  }>()
+  const unknownActiveLivenessTimers = new Map<string, { timer: number; confirmingIdle: boolean }>()
   const recentCompactionByThread = new Map<string, number>()
   const trackedTimeouts = new Set<number>()
 
@@ -488,6 +494,8 @@ export const useCodexStore = defineStore('codex', () => {
     pendingTokenUsage.clear()
     idleReconcileTimers.clear()
     turnLivenessTimers.clear()
+    submissionLivenessTimers.clear()
+    unknownActiveLivenessTimers.clear()
     planOfferRetryTimers.clear()
     completedTurns.clear()
     completedTurnStatus.clear()
@@ -927,7 +935,6 @@ export const useCodexStore = defineStore('codex', () => {
     // Drop unused empty drafts so "New task" stays instant and the sidebar stays clean.
     if (!preserveOtherDrafts) discardEmptyPendingThreads()
     createThreadSequence += 1
-    creatingThread.value = false
     const now = Math.floor(Date.now() / 1000)
     const pendingID = `pending-thread-${Date.now()}-${createThreadSequence}`
     const externalProvider = runtime === 'gemini' ? '__gemini__' : runtime === 'opencode' ? '__opencode__' : appStore.settings.modelProvider
@@ -968,16 +975,21 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   async function newThreadInProject(path: string, preserveOtherDrafts = false): Promise<ThreadSummary | null> {
-    if (!path) return null
-    if (!sameWorkspace(path, appStore.currentWorkspacePath)) {
-      await switchProject(path)
+    if (!path || creatingThread.value) return null
+    creatingThread.value = true
+    try {
+      if (!sameWorkspace(path, appStore.currentWorkspacePath)) {
+        await switchProject(path)
+      }
+      if (!sameWorkspace(path, appStore.currentWorkspacePath)) return null
+      if (!isReady.value) {
+        const connected = await connect(path)
+        if (!connected) return null
+      }
+      return newThread(preserveOtherDrafts)
+    } finally {
+      creatingThread.value = false
     }
-    if (!sameWorkspace(path, appStore.currentWorkspacePath)) return null
-    if (!isReady.value) {
-      const connected = await connect(path)
-      if (!connected) return null
-    }
-    return newThread(preserveOtherDrafts)
   }
 
   async function loadArenaRuntimeThreads(runtime: WorkspaceRuntime): Promise<void> {
@@ -1047,7 +1059,6 @@ export const useCodexStore = defineStore('codex', () => {
     if (activate) {
       workspaceSelectionSequenceByThread.delete(threadID)
       createThreadSequence += 1
-      creatingThread.value = false
     }
     const previousThread = activeThread.value
     const previousThreadID = activeThreadId.value
@@ -2149,6 +2160,7 @@ export const useCodexStore = defineStore('codex', () => {
         || ''
       submission.previousTurnId = startedTurnBeforeSend
       submission.requestStarted = true
+      scheduleSubmissionLivenessReconcile(thread.id, submission)
       const response = await backend.SendMessage({
         threadId: thread.id,
         text: queuedMessage.text,
@@ -2242,7 +2254,7 @@ export const useCodexStore = defineStore('codex', () => {
       // turn is still running. Treat that response as a queue admission race,
       // not as a failed user message; the terminal event of the original turn
       // will release the queue.
-      if (/external provider turn is already running|Codex turn is already running/i.test(message)) {
+      if (/external provider turn is already running|Codex turn is already (?:running|being submitted)/i.test(message)) {
         const items = (itemsByThread.value[resolvedThreadID] ?? []).filter((item) => item.id !== queuedMessage.localItemId)
         itemsByThread.value = { ...itemsByThread.value, [resolvedThreadID]: items }
         patchQueuedMessage(resolvedThreadID, queuedMessage.id, { state: 'queued', error: '', blockedByTurnId: undefined })
@@ -2711,10 +2723,20 @@ export const useCodexStore = defineStore('codex', () => {
           if (reportedTurnID) {
             setThreadTurn(threadID, reportedTurnID)
             setTurnFeedback(threadID, { state: 'running', message: '', turnId: reportedTurnID })
+          } else {
+            scheduleUnknownActiveLivenessReconcile(threadID)
           }
         } else {
+          cancelUnknownActiveLivenessReconcile(threadID)
           const finishingTurnID = threadTurnID(threadID) || liveFeedbackTurnID(threadFeedback(threadID))
-          scheduleIdleThreadReconcile(threadID, finishingTurnID)
+          if (finishingTurnID) {
+            scheduleIdleThreadReconcile(threadID, finishingTurnID)
+          } else if (!pendingThreadSubmission(threadID) && !isThreadSubmitting(threadID)) {
+            clearTurnFeedback(threadID)
+            finalizeOrphanedActiveItems(threadID)
+            resetOrphanedInFlightSends(threadID)
+            scheduleThreadQueueDrain(threadID)
+          }
         }
         break
       }
@@ -4040,9 +4062,15 @@ export const useCodexStore = defineStore('codex', () => {
   function setProjectThreads(path: string, nextThreads: ThreadSummary[]): void {
     const existingPath = Object.keys(projectThreads.value).find((projectPath) => sameWorkspace(projectPath, path))
     const key = existingPath ?? path
+    const normalized = nextThreads.map(preserveLocalLiveThreadStatus)
     projectThreads.value = {
       ...projectThreads.value,
-      [key]: nextThreads.map(preserveLocalLiveThreadStatus),
+      [key]: normalized,
+    }
+    for (const thread of normalized) {
+      if (isActiveStatus(thread.status) && !threadTurnID(thread.id)) {
+        scheduleUnknownActiveLivenessReconcile(thread.id)
+      }
     }
   }
 
@@ -4174,6 +4202,7 @@ export const useCodexStore = defineStore('codex', () => {
     }
     if (!ownerIDs.length) return
     const ownerID = ownerIDs[0]!
+    cancelSubmissionLivenessReconcile(ownerID)
     if (!accepted) replaceQueuedBlockingTurn(ownerID, submission.blockerId)
     const replacement = pendingThreadSubmission(threadID) ?? pendingThreadSubmission(ownerID)
     if (replacement && replacement.submission !== submission) return
@@ -4182,6 +4211,9 @@ export const useCodexStore = defineStore('codex', () => {
       && !ownerIDs.includes(id)
       && !sameThreadSession(id, ownerID),
     )
+    if (!threadTurnID(ownerID) && threadReportsActive(ownerID)) {
+      scheduleUnknownActiveLivenessReconcile(ownerID)
+    }
     if (!accepted) scheduleThreadQueueDrain(ownerID)
   }
 
@@ -4205,6 +4237,12 @@ export const useCodexStore = defineStore('codex', () => {
     if (target && target !== submission) return
     pendingSubmissionByThread.delete(fromID)
     pendingSubmissionByThread.set(toID, submission)
+    const timer = submissionLivenessTimers.get(fromID)
+    if (timer?.submission === submission) {
+      clearTrackedTimeout(timer.timer)
+      submissionLivenessTimers.delete(fromID)
+      scheduleSubmissionLivenessReconcile(toID, submission)
+    }
   }
 
   function releasePendingThreadSubmissions(threadID = ''): void {
@@ -4325,26 +4363,41 @@ export const useCodexStore = defineStore('codex', () => {
 
   function threadHasLocalLiveOwnership(threadID: string): boolean {
     if (!threadID) return false
-    if (pendingThreadSubmission(threadID) || threadIsRunning(threadID) || isThreadSubmitting(threadID)) return true
+    // Always read every reactive ownership source before consulting the plain
+    // pending-submission Map. Otherwise an early Map hit leaves Vue computed
+    // callers with no reactive dependency and they cache `true` after the Map
+    // entry is removed, keeping thinking/stop UI visible forever.
+    const running = threadIsRunning(threadID)
+    const submitting = isThreadSubmitting(threadID)
     const feedback = threadFeedback(threadID)
-    if (feedbackIsBusy(feedback) && !(feedback?.turnId && completedTurns.has(feedback.turnId))) return true
-    if (pendingRequests.value.some((request) => sameThreadSession(asString(request.data.threadId), threadID))) return true
-    return threadHasLiveItems(threadID)
+    const feedbackOwnsTurn = feedbackIsBusy(feedback)
+      && !(feedback?.turnId && completedTurns.has(feedback.turnId))
+    const pendingRequest = pendingRequests.value
+      .some((request) => sameThreadSession(asString(request.data.threadId), threadID))
+    const liveItems = threadHasLiveItems(threadID)
+    const pendingSubmission = Boolean(pendingThreadSubmission(threadID))
+    return pendingSubmission || running || submitting || feedbackOwnsTurn || pendingRequest || liveItems
   }
 
   /** Local work that has crossed the provider request boundary or owns a real turn. */
   function threadHasConfirmedLiveOwnership(threadID: string): boolean {
     if (!threadID) return false
-    const submission = pendingThreadSubmission(threadID)?.submission
-    if (submission?.requestStarted || threadIsRunning(threadID)) return true
+    const running = threadIsRunning(threadID)
     const feedback = threadFeedback(threadID)
-    if (liveFeedbackTurnID(feedback)) return true
-    if (pendingRequests.value.some((request) => sameThreadSession(asString(request.data.threadId), threadID))) return true
-    return threadHasLiveItems(threadID)
+    const feedbackOwnsTurn = Boolean(liveFeedbackTurnID(feedback))
+    const pendingRequest = pendingRequests.value
+      .some((request) => sameThreadSession(asString(request.data.threadId), threadID))
+    const liveItems = threadHasLiveItems(threadID)
+    const submission = pendingThreadSubmission(threadID)?.submission
+    return Boolean(submission?.requestStarted) || running || feedbackOwnsTurn || pendingRequest || liveItems
   }
 
   function threadHasActiveWork(threadID: string): boolean {
-    return threadHasLocalLiveOwnership(threadID) || threadReportsActive(threadID)
+    // Evaluate both branches so background/session-status changes remain
+    // dependencies even while local ownership currently reports busy.
+    const localOwnership = threadHasLocalLiveOwnership(threadID)
+    const providerReportsActive = threadReportsActive(threadID)
+    return localOwnership || providerReportsActive
   }
 
   function canMutateThread(threadID: string): boolean {
@@ -4465,6 +4518,186 @@ export const useCodexStore = defineStore('codex', () => {
     }
   }
 
+  function cancelSubmissionLivenessReconcile(threadID: string): void {
+    for (const [id, entry] of [...submissionLivenessTimers.entries()]) {
+      if (id !== threadID && !sameThreadSession(id, threadID)) continue
+      clearTrackedTimeout(entry.timer)
+      submissionLivenessTimers.delete(id)
+    }
+  }
+
+  function scheduleSubmissionLivenessReconcile(
+    threadID: string,
+    submission: PendingThreadSubmission,
+    delay = TURN_LIVENESS_WATCHDOG_MS,
+    confirmingIdle = false,
+  ): void {
+    if (!threadID || !submission.requestStarted || submission.turnId) return
+    cancelSubmissionLivenessReconcile(threadID)
+    let timer = 0
+    timer = trackedTimeout(() => {
+      const entry = submissionLivenessTimers.get(threadID)
+      if (!entry || entry.timer !== timer || entry.submission !== submission) return
+      submissionLivenessTimers.delete(threadID)
+      void reconcileSubmissionLiveness(submission, confirmingIdle)
+    }, delay)
+    submissionLivenessTimers.set(threadID, { timer, submission, confirmingIdle })
+  }
+
+  async function readAuthoritativeThreadLiveness(threadID: string): Promise<{
+    running: boolean
+    turnId: string
+    latestTurnId: string
+    latestTurnStatus: string
+  }> {
+    const result = await backend.ReadThreadLiveness(threadID)
+    const record = asRecord(result)
+    return {
+      running: record.running === true,
+      turnId: asString(record.turnId),
+      latestTurnId: asString(record.latestTurnId),
+      latestTurnStatus: normalizeThreadStatus(record.latestTurnStatus),
+    }
+  }
+
+  async function reconcileSubmissionLiveness(
+    submission: PendingThreadSubmission,
+    confirmingIdle: boolean,
+  ): Promise<void> {
+    const owner = pendingThreadSubmissionOwner(submission)
+    if (!owner || owner.submission !== submission || submission.turnId) return
+    let liveness
+    try {
+      liveness = await readAuthoritativeThreadLiveness(owner.threadID)
+    } catch {
+      const latest = pendingThreadSubmissionOwner(submission)
+      if (latest?.submission === submission) {
+        scheduleSubmissionLivenessReconcile(latest.threadID, submission)
+      }
+      return
+    }
+    const latest = pendingThreadSubmissionOwner(submission)
+    if (!latest || latest.submission !== submission || submission.turnId) return
+    if (liveness.running) {
+      if (liveness.turnId) {
+        bindPendingThreadSubmission(latest.threadID, liveness.turnId, true, submission)
+        setThreadTurn(latest.threadID, liveness.turnId)
+        setLocalThreadStatus(latest.threadID, 'active')
+        setTurnFeedback(latest.threadID, { state: 'running', message: '', turnId: liveness.turnId })
+        settleAcceptedPendingThreadSubmission(latest.threadID, liveness.turnId)
+      } else {
+        scheduleSubmissionLivenessReconcile(latest.threadID, submission)
+      }
+      return
+    }
+    if (
+      liveness.latestTurnId
+      && liveness.latestTurnId !== submission.previousTurnId
+      && isTerminalTurnStatus(liveness.latestTurnStatus)
+    ) {
+      bindPendingThreadSubmission(latest.threadID, liveness.latestTurnId, true, submission)
+      rememberCompletedTurn(liveness.latestTurnId, liveness.latestTurnStatus)
+      settleAcceptedPendingThreadSubmission(latest.threadID, liveness.latestTurnId)
+      setThreadTurn(latest.threadID, '')
+      clearTurnFeedback(latest.threadID)
+      setLocalThreadStatus(latest.threadID, 'idle')
+      finalizeOrphanedActiveItems(latest.threadID)
+      scheduleThreadQueueDrain(latest.threadID)
+      return
+    }
+    if (!confirmingIdle) {
+      scheduleSubmissionLivenessReconcile(
+        latest.threadID,
+        submission,
+        TURN_LIVENESS_CONFIRM_MS,
+        true,
+      )
+      return
+    }
+    // The backend can only report idle after SendMessage's dispatch section exits.
+    // Leave an unaccepted row retryable instead of keeping a permanent stop button.
+    patchQueuedMessage(latest.threadID, submission.messageId, { state: 'failed', error: translate('notifications.turnFailedFallback') })
+    setTurnFeedback(latest.threadID, {
+      state: 'failed',
+      message: translate('notifications.turnFailedFallback'),
+      turnId: '',
+    })
+    finishPendingThreadSubmission(latest.threadID, submission, false)
+    setLocalThreadStatus(latest.threadID, 'idle')
+  }
+
+  function cancelUnknownActiveLivenessReconcile(threadID: string): void {
+    for (const [id, entry] of [...unknownActiveLivenessTimers.entries()]) {
+      if (id !== threadID && !sameThreadSession(id, threadID)) continue
+      clearTrackedTimeout(entry.timer)
+      unknownActiveLivenessTimers.delete(id)
+    }
+  }
+
+  function scheduleUnknownActiveLivenessReconcile(
+    threadID: string,
+    delay = TURN_LIVENESS_WATCHDOG_MS,
+    confirmingIdle = false,
+  ): void {
+    if (
+      !threadID
+      || threadTurnID(threadID)
+      || pendingThreadSubmission(threadID)
+      || isThreadSubmitting(threadID)
+    ) return
+    const existing = [...unknownActiveLivenessTimers.entries()].find(([id]) =>
+      id === threadID || sameThreadSession(id, threadID),
+    )?.[1]
+    // A stale sidebar refresh must not replace the stronger second idle check.
+    if (existing) return
+    cancelUnknownActiveLivenessReconcile(threadID)
+    let timer = 0
+    timer = trackedTimeout(() => {
+      const entry = unknownActiveLivenessTimers.get(threadID)
+      if (!entry || entry.timer !== timer || entry.confirmingIdle !== confirmingIdle) return
+      unknownActiveLivenessTimers.delete(threadID)
+      void reconcileUnknownActiveLiveness(threadID, confirmingIdle)
+    }, delay)
+    unknownActiveLivenessTimers.set(threadID, { timer, confirmingIdle })
+  }
+
+  async function reconcileUnknownActiveLiveness(
+    threadID: string,
+    confirmingIdle: boolean,
+  ): Promise<void> {
+    if (threadTurnID(threadID) || pendingThreadSubmission(threadID) || isThreadSubmitting(threadID)) return
+    let liveness
+    try {
+      liveness = await readAuthoritativeThreadLiveness(threadID)
+    } catch {
+      if (!threadTurnID(threadID) && threadReportsActive(threadID)) {
+        scheduleUnknownActiveLivenessReconcile(threadID)
+      }
+      return
+    }
+    if (threadTurnID(threadID) || pendingThreadSubmission(threadID) || isThreadSubmitting(threadID)) return
+    if (liveness.running) {
+      if (liveness.turnId) {
+        setThreadTurn(threadID, liveness.turnId)
+        setTurnFeedback(threadID, { state: 'running', message: '', turnId: liveness.turnId })
+      } else {
+        scheduleUnknownActiveLivenessReconcile(threadID)
+      }
+      return
+    }
+    if (!confirmingIdle) {
+      scheduleUnknownActiveLivenessReconcile(threadID, TURN_LIVENESS_CONFIRM_MS, true)
+      return
+    }
+    clearPendingRequestsForThread(threadID)
+    setLocalThreadStatus(threadID, 'idle')
+    const feedback = threadFeedback(threadID)
+    if (feedbackIsBusy(feedback) && !feedback?.turnId) clearTurnFeedback(threadID)
+    finalizeOrphanedActiveItems(threadID)
+    resetOrphanedInFlightSends(threadID)
+    scheduleThreadQueueDrain(threadID)
+  }
+
   function scheduleTurnLivenessReconcile(
     threadID: string,
     turnID: string,
@@ -4494,28 +4727,27 @@ export const useCodexStore = defineStore('codex', () => {
 
     let terminalStatus = ''
     try {
-      const response = await backend.ReadThread(threadID)
-      const rawThread = asRecord(asRecord(response).thread)
-      const turns = [...asArray(rawThread.turns)].reverse().map(asRecord)
-      const matchingTurn = turns.find((turn) => asString(turn.id) === turnID)
-      const matchingStatus = normalizeThreadStatus(matchingTurn?.status)
-      const runningTurn = turns.find((turn) => isActiveStatus(turn.status))
-      const runningTurnID = asString(runningTurn?.id)
-      if (runningTurnID) {
+      const liveness = await readAuthoritativeThreadLiveness(threadID)
+      const matchingStatus = liveness.latestTurnId === turnID
+        ? liveness.latestTurnStatus
+        : ''
+      const runningTurnID = liveness.turnId
+      if (liveness.running) {
+        const latestBeforeApply = threadTurnID(threadID)
+        if (
+          latestBeforeApply
+          && latestBeforeApply !== turnID
+          && runningTurnID !== latestBeforeApply
+        ) return
         if (runningTurnID !== turnID) {
-          rememberCompletedTurn(turnID, isTerminalTurnStatus(matchingStatus) ? matchingStatus : 'completed')
-          replaceQueuedBlockingTurn(threadID, turnID, runningTurnID)
+          if (runningTurnID) {
+            rememberCompletedTurn(turnID, isTerminalTurnStatus(matchingStatus) ? matchingStatus : 'completed')
+            replaceQueuedBlockingTurn(threadID, turnID, runningTurnID)
+          }
         }
-        setThreadTurn(threadID, runningTurnID)
+        setThreadTurn(threadID, runningTurnID || turnID)
         setLocalThreadStatus(threadID, 'active')
-        setTurnFeedback(threadID, { state: 'running', message: '', turnId: runningTurnID })
-        return
-      }
-      if (isActiveStatus(normalizeThreadStatus(rawThread.status))) {
-        // An active thread with no turn snapshot is still owned by the server.
-        setThreadTurn(threadID, turnID)
-        setLocalThreadStatus(threadID, 'active')
-        setTurnFeedback(threadID, { state: 'running', message: '', turnId: turnID })
+        setTurnFeedback(threadID, { state: 'running', message: '', turnId: runningTurnID || turnID })
         return
       }
       terminalStatus = isTerminalTurnStatus(matchingStatus) ? matchingStatus : 'completed'
@@ -4555,6 +4787,7 @@ export const useCodexStore = defineStore('codex', () => {
       return
     }
     rememberCompletedTurn(turnID, terminalStatus)
+    clearPendingRequestsForThread(threadID)
     finalizeActiveItemsForCompletedTurns(threadID, turnID)
     if (currentTurnID === turnID) setThreadTurn(threadID, '')
     finalizeOrphanedActiveItems(threadID)
@@ -4730,6 +4963,13 @@ export const useCodexStore = defineStore('codex', () => {
       current = next
     }
     return current
+  }
+
+  function clearPendingRequestsForThread(threadID: string): void {
+    if (!threadID || !pendingRequests.value.length) return
+    pendingRequests.value = pendingRequests.value.filter((request) =>
+      !sameThreadSession(asString(request.data.threadId), threadID),
+    )
   }
 
   function threadIsLoading(threadID: string): boolean {
@@ -4988,7 +5228,10 @@ export const useCodexStore = defineStore('codex', () => {
     }
     if (turnID) next[threadID] = turnID
     activeTurnByThread.value = next
-    if (turnID && !completedTurns.has(turnID)) scheduleTurnLivenessReconcile(threadID, turnID)
+    if (turnID && !completedTurns.has(turnID)) {
+      cancelUnknownActiveLivenessReconcile(threadID)
+      scheduleTurnLivenessReconcile(threadID, turnID)
+    }
     else cancelTurnLivenessReconcile(threadID)
   }
 
@@ -5055,6 +5298,8 @@ export const useCodexStore = defineStore('codex', () => {
     planOfferRetryTimers.clear()
     idleReconcileTimers.clear()
     turnLivenessTimers.clear()
+    submissionLivenessTimers.clear()
+    unknownActiveLivenessTimers.clear()
     planImplementPrompt.value = null
     deltaTimer = 0
     diffTimer = 0

@@ -165,9 +165,7 @@ function onDuplicate(paneId: string): void {
       </div>
     </div>
 
-    <TransitionGroup
-      name="arena-pane"
-      tag="div"
+    <div
       class="grid min-h-0 flex-1 divide-x divide-y divide-border/70 overflow-hidden"
       :class="gridClassForCount(arenaStore.panes.length)"
     >
@@ -192,7 +190,7 @@ function onDuplicate(paneId: string): void {
           @duplicate="onDuplicate(pane.id)"
         />
       </div>
-    </TransitionGroup>
+    </div>
   </div>
 </template>
 

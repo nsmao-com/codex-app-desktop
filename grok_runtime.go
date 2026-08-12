@@ -627,7 +627,7 @@ func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, erro
 		cancel()
 		return GrokTurnRef{}, errors.New("a Grok turn is already running for this session")
 	}
-	s.externalRuns[key] = &externalRun{turnID: turnID, cancel: cancel}
+	s.externalRuns[key] = &externalRun{turnID: turnID, clientTurnID: request.ClientTurnID, cancel: cancel}
 	s.mu.Unlock()
 	startedPayload := grokClientTurnPayload(request.ClientTurnID, map[string]any{"text": request.Text})
 	if clientSessionID != "" && clientSessionID != request.SessionID {
@@ -682,6 +682,31 @@ func (s *AppService) IsGrokTurnRunning(ref GrokTurnRef) bool {
 		}
 	}
 	return false
+}
+
+func (s *AppService) ReadGrokTurnLiveness(ref GrokTurnRef) TurnLivenessView {
+	backend := normalizeGrokBackend(ref.Backend)
+	sessionID := strings.TrimSpace(ref.SessionID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	find := func(run *externalRun) TurnLivenessView {
+		if run == nil {
+			return TurnLivenessView{Runtime: "grok", State: "idle"}
+		}
+		return TurnLivenessView{Running: true, TurnID: strings.TrimSpace(run.turnID), Runtime: "grok", State: "running"}
+	}
+	if run := s.externalRuns[grokRunKey(backend, sessionID)]; run != nil {
+		return find(run)
+	}
+	for _, run := range s.externalRuns {
+		if run == nil {
+			continue
+		}
+		if ref.TurnID != "" && (run.turnID == ref.TurnID || run.clientTurnID == ref.TurnID) {
+			return find(run)
+		}
+	}
+	return find(nil)
 }
 
 func (s *AppService) isGrokSessionRunning(backend, sessionID string) bool {

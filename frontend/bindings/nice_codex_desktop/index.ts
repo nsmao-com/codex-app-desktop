@@ -73,6 +73,7 @@ export type {
     SteerTurnRequest,
     SystemFont,
     TerminalProfile,
+    TurnLivenessView,
     UpdateInfo,
     UpdateProgress,
     UserSettings,

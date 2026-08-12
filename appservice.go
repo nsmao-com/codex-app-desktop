@@ -54,6 +54,7 @@ type AppService struct {
 	codexLifecycleMu       sync.Mutex
 	codexThreadStartMu     sync.Mutex
 	codexActiveTurns       map[string]string
+	codexPendingDispatches map[string]bool
 	// pendingCodexSessions maps a workspace to the NiceCodex session that is
 	// mid-first-allocation (thread/start sent, response or thread/started event
 	// not yet bound). A map keeps concurrent allocations in different workspaces
@@ -262,6 +263,17 @@ type SendMessageRequest struct {
 	CollaborationMode string `json:"collaborationMode,omitempty"`
 }
 
+// TurnLivenessView is the authoritative process/app-server state for one session.
+// It intentionally excludes cached history, which can retain stale in-progress rows.
+type TurnLivenessView struct {
+	Running          bool   `json:"running"`
+	TurnID           string `json:"turnId,omitempty"`
+	LatestTurnID     string `json:"latestTurnId,omitempty"`
+	LatestTurnStatus string `json:"latestTurnStatus,omitempty"`
+	Runtime          string `json:"runtime"`
+	State            string `json:"state"`
+}
+
 type SessionPreferencesRequest struct {
 	SessionID         string `json:"sessionId"`
 	Model             string `json:"model"`
@@ -325,6 +337,7 @@ func NewAppService(app *application.App, pluginAssets *pluginAssetServer) *AppSe
 		schedulerStop:          make(chan struct{}),
 		providerRouter:         newProviderRouter(),
 		codexActiveTurns:       make(map[string]string),
+		codexPendingDispatches: make(map[string]bool),
 		pendingCodexSessions:   make(map[string]string),
 	}
 	if routerConfig, err := loadProviderRouterConfig(settingsPath); err != nil {
@@ -757,6 +770,7 @@ func (s *AppService) StopCodex() error {
 	}
 	s.mu.Lock()
 	s.codexActiveTurns = make(map[string]string)
+	s.codexPendingDispatches = make(map[string]bool)
 	s.mu.Unlock()
 	return client.Stop()
 }
@@ -1397,6 +1411,96 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 	return paginateCodexThreadResponse(result, -1), nil
 }
 
+// ReadThreadLiveness bypasses ReadThread's display cache and answers only
+// whether this exact session still owns backend work.
+func (s *AppService) ReadThreadLiveness(threadID string) (TurnLivenessView, error) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return TurnLivenessView{}, errors.New("thread id is required")
+	}
+	settings := s.Settings()
+	workspace := activeWorkspaceForRuntime(settings)
+	session := s.sessionForID(threadID)
+	if session != nil {
+		workspace = session.Workspace
+	}
+	if session != nil && isExternalSession(session) {
+		runtime := normalizeExternalRuntime(session.Provider)
+		if runtime == "" {
+			runtime = normalizeExternalRuntime(externalProviderKind(session.ProviderID))
+		}
+		if runtime == "" {
+			runtime = "external"
+		}
+		s.mu.Lock()
+		run := s.externalRuns[session.ID]
+		view := TurnLivenessView{Runtime: runtime, State: "idle"}
+		if count := len(session.Turns); count > 0 {
+			latest := session.Turns[count-1]
+			view.LatestTurnID = strings.TrimSpace(latest.ID)
+			view.LatestTurnStatus = lifecycleStatus(latest.Status)
+		}
+		if run != nil {
+			view.Running = true
+			view.TurnID = strings.TrimSpace(run.turnID)
+			view.State = "running"
+		}
+		s.mu.Unlock()
+		return view, nil
+	}
+
+	backendID := s.codexBackendID(threadID, workspace)
+	expectedTurnID, pending := s.codexLivenessLocalState(threadID, backendID)
+	if pending {
+		return TurnLivenessView{
+			Running: true,
+			TurnID:  concreteTurnID(expectedTurnID),
+			Runtime: "codex",
+			State:   "submitting",
+		}, nil
+	}
+	if backendID == "" {
+		return TurnLivenessView{Runtime: "codex", State: "idle"}, nil
+	}
+
+	result, err := s.readBackendThreadSnapshot(backendID, workspace)
+	if err != nil {
+		return TurnLivenessView{}, err
+	}
+	thread, ok := result["thread"].(map[string]any)
+	if !ok {
+		return TurnLivenessView{}, errors.New("Codex returned an invalid thread snapshot")
+	}
+	threadStatus := lifecycleStatus(thread["status"])
+	latestTurnID, latestTurnStatus := latestLifecycleTurn(thread["turns"])
+	running := lifecycleStatusIsActive(threadStatus)
+	runningTurnID := ""
+	if running {
+		runningTurnID = strings.TrimSpace(stringFromAny(thread["activeTurnId"]))
+		if runningTurnID == "" || runningTurnID == "active" {
+			runningTurnID = activeLifecycleTurnID(thread["turns"])
+		}
+		if runningTurnID == "" {
+			runningTurnID = concreteTurnID(expectedTurnID)
+		}
+		s.syncCodexLivenessActive(threadID, backendID, expectedTurnID, runningTurnID)
+	} else {
+		s.clearCodexLivenessIdle(threadID, backendID, expectedTurnID)
+	}
+	state := threadStatus
+	if state == "" {
+		state = "idle"
+	}
+	return TurnLivenessView{
+		Running:          running,
+		TurnID:           runningTurnID,
+		LatestTurnID:     latestTurnID,
+		LatestTurnStatus: latestTurnStatus,
+		Runtime:          "codex",
+		State:            state,
+	}, nil
+}
+
 // ReadThreadHistory returns the page immediately before a previously opened
 // Codex page. The complete app-server snapshot stays in Go so the webview never
 // has to deserialize an entire long conversation at once.
@@ -1753,6 +1857,13 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 	if session != nil && isExternalSession(session) {
 		return s.runExternalTurn(request.ThreadID, session.Provider, workspace, settings, request.Text, request.Images)
 	}
+	if !s.claimCodexDispatch(request.ThreadID) {
+		return nil, errors.New("Codex turn is already being submitted; message was kept in queue")
+	}
+	backendIDForDispatch := ""
+	defer func() {
+		s.setCodexDispatchPending(false, request.ThreadID, backendIDForDispatch)
+	}()
 
 	backendID := request.ThreadID
 	if session != nil {
@@ -1763,6 +1874,15 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 		backendID = ensured
 	} else if ref := s.codexBackendID(request.ThreadID, workspace); ref != "" {
 		backendID = ref
+	}
+	// Two local session records can temporarily alias the same backend thread
+	// after history reconciliation. Claim that backend identity as well so the
+	// aliases cannot dispatch parallel turns into one Codex thread.
+	if backendID != request.ThreadID {
+		if !s.claimCodexDispatch(backendID) {
+			return nil, errors.New("Codex turn is already being submitted; message was kept in queue")
+		}
+		backendIDForDispatch = backendID
 	}
 	// The frontend normally serializes turns from event state, but an event can
 	// be delayed or lost on a busy WebView. The backend registry is authoritative
@@ -2810,6 +2930,7 @@ func (s *AppService) trackCodexActivity(event codex.Event) {
 		if status, ok := event.Data.(codex.Status); ok && !status.Running {
 			s.mu.Lock()
 			s.codexActiveTurns = make(map[string]string)
+			s.codexPendingDispatches = make(map[string]bool)
 			s.mu.Unlock()
 		}
 		return
@@ -2882,6 +3003,157 @@ func (s *AppService) codexActiveTurnID(threadIDs ...string) string {
 		}
 	}
 	return ""
+}
+
+func (s *AppService) codexLivenessLocalState(threadIDs ...string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	turnID := ""
+	pending := false
+	for _, threadID := range threadIDs {
+		threadID = strings.TrimSpace(threadID)
+		if threadID == "" {
+			continue
+		}
+		if turnID == "" {
+			turnID = strings.TrimSpace(s.codexActiveTurns[threadID])
+		}
+		pending = pending || s.codexPendingDispatches[threadID]
+	}
+	return turnID, pending
+}
+
+func (s *AppService) syncCodexLivenessActive(threadID, backendID, expectedTurnID, runningTurnID string) {
+	runningTurnID = strings.TrimSpace(runningTurnID)
+	if runningTurnID == "" {
+		runningTurnID = "active"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.codexActiveTurns == nil {
+		s.codexActiveTurns = make(map[string]string)
+	}
+	for _, id := range []string{threadID, backendID} {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		current := strings.TrimSpace(s.codexActiveTurns[id])
+		if id == threadID && current == "" {
+			s.codexActiveTurns[id] = runningTurnID
+		} else if current != "" && (current == expectedTurnID || current == "active") {
+			s.codexActiveTurns[id] = runningTurnID
+		}
+	}
+}
+
+func (s *AppService) clearCodexLivenessIdle(threadID, backendID, expectedTurnID string) {
+	expectedTurnID = strings.TrimSpace(expectedTurnID)
+	if expectedTurnID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range []string{threadID, backendID} {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		current := strings.TrimSpace(s.codexActiveTurns[id])
+		if current == expectedTurnID || (expectedTurnID == "active" && current == "active") {
+			delete(s.codexActiveTurns, id)
+		}
+	}
+}
+
+func concreteTurnID(turnID string) string {
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "active" {
+		return ""
+	}
+	return turnID
+}
+
+func lifecycleStatus(value any) string {
+	if status, ok := value.(map[string]any); ok {
+		value = firstMapString(status, "type", "status")
+	}
+	return strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(
+		strings.TrimSpace(stringFromAny(value)), "_", ""), "-", ""))
+}
+
+func lifecycleStatusIsActive(status string) bool {
+	switch lifecycleStatus(status) {
+	case "active", "running", "started", "pending", "inprogress":
+		return true
+	default:
+		return false
+	}
+}
+
+func activeLifecycleTurnID(value any) string {
+	turns, _ := value.([]any)
+	for index := len(turns) - 1; index >= 0; index-- {
+		turn, ok := turns[index].(map[string]any)
+		if !ok || !lifecycleStatusIsActive(lifecycleStatus(turn["status"])) {
+			continue
+		}
+		if turnID := strings.TrimSpace(stringFromAny(turn["id"])); turnID != "" {
+			return turnID
+		}
+	}
+	return ""
+}
+
+func latestLifecycleTurn(value any) (string, string) {
+	turns, _ := value.([]any)
+	for index := len(turns) - 1; index >= 0; index-- {
+		turn, ok := turns[index].(map[string]any)
+		if !ok {
+			continue
+		}
+		turnID := strings.TrimSpace(stringFromAny(turn["id"]))
+		if turnID != "" {
+			return turnID, lifecycleStatus(turn["status"])
+		}
+	}
+	return "", ""
+}
+
+func (s *AppService) setCodexDispatchPending(pending bool, threadIDs ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.codexPendingDispatches == nil {
+		s.codexPendingDispatches = make(map[string]bool)
+	}
+	for _, threadID := range threadIDs {
+		threadID = strings.TrimSpace(threadID)
+		if threadID == "" {
+			continue
+		}
+		if pending {
+			s.codexPendingDispatches[threadID] = true
+		} else {
+			delete(s.codexPendingDispatches, threadID)
+		}
+	}
+}
+
+func (s *AppService) claimCodexDispatch(threadID string) bool {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.codexPendingDispatches == nil {
+		s.codexPendingDispatches = make(map[string]bool)
+	}
+	if s.codexPendingDispatches[threadID] {
+		return false
+	}
+	s.codexPendingDispatches[threadID] = true
+	return true
 }
 
 func (s *AppService) StartChatGPTLogin() (map[string]any, error) {
@@ -3131,6 +3403,7 @@ func (s *AppService) shutdown() {
 		s.mu.Lock()
 		client := s.client
 		s.codexActiveTurns = make(map[string]string)
+		s.codexPendingDispatches = make(map[string]bool)
 		s.mu.Unlock()
 		_ = client.Stop()
 	})

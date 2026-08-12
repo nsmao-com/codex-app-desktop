@@ -1205,20 +1205,17 @@ onUnmounted(() => {
             <div class="h-px flex-1 bg-border/70" />
           </div>
 
-          <Transition name="timeline-step">
-            <div
-              v-if="showThinking"
-              key="timeline-thinking"
-              class="timeline-thinking reasoning-live-row flex min-w-0 items-center py-1.5"
-              :aria-label="thinkingLabel"
-            >
-              <!-- Same Cursor-style sweep as in-message planning shimmer -->
-              <span class="reasoning-shimmer min-w-0 max-w-full">
-                <span class="reasoning-shimmer__base truncate text-[13px]">{{ thinkingLabel }}</span>
-                <span class="reasoning-shimmer__sheen truncate text-[13px]" aria-hidden="true">{{ thinkingLabel }}</span>
-              </span>
-            </div>
-          </Transition>
+          <div
+            v-if="showThinking"
+            class="timeline-thinking reasoning-live-row flex min-w-0 items-center py-1.5"
+            :aria-label="thinkingLabel"
+          >
+            <!-- Same Cursor-style sweep as in-message planning shimmer -->
+            <span class="reasoning-shimmer min-w-0 max-w-full">
+              <span class="reasoning-shimmer__base truncate text-[13px]">{{ thinkingLabel }}</span>
+              <span class="reasoning-shimmer__sheen truncate text-[13px]" aria-hidden="true">{{ thinkingLabel }}</span>
+            </span>
+          </div>
         </template>
       </div>
     </div>

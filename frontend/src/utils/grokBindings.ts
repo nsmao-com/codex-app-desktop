@@ -111,6 +111,23 @@ export function isGrokTurnRunning(ref: GrokTurnRef): Promise<boolean> {
   )
 }
 
+export interface TurnLivenessView {
+  running: boolean
+  turnId: string
+  latestTurnId: string
+  latestTurnStatus: string
+  runtime: string
+  state: string
+}
+
+export function readGrokTurnLiveness(ref: GrokTurnRef): Promise<TurnLivenessView> {
+  return withNameFallback(
+    'ReadGrokTurnLiveness',
+    () => (backend as any).ReadGrokTurnLiveness(ref),
+    ref,
+  )
+}
+
 export function deleteGrokSession(backendId: string, sessionID: string): Promise<void> {
   return withNameFallback(
     'DeleteGrokSession',
