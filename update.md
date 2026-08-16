@@ -2,6 +2,25 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.3.6 - 2026-08-16
+
+### 新增
+
+- 官方 xAI Grok API 改为 Responses 接口，支持 `previous_response_id` 续聊和推理过程流式输出；自定义兼容网关仍走 Chat Completions。
+- Codex / Claude / Gemini / OpenCode / Grok 失败提示改为口语化说明，不再直接甩 HTTP 状态码或 CLI 原文。
+- 各运行时欢迎页提供各自的快捷建议，不再共用 Codex 文案。
+
+### 修改
+
+- 窄屏队列条也会显示下一条预览和失败条数。
+- 思考过程展开后可复制；队列失败项可一键清除。
+- Claude 设置里的权限模式改为中文/英文可读名称，输入栏不再露出 `acceptEdits` / `bypassPermissions`。
+- 新安装 Grok API 默认模型改为 grok-4.6。
+
+### 修复
+
+- 同步 `app.ts` 版本回退值，避免界面仍显示旧版本号。
+
 ## 1.3.5 - 2026-08-16
 
 ### 新增

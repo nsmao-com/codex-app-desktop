@@ -1355,11 +1355,22 @@ function diffStats(diff: string): { add: number; del: number } {
           </button>
           <div class="timeline-collapse" :class="isOpen('completed-reasoning') ? 'is-open' : ''">
             <div class="timeline-collapse-inner">
-              <div
-                class="prose prose-sm reasoning-prose mt-1 max-w-none rounded-xl bg-muted/35 px-3 py-2 text-[13px] leading-6 text-foreground/85"
-                @click="onMarkdownClick"
-                v-html="markdownHTML(completedReasoningText)"
-              />
+              <div class="relative mt-1">
+                <button
+                  type="button"
+                  class="absolute right-1.5 top-1.5 z-[1] inline-flex size-5 items-center justify-center rounded bg-card/80 text-muted-foreground hover:text-foreground"
+                  :aria-label="isCopied('reasoning') ? t('timeline.copied') : t('timeline.copyMessage')"
+                  @click="copyText(completedReasoningText, 'reasoning')"
+                >
+                  <Check v-if="isCopied('reasoning')" :size="11" class="text-positive" />
+                  <Copy v-else :size="11" />
+                </button>
+                <div
+                  class="prose prose-sm reasoning-prose max-w-none rounded-xl bg-muted/35 px-3 py-2 pr-8 text-[13px] leading-6 text-foreground/85"
+                  @click="onMarkdownClick"
+                  v-html="markdownHTML(completedReasoningText)"
+                />
+              </div>
             </div>
           </div>
         </div>

@@ -24,6 +24,7 @@ import {
   type ClaudeTurnRef,
 } from '@/utils/claudeBindings'
 import { notify } from '@/utils/notify'
+import { friendlyErrorMessage } from '@/utils/errorMessage'
 import { translate } from '@/i18n'
 import { normalizeThreadTokenUsage } from '@/utils/protocol'
 import { resolveProviderModelContextWindow } from '@/utils/accountUsage'
@@ -58,8 +59,7 @@ const CLAUDE_TURN_WATCHDOG_MS = 2500
 const CLAUDE_TURN_WATCHDOG_CONFIRM_MS = 450
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message
-  return String(error || translate('notifications.unexpected'))
+  return friendlyErrorMessage(error)
 }
 
 function emptyRuntime(): ClaudeRuntimeStatus {
@@ -1031,7 +1031,7 @@ export const useClaudeStore = defineStore('claude', () => {
       applyTurnMetrics(sessionId, turnId, data as Record<string, unknown>)
       clearClaudeTurnState(sessionId, turnId)
       if (data.error) {
-        notify('error', translate('chat.turnFailed'), String(data.error))
+        notify('error', translate('chat.turnFailed'), friendlyErrorMessage(data.error))
       }
       void appStore.loadLocalUsage().catch(() => undefined)
       void (async () => {

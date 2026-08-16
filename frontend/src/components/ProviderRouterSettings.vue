@@ -33,6 +33,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { SimpleTooltip } from '@/components/ui/tooltip'
 import { notify } from '@/utils/notify'
+import { friendlyErrorMessage } from '@/utils/errorMessage'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 
 type RouterState = 'idle' | 'healthy' | 'warning' | 'open' | 'half-open' | 'disabled'
@@ -333,7 +334,7 @@ function formatOpenUntil(value: number): string {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  return friendlyErrorMessage(error)
 }
 
 void refreshRouter(true)

@@ -21,15 +21,16 @@ import (
 // GrokAPISession is a NiceCodex-owned chat stored under the app settings dir.
 // Used when settings.GrokBackend == "api" (direct xAI / OpenAI-compatible HTTP).
 type GrokAPISession struct {
-	ID        string        `json:"id"`
-	Workspace string        `json:"workspace"`
-	Name      string        `json:"name"`
-	Preview   string        `json:"preview"`
-	Model     string        `json:"model"`
-	Effort    string        `json:"effort"`
-	CreatedAt int64         `json:"createdAt"`
-	UpdatedAt int64         `json:"updatedAt"`
-	Messages  []GrokMessage `json:"messages"`
+	ID             string        `json:"id"`
+	Workspace      string        `json:"workspace"`
+	Name           string        `json:"name"`
+	Preview        string        `json:"preview"`
+	Model          string        `json:"model"`
+	Effort         string        `json:"effort"`
+	LastResponseID string        `json:"lastResponseId,omitempty"`
+	CreatedAt      int64         `json:"createdAt"`
+	UpdatedAt      int64         `json:"updatedAt"`
+	Messages       []GrokMessage `json:"messages"`
 }
 
 // grokPendingApproval is reserved for future tool/approval prompts in API mode.
@@ -81,7 +82,7 @@ func envGrokAPIKey() string {
 	return ""
 }
 
-func resolveGrokAPIEndpoint(settings UserSettings) (string, error) {
+func resolveGrokAPIBase(settings UserSettings) (string, error) {
 	baseURL := resolveGrokAPIBaseURL(settings)
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Hostname() == "" {
@@ -92,7 +93,32 @@ func resolveGrokAPIEndpoint(settings UserSettings) (string, error) {
 	if parsed.Scheme != "https" && !localHTTP {
 		return "", errors.New("Grok API Base URL must use HTTPS (HTTP is only allowed for localhost)")
 	}
-	return strings.TrimRight(baseURL, "/") + "/chat/completions", nil
+	return strings.TrimRight(baseURL, "/"), nil
+}
+
+func resolveGrokAPIEndpoint(settings UserSettings) (string, error) {
+	base, err := resolveGrokAPIBase(settings)
+	if err != nil {
+		return "", err
+	}
+	return base + "/chat/completions", nil
+}
+
+func resolveGrokResponsesEndpoint(settings UserSettings) (string, error) {
+	base, err := resolveGrokAPIBase(settings)
+	if err != nil {
+		return "", err
+	}
+	return base + "/responses", nil
+}
+
+func grokAPIPrefersResponses(settings UserSettings) bool {
+	parsed, err := url.Parse(resolveGrokAPIBaseURL(settings))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "api.x.ai"
 }
 
 func resolveGrokAPIKey(settings UserSettings) string {
@@ -342,53 +368,17 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 		}
 		history = append(history, map[string]any{"role": role, "content": content})
 	}
+	previousResponseID := strings.TrimSpace(session.LastResponseID)
 	if err := s.persistGrokAPISessionsLocked(); err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("persist Grok API session: %w", err)
 	}
 	s.mu.Unlock()
 
-	body := map[string]any{
-		"model":    model,
-		"messages": history,
-		"stream":   true,
-		// Ask providers that support it to attach a final usage chunk.
-		"stream_options": map[string]any{"include_usage": true},
-	}
-	if effort := normalizeGrokEffort(request.Effort); effort != "" {
-		body["reasoning_effort"] = effort
-	}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-
-	client := &http.Client{Timeout: 0}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
-		message := strings.TrimSpace(string(raw))
-		if message == "" {
-			message = resp.Status
-		}
-		return nil, fmt.Errorf("Grok API HTTP %d: %s", resp.StatusCode, truncateRunes(message, 800))
-	}
-
 	var assistant strings.Builder
 	var thought strings.Builder
 	var usage map[string]any
+	var responseID string
 	var streamSequence uint64
 	var thoughtSequence uint64
 	stream := newExternalStreamCoalescer(func(kind, delta string) {
@@ -407,46 +397,11 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 		}))
 	})
 	defer stream.Flush()
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
-	for scanner.Scan() {
-		if ctx.Err() != nil {
-			return usage, context.Canceled
-		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if data == "[DONE]" {
-			break
-		}
-		var chunk map[string]any
-		if json.Unmarshal([]byte(data), &chunk) != nil {
-			continue
-		}
-		if next := normalizeTokenUsageMap(chunk["usage"]); next != nil {
-			usage = next
-		} else if next := normalizeTokenUsageMap(chunk); next != nil && chunk["usage"] == nil {
-			// Some gateways put usage fields at the root of the final SSE frame.
-			if anyToFloat(chunk["prompt_tokens"]) > 0 || anyToFloat(chunk["completion_tokens"]) > 0 {
-				usage = next
-			}
-		}
-		textDelta, thoughtDelta := extractOpenAIStreamParts(chunk)
-		if thoughtDelta != "" {
-			stream.Push("thought", thoughtDelta)
-		}
-		if textDelta != "" {
-			stream.Push("text", textDelta)
-		}
-	}
+
+	streamErr := s.streamGrokAPI(ctx, settings, apiKey, endpoint, model, request.Effort, history, previousResponseID, request.SessionID, &usage, &responseID, stream)
 	stream.Flush()
-	if err := scanner.Err(); err != nil {
-		if ctx.Err() != nil {
-			return usage, context.Canceled
-		}
-		return usage, err
+	if streamErr != nil {
+		return usage, streamErr
 	}
 
 	finalText := strings.TrimSpace(assistant.String())
@@ -485,6 +440,9 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 			added++
 		}
 		session.UpdatedAt = now
+		if responseID != "" {
+			session.LastResponseID = responseID
+		}
 		if finalText != "" {
 			session.Preview = finalText
 		} else {
@@ -557,4 +515,283 @@ func openAIReasoningContent(payload map[string]any) string {
 		return text
 	}
 	return textFromExternalValue(payload["reasoning_content"])
+}
+
+func (s *AppService) streamGrokAPI(
+	ctx context.Context,
+	settings UserSettings,
+	apiKey, chatEndpoint, model, effort string,
+	history []map[string]any,
+	previousResponseID, sessionID string,
+	usage *map[string]any,
+	responseID *string,
+	stream *externalStreamCoalescer,
+) error {
+	if grokAPIPrefersResponses(settings) {
+		err := s.streamGrokResponses(ctx, settings, apiKey, model, effort, history, previousResponseID, usage, responseID, stream)
+		if err == nil {
+			return nil
+		}
+		if grokPreviousResponseExpired(err) && previousResponseID != "" {
+			s.clearGrokLastResponseID(sessionID)
+			err = s.streamGrokResponses(ctx, settings, apiKey, model, effort, history, "", usage, responseID, stream)
+			if err == nil {
+				return nil
+			}
+		}
+		if grokShouldRetryChatCompletions(err) {
+			return s.streamGrokChatCompletions(ctx, apiKey, chatEndpoint, model, effort, history, usage, stream)
+		}
+		return err
+	}
+	return s.streamGrokChatCompletions(ctx, apiKey, chatEndpoint, model, effort, history, usage, stream)
+}
+
+func (s *AppService) clearGrokLastResponseID(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session := s.grokAPISessions[sessionID]; session != nil {
+		session.LastResponseID = ""
+		_ = s.persistGrokAPISessionsLocked()
+	}
+}
+
+func (s *AppService) streamGrokChatCompletions(
+	ctx context.Context,
+	apiKey, endpoint, model, effort string,
+	history []map[string]any,
+	usage *map[string]any,
+	stream *externalStreamCoalescer,
+) error {
+	body := map[string]any{
+		"model":          model,
+		"messages":       history,
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
+	}
+	if normalized := normalizeGrokEffort(effort); normalized != "" {
+		body["reasoning_effort"] = normalized
+	}
+	return s.streamGrokHTTP(ctx, apiKey, endpoint, body, usage, nil, stream, false)
+}
+
+func (s *AppService) streamGrokResponses(
+	ctx context.Context,
+	settings UserSettings,
+	apiKey, model, effort string,
+	history []map[string]any,
+	previousResponseID string,
+	usage *map[string]any,
+	responseID *string,
+	stream *externalStreamCoalescer,
+) error {
+	endpoint, err := resolveGrokResponsesEndpoint(settings)
+	if err != nil {
+		return err
+	}
+	input := grokResponsesInput(history)
+	if previousResponseID != "" && len(history) > 0 {
+		input = grokResponsesInput(history[len(history)-1:])
+	}
+	body := map[string]any{
+		"model":  model,
+		"input":  input,
+		"stream": true,
+	}
+	if normalized := normalizeGrokEffort(effort); normalized != "" {
+		body["reasoning"] = map[string]any{"effort": normalized}
+	}
+	if previousResponseID != "" {
+		body["previous_response_id"] = previousResponseID
+	}
+	return s.streamGrokHTTP(ctx, apiKey, endpoint, body, usage, responseID, stream, true)
+}
+
+func grokResponsesInput(history []map[string]any) []any {
+	out := make([]any, 0, len(history))
+	for _, msg := range history {
+		role, _ := msg["role"].(string)
+		switch typed := msg["content"].(type) {
+		case string:
+			if strings.TrimSpace(typed) == "" {
+				continue
+			}
+			out = append(out, map[string]any{"role": role, "content": typed})
+		case []map[string]any:
+			parts := make([]any, 0, len(typed))
+			for _, part := range typed {
+				switch strings.TrimSpace(fmt.Sprint(part["type"])) {
+				case "text":
+					if text := strings.TrimSpace(fmt.Sprint(part["text"])); text != "" {
+						parts = append(parts, map[string]any{"type": "input_text", "text": text})
+					}
+				case "image_url":
+					url := ""
+					if img, ok := part["image_url"].(map[string]any); ok {
+						url, _ = img["url"].(string)
+					}
+					if url != "" {
+						parts = append(parts, map[string]any{"type": "input_image", "image_url": url})
+					}
+				}
+			}
+			if len(parts) == 0 {
+				continue
+			}
+			out = append(out, map[string]any{"role": role, "content": parts})
+		default:
+			if msg["content"] == nil {
+				continue
+			}
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+func (s *AppService) streamGrokHTTP(
+	ctx context.Context,
+	apiKey, endpoint string,
+	body map[string]any,
+	usage *map[string]any,
+	responseID *string,
+	stream *externalStreamCoalescer,
+	responsesWire bool,
+) error {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	client := &http.Client{Timeout: 0}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+		message := strings.TrimSpace(string(raw))
+		if message == "" {
+			message = resp.Status
+		}
+		return fmt.Errorf("Grok API HTTP %d: %s", resp.StatusCode, truncateRunes(message, 800))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	eventType := ""
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return context.Canceled
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			eventType = ""
+			continue
+		}
+		if strings.HasPrefix(line, "event:") {
+			eventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" {
+			break
+		}
+		var chunk map[string]any
+		if json.Unmarshal([]byte(data), &chunk) != nil {
+			continue
+		}
+		textDelta, thoughtDelta, nextID, nextUsage := extractGrokStreamParts(eventType, chunk, responsesWire)
+		if nextUsage != nil && usage != nil {
+			*usage = nextUsage
+		}
+		if nextID != "" && responseID != nil {
+			*responseID = nextID
+		}
+		if thoughtDelta != "" {
+			stream.Push("thought", thoughtDelta)
+		}
+		if textDelta != "" {
+			stream.Push("text", textDelta)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if ctx.Err() != nil {
+			return context.Canceled
+		}
+		return err
+	}
+	return nil
+}
+
+func extractGrokStreamParts(eventType string, chunk map[string]any, responsesWire bool) (text, thought, responseID string, usage map[string]any) {
+	if next := normalizeTokenUsageMap(chunk["usage"]); next != nil {
+		usage = next
+	} else if next := normalizeTokenUsageMap(chunk); next != nil && chunk["usage"] == nil {
+		if anyToFloat(chunk["prompt_tokens"]) > 0 || anyToFloat(chunk["completion_tokens"]) > 0 {
+			usage = next
+		}
+	}
+	if resp, ok := chunk["response"].(map[string]any); ok {
+		responseID = firstMapString(resp, "id")
+		if next := normalizeTokenUsageMap(resp["usage"]); next != nil {
+			usage = next
+		}
+	}
+	if responseID == "" {
+		responseID = firstMapString(chunk, "id", "response_id", "responseId")
+	}
+	if responsesWire {
+		typ := strings.ToLower(firstMapString(chunk, "type"))
+		if typ == "" {
+			typ = strings.ToLower(eventType)
+		}
+		delta := firstMapString(chunk, "delta", "text")
+		if delta == "" {
+			delta = textFromExternalValue(chunk["delta"])
+		}
+		switch {
+		case strings.Contains(typ, "reasoning"):
+			thought = delta
+		case strings.Contains(typ, "output_text"), strings.HasSuffix(typ, "text.delta"), typ == "response.output_text.delta":
+			text = delta
+		}
+		if text == "" && thought == "" {
+			text, thought = extractOpenAIStreamParts(chunk)
+		}
+		return
+	}
+	text, thought = extractOpenAIStreamParts(chunk)
+	return
+}
+
+func grokShouldRetryChatCompletions(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "http 404") ||
+		strings.Contains(lower, "http 405") ||
+		strings.Contains(lower, "unknown path") ||
+		strings.Contains(lower, "no such endpoint")
+}
+
+func grokPreviousResponseExpired(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "previous_response") ||
+		strings.Contains(lower, "response_id") && (strings.Contains(lower, "expired") || strings.Contains(lower, "invalid") || strings.Contains(lower, "not found"))
 }

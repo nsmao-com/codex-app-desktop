@@ -126,17 +126,17 @@ const claudeSandbox = shallowRef(appStore.settings.claudeSandbox || 'workspace-w
 const claudeApprovalPolicy = shallowRef(appStore.settings.claudeApprovalPolicy || 'on-request')
 /** Official Claude Code --permission-mode values. */
 const claudePermissionMode = shallowRef(appStore.settings.claudePermissionMode || 'acceptEdits')
-const claudePermissionOptions = [
-  { value: 'acceptEdits', label: 'acceptEdits' },
-  { value: 'auto', label: 'auto' },
-  { value: 'plan', label: 'plan' },
-  { value: 'dontAsk', label: 'dontAsk' },
-  { value: 'manual', label: 'manual' },
-  { value: 'bypassPermissions', label: 'bypassPermissions' },
-]
 const workspaceStore = useWorkspaceStore()
 const dialogStore = useDialogStore()
 const { t } = useI18n()
+const claudePermissionOptions = computed(() => [
+  { value: 'acceptEdits', label: t('settings.claudePermAcceptEdits') },
+  { value: 'auto', label: t('settings.claudePermAuto') },
+  { value: 'plan', label: t('settings.claudePermPlan') },
+  { value: 'dontAsk', label: t('settings.claudePermDontAsk') },
+  { value: 'manual', label: t('settings.claudePermManual') },
+  { value: 'bypassPermissions', label: t('settings.claudePermBypass') },
+])
 
 const saving = shallowRef(false)
 const saved = shallowRef(false)
@@ -160,7 +160,7 @@ const sandbox = shallowRef(appStore.settings.sandbox)
 const approvalPolicy = shallowRef(appStore.settings.approvalPolicy)
 const grokBackend = shallowRef(appStore.settings.grokBackend === 'api' ? 'api' : 'build')
 const grokBuildModel = shallowRef(appStore.settings.grokBuildModel || '')
-const grokAPIModel = shallowRef(appStore.settings.grokAPIModel || 'grok-4.5')
+const grokAPIModel = shallowRef(appStore.settings.grokAPIModel || 'grok-4.6')
 const grokEffort = shallowRef(appStore.settings.grokEffort || 'high')
 const grokSandbox = shallowRef(appStore.settings.grokSandbox || 'workspace-write')
 const grokApprovalPolicy = shallowRef(appStore.settings.grokApprovalPolicy || 'on-request')
@@ -1065,7 +1065,7 @@ function syncFromStore(): void {
   approvalPolicy.value = settings.approvalPolicy
   grokBackend.value = settings.grokBackend === 'api' ? 'api' : 'build'
   grokBuildModel.value = settings.grokBuildModel || ''
-  grokAPIModel.value = settings.grokAPIModel || 'grok-4.5'
+  grokAPIModel.value = settings.grokAPIModel || 'grok-4.6'
   grokEffort.value = settings.grokEffort || 'high'
   grokSandbox.value = settings.grokSandbox || 'workspace-write'
   grokApprovalPolicy.value = settings.grokApprovalPolicy || 'on-request'
@@ -1370,7 +1370,7 @@ function addGrokCustomModel(): void {
 
 function removeGrokCustomModel(value: string): void {
   grokCustomModels.value = grokCustomModels.value.filter((item) => item !== value)
-  if (grokAPIModel.value === value) grokAPIModel.value = 'grok-4.5'
+  if (grokAPIModel.value === value) grokAPIModel.value = 'grok-4.6'
   if (grokBuildModel.value === value) grokBuildModel.value = ''
 }
 
@@ -1793,7 +1793,7 @@ async function save(): Promise<void> {
       approvalPolicy: isCodexSettings.value ? approvalPolicy.value : appStore.settings.approvalPolicy,
       grokBackend: isGrokSettings.value ? (grokBackend.value === 'api' ? 'api' : 'build') : appStore.settings.grokBackend,
       grokBuildModel: isGrokSettings.value ? grokBuildModel.value.trim() : appStore.settings.grokBuildModel,
-      grokAPIModel: isGrokSettings.value ? (grokAPIModel.value.trim() || 'grok-4.5') : appStore.settings.grokAPIModel,
+      grokAPIModel: isGrokSettings.value ? (grokAPIModel.value.trim() || 'grok-4.6') : appStore.settings.grokAPIModel,
       grokAPIKey: isGrokSettings.value ? grokAPIKey.value.trim() : appStore.settings.grokAPIKey,
       grokAPIBaseURL: isGrokSettings.value ? grokAPIBaseURL.value.trim() : appStore.settings.grokAPIBaseURL,
       grokEffort: isGrokSettings.value ? (grokEffort.value || 'high') : appStore.settings.grokEffort,

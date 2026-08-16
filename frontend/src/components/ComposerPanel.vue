@@ -772,6 +772,12 @@ function removeQueued(messageId: string): void {
   else codexStore.removeQueuedMessage(messageId, composerSessionId.value)
 }
 
+function clearFailedQueued(): void {
+  for (const message of activeQueuedMessages.value) {
+    if (message.state === 'failed') removeQueued(message.id)
+  }
+}
+
 const willQueueOnSend = computed(() => {
   const sessionId = composerSessionId.value
   if (isGrokMode.value) {
@@ -1820,9 +1826,20 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             </Button>
           </PopoverTrigger>
           <PopoverContent align="start" side="top" class="w-[26rem] max-w-[calc(100vw-2rem)] p-2">
-            <div class="px-2 pb-2 pt-1">
-              <p class="text-xs font-medium">{{ t('chat.queuedTitle') }}</p>
-              <p class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t('chat.queuedHint') }}</p>
+            <div class="flex items-start justify-between gap-2 px-2 pb-2 pt-1">
+              <div class="min-w-0">
+                <p class="text-xs font-medium">{{ t('chat.queuedTitle') }}</p>
+                <p class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t('chat.queuedHint') }}</p>
+              </div>
+              <Button
+                v-if="queuedFailedCount"
+                variant="ghost"
+                size="sm"
+                class="h-6 shrink-0 px-2 text-[11px] text-destructive hover:text-destructive"
+                @click="clearFailedQueued"
+              >
+                {{ t('chat.clearFailedQueued') }}
+              </Button>
             </div>
             <div class="max-h-64 space-y-0.5 overflow-y-auto">
               <div
@@ -1924,7 +1941,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             </div>
           </PopoverContent>
         </Popover>
-        <span class="hidden min-w-0 truncate pr-1 text-[10px] text-muted-foreground sm:block">
+        <span class="min-w-0 flex-1 truncate pr-1 text-[10px] text-muted-foreground">
           <template v-if="queuedFailedCount">{{ t('chat.queuedFailedCount', { count: queuedFailedCount }) }}</template>
           <template v-if="queuedFailedCount && nextQueuedPreview"> · </template>
           <template v-if="nextQueuedPreview">{{ t('chat.queuedNext', { text: nextQueuedPreview }) }}</template>
@@ -2038,21 +2055,21 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               <DropdownMenuItem @click="setPermission('ask')">
                 <span class="flex min-w-0 flex-1 flex-col">
                   <span>{{ t('settings.permissionAsk') }}</span>
-                  <span v-if="isClaudeMode" class="text-[10px] text-muted-foreground">acceptEdits</span>
+                  <span class="text-[10px] text-muted-foreground">{{ t('settings.permissionAskHint') }}</span>
                 </span>
                 <span v-if="permissionPreset === 'ask'" class="ml-2 text-primary">✓</span>
               </DropdownMenuItem>
               <DropdownMenuItem @click="setPermission('auto')">
                 <span class="flex min-w-0 flex-1 flex-col">
                   <span>{{ t('settings.permissionAuto') }}</span>
-                  <span v-if="isClaudeMode" class="text-[10px] text-muted-foreground">bypassPermissions</span>
+                  <span class="text-[10px] text-muted-foreground">{{ t('settings.permissionAutoHint') }}</span>
                 </span>
                 <span v-if="permissionPreset === 'auto'" class="ml-2 text-primary">✓</span>
               </DropdownMenuItem>
               <DropdownMenuItem @click="setPermission('strict')">
                 <span class="flex min-w-0 flex-1 flex-col">
                   <span>{{ t('settings.permissionStrict') }}</span>
-                  <span v-if="isClaudeMode" class="text-[10px] text-muted-foreground">plan</span>
+                  <span class="text-[10px] text-muted-foreground">{{ t('settings.permissionStrictHint') }}</span>
                 </span>
                 <span v-if="permissionPreset === 'strict'" class="ml-2 text-primary">✓</span>
               </DropdownMenuItem>

@@ -3448,7 +3448,7 @@ func defaultSettings() UserSettings {
 		ActiveRuntime:            "codex",
 		GrokBackend:              "build",
 		GrokBuildModel:           "",
-		GrokAPIModel:             "grok-4.5",
+		GrokAPIModel:             "grok-4.6",
 		GrokAPIKey:               "",
 		GrokAPIBaseURL:           "",
 		GrokEffort:               "high",

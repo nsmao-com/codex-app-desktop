@@ -4,6 +4,7 @@ import { computed, shallowRef } from 'vue'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type { CapabilityCatalog, MCPServerView } from '../types/codex'
 import { notify } from '../utils/notify'
+import { friendlyErrorMessage } from '../utils/errorMessage'
 import { translate } from '../i18n'
 import {
   normalizeApps,
@@ -416,8 +417,7 @@ function mergeMCPServers(configured: MCPServerView[], status: MCPServerView[]): 
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return typeof error === 'string' ? error : translate('notifications.unexpected')
+  return friendlyErrorMessage(error)
 }
 
 async function mapWithConcurrency<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {

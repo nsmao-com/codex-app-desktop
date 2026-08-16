@@ -17,6 +17,7 @@ import { useNavigationStore } from './navigation'
 import { useTerminalStore } from './terminal'
 import { useWorkspaceStore } from './workspace'
 import { notify } from '../utils/notify'
+import { friendlyErrorMessage } from '../utils/errorMessage'
 import { sameWorkspacePath as sameWorkspace, workspaceKey } from '../utils/workspacePath'
 import {
   buildRuntimeProviders,
@@ -3108,9 +3109,12 @@ export const useCodexStore = defineStore('codex', () => {
         const reportedTurnID = asString(payload.turnId, asString(asRecord(payload.turn).id))
         const knownTurnID = threadTurnID(threadID) || liveFeedbackTurnID(threadFeedback(threadID))
         const turnID = reportedTurnID || (method === 'turn/error' ? knownTurnID : '')
-        const message = asString(
-          asRecord(payload.error).message,
-          asString(payload.message, translate('notifications.turnFailedFallback')),
+        const message = friendlyErrorMessage(
+          asString(
+            asRecord(payload.error).message,
+            asString(payload.message, translate('notifications.turnFailedFallback')),
+          ),
+          translate('notifications.turnFailedFallback'),
         )
         if (turnID && completedTurns.has(turnID)) break
         bindPendingCollaborationMode(threadID, turnID)
@@ -5596,8 +5600,7 @@ function attachmentName(path: string): string {
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return typeof error === 'string' ? error : translate('notifications.unexpected')
+  return friendlyErrorMessage(error)
 }
 
 function appendBoundedDelta(current: string, delta: string, limit: number): string {

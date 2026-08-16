@@ -3,6 +3,7 @@ import { shallowRef } from 'vue'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import { notify } from '../utils/notify'
+import { friendlyErrorMessage } from '../utils/errorMessage'
 import { translate } from '../i18n'
 
 export const useTerminalStore = defineStore('terminal', () => {
@@ -131,6 +132,5 @@ export const useTerminalStore = defineStore('terminal', () => {
 })
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return typeof error === 'string' ? error : translate('notifications.unexpected')
+  return friendlyErrorMessage(error)
 }

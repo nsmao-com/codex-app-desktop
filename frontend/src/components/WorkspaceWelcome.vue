@@ -44,11 +44,41 @@ const titleText = computed(() => {
   return isCowork.value ? t('chat.coworkTitle') : t('chat.title')
 })
 const titleChars = computed(() => [...titleText.value])
-const suggestions = computed(() => [
-  { icon: FileSearch, title: t('chat.traceBug'), prompt: t('chat.traceBugPrompt') },
-  { icon: Braces, title: t('chat.understandCodebase'), prompt: t('chat.understandCodebasePrompt') },
-  { icon: GitPullRequestArrow, title: t('chat.reviewChanges'), prompt: t('chat.reviewChangesPrompt') },
-])
+const suggestions = computed(() => {
+  if (isGrok.value) {
+    return [
+      { icon: FileSearch, title: t('chat.grokTraceBug'), prompt: t('chat.grokTraceBugPrompt') },
+      { icon: Braces, title: t('chat.grokUnderstandCodebase'), prompt: t('chat.grokUnderstandCodebasePrompt') },
+      { icon: GitPullRequestArrow, title: t('chat.grokReviewChanges'), prompt: t('chat.grokReviewChangesPrompt') },
+    ]
+  }
+  if (isClaude.value) {
+    return [
+      { icon: FileSearch, title: t('chat.claudeTraceBug'), prompt: t('chat.claudeTraceBugPrompt') },
+      { icon: Braces, title: t('chat.claudeUnderstandCodebase'), prompt: t('chat.claudeUnderstandCodebasePrompt') },
+      { icon: GitPullRequestArrow, title: t('chat.claudeReviewChanges'), prompt: t('chat.claudeReviewChangesPrompt') },
+    ]
+  }
+  if (isGemini.value) {
+    return [
+      { icon: FileSearch, title: t('chat.geminiTraceBug'), prompt: t('chat.geminiTraceBugPrompt') },
+      { icon: Braces, title: t('chat.geminiUnderstandCodebase'), prompt: t('chat.geminiUnderstandCodebasePrompt') },
+      { icon: GitPullRequestArrow, title: t('chat.geminiReviewChanges'), prompt: t('chat.geminiReviewChangesPrompt') },
+    ]
+  }
+  if (isOpenCode.value) {
+    return [
+      { icon: FileSearch, title: t('chat.opencodeTraceBug'), prompt: t('chat.opencodeTraceBugPrompt') },
+      { icon: Braces, title: t('chat.opencodeUnderstandCodebase'), prompt: t('chat.opencodeUnderstandCodebasePrompt') },
+      { icon: GitPullRequestArrow, title: t('chat.opencodeReviewChanges'), prompt: t('chat.opencodeReviewChangesPrompt') },
+    ]
+  }
+  return [
+    { icon: FileSearch, title: t('chat.traceBug'), prompt: t('chat.traceBugPrompt') },
+    { icon: Braces, title: t('chat.understandCodebase'), prompt: t('chat.understandCodebasePrompt') },
+    { icon: GitPullRequestArrow, title: t('chat.reviewChanges'), prompt: t('chat.reviewChangesPrompt') },
+  ]
+})
 const runtimeWarning = computed(() => {
   if (isGrok.value) {
     if (grokStore.isReady) return ''

@@ -8,6 +8,7 @@ import { sameWorkspacePath as sameWorkspace, workspaceKey } from '@/utils/worksp
 import { useAppStore } from './app'
 import type { WorkspaceRuntime } from './app'
 import { notify } from '../utils/notify'
+import { friendlyErrorMessage } from '../utils/errorMessage'
 import { translate } from '../i18n'
 
 export interface GitChangeView {
@@ -356,6 +357,5 @@ function rememberWorkspacePath(recent: string[], current: string): string[] {
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return typeof error === 'string' ? error : translate('notifications.unexpected')
+  return friendlyErrorMessage(error)
 }

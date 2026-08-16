@@ -30,6 +30,7 @@ import {
 import { resolveProviderModelContextWindow } from '@/utils/accountUsage'
 import { normalizeThreadTokenUsage } from '@/utils/protocol'
 import { notify } from '@/utils/notify'
+import { friendlyErrorMessage } from '@/utils/errorMessage'
 import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
 import { translate } from '@/i18n'
 import { useAppStore } from './app'
@@ -49,8 +50,7 @@ const GROK_TURN_WATCHDOG_MS = 2500
 const GROK_TURN_WATCHDOG_CONFIRM_MS = 450
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message
-  return String(error || translate('notifications.unexpected'))
+  return friendlyErrorMessage(error)
 }
 
 function emptyRuntime(): GrokRuntimeStatus {
@@ -1804,7 +1804,7 @@ export const useGrokStore = defineStore('grok', () => {
         liveActivityBySession.value = nextActivity
       }
       if (type === 'turn.failed') {
-        notify('error', translate('chat.turnFailed'), String(data.message || ''))
+        notify('error', translate('chat.turnFailed'), friendlyErrorMessage(data.message))
       }
       // Reload sidebar usage after local usage.json is updated by the backend.
       void appStore.loadLocalUsage()

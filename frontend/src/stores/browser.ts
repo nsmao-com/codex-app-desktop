@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { shallowRef } from 'vue'
 
 import { notify } from '../utils/notify'
+import { friendlyErrorMessage } from '../utils/errorMessage'
 import { translate } from '../i18n'
 
 export const useBrowserStore = defineStore('browser', () => {
@@ -92,6 +93,5 @@ export const useBrowserStore = defineStore('browser', () => {
 })
 
 function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return typeof error === 'string' ? error : translate('notifications.unexpected')
+  return friendlyErrorMessage(error)
 }
