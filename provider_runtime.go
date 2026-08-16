@@ -430,7 +430,10 @@ func fallbackProviderModels(kind string) []AgentProviderModel {
 			{Model: "gemini-2.5-flash", DisplayName: "Gemini 2.5 Flash", Description: "Fast Gemini model"},
 		}
 	case "grok":
-		return []AgentProviderModel{{Model: "grok-4.5", DisplayName: "Grok 4.5", Description: "Grok Build frontier model", IsDefault: true, ContextWindow: 500_000}}
+		return []AgentProviderModel{
+			{Model: "grok-4.6", DisplayName: "Grok 4.6", Description: "Grok frontier reasoning model", IsDefault: true, ContextWindow: 500_000},
+			{Model: "grok-4.5", DisplayName: "Grok 4.5", Description: "Previous Grok frontier model", ContextWindow: 500_000},
+		}
 	case "opencode":
 		return []AgentProviderModel{{Model: "anthropic/claude-sonnet-4-6", DisplayName: "Claude Sonnet", Description: "OpenCode provider/model", IsDefault: true}}
 	default:
@@ -447,7 +450,7 @@ func knownProviderContextWindow(kind, model string) int64 {
 	}
 	switch kind {
 	case "grok":
-		if lower == "grok-4.5" {
+		if strings.HasPrefix(lower, "grok-4") {
 			return 500_000
 		}
 	case "claude":
@@ -506,6 +509,7 @@ func fallbackReasoningEfforts(kind string) []AgentProviderReasoningEffort {
 			{Effort: "high", DisplayName: "High", Description: "Highest implementation quality with extensive reasoning", IsDefault: true},
 			{Effort: "medium", DisplayName: "Medium", Description: "Balanced effort with standard implementation and testing"},
 			{Effort: "low", DisplayName: "Low", Description: "Quick implementations with lighter reasoning"},
+			{Effort: "xhigh", DisplayName: "Extra high", Description: "Maximum reasoning depth on grok-4.6 and later"},
 		}
 	default:
 		return nil

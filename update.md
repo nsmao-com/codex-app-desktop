@@ -2,6 +2,24 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.3.5 - 2026-08-16
+
+### 新增
+
+- 回合结束后可展开查看模型思考过程，不再只在流式阶段一闪而过。
+- Grok 推理档位补齐官方 `xhigh`，默认模型目录加入 grok-4.6。
+
+### 修改
+
+- 队列条直接预览下一条待发送内容，并标出发送失败条数。
+- Provider Router 不再把 401/403 当成可重试故障切换，避免错误密钥悄悄消耗下一个上游额度。
+
+### 修复
+
+- 修复 Grok API 流式只读 `delta.content`、丢弃 `reasoning_content`，导致思考过程不显示、用量里的 reasoning tokens 对不上官方 Chat Completions 格式的问题。
+- 修复 Claude 代理后端把 `reasoning_content` 当成正文追加，思考内容混进回复的问题。
+- 修复 Gemini CLI 官方 `tool_use` / `tool_result` 缺少 `tool_id`、`parameters`，以及 `error` / `result.status=error` 未按失败处理的问题。
+
 ## 1.3.4 - 2026-08-12
 
 ### 新增

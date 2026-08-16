@@ -24,6 +24,7 @@ export const FALLBACK_CODEX_MODELS = [
 ] as const
 
 export const FALLBACK_GROK_MODELS = [
+  'grok-4.6',
   'grok-4.5',
   'grok-4',
   'grok-3-mini',
@@ -34,6 +35,7 @@ export const DEFAULT_GROK_REASONING = [
   { effort: 'low', description: 'Faster replies with lighter reasoning' },
   { effort: 'medium', description: 'Balanced speed and depth' },
   { effort: 'high', description: 'Highest quality for complex implementation' },
+  { effort: 'xhigh', description: 'Maximum reasoning depth on grok-4.6+' },
 ] as const
 
 /** Strip proxy nicknames such as "gpt-5.6-sol · claude-opus-4-8". */

@@ -1207,7 +1207,7 @@ func externalCommandArgs(provider, sessionID, workspace string, settings UserSet
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		if isExternalEffort(effort, "low", "medium", "high") {
+		if isExternalEffort(effort, "low", "medium", "high", "xhigh") {
 			args = append(args, "--reasoning-effort", effort)
 		}
 		if !settings.GrokWebSearch {
@@ -1540,6 +1540,21 @@ func normalizeTokenUsageMap(value any) map[string]any {
 		output = anyToFloat(raw["output"])
 	}
 
+	if details, ok := raw["prompt_tokens_details"].(map[string]any); ok && details != nil {
+		if cached <= 0 {
+			cached = anyToFloat(details["cached_tokens"])
+		}
+		if cached <= 0 {
+			cached = anyToFloat(details["cachedTokens"])
+		}
+	}
+	if details, ok := raw["promptTokensDetails"].(map[string]any); ok && details != nil && cached <= 0 {
+		cached = anyToFloat(details["cached_tokens"])
+		if cached <= 0 {
+			cached = anyToFloat(details["cachedTokens"])
+		}
+	}
+
 	reasoning := anyToFloat(raw["reasoning_tokens"])
 	if reasoning <= 0 {
 		reasoning = anyToFloat(raw["reasoningTokens"])
@@ -1558,6 +1573,18 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	}
 	if reasoning <= 0 {
 		reasoning = anyToFloat(raw["reasoning"])
+	}
+	if details, ok := raw["completion_tokens_details"].(map[string]any); ok && details != nil && reasoning <= 0 {
+		reasoning = anyToFloat(details["reasoning_tokens"])
+		if reasoning <= 0 {
+			reasoning = anyToFloat(details["reasoningTokens"])
+		}
+	}
+	if details, ok := raw["completionTokensDetails"].(map[string]any); ok && details != nil && reasoning <= 0 {
+		reasoning = anyToFloat(details["reasoning_tokens"])
+		if reasoning <= 0 {
+			reasoning = anyToFloat(details["reasoningTokens"])
+		}
 	}
 
 	total := anyToFloat(raw["total_tokens"])
@@ -1765,8 +1792,8 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 		//   OpenAI-style: {"choices":[{"delta":{"content":"…"}}]} / {"choices":[{"message":{"content":"…"}}]}
 		//   Generic: {"type":"text","text"|"data":"…"} / {"type":"content","content":"…"}
 		//   {"type":"message","role":"assistant","content":"…" | […]}
-		if text, ok := claudeOpenAIStyleDelta(event); ok {
-			return text, sessionID, false, "text"
+		if text, kind, ok := claudeOpenAIStyleDelta(event); ok {
+			return text, sessionID, false, kind
 		}
 		if eventType == "stream_event" {
 			streamEvent, _ := event["event"].(map[string]any)
@@ -1862,11 +1889,42 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 		return "", sessionID, false, ""
 	}
 	if provider == "gemini" {
+		// Official Gemini CLI stream-json (geminicli.com/docs/cli/headless):
+		//   init | message | tool_use | tool_result | error | result
+		if eventType == "error" {
+			severity := strings.ToLower(firstMapString(event, "severity"))
+			if severity == "warning" || severity == "info" {
+				return "", sessionID, false, ""
+			}
+			message := firstMapString(event, "message", "error", "text")
+			if message == "" {
+				message = "Gemini stream error"
+			}
+			return message, sessionID, true, "error"
+		}
 		if eventType == "message" && strings.EqualFold(firstMapString(event, "role"), "assistant") {
 			return textFromExternalValue(event["content"]), sessionID, false, "text"
 		}
 		if eventType == "result" {
-			return textFromExternalValue(event["response"]), sessionID, true, "text"
+			status := strings.ToLower(firstMapString(event, "status"))
+			if status == "error" || status == "failed" {
+				message := firstMapString(event, "message")
+				if message == "" {
+					if errObj, ok := event["error"].(map[string]any); ok {
+						message = firstMapString(errObj, "message", "type")
+					}
+				}
+				if message == "" {
+					message = "Gemini turn failed"
+				}
+				return message, sessionID, true, "error"
+			}
+			// Official result carries stats, not a full assistant snapshot.
+			text := textFromExternalValue(event["response"])
+			if text == "" {
+				text = firstMapString(event, "text", "content")
+			}
+			return text, sessionID, true, "text"
 		}
 		return "", sessionID, false, ""
 	}
@@ -2018,15 +2076,18 @@ func parseExternalToolEvent(provider string, event map[string]any) (map[string]a
 	if state == nil {
 		state, _ = event["state"].(map[string]any)
 	}
-	id := firstMapString(tool, "callID", "callId", "toolCallId", "tool_call_id", "id")
+	id := firstMapString(tool, "callID", "callId", "toolCallId", "tool_call_id", "tool_id", "id")
 	if id == "" {
-		id = firstMapString(event, "callID", "callId", "toolCallId", "tool_call_id", "itemId")
+		id = firstMapString(event, "callID", "callId", "toolCallId", "tool_call_id", "tool_id", "itemId")
 	}
 	name := firstMapString(tool, "tool", "toolName", "tool_name", "name", "title")
 	if name == "" {
 		name = firstMapString(event, "tool", "toolName", "tool_name", "name", "title")
 	}
-	if id == "" || name == "" {
+	if name == "" {
+		name = "tool"
+	}
+	if id == "" {
 		return nil, false
 	}
 	status := strings.ToLower(firstMapString(state, "status", "phase"))
@@ -2063,6 +2124,12 @@ func parseExternalToolEvent(provider string, event map[string]any) (map[string]a
 	}
 	if input == nil {
 		input = tool["args"]
+	}
+	if input == nil {
+		input = tool["parameters"]
+	}
+	if input == nil {
+		input = event["parameters"]
 	}
 	output := state["output"]
 	if output == nil {
@@ -2121,34 +2188,37 @@ func firstMapString(value map[string]any, keys ...string) string {
 // claudeOpenAIStyleDelta extracts incremental text from OpenAI-compatible chunks
 // that some Claude Code proxies (GPT / GLM / custom gateways) emit inside stream-json.
 // Returns ok=false when the line is not an OpenAI-style delta.
-func claudeOpenAIStyleDelta(event map[string]any) (string, bool) {
+func claudeOpenAIStyleDelta(event map[string]any) (string, string, bool) {
 	// {"choices":[{"delta":{"content":"x"}}]}
 	// {"choices":[{"delta":{"content":[{"type":"text","text":"x"}]}}]}
+	// {"choices":[{"delta":{"reasoning_content":"…"}}]}
 	// {"choices":[{"message":{"content":"full"}}]}  → treat as non-delta (caller handles assistant)
 	choices, ok := event["choices"].([]any)
 	if !ok || len(choices) == 0 {
 		// {"delta":{"content":"x"}} flattened
 		if delta, ok := event["delta"].(map[string]any); ok {
+			if t := firstMapString(delta, "reasoning_content", "reasoning", "thinking"); t != "" {
+				return t, "thought", true
+			}
 			if t := claudeExtractDeltaContent(delta); t != "" {
-				return t, true
+				return t, "text", true
 			}
 		}
-		return "", false
+		return "", "", false
 	}
 	choice, ok := choices[0].(map[string]any)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	if delta, ok := choice["delta"].(map[string]any); ok {
-		if t := claudeExtractDeltaContent(delta); t != "" {
-			return t, true
+		if t := firstMapString(delta, "reasoning_content", "reasoning", "thinking"); t != "" {
+			return t, "thought", true
 		}
-		// reasoning_content used by some reasoning models
-		if t := firstMapString(delta, "reasoning_content", "reasoning"); t != "" {
-			return t, true
+		if t := claudeExtractDeltaContent(delta); t != "" {
+			return t, "text", true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 func claudeExtractDeltaContent(delta map[string]any) string {

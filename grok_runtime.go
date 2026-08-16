@@ -133,7 +133,7 @@ func normalizeGrokBackend(value string) string {
 
 func normalizeGrokEffort(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "low", "medium":
+	case "low", "medium", "xhigh":
 		return strings.ToLower(strings.TrimSpace(value))
 	default:
 		return "high"

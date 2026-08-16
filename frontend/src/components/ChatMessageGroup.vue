@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  Brain,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -397,6 +398,11 @@ const latestReasoningItem = computed(() => {
 })
 
 const planningShimmerLabel = computed(() => reasoningLiveLabel(latestReasoningItem.value))
+const completedReasoningText = computed(() => {
+  if (props.streaming) return ''
+  const item = latestReasoningItem.value
+  return item ? reasoningBodyText(item) : ''
+})
 
 function stripReasoningMarkdown(text: string): string {
   return text
@@ -1326,6 +1332,36 @@ function diffStats(diff: string): { add: number; del: number } {
             <span class="reasoning-shimmer__base truncate text-[13px]">{{ planningShimmerLabel }}</span>
             <span class="reasoning-shimmer__sheen truncate text-[13px]" aria-hidden="true">{{ planningShimmerLabel }}</span>
           </span>
+        </div>
+
+        <div
+          v-else-if="completedReasoningText"
+          class="py-0.5"
+        >
+          <button
+            type="button"
+            class="group/reason inline-flex max-w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+            :aria-expanded="isOpen('completed-reasoning')"
+            :title="t('timeline.reasoningHint')"
+            @click="toggle('completed-reasoning')"
+          >
+            <Brain :size="12" class="shrink-0 opacity-50" />
+            <span class="min-w-0 truncate">{{ t('timeline.reasoningPreview') }}</span>
+            <ChevronRight
+              :size="11"
+              class="timeline-chevron shrink-0 opacity-40"
+              :class="isOpen('completed-reasoning') ? 'is-open' : ''"
+            />
+          </button>
+          <div class="timeline-collapse" :class="isOpen('completed-reasoning') ? 'is-open' : ''">
+            <div class="timeline-collapse-inner">
+              <div
+                class="prose prose-sm reasoning-prose mt-1 max-w-none rounded-xl bg-muted/35 px-3 py-2 text-[13px] leading-6 text-foreground/85"
+                @click="onMarkdownClick"
+                v-html="markdownHTML(completedReasoningText)"
+              />
+            </div>
+          </div>
         </div>
       </div>
 

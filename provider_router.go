@@ -858,8 +858,9 @@ func applyProviderAuthentication(header http.Header, upstream ProviderRouterUpst
 }
 
 func providerRetryableStatus(status int) bool {
-	return status == http.StatusUnauthorized || status == http.StatusForbidden ||
-		status == http.StatusRequestTimeout || status == http.StatusConflict ||
+	// Auth failures must surface to the caller. Failing over a 401/403 can hide a
+	// bad key and spend the next upstream's quota.
+	return status == http.StatusRequestTimeout || status == http.StatusConflict ||
 		status == http.StatusTooEarly || status == http.StatusTooManyRequests ||
 		status >= http.StatusInternalServerError
 }

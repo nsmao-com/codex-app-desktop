@@ -272,7 +272,7 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 		model = strings.TrimSpace(settings.GrokAPIModel)
 	}
 	if model == "" {
-		model = "grok-4.5"
+		model = "grok-4.6"
 	}
 
 	// Persist user message + build chat history for the API.
@@ -387,9 +387,19 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 	}
 
 	var assistant strings.Builder
+	var thought strings.Builder
 	var usage map[string]any
 	var streamSequence uint64
-	stream := newExternalStreamCoalescer(func(_ string, delta string) {
+	var thoughtSequence uint64
+	stream := newExternalStreamCoalescer(func(kind, delta string) {
+		if kind == "thought" {
+			thought.WriteString(delta)
+			thoughtSequence++
+			s.emitGrokEvent("thought.delta", grokBackendAPI, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{
+				"delta": delta, "text": thought.String(), "mode": "replace", "sequence": thoughtSequence,
+			}))
+			return
+		}
 		assistant.WriteString(delta)
 		streamSequence++
 		s.emitGrokEvent("text.delta", grokBackendAPI, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{
@@ -423,11 +433,13 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 				usage = next
 			}
 		}
-		delta := extractOpenAIStreamDelta(chunk)
-		if delta == "" {
-			continue
+		textDelta, thoughtDelta := extractOpenAIStreamParts(chunk)
+		if thoughtDelta != "" {
+			stream.Push("thought", thoughtDelta)
 		}
-		stream.Push("text", delta)
+		if textDelta != "" {
+			stream.Push("text", textDelta)
+		}
 	}
 	stream.Flush()
 	if err := scanner.Err(); err != nil {
@@ -438,7 +450,8 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 	}
 
 	finalText := strings.TrimSpace(assistant.String())
-	if finalText == "" {
+	finalThought := strings.TrimSpace(thought.String())
+	if finalText == "" && finalThought == "" {
 		return usage, errors.New("Grok API returned an empty response")
 	}
 
@@ -449,18 +462,38 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 
 	s.mu.Lock()
 	if session := s.grokAPISessions[request.SessionID]; session != nil {
-		assistantMessage := GrokMessage{
-			ID:        fmt.Sprintf("%s-assistant-%d", turnID, time.Now().UnixNano()),
-			Role:      "assistant",
-			Text:      finalText,
-			Status:    "completed",
-			CreatedAt: time.Now().Unix(),
+		now := time.Now().Unix()
+		added := 0
+		if finalThought != "" {
+			session.Messages = append(session.Messages, GrokMessage{
+				ID:        fmt.Sprintf("%s-reasoning-%d", turnID, time.Now().UnixNano()),
+				Role:      "reasoning",
+				Text:      finalThought,
+				Status:    "completed",
+				CreatedAt: now,
+			})
+			added++
 		}
-		session.Messages = append(session.Messages, assistantMessage)
-		session.UpdatedAt = time.Now().Unix()
-		session.Preview = finalText
+		if finalText != "" {
+			session.Messages = append(session.Messages, GrokMessage{
+				ID:        fmt.Sprintf("%s-assistant-%d", turnID, time.Now().UnixNano()),
+				Role:      "assistant",
+				Text:      finalText,
+				Status:    "completed",
+				CreatedAt: now,
+			})
+			added++
+		}
+		session.UpdatedAt = now
+		if finalText != "" {
+			session.Preview = finalText
+		} else {
+			session.Preview = finalThought
+		}
 		if err := s.persistGrokAPISessionsLocked(); err != nil {
-			session.Messages = session.Messages[:len(session.Messages)-1]
+			if added > 0 && len(session.Messages) >= added {
+				session.Messages = session.Messages[:len(session.Messages)-added]
+			}
 			s.mu.Unlock()
 			return usage, fmt.Errorf("persist Grok API response: %w", err)
 		}
@@ -487,26 +520,41 @@ func estimateTokenUsage(prompt, completion string) map[string]any {
 }
 
 func extractOpenAIStreamDelta(chunk map[string]any) string {
+	text, _ := extractOpenAIStreamParts(chunk)
+	return text
+}
+
+// extractOpenAIStreamParts reads official OpenAI / xAI chat.completion.chunk deltas.
+// xAI SDK and many compatible gateways put thinking in delta.reasoning_content
+// while the visible answer stays in delta.content.
+func extractOpenAIStreamParts(chunk map[string]any) (text, thought string) {
 	choices, _ := chunk["choices"].([]any)
 	if len(choices) == 0 {
-		return ""
+		return "", ""
 	}
 	first, _ := choices[0].(map[string]any)
 	if first == nil {
-		return ""
+		return "", ""
 	}
-	delta, _ := first["delta"].(map[string]any)
-	if delta != nil {
-		if text, ok := delta["content"].(string); ok {
-			return text
-		}
+	if delta, _ := first["delta"].(map[string]any); delta != nil {
+		return openAIMessageContent(delta["content"]), openAIReasoningContent(delta)
 	}
-	// Non-stream fallback shape.
-	message, _ := first["message"].(map[string]any)
-	if message != nil {
-		if text, ok := message["content"].(string); ok {
-			return text
-		}
+	if message, _ := first["message"].(map[string]any); message != nil {
+		return openAIMessageContent(message["content"]), openAIReasoningContent(message)
 	}
-	return ""
+	return "", ""
+}
+
+func openAIMessageContent(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return textFromExternalValue(value)
+}
+
+func openAIReasoningContent(payload map[string]any) string {
+	if text := firstMapString(payload, "reasoning_content", "reasoning", "thinking"); text != "" {
+		return text
+	}
+	return textFromExternalValue(payload["reasoning_content"])
 }

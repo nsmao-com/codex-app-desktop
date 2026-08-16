@@ -523,8 +523,8 @@ const externalModelCatalog = computed(() => {
 const displayModel = computed(() => {
   if (isGrokMode.value) {
     return composerGrokSession.value?.model || (appStore.settings.grokBackend === 'api'
-      ? (appStore.settings.grokAPIModel || appStore.settings.grokBuildModel || 'grok-4.5')
-      : (appStore.settings.grokBuildModel || appStore.settings.grokAPIModel || 'grok-4.5'))
+      ? (appStore.settings.grokAPIModel || appStore.settings.grokBuildModel || 'grok-4.6')
+      : (appStore.settings.grokBuildModel || appStore.settings.grokAPIModel || 'grok-4.6'))
   }
   if (isClaudeMode.value) {
     return composerClaudeSession.value?.model || appStore.settings.claudeModel || 'sonnet'
@@ -700,6 +700,19 @@ const activeQueuedMessages = computed(() => {
 const showQueueStrip = computed(() =>
   activeQueuedMessages.value.some((message) => message.state === 'queued' || message.state === 'failed'),
 )
+const queuedWaitingCount = computed(() =>
+  activeQueuedMessages.value.filter((message) => message.state === 'queued').length,
+)
+const queuedFailedCount = computed(() =>
+  activeQueuedMessages.value.filter((message) => message.state === 'failed').length,
+)
+const nextQueuedPreview = computed(() => {
+  const next = activeQueuedMessages.value.find((message) => message.state === 'queued' || message.state === 'failed')
+  if (!next) return ''
+  const text = (next.text || '').replace(/\s+/g, ' ').trim()
+  if (text) return text.length > 42 ? `${text.slice(0, 42)}…` : text
+  return next.images.length ? t('chat.queuedImageOnly') : ''
+})
 const canSendDuringWorkspaceSwitch = computed(() => Boolean(
   (isCodexMode.value || isGeminiMode.value || isOpenCodeMode.value)
   && composerCodexThread.value?.cwd
@@ -1803,7 +1816,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               class="h-6 min-w-0 gap-1.5 rounded-full bg-background/70 px-2 text-[11px] font-medium text-foreground/80 hover:text-foreground"
             >
               <ListOrdered :size="12" class="shrink-0" />
-              <span class="truncate">{{ t('chat.queuedCount', { count: activeQueuedMessages.filter((m) => m.state !== 'sending').length || activeQueuedMessages.length }) }}</span>
+              <span class="truncate">{{ t('chat.queuedCount', { count: queuedWaitingCount || queuedFailedCount || activeQueuedMessages.length }) }}</span>
             </Button>
           </PopoverTrigger>
           <PopoverContent align="start" side="top" class="w-[26rem] max-w-[calc(100vw-2rem)] p-2">
@@ -1911,7 +1924,12 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             </div>
           </PopoverContent>
         </Popover>
-        <span class="hidden truncate pr-1 text-[10px] text-muted-foreground sm:block">{{ t('chat.queuedHint') }}</span>
+        <span class="hidden min-w-0 truncate pr-1 text-[10px] text-muted-foreground sm:block">
+          <template v-if="queuedFailedCount">{{ t('chat.queuedFailedCount', { count: queuedFailedCount }) }}</template>
+          <template v-if="queuedFailedCount && nextQueuedPreview"> · </template>
+          <template v-if="nextQueuedPreview">{{ t('chat.queuedNext', { text: nextQueuedPreview }) }}</template>
+          <template v-else>{{ t('chat.queuedHint') }}</template>
+        </span>
       </div>
 
       <div v-if="slashOpen && filteredSlashCommands.length" class="rounded-md border border-border/60 bg-muted/30 p-1">
