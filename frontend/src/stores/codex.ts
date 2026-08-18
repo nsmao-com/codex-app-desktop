@@ -771,10 +771,10 @@ export const useCodexStore = defineStore('codex', () => {
       const selected = merged.find((item) => item.model.toLocaleLowerCase() === configured.toLocaleLowerCase())
         ?? merged.find((item) => item.isDefault)
         ?? merged[0]
-      if (selected && !configuredCustom && !merged.some((item) => item.model.toLocaleLowerCase() === configured.toLocaleLowerCase())) {
-        if (requestedRuntime === 'gemini') {
-          appStore.patchSettings({ geminiModel: selected.model })
-        } else {
+      if (requestedRuntime === 'gemini' && configured && !configuredCustom && !merged.some((item) => item.model.toLocaleLowerCase() === configured.toLocaleLowerCase())) {
+        appStore.patchSettings({ geminiModel: '' })
+      } else if (selected && !configuredCustom && !merged.some((item) => item.model.toLocaleLowerCase() === configured.toLocaleLowerCase())) {
+        if (requestedRuntime === 'opencode') {
           appStore.patchSettings({
             openCodeModel: selected.model,
             openCodeProvider: appStore.settings.openCodeProvider || selected.providerId || '',
@@ -940,7 +940,7 @@ export const useCodexStore = defineStore('codex', () => {
     const pendingID = `pending-thread-${Date.now()}-${createThreadSequence}`
     const externalProvider = runtime === 'gemini' ? '__gemini__' : runtime === 'opencode' ? '__opencode__' : appStore.settings.modelProvider
     const externalModel = runtime === 'gemini'
-      ? (appStore.settings.geminiModel || 'gemini-2.5-pro')
+      ? appStore.settings.geminiModel
       : runtime === 'opencode'
         ? (appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6')
         : appStore.settings.model

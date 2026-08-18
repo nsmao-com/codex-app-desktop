@@ -87,6 +87,10 @@ export function CommitGitChanges(request: $models.GitCommitRequest): $Cancellabl
     return $Call.ByID(3986674178, request);
 }
 
+export function CompactClaudeSession(sessionID: string): $CancellablePromise<$models.ClaudeCompactionResult> {
+    return $Call.ByID(1104019359, sessionID);
+}
+
 export function CompactThread(threadID: string): $CancellablePromise<void> {
     return $Call.ByID(2159280559, threadID);
 }

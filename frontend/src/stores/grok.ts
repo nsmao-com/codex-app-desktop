@@ -28,7 +28,7 @@ import {
   unarchiveGrokSession as unarchiveGrokSessionApi,
 } from '@/utils/grokBindings'
 import { resolveProviderModelContextWindow } from '@/utils/accountUsage'
-import { normalizeThreadTokenUsage } from '@/utils/protocol'
+import { normalizeThreadTokenUsage, uncommittedStreamTextTail } from '@/utils/protocol'
 import { notify } from '@/utils/notify'
 import { friendlyErrorMessage } from '@/utils/errorMessage'
 import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
@@ -394,24 +394,12 @@ function workspaceLeafName(path: string): string {
 
 /** Remove assistant segments already committed in native activity from the live cumulative stream. */
 function liveTextTailAfterActivity(fullText: string, activity: GrokMessage[]): string {
-  if (!fullText) return ''
-  let cursor = 0
-  let matched = false
-  for (const message of activity) {
-    const role = (message.role || '').toLowerCase()
-    if (role !== 'assistant' || message.toolName) continue
-    const segment = (message.text || '').trim()
-    if (!segment) continue
-    const index = fullText.indexOf(segment, cursor)
-    if (index < 0) {
-      // Keep the unmatched stream suffix visible if a provider normalized whitespace
-      // differently between streaming-json and chat_history.
-      return matched ? fullText.slice(cursor).trimStart() : fullText
-    }
-    cursor = index + segment.length
-    matched = true
-  }
-  return matched ? fullText.slice(cursor).trimStart() : fullText
+  return uncommittedStreamTextTail(
+    fullText,
+    activity
+      .filter((message) => (message.role || '').toLowerCase() === 'assistant' && !message.toolName)
+      .map((message) => message.text || ''),
+  )
 }
 
 export const useGrokStore = defineStore('grok', () => {

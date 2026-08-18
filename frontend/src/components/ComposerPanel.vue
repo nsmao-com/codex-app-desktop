@@ -222,6 +222,12 @@ const slashCommands = computed<SlashCommand[]>(() => {
   if (isClaudeMode.value) {
     return [
       {
+        id: 'compact',
+        label: '/compact',
+        description: t('slash.compact'),
+        run: () => claudeStore.compactSession(composerSessionId.value),
+      },
+      {
         id: 'archive',
         label: '/archive',
         description: t('slash.archive'),
@@ -530,7 +536,11 @@ const displayModel = computed(() => {
     return composerClaudeSession.value?.model || appStore.settings.claudeModel || 'sonnet'
   }
   if (isGeminiMode.value) {
-    return composerTimelineThread.value?.model || appStore.settings.geminiModel || 'gemini-2.5-pro'
+    return composerTimelineThread.value?.model
+      || appStore.settings.geminiModel
+      || externalModelCatalog.value.find((model) => model.isDefault)?.model
+      || externalModelCatalog.value[0]?.model
+      || ''
   }
   if (isOpenCodeMode.value) {
     return composerTimelineThread.value?.model || appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6'

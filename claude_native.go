@@ -211,7 +211,7 @@ func peekClaudeNativeSummary(path, id string, modTime time.Time) ClaudeSessionSu
 				title = t
 			}
 		case "user":
-			if firstUser != "" {
+			if firstUser != "" || !isClaudeHumanUserRecord(raw) {
 				continue
 			}
 			text := claudeMessageText(raw)
@@ -271,13 +271,23 @@ func readClaudeNativeMessages(path string) ([]ClaudeMessage, error) {
 		created := parseClaudeTimestamp(raw["timestamp"])
 		id := firstMapString(raw, "uuid", "id")
 		switch eventType {
-		case "user":
-			// Skip non-human synthetic prompts when possible.
-			if origin, ok := raw["origin"].(map[string]any); ok {
-				kind := strings.ToLower(firstMapString(origin, "kind"))
-				if kind != "" && kind != "human" && kind != "user" {
-					continue
+		case "system":
+			if strings.EqualFold(strings.TrimSpace(firstMapString(raw, "subtype")), "compact_boundary") {
+				metadata, _ := raw["compactMetadata"].(map[string]any)
+				if metadata == nil {
+					metadata, _ = raw["compact_metadata"].(map[string]any)
 				}
+				postTokens := int64(anyToFloat(metadata["postTokens"]))
+				if postTokens <= 0 {
+					postTokens = int64(anyToFloat(metadata["post_tokens"]))
+				}
+				messages = append(messages, ClaudeMessage{
+					ID: id, Role: "contextCompaction", Status: "completed", CreatedAt: created, ContextTokens: postTokens,
+				})
+			}
+		case "user":
+			if !isClaudeHumanUserRecord(raw) {
+				continue
 			}
 			text := claudeMessageText(raw)
 			if text == "" || isClaudeNoiseUserText(text) {
@@ -377,6 +387,9 @@ func readClaudeCurrentTurnActivity(path, prompt, turnID string) ([]ClaudeMessage
 				}
 			}
 			if hasToolResult {
+				continue
+			}
+			if !isClaudeHumanUserRecord(raw) {
 				continue
 			}
 			text := strings.TrimSpace(claudeMessageText(raw))
@@ -556,13 +569,51 @@ func claudeToolNames(msg map[string]any) string {
 	return "Used tools: " + strings.Join(names, ", ")
 }
 
+func isClaudeHumanUserRecord(raw map[string]any) bool {
+	if raw == nil || isTruthy(raw["isSidechain"]) || isTruthy(raw["isMeta"]) || isTruthy(raw["isSynthetic"]) || isTruthy(raw["isReplay"]) || isTruthy(raw["isCompactSummary"]) || isTruthy(raw["isVisibleInTranscriptOnly"]) {
+		return false
+	}
+	if origin, ok := raw["origin"].(map[string]any); ok {
+		kind := strings.ToLower(strings.TrimSpace(firstMapString(origin, "kind", "type")))
+		if kind != "" && kind != "human" && kind != "user" {
+			return false
+		}
+	}
+	message, _ := raw["message"].(map[string]any)
+	blocks, _ := message["content"].([]any)
+	if len(blocks) > 0 {
+		hasText := false
+		for _, item := range blocks {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			typeName := strings.ToLower(strings.TrimSpace(firstMapString(block, "type")))
+			switch typeName {
+			case "tool_result", "toolresult", "system", "system_message", "systemmessage":
+				return false
+			case "text", "input_text", "inputtext", "image", "image_url", "localimage":
+				hasText = true
+			}
+		}
+		if !hasText {
+			return false
+		}
+	}
+	text := strings.TrimSpace(claudeMessageText(raw))
+	return text != "" && !isClaudeNoiseUserText(text)
+}
+
 func isClaudeNoiseUserText(text string) bool {
 	lower := strings.ToLower(strings.TrimSpace(text))
 	if lower == "" {
 		return true
 	}
 	// Meta / skill dumps that show up as user-role rows in transcripts.
-	if strings.HasPrefix(lower, "<command-") || strings.HasPrefix(lower, "<local-command") {
+	if strings.HasPrefix(lower, "<command-") || strings.HasPrefix(lower, "<local-command") || strings.HasPrefix(lower, "<system-reminder") || strings.HasPrefix(lower, "<task-notification") {
+		return true
+	}
+	if strings.HasPrefix(lower, "base directory for this skill:") || strings.HasPrefix(lower, "this session is being continued from a previous conversation") {
 		return true
 	}
 	if strings.Contains(lower, "skill_listing") || strings.Contains(lower, "agent_listing") {

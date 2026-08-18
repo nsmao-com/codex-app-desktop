@@ -35,6 +35,7 @@ export interface ClaudeMessage {
   toolName?: string
   status?: string
   createdAt: number
+  contextTokens?: number
 }
 
 export interface ClaudeSessionDetail {
@@ -55,6 +56,12 @@ export interface ClaudeSendRequest {
   model: string
   effort: string
   clientTurnId?: string
+}
+
+export interface ClaudeCompactionResult {
+  preTokens: number
+  postTokens: number
+  trigger: string
 }
 
 export interface ClaudeTurnRef {
@@ -228,6 +235,15 @@ export function listClaudeSessionTurnUsages(sessionID: string): Promise<ClaudeTu
   return byIdOrName(
     'ListClaudeSessionTurnUsages',
     () => (backend as any).ListClaudeSessionTurnUsages?.(sessionID),
+    sessionID,
+  )
+}
+
+export function compactClaudeSession(sessionID: string): Promise<ClaudeCompactionResult> {
+  const method = (backend as any).CompactClaudeSession
+  return byIdOrName(
+    'CompactClaudeSession',
+    typeof method === 'function' ? () => method(sessionID) : undefined,
     sessionID,
   )
 }

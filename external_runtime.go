@@ -635,7 +635,7 @@ func firstGeminiModel(models []AgentProviderModel) string {
 	if len(models) > 0 {
 		return models[0].Model
 	}
-	return "gemini-2.5-pro"
+	return ""
 }
 
 func readOpenCodeConfig(path string) (activeProvider, defaultModel, instructions string) {

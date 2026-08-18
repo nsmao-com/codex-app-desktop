@@ -3467,7 +3467,7 @@ func defaultSettings() UserSettings {
 		GrokCustomModels:         []string{},
 		GeminiWorkspace:          "",
 		GeminiRecentWorkspaces:   []string{},
-		GeminiModel:              "gemini-2.5-pro",
+		GeminiModel:              "",
 		GeminiEffort:             "auto",
 		GeminiSandbox:            "workspace-write",
 		GeminiApprovalPolicy:     "on-request",

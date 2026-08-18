@@ -148,6 +148,12 @@ export interface ClaudeCommandView {
     "scope": string;
 }
 
+export interface ClaudeCompactionResult {
+    "preTokens": number;
+    "postTokens": number;
+    "trigger": string;
+}
+
 /**
  * ClaudeHookView summarizes configured hooks from settings.json.
  */
@@ -185,6 +191,7 @@ export interface ClaudeMessage {
     "toolName"?: string;
     "status"?: string;
     "createdAt": number;
+    "contextTokens"?: number;
 }
 
 /**

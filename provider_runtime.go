@@ -425,10 +425,7 @@ func fallbackProviderModels(kind string) []AgentProviderModel {
 			{Model: "fable", DisplayName: "Claude Fable", Description: "alias `fable` → latest Fable (e.g. claude-fable-5)", ContextWindow: 1_000_000},
 		}
 	case "gemini":
-		return []AgentProviderModel{
-			{Model: "gemini-2.5-pro", DisplayName: "Gemini 2.5 Pro", Description: "High-quality Gemini model", IsDefault: true},
-			{Model: "gemini-2.5-flash", DisplayName: "Gemini 2.5 Flash", Description: "Fast Gemini model"},
-		}
+		return nil
 	case "grok":
 		return []AgentProviderModel{
 			{Model: "grok-4.6", DisplayName: "Grok 4.6", Description: "Grok frontier reasoning model", IsDefault: true, ContextWindow: 500_000},

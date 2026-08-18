@@ -709,8 +709,16 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	}
 
 	output, sessionID, usage, runErr := s.executeExternalTurn(ctx, provider, record.BackendRef, workspace, turnSettings, text, images, func(kind, delta string) {
-		if kind == "tool" {
+		if kind == "tool" || kind == "compact" {
 			completeSegments("completed")
+			if kind == "compact" {
+				item := map[string]any{
+					"id": turnID + ":compact", "type": "contextCompaction", "status": "completed",
+				}
+				recordTimelineItem(item)
+				s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "runtime": provider})
+				return
+			}
 			if item, ok := decodeExternalToolTimelineItem(delta); ok {
 				recordTimelineItem(item)
 				s.emitExternalToolNotification(threadID, turnID, delta)
@@ -1048,10 +1056,9 @@ func (s *AppService) executeExternalTurn(
 		if next := extractExternalUsage(event); next != nil {
 			usage = next
 		}
-		if kind == "tool" {
-			// Flush text accumulated before the tool first. Without this barrier a
-			// coalesced text delta can cross the bridge after the tool-start event,
-			// making the tool appear below the assistant reply.
+		if kind == "tool" || kind == "compact" {
+			// Flush text accumulated before structured activity first. Without this
+			// barrier a coalesced text delta can cross the bridge after a tool event.
 			stream.Flush()
 			if onStream != nil {
 				onStream(kind, chunk)
@@ -1785,6 +1792,9 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 		return string(encoded), sessionID, false, "tool"
 	}
 	if provider == "claude" {
+		if eventType == "system" && strings.EqualFold(strings.TrimSpace(firstMapString(event, "subtype")), "compact_boundary") {
+			return "compact", sessionID, false, "compact"
+		}
 		// Claude Code stream-json — Anthropic-native AND proxy backends (GPT / GLM / etc.):
 		//   {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"…"}}}
 		//   {"type":"assistant","message":{"content":[…]}}           // partial/full snapshots

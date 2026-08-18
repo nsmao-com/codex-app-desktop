@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -37,12 +41,13 @@ type ClaudeSessionSummary struct {
 
 // ClaudeMessage is one timeline row stored with a session.
 type ClaudeMessage struct {
-	ID        string `json:"id"`
-	Role      string `json:"role"`
-	Text      string `json:"text"`
-	ToolName  string `json:"toolName,omitempty"`
-	Status    string `json:"status,omitempty"`
-	CreatedAt int64  `json:"createdAt"`
+	ID            string `json:"id"`
+	Role          string `json:"role"`
+	Text          string `json:"text"`
+	ToolName      string `json:"toolName,omitempty"`
+	Status        string `json:"status,omitempty"`
+	CreatedAt     int64  `json:"createdAt"`
+	ContextTokens int64  `json:"contextTokens,omitempty"`
 }
 
 // ClaudeSessionDetail is one page of an open conversation.
@@ -65,6 +70,12 @@ type ClaudeSendRequest struct {
 	Model        string   `json:"model"`
 	Effort       string   `json:"effort"`
 	ClientTurnID string   `json:"clientTurnId,omitempty"`
+}
+
+type ClaudeCompactionResult struct {
+	PreTokens  int64  `json:"preTokens"`
+	PostTokens int64  `json:"postTokens"`
+	Trigger    string `json:"trigger"`
 }
 
 // ClaudeTurnRef identifies a running turn.
@@ -730,6 +741,143 @@ func (s *AppService) validateClaudeSendWorkspace(sessionID, requestedWorkspace s
 	return nil
 }
 
+func (s *AppService) CompactClaudeSession(sessionID string) (ClaudeCompactionResult, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || strings.HasPrefix(sessionID, "pending-claude-") {
+		return ClaudeCompactionResult{}, errors.New("Claude session has not started yet")
+	}
+	if s.isClaudeSessionRunning(sessionID) {
+		return ClaudeCompactionResult{}, errors.New("Claude session is busy")
+	}
+
+	detail, err := s.readClaudeSessionFull(sessionID)
+	if err != nil {
+		return ClaudeCompactionResult{}, err
+	}
+	workspace, err := validateWorkspace(detail.Summary.Workspace)
+	if err != nil {
+		return ClaudeCompactionResult{}, err
+	}
+	nativeSessionID := sessionID
+	model := strings.TrimSpace(detail.Summary.Model)
+	effort := strings.TrimSpace(detail.Summary.Effort)
+	s.mu.Lock()
+	if session := s.claudeSessions[sessionID]; session != nil {
+		if strings.TrimSpace(session.BackendRef) != "" {
+			nativeSessionID = strings.TrimSpace(session.BackendRef)
+		}
+		if strings.TrimSpace(session.Model) != "" {
+			model = strings.TrimSpace(session.Model)
+		}
+		if strings.TrimSpace(session.Effort) != "" {
+			effort = strings.TrimSpace(session.Effort)
+		}
+	}
+	s.mu.Unlock()
+	if _, ok := findClaudeNativeSession(nativeSessionID); !ok {
+		return ClaudeCompactionResult{}, errors.New("Claude native session was not found")
+	}
+
+	executable := s.externalExecutable("claude")
+	if executable == "" {
+		return ClaudeCompactionResult{}, errors.New("Claude CLI executable was not found")
+	}
+	settings := s.Settings()
+	settings.Model = model
+	settings.Effort = effort
+	args := []string{"-p", "/compact", "--resume", nativeSessionID, "--output-format", "stream-json", "--verbose"}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if isExternalEffort(strings.ToLower(effort), "low", "medium", "high", "xhigh", "max") {
+		args = append(args, "--effort", strings.ToLower(effort))
+	}
+	args = append(args, claudePermissionArgs(settings)...)
+	commandPath, commandArgs, err := providerCommand(executable, args)
+	if err != nil {
+		return ClaudeCompactionResult{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, commandPath, commandArgs...)
+	command.Dir = workspace
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return ClaudeCompactionResult{}, err
+	}
+	stderr, err := command.StderrPipe()
+	if err != nil {
+		return ClaudeCompactionResult{}, err
+	}
+	cleanup, err := startManagedBackgroundProcess(ctx, command)
+	if err != nil {
+		return ClaudeCompactionResult{}, err
+	}
+	defer cleanup()
+	stderrResult := make(chan []byte, 1)
+	go func() {
+		payload, _ := io.ReadAll(io.LimitReader(stderr, 256*1024))
+		stderrResult <- payload
+	}()
+
+	result := ClaudeCompactionResult{}
+	compacted := false
+	compactFailure := ""
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	for scanner.Scan() {
+		var event map[string]any
+		if json.Unmarshal(scanner.Bytes(), &event) != nil {
+			continue
+		}
+		if strings.EqualFold(firstMapString(event, "type"), "system") && strings.EqualFold(firstMapString(event, "subtype"), "status") {
+			if failure := strings.TrimSpace(firstMapString(event, "compact_error")); failure != "" {
+				compactFailure = failure
+			}
+		}
+		if !strings.EqualFold(firstMapString(event, "type"), "system") || !strings.EqualFold(firstMapString(event, "subtype"), "compact_boundary") {
+			continue
+		}
+		metadata, _ := event["compactMetadata"].(map[string]any)
+		if metadata == nil {
+			metadata, _ = event["compact_metadata"].(map[string]any)
+		}
+		result.PreTokens = int64(anyToFloat(metadata["preTokens"]))
+		if result.PreTokens <= 0 {
+			result.PreTokens = int64(anyToFloat(metadata["pre_tokens"]))
+		}
+		result.PostTokens = int64(anyToFloat(metadata["postTokens"]))
+		if result.PostTokens <= 0 {
+			result.PostTokens = int64(anyToFloat(metadata["post_tokens"]))
+		}
+		result.Trigger = firstMapString(metadata, "trigger")
+		compacted = true
+	}
+	scanErr := scanner.Err()
+	waitErr := command.Wait()
+	stderrText := strings.TrimSpace(string(<-stderrResult))
+	if ctx.Err() != nil {
+		return result, ctx.Err()
+	}
+	if scanErr != nil {
+		return result, scanErr
+	}
+	if waitErr != nil {
+		if stderrText != "" {
+			return result, errors.New(truncateRunes(stderrText, 1000))
+		}
+		return result, waitErr
+	}
+	if !compacted {
+		if compactFailure != "" {
+			return result, errors.New(truncateRunes(compactFailure, 1000))
+		}
+		return result, errors.New("Claude did not emit a compact boundary")
+	}
+	s.dropClaudeHistoryCache(sessionID)
+	return result, nil
+}
+
 func (s *AppService) SendClaudeMessage(request ClaudeSendRequest) (ClaudeTurnRef, error) {
 	request.SessionID = strings.TrimSpace(request.SessionID)
 	clientSessionID := request.SessionID
@@ -1209,34 +1357,60 @@ func loadClaudeCurrentTurnActivity(sessionID, prompt, turnID string) ([]ClaudeMe
 	return readClaudeCurrentTurnActivity(native.Path, prompt, turnID)
 }
 
-func claudeTextTailAfterActivity(fullText string, activity []ClaudeMessage) string {
+func textTailAfterCommittedSegments(fullText string, segments []string) string {
 	if fullText == "" {
 		return ""
 	}
-	cursor := 0
-	matched := false
-	for _, message := range activity {
-		if !strings.EqualFold(strings.TrimSpace(message.Role), "assistant") || message.ToolName != "" {
+	var normalized strings.Builder
+	sourceEnd := make([]int, 0, len(fullText))
+	for index, char := range fullText {
+		encoded := string(char)
+		end := index + len(encoded)
+		if unicode.IsSpace(char) {
 			continue
 		}
-		segment := strings.TrimSpace(message.Text)
+		normalized.WriteString(encoded)
+		for range []byte(encoded) {
+			sourceEnd = append(sourceEnd, end)
+		}
+	}
+	searchable := normalized.String()
+	normalizedCursor := 0
+	sourceCursor := 0
+	matched := false
+	for _, value := range segments {
+		segment := strings.Join(strings.Fields(value), "")
 		if segment == "" {
 			continue
 		}
-		index := strings.Index(fullText[cursor:], segment)
+		index := strings.Index(searchable[normalizedCursor:], segment)
 		if index < 0 {
 			if matched {
-				return strings.TrimLeft(fullText[cursor:], " \t\r\n")
+				return strings.TrimLeft(fullText[sourceCursor:], " \t\r\n")
 			}
 			return fullText
 		}
-		cursor += index + len(segment)
+		end := normalizedCursor + index + len(segment)
+		normalizedCursor = end
+		if end > 0 && end <= len(sourceEnd) {
+			sourceCursor = sourceEnd[end-1]
+		}
 		matched = true
 	}
 	if !matched {
 		return fullText
 	}
-	return strings.TrimLeft(fullText[cursor:], " \t\r\n")
+	return strings.TrimLeft(fullText[sourceCursor:], " \t\r\n")
+}
+
+func claudeTextTailAfterActivity(fullText string, activity []ClaudeMessage) string {
+	segments := make([]string, 0, len(activity))
+	for _, message := range activity {
+		if strings.EqualFold(strings.TrimSpace(message.Role), "assistant") && message.ToolName == "" {
+			segments = append(segments, message.Text)
+		}
+	}
+	return textTailAfterCommittedSegments(fullText, segments)
 }
 
 func (s *AppService) ensureClaudeSessionLocked(request ClaudeSendRequest, model, effort string) *claudeStoredSession {

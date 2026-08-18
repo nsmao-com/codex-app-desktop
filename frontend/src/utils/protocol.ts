@@ -16,6 +16,40 @@ import type {
   TokenUsageBreakdown,
 } from '../types/codex'
 
+export function uncommittedStreamTextTail(fullText: string, committedSegments: string[]): string {
+  if (!fullText) return ''
+
+  const normalized: string[] = []
+  const sourceEndByNormalizedIndex: number[] = []
+  for (let index = 0; index < fullText.length; index += 1) {
+    const char = fullText[index] || ''
+    if (/\s/u.test(char)) continue
+    normalized.push(char)
+    sourceEndByNormalizedIndex.push(index + 1)
+  }
+
+  const searchable = normalized.join('')
+  let normalizedCursor = 0
+  let sourceCursor = 0
+  let matched = false
+  for (const value of committedSegments) {
+    const segment = value.replace(/\s+/gu, '')
+    if (!segment) continue
+    const index = searchable.indexOf(segment, normalizedCursor)
+    if (index < 0) {
+      const replayPrefix = searchable.slice(normalizedCursor).replace(/\s+/gu, '')
+      const committed = segment.replace(/\s+/gu, '')
+      if (replayPrefix && committed.startsWith(replayPrefix)) return ''
+      return matched ? fullText.slice(sourceCursor).trimStart() : fullText
+    }
+    const end = index + segment.length
+    normalizedCursor = end
+    sourceCursor = sourceEndByNormalizedIndex[end - 1] ?? sourceCursor
+    matched = true
+  }
+  return matched ? fullText.slice(sourceCursor).trimStart() : fullText
+}
+
 export function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)

@@ -17,6 +17,7 @@ export type {
     ClaudeAgentView,
     ClaudeCapabilitiesCatalog,
     ClaudeCommandView,
+    ClaudeCompactionResult,
     ClaudeHookView,
     ClaudeMCPServerView,
     ClaudeMessage,

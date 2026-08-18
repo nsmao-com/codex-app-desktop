@@ -5,6 +5,7 @@ import { computed, shallowRef, watch } from 'vue'
 import type { TimelineItem, TokenUsageBreakdown, TurnMetrics } from '@/types/codex'
 import {
   archiveClaudeSession as archiveClaudeSessionApi,
+  compactClaudeSession as compactClaudeSessionApi,
   deleteClaudeSession as deleteClaudeSessionApi,
   interruptClaudeTurn as interruptClaudeTurnApi,
   listArchivedClaudeSessions,
@@ -26,7 +27,7 @@ import {
 import { notify } from '@/utils/notify'
 import { friendlyErrorMessage } from '@/utils/errorMessage'
 import { translate } from '@/i18n'
-import { normalizeThreadTokenUsage } from '@/utils/protocol'
+import { normalizeThreadTokenUsage, uncommittedStreamTextTail } from '@/utils/protocol'
 import { resolveProviderModelContextWindow } from '@/utils/accountUsage'
 import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
 import { useAppStore } from './app'
@@ -76,6 +77,7 @@ function messageToItem(message: ClaudeMessage, turnId: string): TimelineItem {
   const role = (message.role || '').toLowerCase()
   const isUser = role === 'user' || role === 'human'
   const isReasoning = role === 'reasoning'
+  const isCompaction = role === 'contextcompaction'
   const text = message.text || ''
   const base = {
     id: message.id || `claude-msg-${message.createdAt}-${Math.random().toString(36).slice(2, 8)}`,
@@ -94,6 +96,12 @@ function messageToItem(message: ClaudeMessage, turnId: string): TimelineItem {
   }
   if (isUser) return { ...base, type: 'userMessage', text }
   if (isReasoning) return { ...base, type: 'reasoning', text, reasoningSummary: text }
+  if (isCompaction) return {
+    ...base,
+    type: 'contextCompaction',
+    title: translate('notifications.contextCompacted'),
+    detail: message.contextTokens ? String(message.contextTokens) : '',
+  }
   if (message.toolName) {
     return {
       ...base,
@@ -104,6 +112,20 @@ function messageToItem(message: ClaudeMessage, turnId: string): TimelineItem {
     }
   }
   return { ...base, type: 'agentMessage', text }
+}
+
+function sameClaudeTerminalContent(left: TimelineItem, right: TimelineItem): boolean {
+  if (left.type !== right.type) return false
+  if (left.type === 'agentMessage' || left.type === 'reasoning' || left.type === 'notice') {
+    const a = (left.text || '').trim().replace(/\r\n/g, '\n')
+    const b = (right.text || '').trim().replace(/\r\n/g, '\n')
+    return Boolean(a && b && a === b)
+  }
+  if (left.type === 'dynamicToolCall') {
+    return (left.title || '').trim() === (right.title || '').trim()
+      && (left.output || left.text || '').trim() === (right.output || right.text || '').trim()
+  }
+  return false
 }
 
 function sameClaudeUserRow(left: TimelineItem, right: TimelineItem): boolean {
@@ -164,20 +186,12 @@ interface ClaudeHistoryState {
 }
 
 function claudeTextTailAfterActivity(fullText: string, activity: ClaudeMessage[]): string {
-  if (!fullText) return ''
-  let cursor = 0
-  let matched = false
-  for (const message of activity) {
-    const role = (message.role || '').toLowerCase()
-    if (role !== 'assistant' || message.toolName) continue
-    const segment = (message.text || '').trim()
-    if (!segment) continue
-    const index = fullText.indexOf(segment, cursor)
-    if (index < 0) return matched ? fullText.slice(cursor).trimStart() : fullText
-    cursor = index + segment.length
-    matched = true
-  }
-  return matched ? fullText.slice(cursor).trimStart() : fullText
+  return uncommittedStreamTextTail(
+    fullText,
+    activity
+      .filter((message) => (message.role || '').toLowerCase() === 'assistant' && !message.toolName)
+      .map((message) => message.text || ''),
+  )
 }
 
 /** Replace the cumulative live agent row with native ordered activity plus its uncommitted tail. */
@@ -1430,6 +1444,7 @@ export const useClaudeStore = defineStore('claude', () => {
       if (!list?.length) return
       let totalUsage: TokenUsageBreakdown | null = null
       let lastUsage: TokenUsageBreakdown | null = null
+      let lastUsageAt = 0
       for (const item of list) {
         const usage = item.tokenUsage
         if (!usage) continue
@@ -1445,6 +1460,7 @@ export const useClaudeStore = defineStore('claude', () => {
           totalTokens: total,
         }
         lastUsage = breakdown
+        lastUsageAt = Math.max(lastUsageAt, Number(item.at) || 0)
         totalUsage = totalUsage
           ? {
               inputTokens: totalUsage.inputTokens + breakdown.inputTokens,
@@ -1456,6 +1472,16 @@ export const useClaudeStore = defineStore('claude', () => {
           : { ...breakdown }
       }
       if (lastUsage && totalUsage) {
+        const historyKey = sessionStateKey(itemsBySession.value, sessionId)
+        const contextCompaction = [...(itemsBySession.value[historyKey] || [])]
+          .reverse()
+          .find((item) => item.type === 'contextCompaction' && Number(item.detail) > 0)
+        const compactionAt = Number(contextCompaction?.startedAt || contextCompaction?.completedAt) || 0
+        const normalizedLastUsageAt = lastUsageAt > 1_000_000_000_000 ? lastUsageAt : lastUsageAt * 1000
+        const normalizedCompactionAt = compactionAt > 1_000_000_000_000 ? compactionAt : compactionAt * 1000
+        if (contextCompaction && normalizedCompactionAt >= normalizedLastUsageAt) {
+          lastUsage = { ...lastUsage, totalTokens: Number(contextCompaction.detail) }
+        }
         tokenUsageBySession.value = {
           ...tokenUsageBySession.value,
           [sessionId]: {
@@ -1661,6 +1687,8 @@ export const useClaudeStore = defineStore('claude', () => {
         if (out.some((row) => sameClaudeUserRow(row, item))) {
           continue
         }
+      } else if (out.some((row) => sameClaudeTerminalContent(row, item))) {
+        continue
       }
       const active = isActiveItemStatus(item.status)
       const sameTurnOnDisk = Boolean(item.turnId && disk.some((row) => row.turnId === item.turnId))
@@ -2565,6 +2593,40 @@ export const useClaudeStore = defineStore('claude', () => {
     return false
   }
 
+  async function compactSession(sessionId: string): Promise<void> {
+    const id = resolveSessionId(sessionId)
+    if (!id || id.startsWith('pending-claude-') || sessionMutationForSession(id) || !canMutateClaudeSession(id)) return
+    if (!beginSessionMutation(id, 'compact')) return
+    notify('info', translate('threadActions.compacting'), translate('threadActions.compactingRuntimeHint', { runtime: 'Claude Code' }))
+    try {
+      const result = await compactClaudeSessionApi(id)
+      if (result.postTokens > 0) {
+        const previous = tokenUsageBySession.value[id]
+        const last = previous?.last ?? {
+          inputTokens: 0,
+          cachedInputTokens: 0,
+          outputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 0,
+        }
+        tokenUsageBySession.value = {
+          ...tokenUsageBySession.value,
+          [id]: {
+            last: { ...last, totalTokens: result.postTokens },
+            total: previous?.total ?? last,
+            modelContextWindow: previous?.modelContextWindow ?? null,
+          },
+        }
+      }
+      await openSession(id, { switchWorkspace: false, activate: false })
+      notify('success', translate('notifications.contextCompacted'), translate('notifications.contextCompactedRuntimeHint', { runtime: 'Claude Code' }))
+    } catch (error) {
+      notify('error', translate('threadActions.compactFailed'), errorMessage(error))
+    } finally {
+      endSessionMutation(id)
+    }
+  }
+
   async function deleteSession(sessionId: string): Promise<void> {
     const id = resolveSessionId(sessionId)
     if (!id || sessionMutationForSession(id) || !canMutateClaudeSession(id)) return
@@ -2737,6 +2799,7 @@ export const useClaudeStore = defineStore('claude', () => {
     newSession,
     sendMessage,
     interruptActiveTurn,
+    compactSession,
     deleteSession,
     deleteActiveSession,
     renameSession,
