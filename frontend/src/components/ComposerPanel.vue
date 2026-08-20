@@ -6,14 +6,17 @@ import {
   ChevronUp,
   Command,
   Ellipsis,
+  Folder,
+  GitBranch,
   Image as ImageIcon,
   ListOrdered,
   ListTodo,
   LoaderCircle,
   Maximize2,
   Minimize2,
+  Monitor,
   Octagon,
-  Paperclip,
+  Plus,
   RotateCcw,
   Shield,
   X,
@@ -49,8 +52,9 @@ import {
   CODEX_CONTEXT_BASELINE_TOKENS,
   formatTokenCount,
 } from '@/utils/accountUsage'
-import { resolveImagePreview } from '@/utils/imagePreview'
+import { rememberLocalImagePreview, resolveImagePreview } from '@/utils/imagePreview'
 import { notify } from '@/utils/notify'
+import { sameWorkspacePath } from '@/utils/workspacePath'
 import {
   DEFAULT_CODEX_REASONING,
   DEFAULT_GROK_REASONING,
@@ -107,6 +111,7 @@ const attachingImageTasks = shallowRef(0)
 const sendAdmissionPending = shallowRef(false)
 const effortPopoverOpen = shallowRef(false)
 const effortPreviewIndex = shallowRef(-1)
+const effortDragging = shallowRef(false)
 let applyingSentHistory = false
 const COMPOSER_MAX_COLLAPSED = 200
 const COMPOSER_MAX_EXPANDED = 480
@@ -681,28 +686,85 @@ const selectedEffortLabel = computed(() => {
   return effort.charAt(0).toUpperCase() + effort.slice(1)
 })
 
-const effortOptions = computed(() => reasoningOptions.value.map((item) => ({
-  value: item.effort,
-  label: 'displayName' in item && item.displayName ? String(item.displayName) : item.effort,
-})))
+const EFFORT_ORDER = ['auto', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+const effortOptions = computed(() => {
+  const options = reasoningOptions.value.map((item) => ({
+    value: item.effort,
+    label: 'displayName' in item && item.displayName ? String(item.displayName) : item.effort,
+  }))
+  const current = displayEffort.value.trim()
+  if (current && !options.some((item) => item.value === current)) {
+    options.push({ value: current, label: selectedEffortLabel.value || current })
+  }
+  return options.sort((left, right) => {
+    const leftRank = EFFORT_ORDER.indexOf(left.value.toLowerCase())
+    const rightRank = EFFORT_ORDER.indexOf(right.value.toLowerCase())
+    if (leftRank < 0 && rightRank < 0) return left.label.localeCompare(right.label)
+    if (leftRank < 0) return 1
+    if (rightRank < 0) return -1
+    return leftRank - rightRank
+  })
+})
 const effortCurrentIndex = computed(() => Math.max(0, effortOptions.value.findIndex((item) => item.value === displayEffort.value)))
 const effortDisplayIndex = computed(() => effortPreviewIndex.value >= 0 ? effortPreviewIndex.value : effortCurrentIndex.value)
 const effortPopoverLabel = computed(() => effortOptions.value[effortDisplayIndex.value]?.label || selectedEffortLabel.value)
+const effortProgress = computed(() => {
+  if (effortOptions.value.length <= 1) return 0
+  return effortDisplayIndex.value / (effortOptions.value.length - 1) * 100
+})
+
+function effortMarkerPosition(index: number): string {
+  if (effortOptions.value.length <= 1) return '0%'
+  return `${index / (effortOptions.value.length - 1) * 100}%`
+}
 
 function previewEffort(event: Event): void {
+  effortDragging.value = true
   effortPreviewIndex.value = Number((event.target as HTMLInputElement).value)
 }
 
 function commitEffort(event: Event): void {
   const index = Number((event.target as HTMLInputElement).value)
   const value = effortOptions.value[index]?.value
+  effortDragging.value = false
   effortPreviewIndex.value = -1
   if (value) void onEffortChange(value)
 }
 
+function chooseEffort(index: number): void {
+  const value = effortOptions.value[index]?.value
+  effortDragging.value = false
+  effortPreviewIndex.value = -1
+  if (value) void onEffortChange(value)
+}
+
+function cancelEffortPreview(): void {
+  effortDragging.value = false
+  effortPreviewIndex.value = -1
+}
+
 watch(effortPopoverOpen, (open) => {
-  if (!open) effortPreviewIndex.value = -1
+  if (!open) {
+    effortDragging.value = false
+    effortPreviewIndex.value = -1
+  }
 })
+
+const composerWorkspacePath = computed(() =>
+  composerTargetWorkspace(paneRuntime.value, composerSessionId.value) || workspaceStore.currentPath,
+)
+const composerWorkspaceName = computed(() => {
+  const clean = composerWorkspacePath.value.replace(/[\\/]+$/, '')
+  return clean.split(/[\\/]/).filter(Boolean).at(-1) || t('sidebar.workspace')
+})
+const composerBranch = computed(() => {
+  if (!workspaceStore.branch || !sameWorkspacePath(composerWorkspacePath.value, workspaceStore.currentPath)) return ''
+  return workspaceStore.branch
+})
+const composerRuntimeLabel = computed(() =>
+  appStore.agentProviders.find((item) => item.kind === paneRuntime.value)?.name
+    || (paneRuntime.value === 'opencode' ? 'OpenCode' : paneRuntime.value.charAt(0).toUpperCase() + paneRuntime.value.slice(1)),
+)
 
 function relatedQueueRows<T extends { id: string; createdAt: number }>(
   record: Record<string, T[]>,
@@ -845,6 +907,10 @@ const stopDisabled = computed(() => {
 const sendButtonLabel = computed(() => {
   if (willQueueOnSend.value) return t('chat.queueSend')
   return t('chat.send')
+})
+const primaryActionLabel = computed(() => {
+  if (!activeRuntimeTurnRunning.value) return sendButtonLabel.value
+  return stopDisabled.value ? t('chat.stopping') : t('chat.stop')
 })
 const composerPlaceholder = computed(() => {
   if (isGrokMode.value && willQueueOnSend.value) return t('chat.queuePlaceholder')
@@ -1470,8 +1536,6 @@ function releaseAttachmentPreviews(paths: string[]): void {
   let changed = false
   for (const path of paths) {
     if (attachedImages.value.includes(path)) continue
-    const preview = next[path] || ''
-    if (preview.startsWith('blob:')) URL.revokeObjectURL(preview)
     if (!(path in next)) continue
     delete next[path]
     changed = true
@@ -1509,6 +1573,7 @@ async function attachImageFiles(files: File[]): Promise<void> {
       if (path && !existingImages.includes(path) && !added.includes(path)) {
         added.push(path)
         const localPreview = URL.createObjectURL(file)
+        rememberLocalImagePreview(path, localPreview)
         previewPatch[path] = localPreview
       }
     }
@@ -1777,32 +1842,57 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
 </script>
 
 <template>
-  <div class="shrink-0 px-4 pb-4 pt-1 sm:px-6">
+  <div class="shrink-0 px-3 pb-4 pt-1 sm:px-5">
     <div
       ref="composer"
-      class="relative mx-auto flex max-w-[680px] flex-col gap-1.5 rounded-xl border bg-card p-2 transition-colors"
-      :class="[
-        isDraggingFiles
-          ? 'border-primary border-dashed bg-primary/5'
-          : (
-            (activeRuntimeTurnRunning || activeRuntimeSending)
-              ? 'border-primary/35'
-              : 'border-border'
-          ),
-      ]"
+      class="relative mx-auto flex w-full max-w-[980px] flex-col gap-2"
       @dragenter="onDragEnter"
       @dragover="onDragOver"
       @dragleave="onDragLeave"
       @drop="onDrop"
     >
+      <div class="composer-context-row flex min-w-0 items-center gap-1.5 overflow-x-auto px-0.5 pb-0.5">
+        <span class="composer-context-chip">
+          <Monitor :size="12" />
+          {{ composerRuntimeLabel }}
+        </span>
+        <span class="composer-context-chip" :title="composerWorkspacePath">
+          <Folder :size="12" />
+          <span class="max-w-52 truncate">{{ composerWorkspaceName }}</span>
+        </span>
+        <span v-if="composerBranch" class="composer-context-chip">
+          <GitBranch :size="12" />
+          <span class="max-w-40 truncate">{{ composerBranch }}</span>
+        </span>
+      </div>
+
+      <div
+        class="composer-input-frame relative flex flex-col gap-1.5 rounded-2xl border bg-card px-2.5 pb-2.5 pt-2 shadow-sm transition-[border-color,box-shadow,background-color] duration-200"
+        :class="[
+          isDraggingFiles
+            ? 'border-primary border-dashed bg-primary/5'
+            : ((activeRuntimeTurnRunning || activeRuntimeSending) ? 'is-active border-primary/40' : 'border-border/90'),
+        ]"
+      >
       <div
         v-if="isDraggingFiles"
-        class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-xl bg-primary/8 text-xs font-medium text-primary"
+        class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl bg-primary/8 text-xs font-medium text-primary"
       >
         {{ t('chat.dropImages') }}
       </div>
 
-      <div class="absolute right-1.5 top-1.5 z-[2]">
+      <div
+        v-if="activeRuntimeTurnRunning || activeRuntimeSending"
+        class="composer-live-orb absolute right-3 top-2.5 z-[2]"
+        aria-hidden="true"
+      >
+        <i /><i /><i />
+      </div>
+
+      <div
+        class="absolute top-2 z-[2] transition-[right] duration-200"
+        :class="activeRuntimeTurnRunning || activeRuntimeSending ? 'right-11' : 'right-2'"
+      >
         <SimpleTooltip :content="composerExpanded ? t('chat.collapseComposer') : t('chat.expandComposer')">
           <Button
             variant="ghost"
@@ -2055,7 +2145,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         rows="1"
         :placeholder="composerPlaceholder"
         :aria-description="composerShortcutHint"
-        class="min-h-[44px] resize-none border-0 bg-transparent px-2 py-1.5 pr-8 text-[13.5px] leading-6 shadow-none placeholder:text-muted-foreground/70 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
+        class="min-h-[64px] resize-none border-0 bg-transparent px-1.5 pb-2 pt-2 pr-14 text-[15px] leading-7 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
         :class="composerExpanded ? 'overflow-y-auto' : ''"
         @compositionend="composing = false"
         @compositionstart="composing = true"
@@ -2064,27 +2154,56 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         @pointerdown="resetSentHistoryNavigation"
       />
 
-      <div class="flex items-center justify-between gap-1">
+      <div class="absolute bottom-3 right-3 z-[3]">
+        <SimpleTooltip :content="primaryActionLabel">
+          <Button
+            type="button"
+            size="icon-sm"
+            class="composer-primary-action size-8 rounded-full transition-[transform,opacity,box-shadow] duration-200"
+            :class="[
+              activeRuntimeTurnRunning ? 'is-running text-destructive' : '',
+              !activeRuntimeTurnRunning && !canSend ? 'opacity-35' : 'opacity-100',
+            ]"
+            :variant="activeRuntimeTurnRunning ? 'outline' : 'default'"
+            :aria-label="activeRuntimeTurnRunning ? t('chat.stopLabel') : sendButtonLabel"
+            :aria-busy="activeRuntimeTurnRunning ? stopDisabled : (sendAdmissionPending || activeRuntimeSending)"
+            :disabled="activeRuntimeTurnRunning ? stopDisabled : !canSend"
+            @click="activeRuntimeTurnRunning ? onStop() : send()"
+          >
+            <LoaderCircle
+              v-if="activeRuntimeTurnRunning ? stopDisabled : (sendAdmissionPending || activeRuntimeSending)"
+              :size="14"
+              class="animate-spin"
+            />
+            <Octagon v-else-if="activeRuntimeTurnRunning" :size="13" fill="currentColor" />
+            <ArrowUp v-else :size="16" stroke-width="2.5" />
+          </Button>
+        </SimpleTooltip>
+      </div>
+      </div>
+
+      <div class="flex min-h-8 items-center justify-between gap-2 px-0.5">
         <div class="flex min-w-0 items-center gap-0.5">
           <Button
             variant="ghost"
             size="icon-sm"
-            class="size-7 text-muted-foreground"
+            class="size-8 rounded-full text-muted-foreground hover:bg-muted/70"
             :aria-label="t('chat.attachImages')"
             :disabled="attachedImages.length >= 4 || attachingImages"
             :aria-busy="attachingImages"
             @click="attachImages"
           >
             <LoaderCircle v-if="attachingImages" :size="14" class="animate-spin" />
-            <Paperclip v-else :size="14" />
+            <Plus v-else :size="17" />
           </Button>
 
           <DropdownMenu>
             <DropdownMenuTrigger as-child>
               <Button
-                variant="ghost"
+                v-if="!isArenaPane"
+                variant="outline"
                 size="sm"
-                class="hidden h-7 gap-1.5 px-2 text-[11px] font-normal text-muted-foreground md:inline-flex"
+                class="hidden h-8 gap-1.5 rounded-lg border-warning/35 bg-warning/10 px-2.5 text-[11px] font-normal text-foreground shadow-none hover:bg-warning/15 md:inline-flex"
                 :title="permissionDetail ? `${permissionLabel} (${permissionDetail})` : permissionLabel"
               >
                 <Shield :size="12" />
@@ -2129,7 +2248,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               @click="togglePlanMode"
             >
               <ListTodo :size="12" />
-              <span class="hidden sm:inline">{{ isPlanMode ? t('chat.planModeOn') : t('chat.planModeOff') }}</span>
+              <span :class="isArenaPane ? 'hidden' : 'hidden sm:inline'">{{ isPlanMode ? t('chat.planModeOn') : t('chat.planModeOff') }}</span>
             </Button>
           </SimpleTooltip>
 
@@ -2139,7 +2258,8 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                class="size-7 text-muted-foreground md:hidden"
+                class="size-7 text-muted-foreground"
+                :class="isArenaPane ? '' : 'md:hidden'"
                 :aria-label="t('chat.composerMore')"
               >
                 <Ellipsis :size="14" />
@@ -2180,7 +2300,8 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         <div class="flex min-w-0 items-center gap-0.5">
           <SearchableSelect
             v-model="composerModelSelection"
-            class="h-7 w-auto max-w-44 border-0 bg-transparent px-2 text-[11px] text-muted-foreground shadow-none hover:bg-muted/50"
+            class="h-7 w-auto border-0 bg-transparent px-2 text-[11px] text-muted-foreground shadow-none hover:bg-muted/50"
+            :class="isArenaPane ? 'max-w-28' : 'max-w-44'"
             content-class="min-w-[280px]"
             align="end"
             :options="composerModelOptions"
@@ -2189,7 +2310,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             :search-placeholder="t('settings.modelSearch')"
           />
 
-          <Popover v-if="effortOptions.length > 1" v-model:open="effortPopoverOpen">
+          <Popover v-if="effortOptions.length > 1 && !isArenaPane" v-model:open="effortPopoverOpen">
             <PopoverTrigger as-child>
               <Button
                 type="button"
@@ -2201,28 +2322,66 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                 <span class="truncate">{{ effortPopoverLabel }}</span>
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="end" side="top" :side-offset="10" class="w-72 p-4">
-              <div class="mb-3 flex items-center justify-between gap-3">
+            <PopoverContent align="end" side="top" :side-offset="12" class="w-80 rounded-2xl p-5 shadow-xl">
+              <div class="mb-5 flex items-start justify-between gap-3">
                 <div>
-                  <p class="text-sm font-medium">{{ t('chat.reasoning') }} · {{ effortPopoverLabel }}</p>
-                  <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('chat.effortSliderHint') }}</p>
+                  <p class="text-[15px] font-medium">{{ t('chat.reasoning') }} · {{ effortPopoverLabel }}</p>
+                  <p class="mt-1 text-[11px] leading-5 text-muted-foreground">{{ t('chat.effortSliderHint') }}</p>
                 </div>
-                <Zap :size="15" class="text-primary" />
+                <span class="grid size-8 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
+                  <Zap :size="16" />
+                </span>
               </div>
-              <input
-                type="range"
-                min="0"
-                :max="Math.max(0, effortOptions.length - 1)"
-                step="1"
-                :value="effortDisplayIndex"
-                class="effort-slider w-full"
-                :aria-label="t('chat.reasoning')"
-                @input="previewEffort"
-                @change="commitEffort"
+              <div
+                class="effort-scale"
+                :class="effortDragging ? 'is-dragging' : ''"
+                :style="`--effort-progress: ${effortProgress}%`"
               >
-              <div class="mt-2 flex justify-between text-[10px] text-muted-foreground">
-                <span>{{ effortOptions[0]?.label }}</span>
-                <span>{{ effortOptions.at(-1)?.label }}</span>
+                <div class="effort-scale-track" aria-hidden="true">
+                  <span class="effort-scale-fill" />
+                  <span
+                    v-for="(_, index) in effortOptions"
+                    :key="`effort-marker-${index}`"
+                    class="effort-scale-marker"
+                    :class="{
+                      'is-reached': index <= effortDisplayIndex,
+                      'is-current': index === effortDisplayIndex,
+                    }"
+                    :style="{ left: effortMarkerPosition(index) }"
+                  />
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  :max="Math.max(0, effortOptions.length - 1)"
+                  step="1"
+                  :value="effortDisplayIndex"
+                  class="effort-slider-input"
+                  :aria-label="t('chat.reasoning')"
+                  :aria-valuetext="effortPopoverLabel"
+                  @input="previewEffort"
+                  @change="commitEffort"
+                  @pointerdown="effortDragging = true"
+                  @pointercancel="cancelEffortPreview"
+                  @blur="cancelEffortPreview"
+                >
+              </div>
+              <div class="effort-scale-labels">
+                <button
+                  v-for="(option, index) in effortOptions"
+                  :key="`effort-choice-${option.value}`"
+                  type="button"
+                  class="effort-scale-label"
+                  :class="{
+                    'is-current': index === effortDisplayIndex,
+                    'is-first': index === 0,
+                    'is-last': index === effortOptions.length - 1,
+                  }"
+                  :style="{ left: effortMarkerPosition(index) }"
+                  @click="chooseEffort(index)"
+                >
+                  {{ option.label }}
+                </button>
               </div>
             </PopoverContent>
           </Popover>
@@ -2272,49 +2431,6 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             </span>
           </SimpleTooltip>
 
-          <template v-if="activeRuntimeTurnRunning">
-            <SimpleTooltip v-if="canSend" :content="t('chat.queueSend')">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                class="size-7 rounded-md text-muted-foreground hover:bg-muted"
-                :aria-label="t('chat.queueSend')"
-                @click="send"
-              >
-                <ArrowUp :size="14" stroke-width="2.4" />
-              </Button>
-            </SimpleTooltip>
-            <SimpleTooltip :content="stopDisabled ? t('chat.stopping') : t('chat.stop')">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                class="size-7 rounded-md text-destructive hover:bg-destructive/10 hover:text-destructive"
-                :disabled="stopDisabled"
-                :aria-label="t('chat.stopLabel')"
-                @click.stop.prevent="onStop"
-              >
-                <LoaderCircle v-if="stopDisabled" :size="14" class="animate-spin" />
-                <Octagon v-else :size="14" fill="currentColor" />
-              </Button>
-            </SimpleTooltip>
-          </template>
-          <SimpleTooltip v-else :content="sendButtonLabel">
-            <Button
-              type="button"
-              size="icon-sm"
-              class="size-7 rounded-md transition-opacity"
-              :class="canSend ? 'opacity-100' : 'opacity-40'"
-              :aria-label="sendButtonLabel"
-              :aria-busy="sendAdmissionPending || activeRuntimeSending"
-              :disabled="!canSend"
-              @click="send"
-            >
-              <LoaderCircle v-if="sendAdmissionPending || activeRuntimeSending" :size="14" class="animate-spin" />
-              <ArrowUp v-else :size="15" stroke-width="2.5" />
-            </Button>
-          </SimpleTooltip>
         </div>
       </div>
     </div>

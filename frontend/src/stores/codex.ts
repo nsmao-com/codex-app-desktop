@@ -192,7 +192,6 @@ export const useCodexStore = defineStore('codex', () => {
   }>()
   const unknownActiveLivenessTimers = new Map<string, { timer: number; confirmingIdle: boolean }>()
   const recentCompactionByThread = new Map<string, number>()
-  const autoCompactInFlight = new Set<string>()
   const trackedTimeouts = new Set<number>()
 
   let unsubscribeEvent: (() => void) | null = null
@@ -1532,20 +1531,6 @@ export const useCodexStore = defineStore('codex', () => {
     const threadID = activeThreadId.value
     if (!threadID || activeThreadBusy.value) return
     await archiveThread(threadID)
-  }
-
-  function maybeAutoCompact(threadID: string): void {
-    if (runtimeIDForThread(threadID) !== 'codex') return
-    const threshold = Number(appStore.settings.codexAutoCompactThreshold) || 0
-    if (!threshold || autoCompactInFlight.has(threadID) || threadIsBusy(threadID) || threadMutationForThread(threadID)) return
-    const usage = tokenUsageByThread.value[threadID]
-    const used = Math.max(
-      Number(usage?.last?.totalTokens) || 0,
-      (usage?.last?.inputTokens || 0) + (usage?.last?.cachedInputTokens || 0),
-    )
-    if (used < threshold) return
-    autoCompactInFlight.add(threadID)
-    void compactThread(threadID, false).finally(() => autoCompactInFlight.delete(threadID))
   }
 
   async function compactThread(threadID: string, activate = true): Promise<void> {
@@ -2897,7 +2882,6 @@ export const useCodexStore = defineStore('codex', () => {
         trackedTimeout(() => {
           clearStaleBusyState(threadID)
           scheduleThreadQueueDrain(threadID)
-          maybeAutoCompact(threadID)
         }, 400)
         break
       }

@@ -1958,22 +1958,44 @@ Object.assign(messages['en-US'].chat, {
 })
 Object.assign(messages['zh-CN'], {
   providerConfig: {
-    check: '检查', reload: '重载', restart: '重启',
+    title: '模型商原生配置', detecting: '正在读取 CLI 与配置文件…',
+    check: '检查', reload: '重新读取', restart: '重启', reconnect: '重连 Codex',
     applyImmediate: '立即生效', applyNextTurn: '下一回合生效', applyNewSession: '新会话生效', applyReconnect: '重连后生效',
     contextUnknown: '上下文未知', checkFailed: '配置检查失败', reloadFailed: '配置重载失败', restartFailed: '运行时重启失败',
     reloaded: '配置已重载', restarted: '运行时已重启',
-    contextWindow: '有效窗口 Token', compactThreshold: '自动压缩阈值', saveContext: '保存上下文策略',
+    contextWindow: '上下文窗口', compactThreshold: '自动压缩阈值', saveContext: '保存原生策略',
     contextSaved: '上下文策略已保存', contextSaveFailed: '上下文策略保存失败',
+    modelFixed: '由所选模型固定', modelFixedHint: '该 CLI 不提供可写的窗口参数；这里只显示原生 catalog 或保守回退值。',
+    clientLimit: '客户端保护上限', clientLimitHint: '只能缩小本地客户端使用上限，不能扩大上游模型真实窗口。',
+    calculationLimit: '压缩计算上限', calculationLimitHint: '仅影响 CLI 何时压缩或裁剪，不保证上游模型支持更大的真实窗口。',
+    nativeOverride: '原生配置覆盖', nativeOverrideHint: '写入 CLI 原生配置；Codex 需要重连 app-server 后生效。',
+    useNativeDefault: '留空使用模型原生值', resetNative: '恢复原生',
+    autoCompact: '自动压缩', compactPercent: '上下文使用比例', reservedTokens: '保留 Token',
+    notSupported: '当前模式不支持', nativeManaged: 'CLI 原生管理',
+    pruneTools: '压缩时裁剪旧工具输出', reservedTokensHint: '达到窗口上限前预留这些 Token，供回复、工具与压缩过程使用。',
+    percentHint: '滑块表示上下文使用到多少比例时，由 CLI 开始原生压缩。',
+    tokenThresholdHint: '达到该 Token 数后，由 CLI 自己执行原生压缩。',
   },
 })
 Object.assign(messages['en-US'], {
   providerConfig: {
-    check: 'Check', reload: 'Reload', restart: 'Restart',
+    title: 'Native provider configuration', detecting: 'Reading the CLI and configuration file…',
+    check: 'Check', reload: 'Read again', restart: 'Restart', reconnect: 'Reconnect Codex',
     applyImmediate: 'Applies immediately', applyNextTurn: 'Applies next turn', applyNewSession: 'Applies to new sessions', applyReconnect: 'Applies after reconnect',
     contextUnknown: 'Context unknown', checkFailed: 'Configuration check failed', reloadFailed: 'Configuration reload failed', restartFailed: 'Runtime restart failed',
     reloaded: 'Configuration reloaded', restarted: 'Runtime restarted',
-    contextWindow: 'Effective context tokens', compactThreshold: 'Auto-compact threshold', saveContext: 'Save context policy',
+    contextWindow: 'Context window', compactThreshold: 'Auto-compact threshold', saveContext: 'Save native policy',
     contextSaved: 'Context policy saved', contextSaveFailed: 'Failed to save context policy',
+    modelFixed: 'Fixed by the selected model', modelFixedHint: 'This CLI has no writable window setting; this shows its native catalog or conservative fallback value.',
+    clientLimit: 'Client safety cap', clientLimitHint: 'This can only reduce the local client limit; it cannot expand the upstream model window.',
+    calculationLimit: 'Compaction calculation limit', calculationLimitHint: 'This only changes when the CLI compacts or prunes; it does not guarantee a larger upstream context.',
+    nativeOverride: 'Native configuration override', nativeOverrideHint: 'Written to the CLI native configuration. Codex applies it after reconnecting the app-server.',
+    useNativeDefault: 'Leave empty for model default', resetNative: 'Use native',
+    autoCompact: 'Auto compact', compactPercent: 'Context usage percentage', reservedTokens: 'Reserved tokens',
+    notSupported: 'Not supported in this mode', nativeManaged: 'Managed by the CLI',
+    pruneTools: 'Prune old tool output while compacting', reservedTokensHint: 'Keep these tokens available for replies, tools, and compaction before reaching the window limit.',
+    percentHint: 'The slider controls the usage percentage at which the CLI starts native compaction.',
+    tokenThresholdHint: 'The CLI starts native compaction after reaching this token count.',
   },
 })
 

@@ -160,8 +160,10 @@ function onDuplicate(paneId: string): void {
       </div>
     </div>
 
-    <div class="min-h-0 flex-1 overflow-x-auto overflow-y-hidden">
-      <div
+    <div class="arena-pane-scroller min-h-0 flex-1 overflow-x-auto overflow-y-hidden">
+      <TransitionGroup
+        name="arena-pane"
+        tag="div"
         class="grid h-full min-h-0 divide-x divide-border/70"
         :style="paneGridStyle"
       >
@@ -186,7 +188,7 @@ function onDuplicate(paneId: string): void {
           @duplicate="onDuplicate(pane.id)"
         />
       </div>
-    </div>
+      </TransitionGroup>
   </div>
 </div>
 </template>
@@ -195,6 +197,7 @@ function onDuplicate(paneId: string): void {
 /* FLIP move: other panes slide into place as the dragged pane reorders live. */
 .arena-pane-move {
   transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  will-change: transform;
 }
 
 .arena-pane-enter-active,
@@ -214,5 +217,38 @@ function onDuplicate(paneId: string): void {
   height: 0;
   overflow: hidden;
   pointer-events: none;
+}
+
+.arena-pane-scroller {
+  scrollbar-color: color-mix(in oklab, var(--muted-foreground) 28%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.arena-pane-scroller::-webkit-scrollbar {
+  height: 0.48rem;
+}
+
+.arena-pane-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.arena-pane-scroller::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted-foreground) 28%, transparent);
+  background-clip: padding-box;
+}
+
+.arena-pane-scroller::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--muted-foreground) 46%, transparent);
+  background-clip: padding-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arena-pane-move,
+  .arena-pane-enter-active,
+  .arena-pane-leave-active {
+    transition: none;
+  }
 }
 </style>

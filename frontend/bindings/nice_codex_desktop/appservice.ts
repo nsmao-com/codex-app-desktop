@@ -41,8 +41,8 @@ export function ArchiveThread(threadID: string): $CancellablePromise<void> {
 }
 
 /**
- * AttachImageData saves a pasted/dropped image into the NiceCodex temp folder
- * and registers it for SendMessage (same allow-list as SelectImages).
+ * AttachImageData saves a pasted/dropped image into NiceCodex-managed persistent
+ * attachment storage and registers it for SendMessage (same allow-list as SelectImages).
  */
 export function AttachImageData(fileName: string, mimeType: string, dataBase64: string): $CancellablePromise<string> {
     return $Call.ByID(3374776048, fileName, mimeType, dataBase64);
@@ -748,8 +748,8 @@ export function UninstallPlugin(pluginID: string): $CancellablePromise<void> {
     return $Call.ByID(1232784559, pluginID);
 }
 
-export function UpdateProviderContextPolicy(providerID: string, tokens: number, threshold: number): $CancellablePromise<$models.ProviderApplyResult> {
-    return $Call.ByID(2761509943, providerID, tokens, threshold);
+export function UpdateProviderContextPolicy(providerID: string, tokens: number, threshold: number, autoCompactEnabled: boolean, pruneEnabled: boolean): $CancellablePromise<$models.ProviderApplyResult> {
+    return $Call.ByID(2761509943, providerID, tokens, threshold, autoCompactEnabled, pruneEnabled);
 }
 
 export function UpdateSessionMemories(request: $models.SessionMemoriesRequest): $CancellablePromise<void> {

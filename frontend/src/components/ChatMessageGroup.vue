@@ -1274,8 +1274,10 @@ function diffStats(diff: string): { add: number; del: number } {
           >
             <template v-if="block.item.id === liveTextId">
               <div
-                class="streaming-markdown-caret whitespace-pre-wrap break-words"
-              >{{ plainStreamText(block.item) }}</div>
+                class="streaming-markdown-caret prose max-w-none prose-headings:mb-2.5 prose-headings:mt-4 prose-headings:text-[1.05em] prose-headings:font-semibold prose-headings:tracking-tight prose-p:my-2.5 prose-p:leading-7 prose-li:my-1 prose-ul:my-2.5 prose-ol:my-2.5 prose-pre:my-3 prose-pre:rounded-xl prose-code:rounded-md prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:before:content-none prose-code:after:content-none prose-a:font-medium prose-strong:font-semibold"
+                @click="onMarkdownClick"
+                v-html="markdownHTML(plainStreamText(block.item), block.item)"
+              />
             </template>
             <div
               v-else

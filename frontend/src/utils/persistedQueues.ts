@@ -1,4 +1,4 @@
-export function loadPersistedQueues<T extends { state: string }>(key: string): Record<string, T[]> {
+export function loadPersistedQueues<T extends { state: string; blockedByTurnId?: string; localAppended?: boolean }>(key: string): Record<string, T[]> {
   try {
     const parsed = JSON.parse(localStorage.getItem(key) || '{}') as Record<string, T[]>
     return Object.fromEntries(Object.entries(parsed).map(([owner, rows]) => [
@@ -7,6 +7,8 @@ export function loadPersistedQueues<T extends { state: string }>(key: string): R
         ? rows.filter((row) => row && typeof row === 'object').map((row) => ({
             ...row,
             state: row.state === 'sending' ? 'queued' : row.state,
+            blockedByTurnId: undefined,
+            localAppended: row.state === 'sending' ? false : row.localAppended,
           }))
         : [],
     ]).filter(([, rows]) => rows.length))

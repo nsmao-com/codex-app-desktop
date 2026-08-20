@@ -103,6 +103,8 @@ const providerConfigurationLoading = shallowRef(false)
 const providerRestarting = shallowRef(false)
 const providerContextTokens = shallowRef('')
 const providerCompactThreshold = shallowRef('')
+const providerAutoCompactEnabled = shallowRef(true)
+const providerPruneEnabled = shallowRef(false)
 const providerContextSaving = shallowRef(false)
 const providerApplyLabel = computed(() => {
   switch (providerConfiguration.value?.applyLevel) {
@@ -116,6 +118,37 @@ const providerContextLabel = computed(() => {
   const context = providerConfiguration.value?.context
   if (!context?.tokens) return t('providerConfig.contextUnknown')
   return `${Math.round(context.tokens / 1000)}K · ${context.source}`
+})
+const providerContextPolicy = computed(() => providerConfiguration.value?.context ?? null)
+const providerContextCanSave = computed(() => Boolean(
+  providerContextPolicy.value?.writable
+  || providerContextPolicy.value?.thresholdConfigurable
+  || providerContextPolicy.value?.autoCompactToggleable
+  || providerContextPolicy.value?.pruneSupported,
+))
+const providerTokenModeLabel = computed(() => {
+  const mode = providerContextPolicy.value?.tokenMode
+  if (mode === 'client-limit') return t('providerConfig.clientLimit')
+  if (mode === 'calculation-limit') return t('providerConfig.calculationLimit')
+  if (mode === 'native-override') return t('providerConfig.nativeOverride')
+  return t('providerConfig.modelFixed')
+})
+const providerThresholdLabel = computed(() => {
+  if (providerContextPolicy.value?.thresholdUnit === 'percent') return t('providerConfig.compactPercent')
+  if (providerContextPolicy.value?.thresholdUnit === 'reserved-tokens') return t('providerConfig.reservedTokens')
+  return t('providerConfig.compactThreshold')
+})
+const providerThresholdSliderValue = computed(() => {
+  const value = Number(providerCompactThreshold.value)
+  if (value > 0) return value
+  return providerContextPolicy.value?.thresholdMinimum || 1
+})
+const providerThresholdProgress = computed(() => {
+  const minimum = providerContextPolicy.value?.thresholdMinimum || 0
+  const maximum = providerContextPolicy.value?.thresholdMaximum || minimum
+  if (maximum <= minimum) return 0
+  const value = Math.min(maximum, Math.max(minimum, providerThresholdSliderValue.value))
+  return (value - minimum) / (maximum - minimum) * 100
 })
 const providerBusy = computed(() => {
   if (isClaudeMode.value) return claudeStore.runningSessionIds.length > 0
@@ -400,8 +433,7 @@ async function checkProviderConfiguration(force = true): Promise<void> {
     const configuration = await backend.CheckProviderConfiguration(providerID, force)
     if (providerID !== appStore.activeRuntime) return
     providerConfiguration.value = configuration
-    providerContextTokens.value = configuration.context.tokens ? String(configuration.context.tokens) : ''
-    providerCompactThreshold.value = configuration.context.autoCompactThreshold ? String(configuration.context.autoCompactThreshold) : ''
+    hydrateProviderContext(configuration)
     const next = [...appStore.agentProviders]
     const index = next.findIndex((item) => item.kind === configuration.runtime.kind)
     if (index >= 0) next[index] = configuration.runtime
@@ -414,6 +446,17 @@ async function checkProviderConfiguration(force = true): Promise<void> {
   }
 }
 
+function hydrateProviderContext(configuration: ProviderConfigurationView): void {
+  providerContextTokens.value = configuration.context.configuredTokens
+    ? String(configuration.context.configuredTokens)
+    : ''
+  providerCompactThreshold.value = configuration.context.autoCompactThreshold
+    ? String(configuration.context.autoCompactThreshold)
+    : ''
+  providerAutoCompactEnabled.value = configuration.context.autoCompactEnabled
+  providerPruneEnabled.value = configuration.context.pruneEnabled
+}
+
 async function reloadProviderConfiguration(): Promise<void> {
   const providerID = appStore.activeRuntime
   providerConfigurationLoading.value = true
@@ -421,6 +464,7 @@ async function reloadProviderConfiguration(): Promise<void> {
     const result = await backend.ReloadProviderConfiguration(providerID)
     if (providerID !== appStore.activeRuntime) return
     providerConfiguration.value = result.configuration
+    hydrateProviderContext(result.configuration)
     loadWhenReady()
     notify('success', t('providerConfig.reloaded'), providerApplyLabel.value)
   } catch (error) {
@@ -437,6 +481,7 @@ async function restartProvider(): Promise<void> {
     const result = await backend.RestartProvider(providerID)
     if (providerID !== appStore.activeRuntime) return
     providerConfiguration.value = result.configuration
+    hydrateProviderContext(result.configuration)
     loadWhenReady()
     notify('success', t('providerConfig.restarted'), providerApplyLabel.value)
   } catch (error) {
@@ -453,11 +498,12 @@ async function saveProviderContextPolicy(): Promise<void> {
       appStore.activeRuntime,
       Number(providerContextTokens.value) || 0,
       Number(providerCompactThreshold.value) || 0,
+      providerAutoCompactEnabled.value,
+      providerPruneEnabled.value,
     )
     providerConfiguration.value = result.configuration
-    appStore.settings.codexContextWindow = result.configuration.context.tokens
-    appStore.settings.codexAutoCompactThreshold = result.configuration.context.autoCompactThreshold
-    notify('success', t('providerConfig.contextSaved'), t('providerConfig.applyImmediate'))
+    hydrateProviderContext(result.configuration)
+    notify('success', t('providerConfig.contextSaved'), result.restartRequired ? t('providerConfig.applyReconnect') : providerApplyLabel.value)
   } catch (error) {
     notify('error', t('providerConfig.contextSaveFailed'), error instanceof Error ? error.message : String(error))
   } finally {
@@ -495,10 +541,10 @@ onMounted(() => {
   loadWhenReady()
 })
 watch(() => appStore.codexAvailable, loadWhenReady)
-watch(isGrokMode, loadWhenReady)
-watch(isClaudeMode, loadWhenReady)
-watch(isGeminiMode, loadWhenReady)
-watch(isOpenCodeMode, loadWhenReady)
+watch(() => appStore.activeRuntime, () => {
+  providerConfiguration.value = null
+  loadWhenReady()
+})
 watch([externalInstructionScope, externalMcpScope], () => hydrateExternalEditors())
 watch(
   () => route.query.tab,
@@ -811,37 +857,6 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
           <p v-else-if="isGeminiMode || isOpenCodeMode" class="mt-1 text-[10px] leading-4 text-muted-foreground">
              {{ externalProvider?.message || t('capabilities.externalModeBanner', { runtime: externalRuntimeName }) }}
           </p>
-          <div class="mt-3 space-y-2 rounded-lg border border-border/60 bg-card/65 p-2">
-            <div class="flex items-center justify-between gap-2 text-[10px]">
-              <span class="text-muted-foreground">{{ providerApplyLabel }}</span>
-              <Badge variant="outline" class="h-5 max-w-[132px] truncate px-1.5 text-[9px]">{{ providerContextLabel }}</Badge>
-            </div>
-            <div class="grid grid-cols-3 gap-1">
-              <Button variant="outline" size="sm" class="h-7 px-1 text-[9px]" :disabled="providerConfigurationLoading" @click="void checkProviderConfiguration(true)">
-                <RefreshCw :size="11" class="mr-1" :class="{ 'animate-spin': providerConfigurationLoading }" />
-                {{ t('providerConfig.check') }}
-              </Button>
-              <Button variant="outline" size="sm" class="h-7 px-1 text-[9px]" :disabled="providerConfigurationLoading" @click="void reloadProviderConfiguration()">
-                <Settings2 :size="11" class="mr-1" />
-                {{ t('providerConfig.reload') }}
-              </Button>
-              <Button variant="outline" size="sm" class="h-7 px-1 text-[9px]" :disabled="providerRestarting || providerBusy" @click="void restartProvider()">
-                <Power :size="11" class="mr-1" :class="{ 'animate-pulse': providerRestarting }" />
-                {{ t('providerConfig.restart') }}
-              </Button>
-            </div>
-            <div v-if="providerConfiguration?.context.writable" class="grid grid-cols-2 gap-1.5 border-t border-border/50 pt-2">
-              <Input v-model="providerContextTokens" type="number" min="0" step="1024" class="h-7 px-2 text-[9px]" :placeholder="t('providerConfig.contextWindow')" />
-              <Input v-model="providerCompactThreshold" type="number" min="0" step="1024" class="h-7 px-2 text-[9px]" :placeholder="t('providerConfig.compactThreshold')" />
-              <Button variant="secondary" size="sm" class="col-span-2 h-7 text-[9px]" :disabled="providerContextSaving" @click="void saveProviderContextPolicy()">
-                <LoaderCircle v-if="providerContextSaving" :size="11" class="mr-1 animate-spin" />
-                {{ t('providerConfig.saveContext') }}
-              </Button>
-            </div>
-            <p v-if="providerConfiguration?.warnings?.length" class="line-clamp-2 text-[9px] leading-3 text-amber-700 dark:text-amber-300">
-              {{ providerConfiguration.warnings.join(' · ') }}
-            </p>
-          </div>
         </div>
       </div>
 
@@ -940,6 +955,166 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
     <!-- Rounded content card -->
     <div class="flex min-h-0 min-w-0 flex-1 flex-col pb-2 pr-2 pl-1.5 pt-0">
       <section class="workbench-card relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[14px] border bg-card">
+        <div class="shrink-0 border-b bg-muted/15 px-4 py-3">
+          <div class="flex flex-wrap items-start gap-3">
+            <div class="min-w-0 flex-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <p class="text-[12px] font-semibold">{{ t('providerConfig.title') }}</p>
+                <Badge variant="secondary" class="h-5 text-[9px] font-normal">{{ providerApplyLabel }}</Badge>
+                <Badge variant="outline" class="h-5 max-w-56 truncate text-[9px] font-normal">{{ providerContextLabel }}</Badge>
+              </div>
+              <p class="mt-1 truncate font-mono text-[9px] text-muted-foreground">
+                {{ providerConfiguration?.configPath || t('providerConfig.detecting') }}
+              </p>
+            </div>
+            <div class="flex shrink-0 flex-wrap items-center gap-1.5">
+              <Button variant="outline" size="sm" class="h-7 px-2 text-[10px]" :disabled="providerConfigurationLoading" @click="void checkProviderConfiguration(true)">
+                <RefreshCw :size="11" class="mr-1.5" :class="{ 'animate-spin': providerConfigurationLoading }" />
+                {{ t('providerConfig.check') }}
+              </Button>
+              <Button variant="outline" size="sm" class="h-7 px-2 text-[10px]" :disabled="providerConfigurationLoading" @click="void reloadProviderConfiguration()">
+                <Settings2 :size="11" class="mr-1.5" />
+                {{ t('providerConfig.reload') }}
+              </Button>
+              <Button
+                v-if="providerConfiguration?.canRestart"
+                variant="outline"
+                size="sm"
+                class="h-7 px-2 text-[10px]"
+                :disabled="providerRestarting || providerBusy"
+                @click="void restartProvider()"
+              >
+                <Power :size="11" class="mr-1.5" :class="{ 'animate-pulse': providerRestarting }" />
+                {{ t('providerConfig.reconnect') }}
+              </Button>
+            </div>
+          </div>
+
+          <div v-if="providerConfiguration" class="mt-3 grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)_auto]">
+            <div class="rounded-lg border border-border/70 bg-background/70 p-3">
+              <div class="flex items-start justify-between gap-2">
+                <div>
+                  <p class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{{ t('providerConfig.contextWindow') }}</p>
+                  <p class="mt-1 text-[11px] font-medium">{{ providerTokenModeLabel }}</p>
+                </div>
+                <Badge variant="outline" class="text-[9px] font-normal">
+                  {{ providerContextPolicy?.tokens ? `${providerContextPolicy.tokens.toLocaleString()} tokens` : t('providerConfig.contextUnknown') }}
+                </Badge>
+              </div>
+              <div v-if="providerContextPolicy?.writable" class="mt-2 flex items-center gap-2">
+                <Input
+                  v-model="providerContextTokens"
+                  type="number"
+                  :min="providerContextPolicy.tokenMinimum || 0"
+                  :max="providerContextPolicy.tokenMaximum || undefined"
+                  :step="providerContextPolicy.tokenStep || 1024"
+                  class="h-8 min-w-0 flex-1 text-[11px]"
+                  :placeholder="t('providerConfig.useNativeDefault')"
+                />
+                <Button type="button" variant="ghost" size="sm" class="h-8 px-2 text-[10px]" @click="providerContextTokens = ''">
+                  {{ t('providerConfig.resetNative') }}
+                </Button>
+              </div>
+              <p class="mt-2 text-[9px] leading-4 text-muted-foreground">
+                {{ providerContextPolicy?.tokenMode === 'client-limit'
+                  ? t('providerConfig.clientLimitHint')
+                  : providerContextPolicy?.tokenMode === 'calculation-limit'
+                    ? t('providerConfig.calculationLimitHint')
+                    : providerContextPolicy?.writable
+                      ? t('providerConfig.nativeOverrideHint')
+                      : t('providerConfig.modelFixedHint') }}
+              </p>
+            </div>
+
+            <div class="rounded-lg border border-border/70 bg-background/70 p-3">
+              <div class="flex items-center justify-between gap-3">
+                <div>
+                  <p class="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{{ t('providerConfig.autoCompact') }}</p>
+                  <p class="mt-1 text-[11px] font-medium">
+                    {{ providerContextPolicy?.autoCompactSupported ? providerThresholdLabel : t('providerConfig.notSupported') }}
+                  </p>
+                </div>
+                <Switch
+                  v-if="providerContextPolicy?.autoCompactToggleable"
+                  :model-value="providerAutoCompactEnabled"
+                  :aria-label="t('providerConfig.autoCompact')"
+                  @update:model-value="providerAutoCompactEnabled = Boolean($event)"
+                />
+                <Badge v-else variant="outline" class="text-[9px] font-normal">
+                  {{ providerContextPolicy?.autoCompactSupported ? t('providerConfig.nativeManaged') : t('providerConfig.notSupported') }}
+                </Badge>
+              </div>
+              <div v-if="providerContextPolicy?.thresholdConfigurable" class="mt-3 grid grid-cols-[minmax(0,1fr)_92px] items-center gap-3">
+                <input
+                  type="range"
+                  :min="providerContextPolicy.thresholdMinimum"
+                  :max="providerContextPolicy.thresholdMaximum"
+                  :step="providerContextPolicy.thresholdStep || 1"
+                  :value="providerThresholdSliderValue"
+                  class="policy-slider w-full"
+                  :style="`--policy-progress: ${providerThresholdProgress}%`"
+                  :disabled="providerContextPolicy.autoCompactToggleable && !providerAutoCompactEnabled"
+                  :aria-label="providerThresholdLabel"
+                  @input="providerCompactThreshold = String(($event.target as HTMLInputElement).value)"
+                >
+                <div class="relative">
+                  <Input
+                    v-model="providerCompactThreshold"
+                    type="number"
+                    :min="providerContextPolicy.thresholdMinimum"
+                    :max="providerContextPolicy.thresholdMaximum"
+                    :step="providerContextPolicy.thresholdStep || 1"
+                    class="h-8 pr-7 text-[11px]"
+                    :disabled="providerContextPolicy.autoCompactToggleable && !providerAutoCompactEnabled"
+                  />
+                  <span class="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[8px] text-muted-foreground">
+                    {{ providerContextPolicy.thresholdUnit === 'percent' ? '%' : '' }}
+                  </span>
+                </div>
+              </div>
+              <div v-if="providerContextPolicy?.pruneSupported" class="mt-2 flex items-center justify-between rounded-md bg-muted/40 px-2.5 py-2">
+                <span class="text-[10px] text-muted-foreground">{{ t('providerConfig.pruneTools') }}</span>
+                <Switch
+                  :model-value="providerPruneEnabled"
+                  :aria-label="t('providerConfig.pruneTools')"
+                  @update:model-value="providerPruneEnabled = Boolean($event)"
+                />
+              </div>
+              <p class="mt-2 text-[9px] leading-4 text-muted-foreground">
+                {{ providerContextPolicy?.thresholdUnit === 'reserved-tokens'
+                  ? t('providerConfig.reservedTokensHint')
+                  : providerContextPolicy?.thresholdUnit === 'percent'
+                    ? t('providerConfig.percentHint')
+                    : t('providerConfig.tokenThresholdHint') }}
+              </p>
+            </div>
+
+            <div class="flex min-w-36 flex-col justify-between gap-2 rounded-lg border border-border/70 bg-background/70 p-3">
+              <div>
+                <p class="text-[10px] font-medium">{{ providerConfiguration.runtime.name }}</p>
+                <p class="mt-1 text-[9px] leading-4 text-muted-foreground">{{ providerContextPolicy?.description }}</p>
+              </div>
+              <Button
+                v-if="providerContextCanSave"
+                size="sm"
+                class="h-8 text-[10px]"
+                :disabled="providerContextSaving"
+                @click="void saveProviderContextPolicy()"
+              >
+                <LoaderCircle v-if="providerContextSaving" :size="11" class="mr-1.5 animate-spin" />
+                {{ t('providerConfig.saveContext') }}
+              </Button>
+            </div>
+          </div>
+          <div v-else class="mt-3 flex h-20 items-center justify-center rounded-lg border border-dashed text-[11px] text-muted-foreground">
+            <LoaderCircle v-if="providerConfigurationLoading" :size="13" class="mr-2 animate-spin" />
+            {{ providerConfigurationLoading ? t('providerConfig.detecting') : t('providerConfig.contextUnknown') }}
+          </div>
+          <p v-if="providerConfiguration?.warnings?.length" class="mt-2 text-[9px] leading-4 text-amber-700 dark:text-amber-300">
+            {{ providerConfiguration.warnings.join(' · ') }}
+          </p>
+        </div>
+
         <!-- Claude capability center (aligned with ~/.claude official layout) -->
         <template v-if="isClaudeMode">
           <header class="flex h-12 shrink-0 items-center gap-2 border-b px-4">

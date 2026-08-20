@@ -618,7 +618,7 @@ func (s *AppService) SelectImages() ([]string, error) {
 
 	result := make([]string, 0, len(paths))
 	for _, path := range paths {
-		cleanPath, err := validateImageAttachment(path)
+		cleanPath, err := s.importSelectedImageAttachment(path)
 		if err != nil {
 			return nil, err
 		}
@@ -632,8 +632,8 @@ func (s *AppService) SelectImages() ([]string, error) {
 	return result, nil
 }
 
-// AttachImageData saves a pasted/dropped image into the NiceCodex temp folder
-// and registers it for SendMessage (same allow-list as SelectImages).
+// AttachImageData saves a pasted/dropped image into NiceCodex-managed persistent
+// attachment storage and registers it for SendMessage (same allow-list as SelectImages).
 func (s *AppService) AttachImageData(fileName string, mimeType string, dataBase64 string) (string, error) {
 	dataBase64 = strings.TrimSpace(dataBase64)
 	if dataBase64 == "" {
@@ -662,7 +662,7 @@ func (s *AppService) AttachImageData(fileName string, mimeType string, dataBase6
 	if ext == "" {
 		return "", errors.New("unsupported image format")
 	}
-	dir := filepath.Join(filepath.Dir(s.settingsPath), "attachments")
+	dir := s.managedAttachmentDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -2106,8 +2106,13 @@ func (s *AppService) validateImageAttachments(images []string) ([]string, error)
 		s.mu.Lock()
 		_, allowed := s.allowedImages[key]
 		s.mu.Unlock()
-		if !allowed {
+		if !allowed && !s.isManagedImageAttachment(cleanPath) {
 			return nil, errors.New("select image attachments through Nice Codex before sending")
+		}
+		if !allowed {
+			s.mu.Lock()
+			s.allowedImages[key] = struct{}{}
+			s.mu.Unlock()
 		}
 		seenImages[key] = struct{}{}
 		validated = append(validated, cleanPath)
@@ -2125,8 +2130,13 @@ func (s *AppService) PreviewImage(path string) (string, error) {
 	s.mu.Lock()
 	_, allowed := s.allowedImages[key]
 	s.mu.Unlock()
-	if !allowed {
+	if !allowed && !s.isManagedImageAttachment(cleanPath) {
 		return "", errors.New("select image attachments through Nice Codex before previewing")
+	}
+	if !allowed {
+		s.mu.Lock()
+		s.allowedImages[key] = struct{}{}
+		s.mu.Unlock()
 	}
 	raw, err := os.ReadFile(cleanPath)
 	if err != nil {
@@ -3771,6 +3781,62 @@ func normalizeBrowserURL(rawURL string) (string, error) {
 		return "", errors.New("browser addresses cannot include credentials")
 	}
 	return parsed.String(), nil
+}
+
+func (s *AppService) managedAttachmentDir() string {
+	return filepath.Join(filepath.Dir(s.settingsPath), "attachments")
+}
+
+func (s *AppService) isManagedImageAttachment(path string) bool {
+	dir, err := filepath.Abs(s.managedAttachmentDir())
+	if err != nil {
+		return false
+	}
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	file, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	file, err = filepath.EvalSymlinks(file)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(dir, file)
+	if err != nil || relative == "." || relative == "" {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
+}
+
+func (s *AppService) importSelectedImageAttachment(source string) (string, error) {
+	cleanSource, err := validateImageAttachment(source)
+	if err != nil {
+		return "", err
+	}
+	if s.isManagedImageAttachment(cleanSource) {
+		return cleanSource, nil
+	}
+	raw, err := os.ReadFile(cleanSource)
+	if err != nil {
+		return "", err
+	}
+	ext := imageExtensionForMime("", cleanSource, raw)
+	if ext == "" {
+		return "", errors.New("unsupported image format")
+	}
+	dir := s.managedAttachmentDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	name := sanitizeAttachmentFileName(filepath.Base(cleanSource), ext)
+	target := filepath.Join(dir, fmt.Sprintf("%d-%s", time.Now().UnixNano(), name))
+	if err := os.WriteFile(target, raw, 0o600); err != nil {
+		return "", err
+	}
+	return validateImageAttachment(target)
 }
 
 func validateImageAttachment(path string) (string, error) {
