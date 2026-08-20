@@ -69,6 +69,56 @@ type AgentProviderReasoningEffort struct {
 	IsDefault   bool   `json:"isDefault"`
 }
 
+type ProviderContextPolicyView struct {
+	Tokens                 int64  `json:"tokens"`
+	ConfiguredTokens       int64  `json:"configuredTokens"`
+	Source                 string `json:"source"`
+	Writable               bool   `json:"writable"`
+	TokenMode              string `json:"tokenMode"`
+	TokenMinimum           int64  `json:"tokenMinimum"`
+	TokenMaximum           int64  `json:"tokenMaximum"`
+	TokenStep              int64  `json:"tokenStep"`
+	IsFallback             bool   `json:"isFallback"`
+	CompactStrategy        string `json:"compactStrategy"`
+	CompactAvailable       bool   `json:"compactAvailable"`
+	AutoCompactSupported   bool   `json:"autoCompactSupported"`
+	AutoCompactEnabled     bool   `json:"autoCompactEnabled"`
+	AutoCompactToggleable  bool   `json:"autoCompactToggleable"`
+	ThresholdConfigurable  bool   `json:"thresholdConfigurable"`
+	ThresholdConfigured    bool   `json:"thresholdConfigured"`
+	AutoCompactThreshold   int64  `json:"autoCompactThreshold"`
+	ThresholdUnit          string `json:"thresholdUnit"`
+	ThresholdMinimum       int64  `json:"thresholdMinimum"`
+	ThresholdMaximum       int64  `json:"thresholdMaximum"`
+	ThresholdStep          int64  `json:"thresholdStep"`
+	PruneSupported         bool   `json:"pruneSupported"`
+	PruneEnabled           bool   `json:"pruneEnabled"`
+	Description            string `json:"description"`
+}
+
+type ProviderConfigurationView struct {
+	Runtime         AgentProviderRuntime      `json:"runtime"`
+	ConfigPath      string                    `json:"configPath"`
+	ModelSource     string                    `json:"modelSource"`
+	ApplyLevel      string                    `json:"applyLevel"`
+	RestartRequired bool                      `json:"restartRequired"`
+	CanReload       bool                      `json:"canReload"`
+	CanRestart      bool                      `json:"canRestart"`
+	SupportsModel   bool                      `json:"supportsModel"`
+	SupportsEffort  bool                      `json:"supportsEffort"`
+	PermissionModes []string                  `json:"permissionModes"`
+	Context         ProviderContextPolicyView `json:"context"`
+	Warnings        []string                  `json:"warnings"`
+}
+
+type ProviderApplyResult struct {
+	ProviderID      string                    `json:"providerId"`
+	ApplyLevel      string                    `json:"applyLevel"`
+	RestartRequired bool                      `json:"restartRequired"`
+	Warnings        []string                  `json:"warnings"`
+	Configuration   ProviderConfigurationView `json:"configuration"`
+}
+
 type claudeSettingsFile struct {
 	Env             map[string]any    `json:"env"`
 	Model           string            `json:"model"`

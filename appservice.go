@@ -150,62 +150,64 @@ type UserSettings struct {
 	GrokCustomModels []string `json:"grokCustomModels"`
 	// Gemini/OpenCode preferences stay separate from Codex/Claude/Grok so a
 	// runtime switch never changes another provider's default model.
-	GeminiWorkspace          string   `json:"geminiWorkspace"`
-	GeminiRecentWorkspaces   []string `json:"geminiRecentWorkspaces"`
-	GeminiModel              string   `json:"geminiModel"`
-	GeminiEffort             string   `json:"geminiEffort"`
-	GeminiSandbox            string   `json:"geminiSandbox"`
-	GeminiApprovalPolicy     string   `json:"geminiApprovalPolicy"`
-	GeminiCustomModels       []string `json:"geminiCustomModels"`
-	OpenCodeModel            string   `json:"openCodeModel"`
-	OpenCodeWorkspace        string   `json:"openCodeWorkspace"`
-	OpenCodeRecentWorkspaces []string `json:"openCodeRecentWorkspaces"`
-	OpenCodeEffort           string   `json:"openCodeEffort"`
-	OpenCodeSandbox          string   `json:"openCodeSandbox"`
-	OpenCodeApprovalPolicy   string   `json:"openCodeApprovalPolicy"`
-	OpenCodeProvider         string   `json:"openCodeProvider"`
-	OpenCodeCustomModels     []string `json:"openCodeCustomModels"`
-	Model                    string   `json:"model"`
-	ModelProvider            string   `json:"modelProvider"`
-	CustomModels             []string `json:"customModels"`
-	Effort                   string   `json:"effort"`
-	ServiceTier              string   `json:"serviceTier"`
-	CollaborationMode        string   `json:"collaborationMode"`
-	Personality              string   `json:"personality"`
-	MultiAgentMode           string   `json:"multiAgentMode"`
-	Sandbox                  string   `json:"sandbox"`
-	ApprovalPolicy           string   `json:"approvalPolicy"`
-	Theme                    string   `json:"theme"`
-	AccentColor              string   `json:"accentColor"`
-	FontFamily               string   `json:"fontFamily"`
-	TerminalProfile          string   `json:"terminalProfile"`
-	Language                 string   `json:"language"`
-	AutoConnect              bool     `json:"autoConnect"`
-	WorkMode                 string   `json:"workMode"`
-	SendWithModifier         bool     `json:"sendWithModifier"`
-	FollowUpBehavior         string   `json:"followUpBehavior"`
-	NotifyOnTurnComplete     bool     `json:"notifyOnTurnComplete"`
-	CustomInstructions       string   `json:"customInstructions"`
-	TranslucentSidebar       bool     `json:"translucentSidebar"`
-	HighContrast             bool     `json:"highContrast"`
-	PointerCursor            bool     `json:"pointerCursor"`
-	ReduceMotion             bool     `json:"reduceMotion"`
-	UiFontSize               string   `json:"uiFontSize"`
-	CodeFontSize             string   `json:"codeFontSize"`
-	PreventSleepWhileRunning bool     `json:"preventSleepWhileRunning"`
-	AlwaysOnTop              bool     `json:"alwaysOnTop"`
-	GitBranchPrefix          string   `json:"gitBranchPrefix"`
-	GitCommitPrefix          string   `json:"gitCommitPrefix"`
-	GitOpenPRAfterPush       bool     `json:"gitOpenPRAfterPush"`
-	GitPRBodyTemplate        string   `json:"gitPRBodyTemplate"`
-	BrowserAllowedHosts      []string `json:"browserAllowedHosts"`
-	BrowserBlockedHosts      []string `json:"browserBlockedHosts"`
-	BrowserDownloadDir       string   `json:"browserDownloadDir"`
-	BrowserFullCDP           bool     `json:"browserFullCDP"`
-	ShortcutCommandPalette   string   `json:"shortcutCommandPalette"`
-	ShortcutNewThread        string   `json:"shortcutNewThread"`
-	ShortcutTerminal         string   `json:"shortcutTerminal"`
-	ShortcutBrowser          string   `json:"shortcutBrowser"`
+	GeminiWorkspace           string   `json:"geminiWorkspace"`
+	GeminiRecentWorkspaces    []string `json:"geminiRecentWorkspaces"`
+	GeminiModel               string   `json:"geminiModel"`
+	GeminiEffort              string   `json:"geminiEffort"`
+	GeminiSandbox             string   `json:"geminiSandbox"`
+	GeminiApprovalPolicy      string   `json:"geminiApprovalPolicy"`
+	GeminiCustomModels        []string `json:"geminiCustomModels"`
+	OpenCodeModel             string   `json:"openCodeModel"`
+	OpenCodeWorkspace         string   `json:"openCodeWorkspace"`
+	OpenCodeRecentWorkspaces  []string `json:"openCodeRecentWorkspaces"`
+	OpenCodeEffort            string   `json:"openCodeEffort"`
+	OpenCodeSandbox           string   `json:"openCodeSandbox"`
+	OpenCodeApprovalPolicy    string   `json:"openCodeApprovalPolicy"`
+	OpenCodeProvider          string   `json:"openCodeProvider"`
+	OpenCodeCustomModels      []string `json:"openCodeCustomModels"`
+	Model                     string   `json:"model"`
+	CodexContextWindow        int64    `json:"codexContextWindow"`
+	CodexAutoCompactThreshold int64    `json:"codexAutoCompactThreshold"`
+	ModelProvider             string   `json:"modelProvider"`
+	CustomModels              []string `json:"customModels"`
+	Effort                    string   `json:"effort"`
+	ServiceTier               string   `json:"serviceTier"`
+	CollaborationMode         string   `json:"collaborationMode"`
+	Personality               string   `json:"personality"`
+	MultiAgentMode            string   `json:"multiAgentMode"`
+	Sandbox                   string   `json:"sandbox"`
+	ApprovalPolicy            string   `json:"approvalPolicy"`
+	Theme                     string   `json:"theme"`
+	AccentColor               string   `json:"accentColor"`
+	FontFamily                string   `json:"fontFamily"`
+	TerminalProfile           string   `json:"terminalProfile"`
+	Language                  string   `json:"language"`
+	AutoConnect               bool     `json:"autoConnect"`
+	WorkMode                  string   `json:"workMode"`
+	SendWithModifier          bool     `json:"sendWithModifier"`
+	FollowUpBehavior          string   `json:"followUpBehavior"`
+	NotifyOnTurnComplete      bool     `json:"notifyOnTurnComplete"`
+	CustomInstructions        string   `json:"customInstructions"`
+	TranslucentSidebar        bool     `json:"translucentSidebar"`
+	HighContrast              bool     `json:"highContrast"`
+	PointerCursor             bool     `json:"pointerCursor"`
+	ReduceMotion              bool     `json:"reduceMotion"`
+	UiFontSize                string   `json:"uiFontSize"`
+	CodeFontSize              string   `json:"codeFontSize"`
+	PreventSleepWhileRunning  bool     `json:"preventSleepWhileRunning"`
+	AlwaysOnTop               bool     `json:"alwaysOnTop"`
+	GitBranchPrefix           string   `json:"gitBranchPrefix"`
+	GitCommitPrefix           string   `json:"gitCommitPrefix"`
+	GitOpenPRAfterPush        bool     `json:"gitOpenPRAfterPush"`
+	GitPRBodyTemplate         string   `json:"gitPRBodyTemplate"`
+	BrowserAllowedHosts       []string `json:"browserAllowedHosts"`
+	BrowserBlockedHosts       []string `json:"browserBlockedHosts"`
+	BrowserDownloadDir        string   `json:"browserDownloadDir"`
+	BrowserFullCDP            bool     `json:"browserFullCDP"`
+	ShortcutCommandPalette    string   `json:"shortcutCommandPalette"`
+	ShortcutNewThread         string   `json:"shortcutNewThread"`
+	ShortcutTerminal          string   `json:"shortcutTerminal"`
+	ShortcutBrowser           string   `json:"shortcutBrowser"`
 	// CodexClient* is the app-server initialize clientInfo sent upstream as User-Agent.
 	// Empty values fall back to official Codex Desktop defaults (or NICE_CODEX_CLIENT_* env).
 	CodexClientName    string `json:"codexClientName"`
@@ -402,6 +404,10 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	if settings.Model == "" {
 		settings.Model = defaultCodexModel
 	}
+	settings.CodexContextWindow, settings.CodexAutoCompactThreshold = normalizeCodexContextSettings(
+		settings.CodexContextWindow,
+		settings.CodexAutoCompactThreshold,
+	)
 	settings.ModelProvider = "" // Codex-only: never persist Claude/Gemini/Grok workbench providers
 	settings.CustomModels = sanitizeCustomModels(settings.CustomModels)
 	settings.ClaudeCustomModels = sanitizeCustomModels(settings.ClaudeCustomModels)
@@ -3445,79 +3451,81 @@ func defaultSettings() UserSettings {
 		}
 	}
 	return UserSettings{
-		ActiveRuntime:            "codex",
-		GrokBackend:              "build",
-		GrokBuildModel:           "",
-		GrokAPIModel:             "grok-4.6",
-		GrokAPIKey:               "",
-		GrokAPIBaseURL:           "",
-		GrokEffort:               "high",
-		GrokSandbox:              "workspace-write",
-		GrokApprovalPolicy:       "on-request",
-		GrokWebSearch:            false,
-		GrokXSearch:              false,
-		ClaudeWorkspace:          "",
-		ClaudeRecentWorkspaces:   []string{},
-		ClaudeModel:              "sonnet",
-		ClaudeEffort:             "high",
-		ClaudeSandbox:            "workspace-write",
-		ClaudeApprovalPolicy:     "on-request",
-		ClaudePermissionMode:     "acceptEdits",
-		ClaudeCustomModels:       []string{},
-		GrokCustomModels:         []string{},
-		GeminiWorkspace:          "",
-		GeminiRecentWorkspaces:   []string{},
-		GeminiModel:              "",
-		GeminiEffort:             "auto",
-		GeminiSandbox:            "workspace-write",
-		GeminiApprovalPolicy:     "on-request",
-		GeminiCustomModels:       []string{},
-		OpenCodeModel:            "anthropic/claude-sonnet-4-6",
-		OpenCodeWorkspace:        "",
-		OpenCodeRecentWorkspaces: []string{},
-		OpenCodeEffort:           "high",
-		OpenCodeSandbox:          "workspace-write",
-		OpenCodeApprovalPolicy:   "on-request",
-		OpenCodeProvider:         "",
-		OpenCodeCustomModels:     []string{},
-		Model:                    defaultCodexModel,
-		Effort:                   "high",
-		CollaborationMode:        "default",
-		Personality:              "pragmatic",
-		MultiAgentMode:           "explicitRequestOnly",
-		Sandbox:                  "workspace-write",
-		ApprovalPolicy:           "on-request",
-		Theme:                    "light",
-		AccentColor:              "codex",
-		FontFamily:               "system",
-		TerminalProfile:          profile,
-		Language:                 "zh-CN",
-		AutoConnect:              true,
-		WorkMode:                 "code",
-		SendWithModifier:         false,
-		FollowUpBehavior:         "queue",
-		NotifyOnTurnComplete:     true,
-		CustomInstructions:       "",
-		TranslucentSidebar:       true,
-		HighContrast:             false,
-		PointerCursor:            false,
-		ReduceMotion:             false,
-		UiFontSize:               "md",
-		CodeFontSize:             "md",
-		PreventSleepWhileRunning: false,
-		AlwaysOnTop:              false,
-		GitBranchPrefix:          "",
-		GitCommitPrefix:          "",
-		GitOpenPRAfterPush:       false,
-		GitPRBodyTemplate:        "",
-		BrowserAllowedHosts:      []string{},
-		BrowserBlockedHosts:      []string{},
-		BrowserDownloadDir:       "",
-		BrowserFullCDP:           false,
-		ShortcutCommandPalette:   "Ctrl+K",
-		ShortcutNewThread:        "Ctrl+N",
-		ShortcutTerminal:         "Ctrl+`",
-		ShortcutBrowser:          "Ctrl+Shift+B",
+		ActiveRuntime:             "codex",
+		GrokBackend:               "build",
+		GrokBuildModel:            "",
+		GrokAPIModel:              "grok-4.6",
+		GrokAPIKey:                "",
+		GrokAPIBaseURL:            "",
+		GrokEffort:                "high",
+		GrokSandbox:               "workspace-write",
+		GrokApprovalPolicy:        "on-request",
+		GrokWebSearch:             false,
+		GrokXSearch:               false,
+		ClaudeWorkspace:           "",
+		ClaudeRecentWorkspaces:    []string{},
+		ClaudeModel:               "sonnet",
+		ClaudeEffort:              "high",
+		ClaudeSandbox:             "workspace-write",
+		ClaudeApprovalPolicy:      "on-request",
+		ClaudePermissionMode:      "acceptEdits",
+		ClaudeCustomModels:        []string{},
+		GrokCustomModels:          []string{},
+		GeminiWorkspace:           "",
+		GeminiRecentWorkspaces:    []string{},
+		GeminiModel:               "",
+		GeminiEffort:              "auto",
+		GeminiSandbox:             "workspace-write",
+		GeminiApprovalPolicy:      "on-request",
+		GeminiCustomModels:        []string{},
+		OpenCodeModel:             "anthropic/claude-sonnet-4-6",
+		OpenCodeWorkspace:         "",
+		OpenCodeRecentWorkspaces:  []string{},
+		OpenCodeEffort:            "high",
+		OpenCodeSandbox:           "workspace-write",
+		OpenCodeApprovalPolicy:    "on-request",
+		OpenCodeProvider:          "",
+		OpenCodeCustomModels:      []string{},
+		Model:                     defaultCodexModel,
+		CodexContextWindow:        0,
+		CodexAutoCompactThreshold: 0,
+		Effort:                    "high",
+		CollaborationMode:         "default",
+		Personality:               "pragmatic",
+		MultiAgentMode:            "explicitRequestOnly",
+		Sandbox:                   "workspace-write",
+		ApprovalPolicy:            "on-request",
+		Theme:                     "light",
+		AccentColor:               "codex",
+		FontFamily:                "system",
+		TerminalProfile:           profile,
+		Language:                  "zh-CN",
+		AutoConnect:               true,
+		WorkMode:                  "code",
+		SendWithModifier:          false,
+		FollowUpBehavior:          "queue",
+		NotifyOnTurnComplete:      true,
+		CustomInstructions:        "",
+		TranslucentSidebar:        true,
+		HighContrast:              false,
+		PointerCursor:             false,
+		ReduceMotion:              false,
+		UiFontSize:                "md",
+		CodeFontSize:              "md",
+		PreventSleepWhileRunning:  false,
+		AlwaysOnTop:               false,
+		GitBranchPrefix:           "",
+		GitCommitPrefix:           "",
+		GitOpenPRAfterPush:        false,
+		GitPRBodyTemplate:         "",
+		BrowserAllowedHosts:       []string{},
+		BrowserBlockedHosts:       []string{},
+		BrowserDownloadDir:        "",
+		BrowserFullCDP:            false,
+		ShortcutCommandPalette:    "Ctrl+K",
+		ShortcutNewThread:         "Ctrl+N",
+		ShortcutTerminal:          "Ctrl+`",
+		ShortcutBrowser:           "Ctrl+Shift+B",
 		// Empty = use official Codex Desktop defaults at handshake time.
 		CodexClientName:      "",
 		CodexClientTitle:     "",
@@ -3563,6 +3571,10 @@ func readSettings(path string) (UserSettings, error) {
 	if settings.Model == "" {
 		settings.Model = defaultCodexModel
 	}
+	settings.CodexContextWindow, settings.CodexAutoCompactThreshold = normalizeCodexContextSettings(
+		settings.CodexContextWindow,
+		settings.CodexAutoCompactThreshold,
+	)
 	settings.RecentWorkspaces = sanitizeRecentWorkspaces(settings.RecentWorkspaces)
 	settings.GrokRecentWorkspaces = sanitizeRecentWorkspaces(settings.GrokRecentWorkspaces)
 	settings.GeminiRecentWorkspaces = sanitizeRecentWorkspaces(settings.GeminiRecentWorkspaces)
@@ -3681,6 +3693,25 @@ func readSettings(path string) (UserSettings, error) {
 		_ = writeSettings(path, settings)
 	}
 	return settings, nil
+}
+
+func normalizeCodexContextSettings(window, threshold int64) (int64, int64) {
+	if window < 0 {
+		window = 0
+	}
+	if window > 0 && window < 16_384 {
+		window = 16_384
+	}
+	if threshold < 0 {
+		threshold = 0
+	}
+	if threshold > 0 && threshold < 8_192 {
+		threshold = 8_192
+	}
+	if window > 0 && threshold >= window {
+		threshold = window - 1_024
+	}
+	return window, threshold
 }
 
 func sanitizeWorkbenchProvider(value string) string {

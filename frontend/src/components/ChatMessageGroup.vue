@@ -19,7 +19,6 @@ import {
 import { computed, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -35,12 +34,12 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
+import AttachmentImage from './AttachmentImage.vue'
 import { useAppStore } from '@/stores'
 import type { TimelineItem, TurnMetrics } from '@/types/codex'
 import { extractFileDiff, parseUnifiedDiff } from '@/utils/diff'
 import { formatToolPayload, renderToolPayloadHTML } from '@/utils/formatPayload'
 import { renderMarkdown, extractCandidateFilePaths } from '@/utils/markdown'
-import { resolveImagePreview } from '@/utils/imagePreview'
 import { notify } from '@/utils/notify'
 import { compactDisplayPath, fullDisplayPath } from '@/utils/workspacePath'
 
@@ -69,31 +68,11 @@ const { t } = useI18n()
 const appStore = useAppStore()
 const openRows = shallowRef<Record<string, boolean>>({})
 const copiedKey = shallowRef('')
-const attachmentPreviews = shallowRef<Record<string, string>>({})
 const parsedTurnDiffCache = new Map<string, ReturnType<typeof parseUnifiedDiff>>()
 const displayWorkspacePath = computed(() => props.workspacePath || appStore.currentWorkspacePath)
 
 /** Soft enter for live/recent groups only — history mounts stay instant. */
 const animateEnter = computed(() => Boolean(props.streaming || props.animated))
-
-watch(
-  () => props.items[0]?.attachments?.map((item) => item.source).join('\0') ?? '',
-  (signature) => {
-    if (props.kind !== 'user' || !signature) return
-    for (const attachment of props.items[0]?.attachments ?? []) {
-      if (attachmentPreviews.value[attachment.source]) continue
-      void resolveImagePreview(attachment.source).then((url) => {
-        if (!url) return
-        attachmentPreviews.value = { ...attachmentPreviews.value, [attachment.source]: url }
-      })
-    }
-  },
-  { immediate: true },
-)
-
-function attachmentPreview(path: string): string {
-  return attachmentPreviews.value[path] || ''
-}
 
 /** History and live tails share the same GFM renderer; parse failures fall back to plain text. */
 function markdownHTML(source: string, _item?: { id?: string; status?: string } | null): string {
@@ -943,26 +922,14 @@ function diffStats(diff: string): { add: number; del: number } {
       <div class="max-w-[min(100%,42rem)] rounded-2xl bg-muted/70 px-3.5 py-2.5 text-[14px] leading-6 text-foreground">
         <p class="whitespace-pre-wrap break-words">{{ items[0]?.text }}</p>
         <div v-if="items[0]?.attachments.length" class="mt-1.5 flex flex-wrap gap-1.5">
-          <div
+          <AttachmentImage
             v-for="attachment in items[0].attachments"
             :key="attachment.source"
-            class="overflow-hidden rounded-lg border border-border/60 bg-background/70"
-          >
-            <img
-              v-if="attachmentPreview(attachment.source)"
-              :src="attachmentPreview(attachment.source)"
-              :alt="attachmentName(attachment.source)"
-              class="max-h-36 max-w-[180px] object-cover"
-              loading="lazy"
-            >
-            <Badge
-              v-else
-              variant="secondary"
-              class="h-5 rounded-full text-[10px] font-normal"
-            >
-              {{ attachmentName(attachment.source) }}
-            </Badge>
-          </div>
+            :source="attachment.source"
+            :kind="attachment.kind"
+            :alt="attachmentName(attachment.source)"
+            image-class="max-h-36 max-w-[180px] object-cover"
+          />
         </div>
       </div>
       <div class="flex h-6 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
@@ -1307,10 +1274,8 @@ function diffStats(diff: string): { add: number; del: number } {
           >
             <template v-if="block.item.id === liveTextId">
               <div
-                class="streaming-markdown-caret prose max-w-none prose-headings:mb-2.5 prose-headings:mt-4 prose-headings:text-[1.05em] prose-headings:font-semibold prose-headings:tracking-tight prose-p:my-2.5 prose-p:leading-7 prose-li:my-1 prose-ul:my-2.5 prose-ol:my-2.5 prose-pre:my-3 prose-pre:rounded-xl prose-code:rounded-md prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:before:content-none prose-code:after:content-none prose-a:font-medium prose-strong:font-semibold"
-                @click="onMarkdownClick"
-                v-html="markdownHTML(plainStreamText(block.item), block.item)"
-              />
+                class="streaming-markdown-caret whitespace-pre-wrap break-words"
+              >{{ plainStreamText(block.item) }}</div>
             </template>
             <div
               v-else

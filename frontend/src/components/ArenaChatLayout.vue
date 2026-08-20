@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Columns2, Columns3, Columns4, Plus, X } from '@lucide/vue'
-import { shallowRef } from 'vue'
+import { computed, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import ArenaChatPane from '@/components/ArenaChatPane.vue'
@@ -16,18 +16,13 @@ const { t } = useI18n()
 const arenaStore = useArenaStore()
 const appStore = useAppStore()
 
-/** Last pane id we live-reordered onto (avoids thrashing on every dragover). */
+const paneGridStyle = computed(() => ({
+  gridTemplateColumns: `repeat(${arenaStore.panes.length}, minmax(360px, 1fr))`,
+  minWidth: `${arenaStore.panes.length * 360}px`,
+}))
+
 const lastLiveTargetId = shallowRef('')
 let liveMoveRaf = 0
-
-function gridClassForCount(n: number): string {
-  if (n <= 1) return 'grid-cols-1'
-  if (n === 2) return 'grid-cols-1 md:grid-cols-2'
-  if (n === 3) return 'grid-cols-1 md:grid-cols-3'
-  if (n === 4) return 'grid-cols-2 grid-rows-2'
-  if (n <= 6) return 'grid-cols-2 lg:grid-cols-3'
-  return 'grid-cols-2 lg:grid-cols-4'
-}
 
 function onFocusPane(paneId: string): void {
   arenaStore.focusPane(paneId)
@@ -165,10 +160,11 @@ function onDuplicate(paneId: string): void {
       </div>
     </div>
 
-    <div
-      class="grid min-h-0 flex-1 divide-x divide-y divide-border/70 overflow-hidden"
-      :class="gridClassForCount(arenaStore.panes.length)"
-    >
+    <div class="min-h-0 flex-1 overflow-x-auto overflow-y-hidden">
+      <div
+        class="grid h-full min-h-0 divide-x divide-border/70"
+        :style="paneGridStyle"
+      >
       <div
         v-for="pane in arenaStore.panes"
         :key="pane.id"
@@ -192,6 +188,7 @@ function onDuplicate(paneId: string): void {
       </div>
     </div>
   </div>
+</div>
 </template>
 
 <style scoped>

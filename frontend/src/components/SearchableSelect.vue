@@ -37,10 +37,6 @@ const props = withDefaults(defineProps<{
   align: 'end',
 })
 
-const emit = defineEmits<{
-  'update:modelValue': [value: string]
-}>()
-
 const { t } = useI18n()
 const open = shallowRef(false)
 const query = shallowRef('')
@@ -91,7 +87,6 @@ function optionStyle(option: SelectOption): Record<string, string> | undefined {
 function pick(option: SelectOption): void {
   if (option.disabled) return
   model.value = option.value
-  emit('update:modelValue', option.value)
   open.value = false
   query.value = ''
 }

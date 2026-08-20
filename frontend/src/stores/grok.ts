@@ -32,6 +32,7 @@ import { normalizeThreadTokenUsage, uncommittedStreamTextTail } from '@/utils/pr
 import { notify } from '@/utils/notify'
 import { friendlyErrorMessage } from '@/utils/errorMessage'
 import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
+import { savePersistedQueues, loadPersistedQueues } from '@/utils/persistedQueues'
 import { translate } from '@/i18n'
 import { useAppStore } from './app'
 import { useArenaStore } from './arena'
@@ -457,7 +458,10 @@ export const useGrokStore = defineStore('grok', () => {
   /** Ordered provider-history assistant/reasoning/tool rows for the active turn. */
   const liveActivityBySession = shallowRef<Record<string, GrokMessage[]>>({})
   /** Per-session follow-up queue — drain after turn.completed / failed / interrupted. */
-  const queuedBySession = shallowRef<Record<string, GrokQueuedMessage[]>>({})
+  const queuedBySession = shallowRef<Record<string, GrokQueuedMessage[]>>(
+    loadPersistedQueues<GrokQueuedMessage>('nice-codex.queue.grok.v1'),
+  )
+  watch(queuedBySession, (queues) => savePersistedQueues('nice-codex.queue.grok.v1', queues))
   /** Cumulative text snapshots + sequence numbers protect against bridge reordering. */
   const streamSequenceByTurn = new Map<string, number>()
   const pendingLiveText = new Map<string, string>()

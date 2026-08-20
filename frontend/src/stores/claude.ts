@@ -30,6 +30,7 @@ import { translate } from '@/i18n'
 import { normalizeThreadTokenUsage, uncommittedStreamTextTail } from '@/utils/protocol'
 import { resolveProviderModelContextWindow } from '@/utils/accountUsage'
 import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
+import { savePersistedQueues, loadPersistedQueues } from '@/utils/persistedQueues'
 import { useAppStore } from './app'
 import { useArenaStore } from './arena'
 import { useDialogStore } from './dialog'
@@ -267,7 +268,10 @@ export const useClaudeStore = defineStore('claude', () => {
   const tokenUsageBySession = shallowRef<Record<string, ReturnType<typeof normalizeThreadTokenUsage>>>({})
   /** Ordered provider transcript assistant/reasoning/tool rows for the active turn. */
   const liveActivityBySession = shallowRef<Record<string, ClaudeMessage[]>>({})
-  const queueBySession = shallowRef<Record<string, ClaudeQueuedMessage[]>>({})
+  const queueBySession = shallowRef<Record<string, ClaudeQueuedMessage[]>>(
+    loadPersistedQueues<ClaudeQueuedMessage>('nice-codex.queue.claude.v1'),
+  )
+  watch(queueBySession, (queues) => savePersistedQueues('nice-codex.queue.claude.v1', queues))
   /** real session id → pending id (and reverse) while a create is in flight */
   const sessionAlias = new Map<string, string>()
   /** Latest history request and active loading barrier for each session. */

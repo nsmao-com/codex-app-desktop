@@ -615,6 +615,56 @@ export interface ProjectInstructionsInfo {
     "available": boolean;
 }
 
+export interface ProviderApplyResult {
+    "providerId": string;
+    "applyLevel": string;
+    "restartRequired": boolean;
+    "warnings": string[] | null;
+    "configuration": ProviderConfigurationView;
+}
+
+export interface ProviderConfigurationView {
+    "runtime": AgentProviderRuntime;
+    "configPath": string;
+    "modelSource": string;
+    "applyLevel": string;
+    "restartRequired": boolean;
+    "canReload": boolean;
+    "canRestart": boolean;
+    "supportsModel": boolean;
+    "supportsEffort": boolean;
+    "permissionModes": string[] | null;
+    "context": ProviderContextPolicyView;
+    "warnings": string[] | null;
+}
+
+export interface ProviderContextPolicyView {
+    "tokens": number;
+    "configuredTokens": number;
+    "source": string;
+    "writable": boolean;
+    "tokenMode": string;
+    "tokenMinimum": number;
+    "tokenMaximum": number;
+    "tokenStep": number;
+    "isFallback": boolean;
+    "compactStrategy": string;
+    "compactAvailable": boolean;
+    "autoCompactSupported": boolean;
+    "autoCompactEnabled": boolean;
+    "autoCompactToggleable": boolean;
+    "thresholdConfigurable": boolean;
+    "thresholdConfigured": boolean;
+    "autoCompactThreshold": number;
+    "thresholdUnit": string;
+    "thresholdMinimum": number;
+    "thresholdMaximum": number;
+    "thresholdStep": number;
+    "pruneSupported": boolean;
+    "pruneEnabled": boolean;
+    "description": string;
+}
+
 export interface ProviderRouterSaveRequest {
     "enabled": boolean;
     "port": number;
@@ -852,6 +902,8 @@ export interface UserSettings {
     "openCodeProvider": string;
     "openCodeCustomModels": string[] | null;
     "model": string;
+    "codexContextWindow": number;
+    "codexAutoCompactThreshold": number;
     "modelProvider": string;
     "customModels": string[] | null;
     "effort": string;

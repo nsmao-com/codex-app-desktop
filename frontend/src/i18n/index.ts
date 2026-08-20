@@ -1938,6 +1938,40 @@ Object.assign(messages['en-US'].settings, {
   grokInstructionsHint: 'Grok Build reads native rules from ~/.grok and the project AGENTS.md.',
   grokProjectInstructionsSync: 'Saved to the Grok workspace AGENTS.md.',
 })
+Object.assign(messages['zh-CN'].slash, {
+  summarizeLocal: '整理 NiceCodex 本地历史摘要；不会释放模型上下文。',
+})
+Object.assign(messages['en-US'].slash, {
+  summarizeLocal: 'Summarize NiceCodex local history; this does not free model context.',
+})
+Object.assign(messages['zh-CN'].chat, {
+  effortSliderHint: '拖动选择推理强度，释放后应用到当前会话与后续回合。',
+  imageTooLarge: '图片过大，单张不能超过 {size}。',
+})
+Object.assign(messages['en-US'].chat, {
+  effortSliderHint: 'Drag to choose reasoning effort; release to apply it to this session and future turns.',
+  imageTooLarge: 'The image is too large. Each image must be under {size}.',
+})
+Object.assign(messages['zh-CN'], {
+  providerConfig: {
+    check: '检查', reload: '重载', restart: '重启',
+    applyImmediate: '立即生效', applyNextTurn: '下一回合生效', applyNewSession: '新会话生效', applyReconnect: '重连后生效',
+    contextUnknown: '上下文未知', checkFailed: '配置检查失败', reloadFailed: '配置重载失败', restartFailed: '运行时重启失败',
+    reloaded: '配置已重载', restarted: '运行时已重启',
+    contextWindow: '有效窗口 Token', compactThreshold: '自动压缩阈值', saveContext: '保存上下文策略',
+    contextSaved: '上下文策略已保存', contextSaveFailed: '上下文策略保存失败',
+  },
+})
+Object.assign(messages['en-US'], {
+  providerConfig: {
+    check: 'Check', reload: 'Reload', restart: 'Restart',
+    applyImmediate: 'Applies immediately', applyNextTurn: 'Applies next turn', applyNewSession: 'Applies to new sessions', applyReconnect: 'Applies after reconnect',
+    contextUnknown: 'Context unknown', checkFailed: 'Configuration check failed', reloadFailed: 'Configuration reload failed', restartFailed: 'Runtime restart failed',
+    reloaded: 'Configuration reloaded', restarted: 'Runtime restarted',
+    contextWindow: 'Effective context tokens', compactThreshold: 'Auto-compact threshold', saveContext: 'Save context policy',
+    contextSaved: 'Context policy saved', contextSaveFailed: 'Failed to save context policy',
+  },
+})
 
 export const i18n = createI18n({
   legacy: false,

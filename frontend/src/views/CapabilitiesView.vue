@@ -11,6 +11,7 @@ import {
   Pencil,
   Plus,
   PlugZap,
+  Power,
   RefreshCw,
   Search,
   Settings2,
@@ -44,8 +45,8 @@ import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
-import type { ExternalRuntimeCatalog } from '../../bindings/nice_codex_desktop/models'
-import { useAppStore, useCapabilitiesStore, useClaudeStore, useDialogStore, useGrokStore } from '@/stores'
+import type { ExternalRuntimeCatalog, ProviderConfigurationView } from '../../bindings/nice_codex_desktop/models'
+import { useAppStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore } from '@/stores'
 import {
   openClaudeConfigFile,
   openClaudeHome,
@@ -69,6 +70,7 @@ type ClaudeCapTab = 'runtime' | 'mcp' | 'skills' | 'plugins' | 'agents' | 'hooks
 const router = useRouter()
 const route = useRoute()
 const appStore = useAppStore()
+const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
 const capabilitiesStore = useCapabilitiesStore()
@@ -96,6 +98,32 @@ const externalMcpScope = shallowRef<'global' | 'project'>('global')
 const externalInstructionDraft = shallowRef('')
 const externalMcpJSON = shallowRef('')
 const externalMcpSaving = shallowRef(false)
+const providerConfiguration = shallowRef<ProviderConfigurationView | null>(null)
+const providerConfigurationLoading = shallowRef(false)
+const providerRestarting = shallowRef(false)
+const providerContextTokens = shallowRef('')
+const providerCompactThreshold = shallowRef('')
+const providerContextSaving = shallowRef(false)
+const providerApplyLabel = computed(() => {
+  switch (providerConfiguration.value?.applyLevel) {
+    case 'immediate': return t('providerConfig.applyImmediate')
+    case 'reconnect': return t('providerConfig.applyReconnect')
+    case 'new-session': return t('providerConfig.applyNewSession')
+    default: return t('providerConfig.applyNextTurn')
+  }
+})
+const providerContextLabel = computed(() => {
+  const context = providerConfiguration.value?.context
+  if (!context?.tokens) return t('providerConfig.contextUnknown')
+  return `${Math.round(context.tokens / 1000)}K · ${context.source}`
+})
+const providerBusy = computed(() => {
+  if (isClaudeMode.value) return claudeStore.runningSessionIds.length > 0
+  if (isGrokMode.value) return grokStore.runningSessionIds.length > 0
+  if (appStore.activeRuntime === 'codex') return codexStore.activeThreadBusy
+  return codexStore.runningThreadIds.length > 0
+})
+
 const externalTabs = computed(() => [
   { value: 'runtime' as const, label: t('capabilities.externalTabRuntime'), icon: isGeminiMode.value ? GeminiIcon : OpenCodeIcon, count: externalCatalog.value?.models?.length ?? 0 },
   { value: 'mcp' as const, label: t('capabilities.externalTabMcp'), icon: PlugZap, count: externalCatalog.value?.mcp?.length ?? 0 },
@@ -365,7 +393,80 @@ async function saveExternalMCP(): Promise<void> {
   }
 }
 
+async function checkProviderConfiguration(force = true): Promise<void> {
+  const providerID = appStore.activeRuntime
+  providerConfigurationLoading.value = true
+  try {
+    const configuration = await backend.CheckProviderConfiguration(providerID, force)
+    if (providerID !== appStore.activeRuntime) return
+    providerConfiguration.value = configuration
+    providerContextTokens.value = configuration.context.tokens ? String(configuration.context.tokens) : ''
+    providerCompactThreshold.value = configuration.context.autoCompactThreshold ? String(configuration.context.autoCompactThreshold) : ''
+    const next = [...appStore.agentProviders]
+    const index = next.findIndex((item) => item.kind === configuration.runtime.kind)
+    if (index >= 0) next[index] = configuration.runtime
+    else next.push(configuration.runtime)
+    appStore.agentProviders = next
+  } catch (error) {
+    notify('error', t('providerConfig.checkFailed'), error instanceof Error ? error.message : String(error))
+  } finally {
+    providerConfigurationLoading.value = false
+  }
+}
+
+async function reloadProviderConfiguration(): Promise<void> {
+  const providerID = appStore.activeRuntime
+  providerConfigurationLoading.value = true
+  try {
+    const result = await backend.ReloadProviderConfiguration(providerID)
+    if (providerID !== appStore.activeRuntime) return
+    providerConfiguration.value = result.configuration
+    loadWhenReady()
+    notify('success', t('providerConfig.reloaded'), providerApplyLabel.value)
+  } catch (error) {
+    notify('error', t('providerConfig.reloadFailed'), error instanceof Error ? error.message : String(error))
+  } finally {
+    providerConfigurationLoading.value = false
+  }
+}
+
+async function restartProvider(): Promise<void> {
+  const providerID = appStore.activeRuntime
+  providerRestarting.value = true
+  try {
+    const result = await backend.RestartProvider(providerID)
+    if (providerID !== appStore.activeRuntime) return
+    providerConfiguration.value = result.configuration
+    loadWhenReady()
+    notify('success', t('providerConfig.restarted'), providerApplyLabel.value)
+  } catch (error) {
+    notify('error', t('providerConfig.restartFailed'), error instanceof Error ? error.message : String(error))
+  } finally {
+    providerRestarting.value = false
+  }
+}
+
+async function saveProviderContextPolicy(): Promise<void> {
+  providerContextSaving.value = true
+  try {
+    const result = await backend.UpdateProviderContextPolicy(
+      appStore.activeRuntime,
+      Number(providerContextTokens.value) || 0,
+      Number(providerCompactThreshold.value) || 0,
+    )
+    providerConfiguration.value = result.configuration
+    appStore.settings.codexContextWindow = result.configuration.context.tokens
+    appStore.settings.codexAutoCompactThreshold = result.configuration.context.autoCompactThreshold
+    notify('success', t('providerConfig.contextSaved'), t('providerConfig.applyImmediate'))
+  } catch (error) {
+    notify('error', t('providerConfig.contextSaveFailed'), error instanceof Error ? error.message : String(error))
+  } finally {
+    providerContextSaving.value = false
+  }
+}
+
 function loadWhenReady(): void {
+  void checkProviderConfiguration(false)
   if (isGrokMode.value) {
     void loadGrokCatalog()
     return
@@ -710,6 +811,37 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
           <p v-else-if="isGeminiMode || isOpenCodeMode" class="mt-1 text-[10px] leading-4 text-muted-foreground">
              {{ externalProvider?.message || t('capabilities.externalModeBanner', { runtime: externalRuntimeName }) }}
           </p>
+          <div class="mt-3 space-y-2 rounded-lg border border-border/60 bg-card/65 p-2">
+            <div class="flex items-center justify-between gap-2 text-[10px]">
+              <span class="text-muted-foreground">{{ providerApplyLabel }}</span>
+              <Badge variant="outline" class="h-5 max-w-[132px] truncate px-1.5 text-[9px]">{{ providerContextLabel }}</Badge>
+            </div>
+            <div class="grid grid-cols-3 gap-1">
+              <Button variant="outline" size="sm" class="h-7 px-1 text-[9px]" :disabled="providerConfigurationLoading" @click="void checkProviderConfiguration(true)">
+                <RefreshCw :size="11" class="mr-1" :class="{ 'animate-spin': providerConfigurationLoading }" />
+                {{ t('providerConfig.check') }}
+              </Button>
+              <Button variant="outline" size="sm" class="h-7 px-1 text-[9px]" :disabled="providerConfigurationLoading" @click="void reloadProviderConfiguration()">
+                <Settings2 :size="11" class="mr-1" />
+                {{ t('providerConfig.reload') }}
+              </Button>
+              <Button variant="outline" size="sm" class="h-7 px-1 text-[9px]" :disabled="providerRestarting || providerBusy" @click="void restartProvider()">
+                <Power :size="11" class="mr-1" :class="{ 'animate-pulse': providerRestarting }" />
+                {{ t('providerConfig.restart') }}
+              </Button>
+            </div>
+            <div v-if="providerConfiguration?.context.writable" class="grid grid-cols-2 gap-1.5 border-t border-border/50 pt-2">
+              <Input v-model="providerContextTokens" type="number" min="0" step="1024" class="h-7 px-2 text-[9px]" :placeholder="t('providerConfig.contextWindow')" />
+              <Input v-model="providerCompactThreshold" type="number" min="0" step="1024" class="h-7 px-2 text-[9px]" :placeholder="t('providerConfig.compactThreshold')" />
+              <Button variant="secondary" size="sm" class="col-span-2 h-7 text-[9px]" :disabled="providerContextSaving" @click="void saveProviderContextPolicy()">
+                <LoaderCircle v-if="providerContextSaving" :size="11" class="mr-1 animate-spin" />
+                {{ t('providerConfig.saveContext') }}
+              </Button>
+            </div>
+            <p v-if="providerConfiguration?.warnings?.length" class="line-clamp-2 text-[9px] leading-3 text-amber-700 dark:text-amber-300">
+              {{ providerConfiguration.warnings.join(' · ') }}
+            </p>
+          </div>
         </div>
       </div>
 

@@ -73,7 +73,20 @@ type ComposerDraftContext = {
   workspace: string
 }
 
-const composerDrafts = shallowRef<Record<string, ComposerDraft>>({})
+const COMPOSER_DRAFTS_STORAGE_KEY = 'nice-codex.composer-drafts.v1'
+
+function loadComposerDrafts(): Record<string, ComposerDraft> {
+  try {
+    const value = JSON.parse(localStorage.getItem(COMPOSER_DRAFTS_STORAGE_KEY) || '{}') as Record<string, ComposerDraft>
+    return Object.fromEntries(Object.entries(value).filter(([, draft]) =>
+      draft && typeof draft.text === 'string' && Array.isArray(draft.images),
+    ))
+  } catch {
+    return {}
+  }
+}
+
+const composerDrafts = shallowRef<Record<string, ComposerDraft>>(loadComposerDrafts())
 const draftKeyAliases = new Map<string, string>()
 
 const activeComposerContext = computed<ComposerDraftContext>(() => {
@@ -102,6 +115,14 @@ const activeComposerContext = computed<ComposerDraftContext>(() => {
     runtime,
     sessionId: sessionId.trim(),
     workspace,
+  }
+})
+
+watch(composerDrafts, (drafts) => {
+  try {
+    localStorage.setItem(COMPOSER_DRAFTS_STORAGE_KEY, JSON.stringify(drafts))
+  } catch {
+    // Storage can be unavailable in private mode; in-memory drafts still work.
   }
 })
 

@@ -1,0 +1,54 @@
+.effort-slider {
+  height: 1.5rem;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.effort-slider::-webkit-slider-runnable-track {
+  height: 0.4rem;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle, color-mix(in oklab, var(--muted-foreground) 55%, transparent) 0 1.5px, transparent 2px) 0 50% / 25% 100% repeat-x,
+    color-mix(in oklab, var(--muted) 86%, transparent);
+}
+
+.effort-slider::-webkit-slider-thumb {
+  width: 1.15rem;
+  height: 1.15rem;
+  margin-top: -0.38rem;
+  appearance: none;
+  border: 2px solid var(--background);
+  border-radius: 999px;
+  background: var(--primary);
+  box-shadow: 0 1px 4px color-mix(in oklab, var(--foreground) 24%, transparent);
+}
+
+.effort-slider:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 999px;
+}
+
+.reasoning-live-row::before {
+  content: '';
+  width: 0.72rem;
+  height: 0.72rem;
+  margin-right: 0.55rem;
+  flex: none;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 35% 30%, color-mix(in oklab, var(--background) 88%, transparent) 0 14%, transparent 16%),
+    conic-gradient(from 20deg, var(--primary), color-mix(in oklab, var(--primary) 18%, transparent), var(--primary));
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 24%, transparent);
+  animation: reasoning-orb-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes reasoning-orb-breathe {
+  0%, 100% { transform: scale(0.86); opacity: 0.65; box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 18%, transparent); }
+  50% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 0.3rem color-mix(in oklab, var(--primary) 0%, transparent); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reasoning-live-row::before { animation: none; }
+}

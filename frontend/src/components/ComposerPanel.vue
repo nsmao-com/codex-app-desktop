@@ -25,6 +25,7 @@ import { useRouter } from 'vue-router'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import SearchableSelect from '@/components/SearchableSelect.vue'
+import AttachmentImage from '@/components/AttachmentImage.vue'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -39,13 +40,6 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { SimpleTooltip } from '@/components/ui/tooltip'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { useAppStore, useArenaStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
@@ -55,7 +49,7 @@ import {
   CODEX_CONTEXT_BASELINE_TOKENS,
   formatTokenCount,
 } from '@/utils/accountUsage'
-import { forgetImagePreview, rememberLocalImagePreview, resolveImagePreview } from '@/utils/imagePreview'
+import { resolveImagePreview } from '@/utils/imagePreview'
 import { notify } from '@/utils/notify'
 import {
   DEFAULT_CODEX_REASONING,
@@ -110,6 +104,9 @@ const sentHistoryIndex = shallowRef(-1)
 const sentHistorySnapshot = shallowRef<string[]>([])
 const sentHistoryDraft = shallowRef('')
 const attachingImageTasks = shallowRef(0)
+const sendAdmissionPending = shallowRef(false)
+const effortPopoverOpen = shallowRef(false)
+const effortPreviewIndex = shallowRef(-1)
 let applyingSentHistory = false
 const COMPOSER_MAX_COLLAPSED = 200
 const COMPOSER_MAX_EXPANDED = 480
@@ -268,9 +265,9 @@ const slashCommands = computed<SlashCommand[]>(() => {
         run: () => runAddCommand(),
       },
       {
-        id: 'compact',
-        label: '/compact',
-        description: t('slash.compact'),
+        id: 'summarize',
+        label: '/summarize',
+        description: t('slash.summarizeLocal'),
         run: compactComposerSession,
       },
       {
@@ -625,6 +622,7 @@ const reasoningOptions = computed(() => {
       { effort: 'max', displayName: 'Max', description: 'Maximum' },
     ]
   }
+  if (isGeminiMode.value) return []
   const fromModel = selectedModel.value?.supportedReasoningEfforts ?? []
   return fromModel.length ? fromModel : [...DEFAULT_CODEX_REASONING]
 })
@@ -683,6 +681,29 @@ const selectedEffortLabel = computed(() => {
   return effort.charAt(0).toUpperCase() + effort.slice(1)
 })
 
+const effortOptions = computed(() => reasoningOptions.value.map((item) => ({
+  value: item.effort,
+  label: 'displayName' in item && item.displayName ? String(item.displayName) : item.effort,
+})))
+const effortCurrentIndex = computed(() => Math.max(0, effortOptions.value.findIndex((item) => item.value === displayEffort.value)))
+const effortDisplayIndex = computed(() => effortPreviewIndex.value >= 0 ? effortPreviewIndex.value : effortCurrentIndex.value)
+const effortPopoverLabel = computed(() => effortOptions.value[effortDisplayIndex.value]?.label || selectedEffortLabel.value)
+
+function previewEffort(event: Event): void {
+  effortPreviewIndex.value = Number((event.target as HTMLInputElement).value)
+}
+
+function commitEffort(event: Event): void {
+  const index = Number((event.target as HTMLInputElement).value)
+  const value = effortOptions.value[index]?.value
+  effortPreviewIndex.value = -1
+  if (value) void onEffortChange(value)
+}
+
+watch(effortPopoverOpen, (open) => {
+  if (!open) effortPreviewIndex.value = -1
+})
+
 function relatedQueueRows<T extends { id: string; createdAt: number }>(
   record: Record<string, T[]>,
   sessionId: string,
@@ -734,6 +755,7 @@ const canSendDuringWorkspaceSwitch = computed(() => Boolean(
  */
 const canSend = computed(() => {
   const hasContent = Boolean(modelValue.value.trim()) || attachedImages.value.length > 0
+  if (sendAdmissionPending.value) return false
   if (attachingImages.value) return false
   if (!isArenaPane.value && workspaceStore.switchingWorkspace && !canSendDuringWorkspaceSwitch.value) return false
   if (isArenaPane.value && workspaceStore.switchingWorkspace && !composerSessionId.value) return false
@@ -867,7 +889,9 @@ function resize(): void {
   void nextTick(() => {
     const textarea = composer.value?.querySelector('textarea')
     if (!textarea) return
-    const max = composerExpanded.value ? COMPOSER_MAX_EXPANDED : COMPOSER_MAX_COLLAPSED
+    const max = composerExpanded.value
+      ? Math.min(COMPOSER_MAX_EXPANDED, Math.max(220, Math.floor(window.innerHeight * 0.44)))
+      : Math.min(COMPOSER_MAX_COLLAPSED, Math.max(120, Math.floor(window.innerHeight * 0.3)))
     textarea.style.height = '0px'
     if (composerExpanded.value) {
       textarea.style.height = `${max}px`
@@ -1261,8 +1285,6 @@ async function prepareArenaSession(
   return sessionId
 }
 
-let sendAdmissionPending = false
-
 async function performSend(): Promise<void> {
   const message = modelValue.value.trim()
   const images = [...attachedImages.value]
@@ -1374,12 +1396,12 @@ async function performSend(): Promise<void> {
 }
 
 async function send(): Promise<void> {
-  if (sendAdmissionPending) return
-  sendAdmissionPending = true
+  if (sendAdmissionPending.value) return
+  sendAdmissionPending.value = true
   try {
     await performSend()
   } finally {
-    sendAdmissionPending = false
+    sendAdmissionPending.value = false
   }
 }
 
@@ -1419,7 +1441,12 @@ function collectImageFiles(list: FileList | File[] | null | undefined): File[] {
   return Array.from(list).filter(isImageFile)
 }
 
+const MAX_PASTED_IMAGE_BYTES = 12 * 1024 * 1024
+
 async function fileToBase64(file: File): Promise<string> {
+  if (file.size > MAX_PASTED_IMAGE_BYTES) {
+    throw new Error(t('chat.imageTooLarge', { size: '12 MB' }))
+  }
   const buffer = await file.arrayBuffer()
   const bytes = new Uint8Array(buffer)
   let binary = ''
@@ -1434,10 +1461,7 @@ async function loadAttachmentPreview(path: string): Promise<void> {
   if (!path || !attachedImages.value.includes(path) || attachmentPreviews.value[path]) return
   const url = await resolveImagePreview(path)
   if (!url) return
-  if (!attachedImages.value.includes(path)) {
-    forgetImagePreview(path)
-    return
-  }
+  if (!attachedImages.value.includes(path)) return
   attachmentPreviews.value = { ...attachmentPreviews.value, [path]: url }
 }
 
@@ -1446,7 +1470,8 @@ function releaseAttachmentPreviews(paths: string[]): void {
   let changed = false
   for (const path of paths) {
     if (attachedImages.value.includes(path)) continue
-    forgetImagePreview(path)
+    const preview = next[path] || ''
+    if (preview.startsWith('blob:')) URL.revokeObjectURL(preview)
     if (!(path in next)) continue
     delete next[path]
     changed = true
@@ -1484,7 +1509,6 @@ async function attachImageFiles(files: File[]): Promise<void> {
       if (path && !existingImages.includes(path) && !added.includes(path)) {
         added.push(path)
         const localPreview = URL.createObjectURL(file)
-        rememberLocalImagePreview(path, localPreview)
         previewPatch[path] = localPreview
       }
     }
@@ -1799,12 +1823,13 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
           :key="path"
           class="group relative overflow-hidden rounded-lg border border-border/70 bg-muted/40"
         >
-          <img
+          <AttachmentImage
             v-if="attachmentPreviews[path]"
-            :src="attachmentPreviews[path]"
+            :source="attachmentPreviews[path]"
+            kind="preview"
             :alt="attachmentName(path)"
-            class="h-14 w-14 object-cover"
-          >
+            image-class="h-14 w-14 object-cover"
+          />
           <div v-else class="flex h-14 w-14 items-center justify-center px-1">
             <ImageIcon :size="14" class="text-muted-foreground" />
           </div>
@@ -1835,7 +1860,12 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               <span class="truncate">{{ t('chat.queuedCount', { count: queuedWaitingCount || queuedFailedCount || activeQueuedMessages.length }) }}</span>
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="start" side="top" class="w-[26rem] max-w-[calc(100vw-2rem)] p-2">
+          <PopoverContent
+            align="start"
+            side="top"
+            class="p-2"
+            :class="isArenaPane ? 'w-[min(22rem,calc(100vw-2rem))]' : 'w-[26rem] max-w-[calc(100vw-2rem)]'"
+          >
             <div class="flex items-start justify-between gap-2 px-2 pb-2 pt-1">
               <div class="min-w-0">
                 <p class="text-xs font-medium">{{ t('chat.queuedTitle') }}</p>
@@ -2159,27 +2189,43 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             :search-placeholder="t('settings.modelSearch')"
           />
 
-          <Select
-            :model-value="displayEffort"
-            @update:model-value="(value) => onEffortChange(String(value))"
-          >
-            <SelectTrigger
-              :aria-label="t('chat.reasoning')"
-              class="hidden h-7 w-auto min-w-0 max-w-24 gap-1 border-0 bg-transparent px-2 text-[11px] font-normal text-muted-foreground shadow-none md:flex"
-            >
-              <Zap :size="11" class="shrink-0" />
-              <SelectValue>{{ selectedEffortLabel }}</SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem
-                v-for="option in reasoningOptions"
-                :key="option.effort"
-                :value="option.effort"
+          <Popover v-if="effortOptions.length > 1" v-model:open="effortPopoverOpen">
+            <PopoverTrigger as-child>
+              <Button
+                type="button"
+                variant="ghost"
+                class="hidden h-7 max-w-28 gap-1 px-2 text-[11px] font-normal text-muted-foreground md:flex"
+                :aria-label="t('chat.reasoning')"
               >
-                {{ 'displayName' in option ? option.displayName : option.effort }}
-              </SelectItem>
-            </SelectContent>
-          </Select>
+                <Zap :size="11" class="shrink-0" />
+                <span class="truncate">{{ effortPopoverLabel }}</span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" side="top" :side-offset="10" class="w-72 p-4">
+              <div class="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <p class="text-sm font-medium">{{ t('chat.reasoning') }} · {{ effortPopoverLabel }}</p>
+                  <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('chat.effortSliderHint') }}</p>
+                </div>
+                <Zap :size="15" class="text-primary" />
+              </div>
+              <input
+                type="range"
+                min="0"
+                :max="Math.max(0, effortOptions.length - 1)"
+                step="1"
+                :value="effortDisplayIndex"
+                class="effort-slider w-full"
+                :aria-label="t('chat.reasoning')"
+                @input="previewEffort"
+                @change="commitEffort"
+              >
+              <div class="mt-2 flex justify-between text-[10px] text-muted-foreground">
+                <span>{{ effortOptions[0]?.label }}</span>
+                <span>{{ effortOptions.at(-1)?.label }}</span>
+              </div>
+            </PopoverContent>
+          </Popover>
 
           <SimpleTooltip :content="contextUsageTooltip">
             <span
@@ -2226,30 +2272,47 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             </span>
           </SimpleTooltip>
 
-          <Button
-            v-if="activeRuntimeTurnRunning"
-            type="button"
-            variant="ghost"
-            size="sm"
-            class="h-7 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
-            :disabled="stopDisabled"
-            :aria-label="t('chat.stopLabel')"
-            @click.stop.prevent="onStop"
-          >
-            <Octagon :size="12" class="mr-1" fill="currentColor" />
-            {{ stopDisabled ? t('chat.stopping') : t('chat.stop') }}
-          </Button>
-          <SimpleTooltip :content="sendButtonLabel">
+          <template v-if="activeRuntimeTurnRunning">
+            <SimpleTooltip v-if="canSend" :content="t('chat.queueSend')">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                class="size-7 rounded-md text-muted-foreground hover:bg-muted"
+                :aria-label="t('chat.queueSend')"
+                @click="send"
+              >
+                <ArrowUp :size="14" stroke-width="2.4" />
+              </Button>
+            </SimpleTooltip>
+            <SimpleTooltip :content="stopDisabled ? t('chat.stopping') : t('chat.stop')">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                class="size-7 rounded-md text-destructive hover:bg-destructive/10 hover:text-destructive"
+                :disabled="stopDisabled"
+                :aria-label="t('chat.stopLabel')"
+                @click.stop.prevent="onStop"
+              >
+                <LoaderCircle v-if="stopDisabled" :size="14" class="animate-spin" />
+                <Octagon v-else :size="14" fill="currentColor" />
+              </Button>
+            </SimpleTooltip>
+          </template>
+          <SimpleTooltip v-else :content="sendButtonLabel">
             <Button
               type="button"
               size="icon-sm"
               class="size-7 rounded-md transition-opacity"
               :class="canSend ? 'opacity-100' : 'opacity-40'"
               :aria-label="sendButtonLabel"
+              :aria-busy="sendAdmissionPending || activeRuntimeSending"
               :disabled="!canSend"
               @click="send"
             >
-              <ArrowUp :size="15" stroke-width="2.5" />
+              <LoaderCircle v-if="sendAdmissionPending || activeRuntimeSending" :size="14" class="animate-spin" />
+              <ArrowUp v-else :size="15" stroke-width="2.5" />
             </Button>
           </SimpleTooltip>
         </div>

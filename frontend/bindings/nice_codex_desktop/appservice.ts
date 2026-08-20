@@ -79,6 +79,10 @@ export function CheckForUpdates(): $CancellablePromise<$models.UpdateInfo> {
     return $Call.ByID(3671876993);
 }
 
+export function CheckProviderConfiguration(providerID: string, force: boolean): $CancellablePromise<$models.ProviderConfigurationView> {
+    return $Call.ByID(1084288519, providerID, force);
+}
+
 export function CodexStatus(): $CancellablePromise<codex$0.Status> {
     return $Call.ByID(3760924599);
 }
@@ -521,6 +525,10 @@ export function RefreshWorkspace(): $CancellablePromise<$models.WorkspaceInfo> {
     return $Call.ByID(2632368162);
 }
 
+export function ReloadProviderConfiguration(providerID: string): $CancellablePromise<$models.ProviderApplyResult> {
+    return $Call.ByID(1515072116, providerID);
+}
+
 export function RenameClaudeSession(sessionID: string, name: string): $CancellablePromise<void> {
     return $Call.ByID(2613138530, sessionID, name);
 }
@@ -542,6 +550,10 @@ export function ResizeTerminal(processID: string, rows: number, cols: number): $
 
 export function ResolveServerRequest(requestKey: string, result: { [_ in string]?: any } | null): $CancellablePromise<void> {
     return $Call.ByID(3513618634, requestKey, result);
+}
+
+export function RestartProvider(providerID: string): $CancellablePromise<$models.ProviderApplyResult> {
+    return $Call.ByID(360590612, providerID);
 }
 
 export function RestoreCodexProviderRoute(): $CancellablePromise<$models.ProviderRouterView> {
@@ -734,6 +746,10 @@ export function UnarchiveThread(threadID: string): $CancellablePromise<{ [_ in s
 
 export function UninstallPlugin(pluginID: string): $CancellablePromise<void> {
     return $Call.ByID(1232784559, pluginID);
+}
+
+export function UpdateProviderContextPolicy(providerID: string, tokens: number, threshold: number): $CancellablePromise<$models.ProviderApplyResult> {
+    return $Call.ByID(2761509943, providerID, tokens, threshold);
 }
 
 export function UpdateSessionMemories(request: $models.SessionMemoriesRequest): $CancellablePromise<void> {
