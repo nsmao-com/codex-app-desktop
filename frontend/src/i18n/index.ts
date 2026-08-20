@@ -1947,10 +1947,14 @@ Object.assign(messages['en-US'].slash, {
 Object.assign(messages['zh-CN'].chat, {
   effortSliderHint: '拖动选择推理强度，释放后应用到当前会话与后续回合。',
   imageTooLarge: '图片过大，单张不能超过 {size}。',
+  openImagePreview: '放大查看 {name}',
+  imagePreview: '图片预览',
 })
 Object.assign(messages['en-US'].chat, {
   effortSliderHint: 'Drag to choose reasoning effort; release to apply it to this session and future turns.',
   imageTooLarge: 'The image is too large. Each image must be under {size}.',
+  openImagePreview: 'Enlarge {name}',
+  imagePreview: 'Image preview',
 })
 Object.assign(messages['zh-CN'], {
   providerConfig: {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ImageOff, RefreshCw } from '@lucide/vue'
 import { computed, onBeforeUnmount, shallowRef, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
@@ -16,6 +17,8 @@ const props = withDefaults(defineProps<{
   alt: '',
   imageClass: '',
 })
+
+const { t } = useI18n()
 
 const preview = shallowRef('')
 const state = shallowRef<'loading' | 'loaded' | 'failed'>('loading')
@@ -61,12 +64,12 @@ onBeforeUnmount(() => { generation += 1 })
 </script>
 
 <template>
-  <div class="relative overflow-hidden rounded-lg border border-border/60 bg-muted/30">
+  <div class="relative max-w-full overflow-hidden rounded-lg border border-border/60 bg-muted/30">
     <button
       v-if="state === 'loaded' && preview"
       type="button"
-      class="block cursor-zoom-in"
-      :aria-label="`${label} · preview`"
+      class="block max-w-full cursor-zoom-in"
+      :aria-label="t('chat.openImagePreview', { name: label })"
       @click="dialogOpen = true"
     >
       <img
@@ -85,7 +88,7 @@ onBeforeUnmount(() => { generation += 1 })
         <p class="max-w-40 truncate">{{ label }}</p>
         <Button variant="outline" size="sm" class="h-7 text-[11px]" @click="void load(true)">
           <RefreshCw :size="12" class="mr-1.5" />
-          Retry
+          {{ t('common.retry') }}
         </Button>
       </div>
     </div>
@@ -94,7 +97,7 @@ onBeforeUnmount(() => { generation += 1 })
   <Dialog v-model:open="dialogOpen">
     <DialogContent class="flex max-h-[92vh] max-w-[94vw] flex-col p-3 sm:max-w-[90vw]">
       <DialogTitle class="sr-only">{{ label }}</DialogTitle>
-      <DialogDescription class="sr-only">Image preview</DialogDescription>
+      <DialogDescription class="sr-only">{{ t('chat.imagePreview') }}</DialogDescription>
       <div class="min-h-0 flex-1 overflow-auto rounded-lg bg-black/5 p-2 dark:bg-black/30">
         <img :src="preview" :alt="label" class="mx-auto max-h-[85vh] max-w-full object-contain" @error="failed">
       </div>

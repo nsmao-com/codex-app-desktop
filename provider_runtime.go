@@ -70,30 +70,30 @@ type AgentProviderReasoningEffort struct {
 }
 
 type ProviderContextPolicyView struct {
-	Tokens                 int64  `json:"tokens"`
-	ConfiguredTokens       int64  `json:"configuredTokens"`
-	Source                 string `json:"source"`
-	Writable               bool   `json:"writable"`
-	TokenMode              string `json:"tokenMode"`
-	TokenMinimum           int64  `json:"tokenMinimum"`
-	TokenMaximum           int64  `json:"tokenMaximum"`
-	TokenStep              int64  `json:"tokenStep"`
-	IsFallback             bool   `json:"isFallback"`
-	CompactStrategy        string `json:"compactStrategy"`
-	CompactAvailable       bool   `json:"compactAvailable"`
-	AutoCompactSupported   bool   `json:"autoCompactSupported"`
-	AutoCompactEnabled     bool   `json:"autoCompactEnabled"`
-	AutoCompactToggleable  bool   `json:"autoCompactToggleable"`
-	ThresholdConfigurable  bool   `json:"thresholdConfigurable"`
-	ThresholdConfigured    bool   `json:"thresholdConfigured"`
-	AutoCompactThreshold   int64  `json:"autoCompactThreshold"`
-	ThresholdUnit          string `json:"thresholdUnit"`
-	ThresholdMinimum       int64  `json:"thresholdMinimum"`
-	ThresholdMaximum       int64  `json:"thresholdMaximum"`
-	ThresholdStep          int64  `json:"thresholdStep"`
-	PruneSupported         bool   `json:"pruneSupported"`
-	PruneEnabled           bool   `json:"pruneEnabled"`
-	Description            string `json:"description"`
+	Tokens                int64  `json:"tokens"`
+	ConfiguredTokens      int64  `json:"configuredTokens"`
+	Source                string `json:"source"`
+	Writable              bool   `json:"writable"`
+	TokenMode             string `json:"tokenMode"`
+	TokenMinimum          int64  `json:"tokenMinimum"`
+	TokenMaximum          int64  `json:"tokenMaximum"`
+	TokenStep             int64  `json:"tokenStep"`
+	IsFallback            bool   `json:"isFallback"`
+	CompactStrategy       string `json:"compactStrategy"`
+	CompactAvailable      bool   `json:"compactAvailable"`
+	AutoCompactSupported  bool   `json:"autoCompactSupported"`
+	AutoCompactEnabled    bool   `json:"autoCompactEnabled"`
+	AutoCompactToggleable bool   `json:"autoCompactToggleable"`
+	ThresholdConfigurable bool   `json:"thresholdConfigurable"`
+	ThresholdConfigured   bool   `json:"thresholdConfigured"`
+	AutoCompactThreshold  int64  `json:"autoCompactThreshold"`
+	ThresholdUnit         string `json:"thresholdUnit"`
+	ThresholdMinimum      int64  `json:"thresholdMinimum"`
+	ThresholdMaximum      int64  `json:"thresholdMaximum"`
+	ThresholdStep         int64  `json:"thresholdStep"`
+	PruneSupported        bool   `json:"pruneSupported"`
+	PruneEnabled          bool   `json:"pruneEnabled"`
+	Description           string `json:"description"`
 }
 
 type ProviderConfigurationView struct {
