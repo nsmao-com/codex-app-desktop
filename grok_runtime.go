@@ -844,6 +844,7 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 	var streamSequence uint64
 	var streamedThought strings.Builder
 	var thoughtSequence uint64
+	directTools := make(map[string]GrokMessage)
 	pollCtx, stopToolPolling := context.WithCancel(ctx)
 	defer stopToolPolling()
 	toolPollingDone := make(chan struct{})
@@ -873,6 +874,23 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 			}))
 			return
 		}
+		if kind == "tool" {
+			item, ok := decodeExternalToolTimelineItem(delta)
+			if !ok {
+				return
+			}
+			callID := firstMapString(item, "id")
+			previous := directTools[callID]
+			message := grokMessageFromStreamTool(item, previous)
+			if message.ID == "" {
+				return
+			}
+			directTools[callID] = message
+			s.emitGrokEvent("activity.tool", grokBackendBuild, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{
+				"message": message,
+			}))
+			return
+		}
 		streamedText.WriteString(delta)
 		streamSequence++
 		s.emitGrokEvent("text.delta", grokBackendBuild, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{
@@ -896,6 +914,65 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 		s.emitGrokEvent("session.bound", grokBackendBuild, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{"sessionId": nativeID}))
 	}
 	return usage, err
+}
+
+func grokToolMessageID(callID string) string {
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return ""
+	}
+	return "grok-tool-" + callID
+}
+
+func grokMessageFromStreamTool(item map[string]any, previous GrokMessage) GrokMessage {
+	callID := strings.TrimSpace(firstMapString(item, "id"))
+	if callID == "" {
+		return GrokMessage{}
+	}
+	name := strings.TrimSpace(firstMapString(item, "tool"))
+	if name == "" || name == "tool" {
+		name = previous.ToolName
+	}
+	if name == "" {
+		name = "tool"
+	}
+	args := stringifyGrokArgs(item["arguments"])
+	output := strings.TrimSpace(textFromExternalValue(item["contentItems"]))
+	if output == "" {
+		output = strings.TrimSpace(stringifyGrokArgs(item["contentItems"]))
+	}
+	toolKind, filePath, command, detail, diff := classifyGrokTool(name, args, output)
+	if filePath == "" {
+		filePath = previous.Path
+	}
+	if command == "" {
+		command = previous.Command
+	}
+	if detail == "" {
+		detail = previous.Detail
+	}
+	if diff == "" {
+		diff = previous.Diff
+	}
+	if output == "" {
+		output = previous.Text
+	}
+	status := strings.TrimSpace(firstMapString(item, "status"))
+	if status == "" {
+		status = previous.Status
+	}
+	if status == "" {
+		status = "inProgress"
+	}
+	createdAt := previous.CreatedAt
+	if createdAt <= 0 {
+		createdAt = time.Now().Unix()
+	}
+	return GrokMessage{
+		ID: grokToolMessageID(callID), Role: "tool", Text: output, ToolName: name,
+		ToolKind: toolKind, Command: command, Path: filePath, Detail: detail,
+		Diff: diff, Status: status, CreatedAt: createdAt,
+	}
 }
 
 // pollGrokBuildActivity mirrors provider-owned assistant/tool ordering while the
@@ -1274,7 +1351,7 @@ func readGrokNativeMessages(sessionDir string) ([]GrokMessage, error) {
 				}
 				toolKind, filePath, command, detail, diff := classifyGrokTool(toolName, meta.Args, "")
 				idx := appendMsg(GrokMessage{
-					ID:        fmt.Sprintf("%s-pending-%s", base, callID),
+					ID:        grokToolMessageID(callID),
 					Role:      "tool",
 					Text:      "",
 					ToolName:  toolName,
@@ -1338,6 +1415,7 @@ func readGrokNativeMessages(sessionDir string) ([]GrokMessage, error) {
 				}
 			}
 			appendMsg(GrokMessage{
+				ID:   grokToolMessageID(callID),
 				Role: "tool", Text: output, ToolName: toolName, ToolKind: toolKind,
 				Path: filePath, Command: command, Detail: detail, Diff: diff, CreatedAt: created,
 			})

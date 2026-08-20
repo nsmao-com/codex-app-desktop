@@ -1181,6 +1181,7 @@ func externalCommandArgs(provider, sessionID, workspace string, settings UserSet
 	switch provider {
 	case "claude":
 		args := []string{"-p", prompt, "--output-format", "stream-json", "--include-partial-messages", "--verbose"}
+		args = appendClaudeCompatibilityArgs(args, model)
 		if sessionID != "" {
 			args = append(args, "--resume", sessionID)
 		} else {
@@ -1247,6 +1248,19 @@ func externalCommandArgs(provider, sessionID, workspace string, settings UserSet
 	default:
 		return nil, generatedSessionID
 	}
+}
+
+func appendClaudeCompatibilityArgs(args []string, model string) []string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" || model == "sonnet" || model == "opus" || model == "haiku" || model == "fable" || strings.HasPrefix(model, "claude-") {
+		return args
+	}
+	return append(args,
+		"--system-prompt", "You are a coding assistant working in the current workspace. Follow the user's request and use the available tools when needed. Do not modify files unless the user explicitly asks.",
+		"--disable-slash-commands",
+		"--strict-mcp-config",
+		"--tools", "Read,Glob,Grep,Bash,Edit,Write",
+	)
 }
 
 func isExternalEffort(value string, options ...string) bool {
@@ -2051,7 +2065,7 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 // releases, so the parser intentionally looks through part/data/state/tool
 // envelopes instead of relying on one exact version.
 func parseExternalToolEvent(provider string, event map[string]any) (map[string]any, bool) {
-	if provider != "gemini" && provider != "opencode" {
+	if provider != "gemini" && provider != "opencode" && provider != "grok" {
 		return nil, false
 	}
 	eventType := strings.ToLower(firstMapString(event, "type", "event", "kind"))
@@ -2127,6 +2141,9 @@ func parseExternalToolEvent(provider string, event map[string]any) (map[string]a
 		input = state["arguments"]
 	}
 	if input == nil {
+		input = tool["rawInput"]
+	}
+	if input == nil {
 		input = tool["input"]
 	}
 	if input == nil {
@@ -2146,6 +2163,9 @@ func parseExternalToolEvent(provider string, event map[string]any) (map[string]a
 		output = state["result"]
 	}
 	if output == nil {
+		output = tool["rawOutput"]
+	}
+	if output == nil {
 		output = tool["output"]
 	}
 	if output == nil {
@@ -2153,6 +2173,9 @@ func parseExternalToolEvent(provider string, event map[string]any) (map[string]a
 	}
 	if output == nil {
 		output = event["output"]
+	}
+	if output == nil {
+		output = event["content"]
 	}
 	item := map[string]any{
 		"id":           id,

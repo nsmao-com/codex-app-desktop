@@ -786,6 +786,7 @@ func (s *AppService) CompactClaudeSession(sessionID string) (ClaudeCompactionRes
 	settings.Model = model
 	settings.Effort = effort
 	args := []string{"-p", "/compact", "--resume", nativeSessionID, "--output-format", "stream-json", "--verbose"}
+	args = appendClaudeCompatibilityArgs(args, model)
 	if model != "" {
 		args = append(args, "--model", model)
 	}

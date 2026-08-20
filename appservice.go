@@ -3609,6 +3609,15 @@ func readSettings(path string) (UserSettings, error) {
 	settings.ClaudeModel = sanitizeShortText(settings.ClaudeModel, 160)
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
 	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
+	migratedGeminiModel := false
+	geminiHome, _ := os.UserHomeDir()
+	if nativeModel := readEnvValue(filepath.Join(geminiHome, ".gemini", ".env"), "GEMINI_MODEL"); nativeModel != "" {
+		legacy := strings.ToLower(strings.TrimSpace(settings.GeminiModel))
+		if legacy == "" || legacy == "gemini-2.5-pro" || legacy == "gemini-2.5-flash" {
+			settings.GeminiModel = nativeModel
+			migratedGeminiModel = true
+		}
+	}
 	settings.GeminiWorkspace = strings.TrimSpace(settings.GeminiWorkspace)
 	settings.GeminiCustomModels = sanitizeCustomModels(settings.GeminiCustomModels)
 	if !isAllowed(settings.GeminiSandbox, "read-only", "workspace-write", "danger-full-access") {
@@ -3667,8 +3676,8 @@ func readSettings(path string) (UserSettings, error) {
 	if _, err := validateWorkspace(settings.OpenCodeWorkspace); err != nil {
 		settings.OpenCodeWorkspace = ""
 	}
-	// Persist the migration so a later empty/invalid workspace can't reopen the wizard.
-	if migratedOnboarding {
+	// Persist migrations so subsequent launches and the frontend see the same values.
+	if migratedOnboarding || migratedGeminiModel {
 		_ = writeSettings(path, settings)
 	}
 	return settings, nil

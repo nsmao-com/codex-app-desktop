@@ -225,6 +225,36 @@ function finalizeGrokMessages(messages: GrokMessage[], status: string): GrokMess
   return changed ? next : messages
 }
 
+function mergeGrokActivitySnapshot(current: GrokMessage[], incoming: GrokMessage[]): GrokMessage[] {
+  const result = [...incoming]
+  const incomingById = new Map(
+    incoming.filter((message) => message.id).map((message, index) => [message.id, index]),
+  )
+  for (const message of current) {
+    const index = message.id ? incomingById.get(message.id) : undefined
+    if (index !== undefined) {
+      const next = result[index]
+      if (!next) continue
+      result[index] = {
+        ...message,
+        ...next,
+        text: next.text || message.text,
+        toolName: next.toolName || message.toolName,
+        toolKind: next.toolKind || message.toolKind,
+        command: next.command || message.command,
+        path: next.path || message.path,
+        detail: next.detail || message.detail,
+        diff: next.diff || message.diff,
+      }
+      continue
+    }
+    if ((message.role || '').toLowerCase() === 'tool' || message.toolName) {
+      result.push(message)
+    }
+  }
+  return result
+}
+
 function mergeGrokDiskWithCurrent(
   disk: GrokMessage[],
   current: GrokMessage[],
@@ -1530,6 +1560,29 @@ export const useGrokStore = defineStore('grok', () => {
     liveActivityBySession.value = nextActivity
   }
 
+  function materializeLiveGrokTools(sessionId: string, status: string): void {
+    const key = liveWriteKey(sessionId) || sessionId
+    const activity = liveActivityBySession.value[key] || []
+    const tools = activity.filter((message) =>
+      (message.role || '').toLowerCase() === 'tool' || Boolean(message.toolName),
+    )
+    if (!tools.length) return
+    const current = mergedSessionMessages(key)
+    const byId = new Map(current.filter((message) => message.id).map((message, index) => [message.id, index]))
+    const next = [...current]
+    for (const tool of tools) {
+      const message = { ...tool, status: isActiveGrokStatus(tool.status) ? status : tool.status }
+      const index = message.id ? byId.get(message.id) : undefined
+      if (index !== undefined) {
+        next[index] = { ...next[index], ...message }
+      } else {
+        next.push(message)
+        if (message.id) byId.set(message.id, next.length - 1)
+      }
+    }
+    replaceSessionMessages(key, next)
+  }
+
   function liveWriteKey(eventSessionId: string): string {
     // Event routing must not depend on whichever conversation the user is viewing.
     return resolveSessionId(eventSessionId) || eventSessionId
@@ -1669,6 +1722,36 @@ export const useGrokStore = defineStore('grok', () => {
       scheduleLiveStreamFlush()
       return
     }
+    if (type === 'activity.tool') {
+      if (turnId && finalizedTurnIds.has(turnId)) return
+      if (!sessionId || !grokEventMatchesCurrentTurn(sessionId, turnId, eventClientTurnId)) return
+      const raw = data.message
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return
+      const message = raw as GrokMessage
+      if (!message.id) return
+      const key = liveWriteKey(sessionId) || sessionId
+      const current = liveActivityBySession.value[key] || []
+      const index = current.findIndex((item) => item.id === message.id)
+      const next = [...current]
+      if (index >= 0) {
+        const previous = next[index]
+        next[index] = {
+          ...previous,
+          ...message,
+          text: message.text || previous?.text || '',
+          toolName: message.toolName || previous?.toolName || '',
+          toolKind: message.toolKind || previous?.toolKind || '',
+          command: message.command || previous?.command || '',
+          path: message.path || previous?.path || '',
+          detail: message.detail || previous?.detail || '',
+          diff: message.diff || previous?.diff || '',
+        }
+      } else {
+        next.push(message)
+      }
+      liveActivityBySession.value = { ...liveActivityBySession.value, [key]: next }
+      return
+    }
     if (type === 'activity.snapshot') {
       if (turnId && finalizedTurnIds.has(turnId)) return
       if (!sessionId) return
@@ -1682,7 +1765,10 @@ export const useGrokStore = defineStore('grok', () => {
       )
       const messages = (Array.isArray(data.messages) ? data.messages as GrokMessage[] : [])
         .filter((message) => !message.id || !historyIds.has(message.id))
-      liveActivityBySession.value = { ...liveActivityBySession.value, [key]: messages }
+      liveActivityBySession.value = {
+        ...liveActivityBySession.value,
+        [key]: mergeGrokActivitySnapshot(liveActivityBySession.value[key] || [], messages),
+      }
       return
     }
     if (type === 'text.delta') {
@@ -1767,6 +1853,12 @@ export const useGrokStore = defineStore('grok', () => {
       streamSequenceByTurn.delete(`${turnId}:text`)
       streamSequenceByTurn.delete(`${turnId}:thought`)
       const key = liveWriteKey(sessionId) || sessionId
+      const terminalStatus = type === 'turn.failed'
+        ? 'failed'
+        : type === 'turn.interrupted'
+          ? 'interrupted'
+          : 'completed'
+      materializeLiveGrokTools(key, terminalStatus)
       // Capture metrics before clearTurnState wipes activeTurn.
       applyTurnUsageMetrics(key, turnId, data)
       // Release the turn lock immediately so a slow openSession cannot race with
@@ -1801,11 +1893,6 @@ export const useGrokStore = defineStore('grok', () => {
         if (terminalBackend === backendId.value) {
           try {
             if (targetSession && !targetSession.startsWith('pending-grok-')) {
-              const terminalStatus = type === 'turn.failed'
-                ? 'failed'
-                : type === 'turn.interrupted'
-                  ? 'interrupted'
-                  : 'completed'
               await openSession(targetSession, { terminalStatus, activate: false })
             } else {
               await loadSessions(true)
@@ -2137,7 +2224,7 @@ export const useGrokStore = defineStore('grok', () => {
       const split = keepLoadedPrefix
         ? splitGrokHistoryPrefix(messages, cached)
         : { prefix: [] as GrokMessage[], current: cached }
-      const merged = mergeGrokDiskWithCurrent(messages, split.current, busy)
+      const merged = mergeGrokDiskWithCurrent(messages, split.current, busy || Boolean(options?.terminalStatus))
       const combined = split.prefix.length ? [...split.prefix, ...merged] : merged
       const nextMessages = terminalStatus ? finalizeGrokMessages(combined, terminalStatus) : combined
       replaceSessionMessages(targetId, nextMessages)
