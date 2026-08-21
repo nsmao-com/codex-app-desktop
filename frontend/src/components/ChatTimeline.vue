@@ -1,17 +1,10 @@
 <script setup lang="ts">
-import { ArrowDown, ChevronsDown, ChevronsUp, LoaderCircle, RefreshCw } from '@lucide/vue'
+import { ArrowDown, LoaderCircle, RefreshCw } from '@lucide/vue'
 import { computed, nextTick, onMounted, onUnmounted, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
-import {
-  SimpleTooltip,
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
 import { useClaudeStore, useCodexStore, useGrokStore } from '@/stores'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import type { TimelineItem } from '@/types/codex'
@@ -324,65 +317,6 @@ const turnOrder = computed(() => {
 const turnIndexById = computed(() => new Map(
   turnOrder.value.map((turnId, index) => [turnId, index]),
 ))
-
-const userMarkers = computed(() => {
-  const markers: Array<{
-    groupIndex: number
-    index: number
-    preview: string
-    failed: boolean
-  }> = []
-  groups.value.forEach((group, groupIndex) => {
-    if (group.kind !== 'user') return
-    const text = group.items.map((item) => item.text).join(' ').replace(/\s+/g, ' ').trim()
-    const preview = text
-      ? (text.length > 80 ? `${text.slice(0, 80)}…` : text)
-      : t('chat.userMessageFallback', { index: markers.length + 1 })
-    markers.push({
-      groupIndex,
-      index: markers.length + 1,
-      preview,
-      failed: group.items.some((item) => item.failed),
-    })
-  })
-  return markers
-})
-
-/** Cap rail DOM nodes on very long threads; keep first/last + evenly sampled ticks. */
-const visibleUserMarkers = computed(() => {
-  const all = userMarkers.value
-  if (all.length <= 36) return all
-  const out: typeof all = []
-  const last = all.length - 1
-  const slots = 34
-  const picked = new Set<number>([0, last])
-  for (let i = 1; i <= slots; i += 1) {
-    picked.add(Math.round((i / (slots + 1)) * last))
-  }
-  ;[...picked].sort((a, b) => a - b).forEach((index) => {
-    const marker = all[index]
-    if (marker) out.push(marker)
-  })
-  return out
-})
-
-/** Tall enough to read; only compresses when markers exceed the track. */
-const userNavRailStyle = computed(() => {
-  const count = visibleUserMarkers.value.length
-  if (count <= 0) return undefined
-  if (count === 1) return { height: '16px' }
-  // Ideal center-to-center gap before compression.
-  const idealStep = 17
-  const idealHeight = Math.round((count - 1) * idealStep + 14)
-  // ~48vh keeps the rail usable without dominating the chat pane.
-  return { height: `min(${idealHeight}px, 48vh, 440px)` }
-})
-
-function markerTopPercent(index: number): string {
-  const count = visibleUserMarkers.value.length
-  if (count <= 1) return '50%'
-  return `${(index / (count - 1)) * 100}%`
-}
 
 const renderedGroups = computed(() => {
   const all = groups.value
@@ -766,42 +700,7 @@ async function shiftRenderWindow(nextStart: number, nextEnd: number, anchorIndex
   updateJumpBottom()
 }
 
-async function ensureGroupRendered(groupIndex: number): Promise<void> {
-  if (groupIndex >= renderWindowStart.value && groupIndex < renderWindowEnd.value) return
-  const total = groups.value.length
-  let start = Math.max(0, groupIndex - Math.floor(RENDER_PAGE_GROUPS / 2))
-  let end = Math.min(total, start + MAX_RENDER_GROUPS)
-  start = Math.max(0, end - MAX_RENDER_GROUPS)
-  renderWindowStart.value = start
-  renderWindowEnd.value = end
-  await nextTick()
-  await waitFrame()
-}
-
-async function jumpToUserMessage(groupIndex: number): Promise<void> {
-  unlockFromBottom()
-  await ensureGroupRendered(groupIndex)
-  const byData = contentRef.value?.querySelector(`[data-group-index="${groupIndex}"]`) as HTMLElement | null
-  const byTurn = groups.value[groupIndex]
-    ? document.getElementById(`conversation-turn-${groups.value[groupIndex].turnId}`)
-    : null
-  ;(byData || byTurn)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  updateJumpBottom()
-}
-
-async function scrollToTop(): Promise<void> {
-  unlockFromBottom()
-  const container = scrollAreaRef.value
-  if (!container) return
-  renderWindowStart.value = 0
-  renderWindowEnd.value = Math.min(groups.value.length, MAX_RENDER_GROUPS)
-  await nextTick()
-  await waitFrame()
-  container.scrollTo({ top: 0, behavior: 'smooth' })
-  updateJumpBottom()
-}
-
-/** User-clicked “scroll to bottom” — smooth like scrollToTop (auto-pin stays instant). */
+/** User-clicked “scroll to bottom” stays smooth while automatic pinning remains instant. */
 async function jumpToLatest(): Promise<void> {
   stickToBottom.value = true
   const container = scrollAreaRef.value
@@ -919,7 +818,11 @@ function onScroll(): void {
 
 /** Wheel/trackpad up = explicit leave-bottom intent (before layout resize can snap back). */
 function onWheel(event: WheelEvent): void {
-  if (event.deltaY < 0) unlockFromBottom()
+  if (event.deltaY >= 0) return
+  unlockFromBottom()
+  // Wheel fires before the browser applies the new scrollTop. Reveal the
+  // return affordance immediately; the next scroll event applies the threshold.
+  showJumpBottom.value = true
 }
 
 function onTouchStart(event: TouchEvent): void {
@@ -1059,12 +962,6 @@ onMounted(() => {
     scheduleScroll(true)
   })
   if (contentRef.value) resizeObserver.observe(contentRef.value)
-  const area = scrollAreaRef.value
-  area?.addEventListener('scroll', onScroll, { passive: true })
-  area?.addEventListener('wheel', onWheel, { passive: true })
-  area?.addEventListener('touchstart', onTouchStart, { passive: true })
-  area?.addEventListener('touchmove', onTouchMove, { passive: true })
-  area?.addEventListener('keydown', onKeyDown)
   if (timelineThreadId.value) {
     stickToBottom.value = true
     markProgrammaticScroll(1500)
@@ -1079,19 +976,21 @@ onUnmounted(() => {
   clearLoadTakingLongTimer()
   resizeObserver?.disconnect()
   resizeObserver = null
-  const area = scrollAreaRef.value
-  area?.removeEventListener('scroll', onScroll)
-  area?.removeEventListener('wheel', onWheel)
-  area?.removeEventListener('touchstart', onTouchStart)
-  area?.removeEventListener('touchmove', onTouchMove)
-  area?.removeEventListener('keydown', onKeyDown)
   if (scrollFrame.value !== null) cancelAnimationFrame(scrollFrame.value)
 })
 </script>
 
 <template>
   <div class="relative h-full min-h-0">
-    <div ref="scrollAreaRef" class="scrollbar-thin h-full overflow-y-auto pr-10">
+    <div
+      ref="scrollAreaRef"
+      class="scrollbar-thin h-full overflow-y-auto"
+      @scroll.passive="onScroll"
+      @wheel.passive="onWheel"
+      @touchstart.passive="onTouchStart"
+      @touchmove.passive="onTouchMove"
+      @keydown="onKeyDown"
+    >
       <div ref="contentRef" class="mx-auto max-w-[680px] space-y-6 px-4 pb-8 pt-5 sm:px-6">
         <div v-if="showLoadingPlaceholder" class="space-y-5" :aria-busy="true" :aria-label="$t('chat.loadingThread')">
           <p class="text-[12px] text-muted-foreground">{{ $t('chat.loadingThread') }}</p>
@@ -1220,74 +1119,63 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <button
-      v-if="showJumpBottom"
-      type="button"
-      class="absolute bottom-4 left-1/2 z-20 flex h-8 -translate-x-1/2 items-center gap-1.5 rounded-full border border-border/70 bg-card/95 px-3 text-[11px] text-muted-foreground shadow-sm backdrop-blur transition-colors hover:text-foreground"
-      @click="jumpToLatest"
-    >
-      <ArrowDown :size="12" />
-      {{ $t('chat.jumpLatest', 'Latest') }}
-    </button>
-
-    <nav
-      v-if="!isLoading && groups.length > 0"
-      class="pointer-events-none absolute right-1.5 top-1/2 z-40 flex -translate-y-1/2 flex-col items-center gap-2.5 sm:right-2"
-      :aria-label="$t('chat.userNavigation')"
-    >
-      <SimpleTooltip :content="$t('chat.scrollToTop')">
-        <button
-          type="button"
-          class="pointer-events-auto relative z-[1] grid size-8 place-items-center rounded-full border border-border bg-card/95 text-foreground/80 shadow-md backdrop-blur transition-colors hover:border-primary/40 hover:text-foreground"
-          :aria-label="$t('chat.scrollToTop')"
-          @click="scrollToTop"
-        >
-          <ChevronsUp :size="15" />
-        </button>
-      </SimpleTooltip>
-
-      <div
-        v-if="userMarkers.length > 0"
-        class="user-nav-rail pointer-events-auto relative z-[1] w-4 overflow-visible"
-        :style="userNavRailStyle"
+    <Transition name="jump-latest">
+      <button
+        v-if="showJumpBottom"
+        type="button"
+        class="jump-latest-button absolute bottom-4 left-1/2 z-20 flex h-8 items-center gap-1.5 rounded-full border border-border/70 bg-card/95 px-3 text-[11px] text-muted-foreground shadow-md backdrop-blur hover:text-foreground"
+        @click="jumpToLatest"
       >
-        <TooltipProvider :delay-duration="160" :disable-hoverable-content="true">
-          <Tooltip v-for="(marker, markerIndex) in visibleUserMarkers" :key="`${marker.groupIndex}:${marker.index}`">
-            <TooltipTrigger as-child>
-              <button
-                type="button"
-                class="user-nav-tick absolute left-1/2"
-                :class="marker.failed ? 'is-failed' : ''"
-                :style="{ top: markerTopPercent(markerIndex), zIndex: markerIndex + 1 }"
-                :aria-label="$t('chat.jumpUserMessage', { index: marker.index, preview: marker.preview })"
-                @click="jumpToUserMessage(marker.groupIndex)"
-              />
-            </TooltipTrigger>
-            <TooltipContent
-              side="left"
-              :side-offset="10"
-              class="max-w-[240px] border-0 bg-card px-2.5 py-1.5 text-left text-foreground shadow-lg"
-              arrow-class="!translate-y-0 border-0 bg-card fill-card shadow-none"
-            >
-              <p class="text-[10px] font-medium text-muted-foreground">
-                {{ $t('chat.userMessageLabel', { index: marker.index }) }}
-              </p>
-              <p class="mt-0.5 text-[11px] leading-4 text-foreground/90">{{ marker.preview }}</p>
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-      </div>
-
-      <SimpleTooltip :content="$t('chat.scrollToBottom')">
-        <button
-          type="button"
-          class="pointer-events-auto relative z-[1] grid size-8 place-items-center rounded-full border border-border bg-card/95 text-foreground/80 shadow-md backdrop-blur transition-colors hover:border-primary/40 hover:text-foreground"
-          :aria-label="$t('chat.scrollToBottom')"
-          @click="jumpToLatest"
-        >
-          <ChevronsDown :size="15" />
-        </button>
-      </SimpleTooltip>
-    </nav>
+        <span v-if="showThinking" class="jump-latest-live" aria-hidden="true" />
+        <ArrowDown :size="12" class="jump-latest-arrow" />
+        {{ $t('chat.jumpLatest', 'Latest') }}
+      </button>
+    </Transition>
   </div>
 </template>
+
+<style scoped>
+.jump-latest-button {
+  transform: translateX(-50%);
+  transition: color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.jump-latest-arrow {
+  transition: transform 180ms ease;
+}
+
+.jump-latest-button:hover .jump-latest-arrow {
+  transform: translateY(2px);
+}
+
+.jump-latest-live {
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 999px;
+  background: var(--primary);
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 28%, transparent);
+  animation: jump-latest-pulse 1.35s ease-out infinite;
+}
+
+.jump-latest-enter-active,
+.jump-latest-leave-active {
+  transition: opacity 180ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.jump-latest-enter-from,
+.jump-latest-leave-to {
+  opacity: 0;
+  transform: translate(-50%, 8px) scale(0.96);
+}
+
+@keyframes jump-latest-pulse {
+  65%, 100% { box-shadow: 0 0 0 0.38rem transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jump-latest-live { animation: none; }
+  .jump-latest-arrow,
+  .jump-latest-enter-active,
+  .jump-latest-leave-active { transition: none; }
+}
+</style>

@@ -2462,6 +2462,20 @@ export const useClaudeStore = defineStore('claude', () => {
     moveQueuedMessage(messageId, direction)
   }
 
+  function updateQueuedMessage(messageId: string, text: string): boolean {
+    const found = findQueuedMessage(messageId)
+    if (!found || found.item.state === 'sending') return false
+    const nextText = text.trim()
+    if (!nextText && found.item.images.length === 0) return false
+    queueBySession.value = {
+      ...queueBySession.value,
+      [found.sessionId]: found.list.map((row) =>
+        row.id === messageId ? { ...row, text: nextText } : row,
+      ),
+    }
+    return true
+  }
+
   function retryQueuedMessage(messageId: string): void {
     const found = findQueuedMessage(messageId)
     if (!found || found.item.state !== 'failed') return
@@ -2812,6 +2826,7 @@ export const useClaudeStore = defineStore('claude', () => {
     archiveActiveSession,
     unarchiveSession,
     reorderQueuedMessage,
+    updateQueuedMessage,
     retryQueuedMessage,
     removeQueuedMessage,
     sendQueuedMessageNow,

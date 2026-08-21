@@ -561,13 +561,16 @@ export function normalizeTimelineItem(value: unknown, turnId = ''): TimelineItem
 
 function normalizeMessageAttachments(content: Record<string, unknown>[]): MessageAttachment[] {
   return content.flatMap((item, index) => {
-    const type = asString(item.type)
-    const source = type === 'localImage'
-      ? asString(item.path)
-      : type === 'image' ? asString(item.url) : ''
+    const type = asString(item.type).toLowerCase().replace(/[_-]/g, '')
+    const imageURL = asRecord(item.image_url ?? item.imageUrl)
+    const source = type === 'localimage'
+      ? asString(item.path ?? item.localPath ?? item.url)
+      : type === 'image' || type === 'imageurl' || type === 'inputimage'
+        ? asString(item.url ?? item.path ?? imageURL.url ?? item.image_url ?? item.imageUrl)
+        : ''
     if (!source) return []
     return [{
-      kind: type === 'localImage' ? 'local' : 'remote',
+      kind: type === 'localimage' || !/^(?:https?:|data:image\/)/i.test(source) ? 'local' : 'remote',
       source,
       name: attachmentName(source, index),
     } satisfies MessageAttachment]

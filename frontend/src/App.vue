@@ -2,6 +2,7 @@
 import { MotionConfig } from 'motion-v'
 import { computed, onMounted, onUnmounted, shallowRef, watch } from 'vue'
 import { RouterView } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import * as backend from '../bindings/nice_codex_desktop/appservice'
 import CommandPalette from '@/components/CommandPalette.vue'
@@ -10,12 +11,17 @@ import AppPromptDialog from '@/components/AppPromptDialog.vue'
 import TitleBar from '@/components/TitleBar.vue'
 import UpdateCheckDialog from '@/components/UpdateCheckDialog.vue'
 import OnboardingView from '@/views/OnboardingView.vue'
+import SettingsView from '@/views/SettingsView.vue'
+import WorkbenchView from '@/views/WorkbenchView.vue'
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Toaster } from '@/components/ui/sonner'
 import { useNavigationHistory } from '@/composables/useNavigationHistory'
 import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useTerminalStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
 
 const appStore = useAppStore()
+const route = useRoute()
+const router = useRouter()
 const arenaStore = useArenaStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
@@ -40,6 +46,14 @@ useNavigationHistory()
 const showOnboarding = computed(() =>
   !appStore.bootstrapping && !appStore.settings.onboardingCompleted,
 )
+const showWorkbench = computed(() => route.name === 'workbench' || route.name === 'settings')
+const settingsOpen = computed(() => !showOnboarding.value && route.name === 'settings')
+
+function onSettingsOpenChange(open: boolean): void {
+  if (open || route.name !== 'settings') return
+  const from = typeof route.query.from === 'string' ? route.query.from : ''
+  void router.replace(from === 'capabilities' ? { name: 'capabilities' } : { name: 'workbench' })
+}
 
 const anyTurnRunning = computed(() =>
   codexStore.runningThreadIds.length > 0
@@ -255,13 +269,26 @@ function onGlobalKeydown(event: KeyboardEvent): void {
       <TitleBar v-if="!showOnboarding" />
       <div class="relative min-h-0 flex-1 overflow-hidden">
         <OnboardingView v-if="showOnboarding" />
-        <RouterView v-else v-slot="{ Component, route }">
-          <Transition :name="route.name === 'workbench' ? 'route-fade' : 'route-slide'" mode="out-in">
-            <KeepAlive include="WorkbenchView" :max="1">
-              <component :is="Component" :key="String(route.name || route.path)" />
-            </KeepAlive>
-          </Transition>
-        </RouterView>
+        <template v-else>
+          <KeepAlive include="WorkbenchView" :max="1">
+            <WorkbenchView v-if="showWorkbench" />
+          </KeepAlive>
+          <RouterView v-if="!showWorkbench" v-slot="{ Component, route: activeRoute }">
+            <Transition name="route-slide" mode="out-in">
+              <component :is="Component" :key="String(activeRoute.name || activeRoute.path)" />
+            </Transition>
+          </RouterView>
+          <Dialog :open="settingsOpen" @update:open="onSettingsOpenChange">
+            <DialogContent
+              :show-close-button="false"
+              class="h-[min(880px,calc(100vh-3rem))] w-[min(1180px,calc(100vw-3rem))] max-w-none gap-0 overflow-hidden rounded-2xl bg-background/98 p-0 shadow-2xl backdrop-blur-xl sm:max-w-none"
+            >
+              <DialogTitle class="sr-only">{{ $t('settings.title') }}</DialogTitle>
+              <DialogDescription class="sr-only">{{ $t('settings.pageDescription') }}</DialogDescription>
+              <SettingsView />
+            </DialogContent>
+          </Dialog>
+        </template>
       </div>
       <UpdateCheckDialog />
       <CommandPalette v-model:open="commandPaletteOpen" />

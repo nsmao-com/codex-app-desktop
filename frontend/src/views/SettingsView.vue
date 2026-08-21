@@ -3,6 +3,7 @@ import {
   Anchor,
   Archive,
   ArrowLeft,
+  BarChart3,
   Blocks,
   Check,
   Clock3,
@@ -38,6 +39,7 @@ import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
 import OpenAIIcon from '@/components/icons/OpenAIIcon.vue'
 import ProviderRouterSettings from '@/components/ProviderRouterSettings.vue'
 import SearchableSelect from '@/components/SearchableSelect.vue'
+import UsageOverviewCard from '@/components/UsageOverviewCard.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -71,7 +73,6 @@ import {
   saveClaudeProjectInstructions,
 } from '@/utils/claudeBindings'
 import type { SelectOption } from '@/types/codex'
-import { formatTokenCount } from '@/utils/accountUsage'
 import { notify } from '@/utils/notify'
 import {
   checkCLITools,
@@ -87,6 +88,7 @@ type SettingsPanel =
   | 'shortcuts'
   | 'agent'
   | 'personalization'
+  | 'usage'
   | 'account'
   | 'archived'
   | 'plugins'
@@ -774,6 +776,7 @@ const navGroups = computed<NavGroup[]>(() => [
       { id: 'shortcuts', label: t('settings.navShortcuts'), icon: Keyboard, keywords: 'keyboard shortcuts hotkeys 快捷键' },
       { id: 'agent', label: t('settings.navAgent'), icon: agentSettingsIcon.value, keywords: 'agent model codex claude gemini grok opencode 配置 模型' },
       { id: 'personalization', label: t('settings.navPersonalization'), icon: Smile, keywords: 'personality collaboration instructions AGENTS memories 个性化 记忆 全局提示词 项目提示词' },
+      { id: 'usage', label: t('settings.navUsage'), icon: BarChart3, keywords: 'usage tokens chart models analytics 用量 token 图表 模型 统计' },
       { id: 'account', label: t('settings.navAccount'), icon: UserRound, keywords: 'account login usage token 账户 登录 用量' },
       { id: 'archived', label: t('settings.navArchived'), icon: Archive, keywords: 'archived restore conversations 已归档 恢复 对话' },
     ],
@@ -1025,7 +1028,7 @@ onUnmounted(() => {
 
 function isSettingsPanel(value: string): value is SettingsPanel {
   return [
-    'general', 'appearance', 'shortcuts', 'agent', 'personalization', 'account', 'archived',
+    'general', 'appearance', 'shortcuts', 'agent', 'personalization', 'usage', 'account', 'archived',
     'browser', 'environment', 'git', 'scheduled', 'routing',
   ].includes(value)
 }
@@ -1621,10 +1624,6 @@ function selectedOptionLabel(options: SelectOption[], value: string): string {
   return options.find((option) => option.value === value)?.label ?? value
 }
 
-function formatSettingsTokenCount(value: number | null | undefined): string {
-  return formatTokenCount(value)
-}
-
 async function checkUpdatesNow(): Promise<void> {
   await appStore.openUpdateCheckDialog()
 }
@@ -1939,7 +1938,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
 <template>
   <div class="flex h-full w-full overflow-hidden bg-transparent text-foreground">
     <!-- Left menu sits on the gray shell, matching the main workbench sidebar. -->
-    <aside class="flex w-[248px] shrink-0 flex-col">
+    <aside class="flex w-[210px] shrink-0 flex-col lg:w-[248px]">
       <div class="space-y-2 px-3 pb-2 pt-1">
         <Button variant="ghost" class="h-8 w-full justify-start px-2 text-xs text-muted-foreground" @click="closeSettings">
           <ArrowLeft :size="14" class="mr-2" />
@@ -1956,7 +1955,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
         </div>
       </div>
 
-      <nav class="min-h-0 flex-1 space-y-4 overflow-y-auto px-2 pb-3">
+      <nav class="scrollbar-thin min-h-0 flex-1 space-y-4 overflow-y-auto px-2 pb-3">
         <div v-for="group in filteredNavGroups" :key="group.id" class="space-y-1">
           <p class="px-2 pb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
             {{ group.label }}
@@ -1993,7 +1992,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
             <div class="min-w-0 flex-1">
               <h1 class="text-[15px] font-semibold tracking-tight">{{ activeNavItem?.label || t('settings.title') }}</h1>
             </div>
-            <Button v-if="activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching">
+            <Button v-if="activePanel !== 'usage' && activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching">
               {{ saving ? t('common.saving') : t('settings.save') }}
             </Button>
           </div>
@@ -2037,7 +2036,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
           </div>
         </header>
 
-        <main class="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        <main class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-5">
           <form id="settings-form" class="mx-auto max-w-3xl space-y-5" @submit.prevent="submitSettings">
             <!-- General -->
             <template v-if="activePanel === 'general'">
@@ -3182,6 +3181,11 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
               </section>
             </template>
 
+            <!-- Provider usage -->
+            <template v-else-if="activePanel === 'usage'">
+              <UsageOverviewCard :runtime="appStore.activeRuntime" compact />
+            </template>
+
             <!-- Account -->
             <template v-else-if="activePanel === 'account'">
               <section class="overflow-hidden rounded-xl border bg-card">
@@ -3219,43 +3223,6 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                     <LogOut :size="14" class="mr-1.5" />
                     {{ t('sidebar.signOut') }}
                   </Button>
-                </div>
-              </section>
-              <section
-                v-if="appStore.accountUsage"
-                class="overflow-hidden rounded-xl border bg-card"
-              >
-                <div class="border-b px-4 py-3">
-                  <h2 class="text-[13px] font-semibold">{{ t('settings.usageSummary') }}</h2>
-                  <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.usageSummaryHint') }}</p>
-                </div>
-                <div class="grid gap-3 p-4 sm:grid-cols-2">
-                  <div class="rounded-lg border px-3 py-2.5">
-                    <p class="text-[10px] text-muted-foreground">{{ t('inspector.lifetimeTokens') }}</p>
-                    <p class="mt-0.5 text-sm font-semibold tabular-nums">
-                      {{ formatSettingsTokenCount(appStore.accountUsage.lifetimeTokens) }}
-                    </p>
-                  </div>
-                  <div class="rounded-lg border px-3 py-2.5">
-                    <p class="text-[10px] text-muted-foreground">{{ t('sidebar.usagePeakDaily') }}</p>
-                    <p class="mt-0.5 text-sm font-semibold tabular-nums">
-                      {{ formatSettingsTokenCount(appStore.accountUsage.peakDailyTokens) }}
-                    </p>
-                  </div>
-                  <div class="rounded-lg border px-3 py-2.5">
-                    <p class="text-[10px] text-muted-foreground">{{ t('settings.usageStreak') }}</p>
-                    <p class="mt-0.5 text-sm font-semibold tabular-nums">
-                      {{ appStore.accountUsage.currentStreakDays ?? '—' }}
-                      <span class="text-[11px] font-normal text-muted-foreground">{{ t('settings.usageDays') }}</span>
-                    </p>
-                  </div>
-                  <div class="rounded-lg border px-3 py-2.5">
-                    <p class="text-[10px] text-muted-foreground">{{ t('settings.usageLongestStreak') }}</p>
-                    <p class="mt-0.5 text-sm font-semibold tabular-nums">
-                      {{ appStore.accountUsage.longestStreakDays ?? '—' }}
-                      <span class="text-[11px] font-normal text-muted-foreground">{{ t('settings.usageDays') }}</span>
-                    </p>
-                  </div>
                 </div>
               </section>
             </template>

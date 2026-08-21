@@ -2537,6 +2537,19 @@ export const useGrokStore = defineStore('grok', () => {
     }
   }
 
+  function updateQueuedMessage(messageId: string, text: string): boolean {
+    for (const [sessionId, list] of Object.entries(queuedBySession.value)) {
+      const message = list.find((item) => item.id === messageId)
+      if (!message) continue
+      if (message.state === 'sending') return false
+      const nextText = text.trim()
+      if (!nextText && message.images.length === 0) return false
+      patchQueuedMessage(sessionId, messageId, { text: nextText })
+      return true
+    }
+    return false
+  }
+
   function reorderQueuedMessage(messageId: string, direction: 'up' | 'down'): void {
     for (const [sessionId, list] of Object.entries(queuedBySession.value)) {
       const index = list.findIndex((item) => item.id === messageId)
@@ -3237,6 +3250,7 @@ export const useGrokStore = defineStore('grok', () => {
     deleteActiveSession,
     enterRuntime,
     removeQueuedMessage,
+    updateQueuedMessage,
     reorderQueuedMessage,
     sendQueuedMessageNow,
     retryQueuedMessage,

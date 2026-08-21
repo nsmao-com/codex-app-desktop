@@ -530,14 +530,24 @@ function loadWhenReady(): void {
   }
 }
 
+function applyRouteTab(tab: unknown): void {
+  const value = String(tab || '')
+  if (value === 'plugins' || value === 'skills' || value === 'apps' || value === 'mcp' || value === 'automation') {
+    activeTab.value = value
+  }
+  if (value === 'runtime' || value === 'mcp' || value === 'skills' || value === 'plugins' || value === 'instructions') {
+    grokTab.value = value
+  }
+  if (value === 'runtime' || value === 'mcp' || value === 'skills' || value === 'plugins' || value === 'agents' || value === 'hooks' || value === 'instructions') {
+    claudeTab.value = value
+  }
+  if (value === 'runtime' || value === 'mcp' || value === 'instructions') {
+    externalTab.value = value
+  }
+}
+
 onMounted(() => {
-  const tab = String(route.query.tab || '')
-  if (tab === 'plugins' || tab === 'skills' || tab === 'apps' || tab === 'mcp' || tab === 'automation') {
-    activeTab.value = tab
-  }
-  if (tab === 'runtime' || tab === 'mcp' || tab === 'instructions') {
-    externalTab.value = tab
-  }
+  applyRouteTab(route.query.tab)
   loadWhenReady()
 })
 watch(() => appStore.codexAvailable, loadWhenReady)
@@ -548,15 +558,7 @@ watch(() => appStore.activeRuntime, () => {
 watch([externalInstructionScope, externalMcpScope], () => hydrateExternalEditors())
 watch(
   () => route.query.tab,
-  (tab) => {
-    const value = String(tab || '')
-    if (value === 'plugins' || value === 'skills' || value === 'apps' || value === 'mcp' || value === 'automation') {
-      activeTab.value = value
-    }
-    if (value === 'runtime' || value === 'mcp' || value === 'instructions') {
-      externalTab.value = value
-    }
-  },
+  applyRouteTab,
 )
 
 function setTab(tab: CapabilityTab): void {
@@ -990,7 +992,10 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
             </div>
           </div>
 
-          <div v-if="providerConfiguration" class="mt-3 grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)_auto]">
+          <div
+            v-if="providerConfiguration"
+            class="mt-3 grid gap-3 lg:grid-cols-2 2xl:grid-cols-[minmax(280px,0.85fr)_minmax(360px,1fr)_minmax(420px,1.6fr)]"
+          >
             <div class="rounded-lg border border-border/70 bg-background/70 p-3">
               <div class="flex items-start justify-between gap-2">
                 <div>
@@ -1044,7 +1049,7 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                   {{ providerContextPolicy?.autoCompactSupported ? t('providerConfig.nativeManaged') : t('providerConfig.notSupported') }}
                 </Badge>
               </div>
-              <div v-if="providerContextPolicy?.thresholdConfigurable" class="mt-3 grid grid-cols-[minmax(0,1fr)_92px] items-center gap-3">
+              <div v-if="providerContextPolicy?.thresholdConfigurable" class="mt-3 grid grid-cols-[minmax(0,1fr)_112px] items-center gap-3">
                 <input
                   type="range"
                   :min="providerContextPolicy.thresholdMinimum"
@@ -1089,7 +1094,7 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
               </p>
             </div>
 
-            <div class="flex min-w-36 flex-col justify-between gap-2 rounded-lg border border-border/70 bg-background/70 p-3">
+            <div class="flex min-w-0 flex-col justify-between gap-2 rounded-lg border border-border/70 bg-background/70 p-3 lg:col-span-2 2xl:col-span-1">
               <div>
                 <p class="text-[10px] font-medium">{{ providerConfiguration.runtime.name }}</p>
                 <p class="mt-1 text-[9px] leading-4 text-muted-foreground">{{ providerContextPolicy?.description }}</p>

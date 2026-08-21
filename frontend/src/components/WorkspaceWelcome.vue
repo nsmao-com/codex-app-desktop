@@ -4,6 +4,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { Button } from '@/components/ui/button'
+import UsageOverviewCard from '@/components/UsageOverviewCard.vue'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
 
@@ -181,7 +182,7 @@ async function chooseWorkspace(): Promise<void> {
 </script>
 
 <template>
-  <div class="welcome-stage relative flex h-full flex-col items-center justify-center overflow-hidden px-6 text-center">
+  <div class="welcome-stage scrollbar-thin relative flex h-full flex-col items-center justify-center overflow-x-hidden overflow-y-auto px-4 py-5 text-center sm:px-6">
     <div class="welcome-aurora pointer-events-none absolute inset-0" aria-hidden="true" />
     <div class="welcome-orb welcome-orb-a pointer-events-none absolute" aria-hidden="true" />
     <div class="welcome-orb welcome-orb-b pointer-events-none absolute" aria-hidden="true" />
@@ -207,7 +208,11 @@ async function chooseWorkspace(): Promise<void> {
       </p>
     </div>
 
-    <div class="relative z-[1] mt-9 flex w-full max-w-xl flex-wrap items-center justify-center gap-2">
+    <div class="welcome-note relative z-[1] mt-6 flex w-full justify-center">
+      <UsageOverviewCard :runtime="paneRuntime" :compact="isArenaPane" />
+    </div>
+
+    <div class="relative z-[1] mt-4 flex w-full max-w-xl flex-wrap items-center justify-center gap-2">
       <button
         v-for="(suggestion, index) in suggestions"
         :key="suggestion.title"

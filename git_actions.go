@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -22,6 +27,175 @@ type GitActionResult struct {
 	Message string `json:"message"`
 	Branch  string `json:"branch,omitempty"`
 	PRURL   string `json:"prUrl,omitempty"`
+}
+
+type GitHubIssueImportContext struct {
+	Available bool   `json:"available"`
+	OwnerRepo string `json:"ownerRepo"`
+	RemoteURL string `json:"remoteUrl"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+type GitHubIssueContent struct {
+	Number int      `json:"number"`
+	Title  string   `json:"title"`
+	Body   string   `json:"body"`
+	URL    string   `json:"url"`
+	State  string   `json:"state"`
+	Author string   `json:"author"`
+	Labels []string `json:"labels"`
+}
+
+func (s *AppService) GetGitHubIssueImportContext(workspace string) GitHubIssueImportContext {
+	cleanWorkspace, err := validateWorkspace(workspace)
+	if err != nil {
+		return GitHubIssueImportContext{Reason: "Choose a valid workspace first"}
+	}
+	remoteURL, ownerRepo := githubRemoteContext(cleanWorkspace)
+	if ownerRepo == "" {
+		return GitHubIssueImportContext{RemoteURL: remoteURL, Reason: "This folder does not have a GitHub origin remote"}
+	}
+	return GitHubIssueImportContext{Available: true, OwnerRepo: ownerRepo, RemoteURL: remoteURL}
+}
+
+func (s *AppService) ImportGitHubIssue(workspace, reference string) (GitHubIssueContent, error) {
+	contextInfo := s.GetGitHubIssueImportContext(workspace)
+	if !contextInfo.Available {
+		return GitHubIssueContent{}, errors.New(contextInfo.Reason)
+	}
+	ownerRepo, number, err := githubIssueReference(reference, contextInfo.OwnerRepo)
+	if err != nil {
+		return GitHubIssueContent{}, err
+	}
+	if issue, ghErr := readGitHubIssueWithCLI(ownerRepo, number); ghErr == nil {
+		return issue, nil
+	}
+	return readPublicGitHubIssue(ownerRepo, number)
+}
+
+func githubRemoteContext(workspace string) (string, string) {
+	remoteURL := strings.TrimSuffix(strings.TrimSpace(gitRemoteHTTPS(workspace)), "/")
+	clean := strings.TrimSuffix(remoteURL, ".git")
+	marker := "github.com/"
+	index := strings.Index(strings.ToLower(clean), marker)
+	if index < 0 {
+		return remoteURL, ""
+	}
+	ownerRepo := strings.Trim(strings.TrimSpace(clean[index+len(marker):]), "/")
+	if len(strings.Split(ownerRepo, "/")) != 2 {
+		return remoteURL, ""
+	}
+	return remoteURL, ownerRepo
+}
+
+func githubIssueReference(reference, defaultOwnerRepo string) (string, int, error) {
+	value := strings.TrimSpace(reference)
+	ownerRepo := defaultOwnerRepo
+	if strings.Contains(value, "://") {
+		parsed, err := url.Parse(value)
+		if err != nil || !strings.EqualFold(parsed.Hostname(), "github.com") {
+			return "", 0, errors.New("enter a github.com issue URL")
+		}
+		parts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+		if len(parts) != 4 || !strings.EqualFold(parts[2], "issues") {
+			return "", 0, errors.New("enter a GitHub issue URL such as https://github.com/owner/repo/issues/123")
+		}
+		owner, ownerErr := url.PathUnescape(parts[0])
+		repo, repoErr := url.PathUnescape(parts[1])
+		if ownerErr != nil || repoErr != nil || strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "" || strings.ContainsAny(owner+repo, "/\\") {
+			return "", 0, errors.New("enter a valid GitHub issue URL")
+		}
+		ownerRepo = owner + "/" + repo
+		value = parts[3]
+	} else {
+		value = strings.TrimSpace(strings.TrimPrefix(value, "#"))
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil || number <= 0 {
+		return "", 0, errors.New("enter an issue number such as #123 or a GitHub issue URL")
+	}
+	return ownerRepo, number, nil
+}
+
+func readGitHubIssueWithCLI(ownerRepo string, number int) (GitHubIssueContent, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "gh", "issue", "view", strconv.Itoa(number), "--repo", ownerRepo, "--json", "number,title,body,url,state,author,labels")
+	configureBackgroundProcess(command)
+	payload, err := command.Output()
+	if err != nil {
+		return GitHubIssueContent{}, err
+	}
+	var raw struct {
+		Number int    `json:"number"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		URL    string `json:"url"`
+		State  string `json:"state"`
+		Author struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return GitHubIssueContent{}, err
+	}
+	labels := make([]string, 0, len(raw.Labels))
+	for _, label := range raw.Labels {
+		if strings.TrimSpace(label.Name) != "" {
+			labels = append(labels, label.Name)
+		}
+	}
+	return GitHubIssueContent{Number: raw.Number, Title: raw.Title, Body: raw.Body, URL: raw.URL, State: raw.State, Author: raw.Author.Login, Labels: labels}, nil
+}
+
+func readPublicGitHubIssue(ownerRepo string, number int) (GitHubIssueContent, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	endpoint := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d", ownerRepo, number)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return GitHubIssueContent{}, err
+	}
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("User-Agent", "NiceCodex")
+	response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+	if err != nil {
+		return GitHubIssueContent{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return GitHubIssueContent{}, fmt.Errorf("GitHub returned %s", response.Status)
+	}
+	payload, err := io.ReadAll(io.LimitReader(response.Body, 2*1024*1024))
+	if err != nil {
+		return GitHubIssueContent{}, err
+	}
+	var raw struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		HTMLURL string `json:"html_url"`
+		State   string `json:"state"`
+		User    struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return GitHubIssueContent{}, err
+	}
+	labels := make([]string, 0, len(raw.Labels))
+	for _, label := range raw.Labels {
+		if strings.TrimSpace(label.Name) != "" {
+			labels = append(labels, label.Name)
+		}
+	}
+	return GitHubIssueContent{Number: raw.Number, Title: raw.Title, Body: raw.Body, URL: raw.HTMLURL, State: raw.State, Author: raw.User.Login, Labels: labels}, nil
 }
 
 func (s *AppService) CreateGitBranch(request GitBranchRequest) (GitActionResult, error) {

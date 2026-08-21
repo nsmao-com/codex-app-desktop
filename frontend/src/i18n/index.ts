@@ -501,16 +501,38 @@ const messages = {
       queueSendNow: '立即发送',
       removeQueued: '移出队列',
       retryQueued: '重试发送',
+      editQueued: '编辑队列消息',
+      saveQueuedEdit: '保存修改',
+      cancelQueuedEdit: '取消编辑',
+      queuedEditHint: 'Ctrl/⌘ + Enter 保存，Esc 取消',
+      queuedEditEmpty: '消息内容不能为空',
+      queuedEditUnavailable: '这条消息已开始发送，无法再修改',
+      queuedEditSaved: '队列消息已更新',
       clearFailedQueued: '清除失败项',
       attachImages: '添加图片',
-      attachLimit: '每条消息最多附带 4 张图片。',
-      attachLimitTitle: '已达图片上限',
+      addContext: '添加内容',
+      addFilesOrPhotos: '添加文件或图片',
+      addFilesOrPhotosHint: '图片会预览，其他文件会作为路径加入消息',
+      addWorkspaceFolder: '添加或切换工作文件夹',
+      addWorkspaceFolderHint: '切换当前模型商使用的工作目录',
+      importGitHubIssue: '导入 GitHub Issue',
+      githubIssueTitle: '导入 GitHub Issue',
+      githubIssueDescription: '输入 {repository} 的 Issue 编号或完整链接。内容会加入输入框，不会自动发送。',
+      githubIssuePlaceholder: '#123 或 GitHub Issue 链接',
+      githubIssueImport: '导入到消息',
+      githubIssueNeedsWorkspace: '请先选择一个 Git 工作区',
+      githubIssueUnavailable: '当前工作区没有可用的 GitHub origin',
+      githubIssueNoBody: '此 Issue 没有正文。',
+      githubIssueImported: 'Issue 已加入输入框',
+      githubIssueImportFailed: '无法导入 GitHub Issue',
+      connectors: '连接器',
+      connectorsHint: '管理当前模型商的 Apps 与 MCP',
+      pluginsHint: '管理当前模型商已安装的插件',
+      pluginsUnsupported: '当前模型商不支持插件管理',
       dropImages: '放开以添加图片',
       expandComposer: '扩展输入框',
       collapseComposer: '收起输入框',
       removeAttachment: '移除图片',
-      attachmentLimit: '每条消息最多添加 4 张图片',
-      attachmentCount: '已添加 {count}/4',
       loadEarlier: '加载更早的 {count} 轮对话',
       loadLater: '加载后面的 {count} 轮对话',
       turnNavigation: '对话轮次导航',
@@ -560,6 +582,7 @@ const messages = {
       navGrokAgent: 'Grok 配置',
       navClaudeAgent: 'Claude 配置',
       navPersonalization: '个性化',
+      navUsage: '用量',
       navAccount: '账户',
       navArchived: '已归档',
       archivedTitle: '已归档对话',
@@ -1265,6 +1288,7 @@ const messages = {
       taskOpenFailed: '无法打开对话',
       messageNotSent: '消息发送失败',
       imagesNotSelected: '无法添加图片',
+      filesNotSelected: '无法添加文件或图片',
       steerFailed: '追加指令失败',
       turnStopFailed: '无法停止当前任务',
       turnCompleteTitle: '回合已完成',
@@ -1436,7 +1460,7 @@ const messages = {
       workspace: 'Workspace', chooseFolder: 'Choose a folder', chooseAnother: 'Choose another folder', newTask: 'New task', threads: 'Threads', searchLabel: 'Search threads', searchPlaceholder: 'Search tasks', noSearchResults: 'No tasks match your search.', firstTask: 'Your workspace is ready for its first task.', switchToCodeHint: 'You are in Cowork mode. Past chats are usually under Code.', switchToCoworkHint: 'You are in Code mode. Switch to Cowork to see chats from that mode.', noPreview: 'No message preview', signIn: 'Sign in to Codex', chatgptAccount: 'Use your ChatGPT account', codexAccount: 'Codex account', openSettings: 'Open settings', now: 'now', projectLoadFailed: 'Project conversations could not be loaded', retryProject: 'Reload', toggle: 'Toggle sidebar', loadMore: 'Show {count} more', runningInBackground: 'This conversation is running in the background', customize: 'Capabilities', recents: 'Recent conversations', code: 'Code', cowork: 'Cowork', runtimeCodex: 'Switch to Codex', runtimeClaude: 'Switch to Claude', runtimeGrok: 'Switch to Grok', runtimeSwitchFailed: 'Could not switch runtime', claudeEmpty: 'Claude Code', claudeEmptyHint: 'Claude Code detected. In-app chat will expand later; use the claude CLI in a terminal for now.', claudeRuntimeMissing: 'Claude Code CLI (claude) not found. Install it, then restart Nice Codex.', claudeReady: 'Claude Code ready', grokEmpty: 'No Grok sessions yet.', grokEmptyHint: 'Start a new task to chat via Grok Build or the Grok API.', grokRuntimeMissing: 'No usable Grok Build / API configuration detected.', grokBindingsStale: 'Backend bindings are stale. Fully quit and restart NiceCodex (or restart wails dev), then switch to Grok again.', archived: 'Archived', archivedEmpty: 'No archived conversations.', restore: 'Restore', signOut: 'Sign out', newTaskInProject: 'New chat in this project', pin: 'Pin conversation', unpin: 'Unpin conversation', renameHint: 'Double-click to rename', usageHint: 'View token usage', usageTitle: 'Token usage', usageSubtitle: 'Local stats from ~/.codex session history, then accumulates new turns.', usageSubtitleGrok: 'Local stats: accumulates Grok turns from NiceCodex (Build CLI / API).', usageSubtitleClaude: 'Local stats: accumulates Claude Code turns from NiceCodex.', usageSubtitleGemini: 'Local stats from cumulative Gemini CLI native session usage.', usageSubtitleOpenCode: 'Local stats from cumulative OpenCode native session database usage.', usageToday: 'Today', usageWeek: '7 days', usageTwoWeeks: '14 days', usageMonth: '30 days', usageCumulative: 'Cumulative', usageRangeTotal: 'Range total', usageRangeMeta: '{days} days · avg {avg}/day · {count} active days', usageAggregateMeta: 'Lifetime total {count} tokens (daily detail may be unavailable)', usageEmpty: 'No usage data in this range', usagePeakDaily: 'Peak daily', usageLifetimeShort: 'Lifetime {count}', usageInput: 'Input', usageCached: 'Cached', usageOutput: 'Output', usageReasoning: 'Reasoning', usageBreakdown: 'Breakdown',
     },
     chat: {
-      readyHere: 'READY IN THIS WORKSPACE', grokReadyHere: 'GROK WORKSPACE READY', claudeReadyHere: 'CLAUDE WORKSPACE READY', title: 'What should we build?', grokTitle: 'What should Grok do?', claudeTitle: 'What should Claude do?', description: 'Describe the outcome. Nice Codex will inspect the project, plan the work, and ask before sensitive actions.', grokDescription: 'Describe the outcome. Grok plans and acts in the current project, fully separate from Codex sessions.', claudeDescription: 'Describe the outcome. Claude Code plans and acts in this workspace, fully separate from Codex and Grok sessions.', traceBug: 'Trace a bug', traceBugPrompt: 'Inspect this project and trace the most likely cause of the current bug before proposing a fix.', understandCodebase: 'Understand the codebase', understandCodebasePrompt: 'Map the architecture of this project and explain the most important execution paths.', reviewChanges: 'Review changes', reviewChangesPrompt: 'Review the current Git changes for correctness, security issues, and regressions.', startReview: 'Start review', placeholder: "Describe a goal, or type / commands, {'$'} skills, {'@'} plugins", grokPlaceholder: 'Describe a goal — Grok will work in the current workspace', workingPlaceholder: 'Codex is working…', steer: 'Add to current turn', steerPlaceholder: 'Add guidance while Codex continues the current turn', queuePlaceholder: 'Keep typing; messages send after the current turn finishes or stops', providerLocked: 'Session provider is locked', providerLockedHint: 'Provider is fixed for this session. Start a new session to switch.', coworkTitle: 'What should we collaborate on?', coworkDescription: 'Cowork sessions default to plan mode — good for outlining work and coordinating changes.', messageLabel: 'Message to Codex', send: 'Send message', queueSend: 'Add to queue', stop: 'Stop', stopLabel: 'Stop current turn', shortcut: 'Enter to send · Shift + Enter for a new line', shortcutModifier: '{key}+Enter to send · Enter for a new line', defaultModel: 'Default model', model: 'Model', reasoning: 'Reasoning', fast: 'Fast', fastUnavailable: 'Fast mode is unavailable for this model', planMode: 'Plan', planModeOn: 'Plan mode', planModeOff: 'Implementation', planModeToggleHint: 'Shift+Tab toggles plan/implementation. After a plan turn, Codex asks whether to implement.', planImplementTitle: 'Implement this plan?', planImplementHint: 'Switches to implementation mode and continues in this thread.', planImplementYes: 'Yes, implement this plan', planImplementNo: 'Not now', implementPlanMessage: 'Implement the plan.', sandbox: 'Sandbox', jumpLatest: 'Jump to latest', working: 'Codex is working', thinking: 'Thinking', thinkingHint: 'Codex is analyzing your request…', loadingThread: 'Loading conversation…', conversation: 'Codex conversation', switchingProject: 'Switching project and restoring the conversation…', submitting: 'Submitting message…', steering: 'Adding guidance…', retrying: 'Codex hit a temporary issue and is retrying…', turnFailed: 'This turn failed', interrupted: 'Turn stopped', retryTurn: 'Send the last message again', retryMessage: 'Send again', stopping: 'Stopping…', queuedCount: 'Queued · {count}', queuedTitle: 'Messages waiting to send', queuedHint: 'They send in order after the current turn finishes. Reorder priority, or send now (stops the current turn first).', queuedNext: 'Next: {text}', queuedFailedCount: '{count} failed', queuedWaiting: 'Waiting', queuedSending: 'Sending', queuedFailed: 'Send failed', queuedAttachments: '{count} images', queuedImageOnly: '(image attachment)', queueMoveUp: 'Higher priority', queueMoveDown: 'Lower priority', queueSendNow: 'Send now', removeQueued: 'Remove from queue', retryQueued: 'Retry send', clearFailedQueued: 'Clear failed', attachImages: 'Attach images', attachLimitTitle: 'Image limit reached', dropImages: 'Drop to attach images', expandComposer: 'Expand composer', collapseComposer: 'Collapse composer', attachLimit: 'Up to 4 images per message.', removeAttachment: 'Remove image', attachmentLimit: 'You can attach up to 4 images per message', attachmentCount: '{count}/4 attached', loadEarlier: 'Load {count} earlier turns', loadLater: 'Load {count} later turns', turnNavigation: 'Turn navigation', jumpTurn: 'Jump to turn {index}', userNavigation: 'User message navigation', jumpUserMessage: 'User message {index}: {preview}', userMessageFallback: 'User message {index}', userMessageLabel: 'User message {index}', scrollToTop: 'Scroll to top', scrollToBottom: 'Scroll to bottom', composerMore: 'More options', emptyThread: 'No messages yet', emptyThreadHint: 'Describe a goal below to start this conversation.',
+      readyHere: 'READY IN THIS WORKSPACE', grokReadyHere: 'GROK WORKSPACE READY', claudeReadyHere: 'CLAUDE WORKSPACE READY', title: 'What should we build?', grokTitle: 'What should Grok do?', claudeTitle: 'What should Claude do?', description: 'Describe the outcome. Nice Codex will inspect the project, plan the work, and ask before sensitive actions.', grokDescription: 'Describe the outcome. Grok plans and acts in the current project, fully separate from Codex sessions.', claudeDescription: 'Describe the outcome. Claude Code plans and acts in this workspace, fully separate from Codex and Grok sessions.', traceBug: 'Trace a bug', traceBugPrompt: 'Inspect this project and trace the most likely cause of the current bug before proposing a fix.', understandCodebase: 'Understand the codebase', understandCodebasePrompt: 'Map the architecture of this project and explain the most important execution paths.', reviewChanges: 'Review changes', reviewChangesPrompt: 'Review the current Git changes for correctness, security issues, and regressions.', startReview: 'Start review', placeholder: "Describe a goal, or type / commands, {'$'} skills, {'@'} plugins", grokPlaceholder: 'Describe a goal — Grok will work in the current workspace', workingPlaceholder: 'Codex is working…', steer: 'Add to current turn', steerPlaceholder: 'Add guidance while Codex continues the current turn', queuePlaceholder: 'Keep typing; messages send after the current turn finishes or stops', providerLocked: 'Session provider is locked', providerLockedHint: 'Provider is fixed for this session. Start a new session to switch.', coworkTitle: 'What should we collaborate on?', coworkDescription: 'Cowork sessions default to plan mode — good for outlining work and coordinating changes.', messageLabel: 'Message to Codex', send: 'Send message', queueSend: 'Add to queue', stop: 'Stop', stopLabel: 'Stop current turn', shortcut: 'Enter to send · Shift + Enter for a new line', shortcutModifier: '{key}+Enter to send · Enter for a new line', defaultModel: 'Default model', model: 'Model', reasoning: 'Reasoning', fast: 'Fast', fastUnavailable: 'Fast mode is unavailable for this model', planMode: 'Plan', planModeOn: 'Plan mode', planModeOff: 'Implementation', planModeToggleHint: 'Shift+Tab toggles plan/implementation. After a plan turn, Codex asks whether to implement.', planImplementTitle: 'Implement this plan?', planImplementHint: 'Switches to implementation mode and continues in this thread.', planImplementYes: 'Yes, implement this plan', planImplementNo: 'Not now', implementPlanMessage: 'Implement the plan.', sandbox: 'Sandbox', jumpLatest: 'Jump to latest', working: 'Codex is working', thinking: 'Thinking', thinkingHint: 'Codex is analyzing your request…', loadingThread: 'Loading conversation…', conversation: 'Codex conversation', switchingProject: 'Switching project and restoring the conversation…', submitting: 'Submitting message…', steering: 'Adding guidance…', retrying: 'Codex hit a temporary issue and is retrying…', turnFailed: 'This turn failed', interrupted: 'Turn stopped', retryTurn: 'Send the last message again', retryMessage: 'Send again', stopping: 'Stopping…', queuedCount: 'Queued · {count}', queuedTitle: 'Messages waiting to send', queuedHint: 'They send in order after the current turn finishes. Reorder priority, or send now (stops the current turn first).', queuedNext: 'Next: {text}', queuedFailedCount: '{count} failed', queuedWaiting: 'Waiting', queuedSending: 'Sending', queuedFailed: 'Send failed', queuedAttachments: '{count} images', queuedImageOnly: '(image attachment)', queueMoveUp: 'Higher priority', queueMoveDown: 'Lower priority', queueSendNow: 'Send now', removeQueued: 'Remove from queue', retryQueued: 'Retry send', clearFailedQueued: 'Clear failed', attachImages: 'Attach images', attachLimitTitle: 'Images attached', dropImages: 'Drop to attach images', expandComposer: 'Expand composer', collapseComposer: 'Collapse composer', attachLimit: 'Attach as many images as the active provider can process.', removeAttachment: 'Remove image', attachmentLimit: 'No fixed image-count limit', attachmentCount: '{count} attached', loadEarlier: 'Load {count} earlier turns', loadLater: 'Load {count} later turns', turnNavigation: 'Turn navigation', jumpTurn: 'Jump to turn {index}', userNavigation: 'User message navigation', jumpUserMessage: 'User message {index}: {preview}', userMessageFallback: 'User message {index}', userMessageLabel: 'User message {index}', scrollToTop: 'Scroll to top', scrollToBottom: 'Scroll to bottom', composerMore: 'More options', emptyThread: 'No messages yet', emptyThreadHint: 'Describe a goal below to start this conversation.',
     },
     settings: {
       ...enRoutingSettings,
@@ -1575,6 +1599,13 @@ const messages = {
 }
 
 Object.assign(messages['en-US'].chat, {
+  editQueued: 'Edit queued message',
+  saveQueuedEdit: 'Save changes',
+  cancelQueuedEdit: 'Cancel editing',
+  queuedEditHint: 'Ctrl/⌘ + Enter to save, Esc to cancel',
+  queuedEditEmpty: 'Message content cannot be empty',
+  queuedEditUnavailable: 'This message has started sending and can no longer be edited',
+  queuedEditSaved: 'Queued message updated',
   loadingThreadSlow: 'Loading is taking longer than expected. You can safely reload this conversation without stopping the running task or clearing visible and queued messages.',
   recoverThread: 'Reload conversation',
   recoveringThread: 'Reloading…',
@@ -1637,6 +1668,62 @@ Object.assign(messages['zh-CN'], {
     network: '网络连接失败，请检查代理或网络后重试。',
   },
 })
+Object.assign(messages['zh-CN'], {
+  usageOverview: {
+    title: '用量概览', subtitle: '本机记录的真实模型商用量', overview: '概览', models: '模型',
+    rangeWeek: '7 天', rangeMonth: '30 天', rangeAll: '全部', totalTokens: 'Token 总量', tokens: 'tokens',
+    sessions: '会话', activeDays: '活跃天数', dailyAverage: '日均 Token', currentStreak: '当前连续',
+    longestStreak: '最长连续', peakDay: '单日峰值', favoriteModel: '常用模型', noValue: '—',
+    unknownModel: '未知模型', otherModels: '其他模型', sessionCount: '{count} 个会话', modelsHint: '根据已加载的 {count} 个真实会话统计，不推算历史 Token。',
+    noModels: '还没有模型统计', noModelsHint: '发送第一条消息后，这里会按真实会话模型汇总。', loadFailed: '暂时无法读取本机用量',
+  },
+})
+
+Object.assign(messages['en-US'].settings, {
+  navUsage: 'Usage',
+})
+
+Object.assign(messages['en-US'], {
+  usageOverview: {
+    title: 'Usage overview', subtitle: 'Real provider usage recorded on this device', overview: 'Overview', models: 'Models',
+    rangeWeek: '7 days', rangeMonth: '30 days', rangeAll: 'All', totalTokens: 'Total tokens', tokens: 'tokens',
+    sessions: 'Sessions', activeDays: 'Active days', dailyAverage: 'Daily average', currentStreak: 'Current streak',
+    longestStreak: 'Longest streak', peakDay: 'Peak day', favoriteModel: 'Favorite model', noValue: '—',
+    unknownModel: 'Unknown model', otherModels: 'Other models', sessionCount: '{count} sessions', modelsHint: 'Based on {count} loaded sessions; historical tokens are not estimated.',
+    noModels: 'No model stats yet', noModelsHint: 'Send the first message to build a model chart from real sessions.', loadFailed: 'Local usage is temporarily unavailable',
+  },
+})
+
+Object.assign(messages['en-US'].chat as Record<string, string>, {
+  addContext: 'Add context',
+  addFilesOrPhotos: 'Add files or photos',
+  addFilesOrPhotosHint: 'Images preview here; other files are added as paths',
+  addWorkspaceFolder: 'Add or switch work folder',
+  addWorkspaceFolderHint: 'Switch the working directory for this provider',
+  importGitHubIssue: 'Import GitHub issue',
+  githubIssueTitle: 'Import GitHub issue',
+  githubIssueDescription: 'Enter an issue number or full URL for {repository}. The issue is added to the composer and is not sent automatically.',
+  githubIssuePlaceholder: '#123 or a GitHub issue URL',
+  githubIssueImport: 'Add to message',
+  githubIssueNeedsWorkspace: 'Choose a Git workspace first',
+  githubIssueUnavailable: 'This workspace has no usable GitHub origin',
+  githubIssueNoBody: 'This issue has no body.',
+  githubIssueImported: 'Issue added to composer',
+  githubIssueImportFailed: 'Could not import GitHub issue',
+  connectors: 'Connectors',
+  connectorsHint: 'Manage Apps and MCP for this provider',
+  pluginsHint: 'Manage installed plugins for this provider',
+  pluginsUnsupported: 'This provider does not support plugin management',
+  attachLimitTitle: 'Images attached',
+  attachLimit: 'Attach as many images as the active provider can process.',
+  attachmentLimit: 'No fixed image-count limit',
+  attachmentCount: '{count} attached',
+})
+
+Object.assign(messages['en-US'].notifications as Record<string, string>, {
+  filesNotSelected: 'Files or photos could not be attached',
+})
+
 Object.assign(messages['en-US'], {
   errors: {
     canceled: 'This request was cancelled.',

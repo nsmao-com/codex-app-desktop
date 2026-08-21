@@ -147,6 +147,14 @@ export function ForkThread(threadID: string): $CancellablePromise<{ [_ in string
     return $Call.ByID(1034771762, threadID);
 }
 
+export function GetGitHubIssueImportContext(workspace: string): $CancellablePromise<$models.GitHubIssueImportContext> {
+    return $Call.ByID(3179848564, workspace);
+}
+
+export function ImportGitHubIssue(workspace: string, reference: string): $CancellablePromise<$models.GitHubIssueContent> {
+    return $Call.ByID(3703804695, workspace, reference);
+}
+
 export function ImportMCPServers(request: $models.MCPServersImportRequest): $CancellablePromise<void> {
     return $Call.ByID(340745843, request);
 }
@@ -460,6 +468,14 @@ export function ReadProviderRouterConfig(): $CancellablePromise<$models.Provider
     return $Call.ByID(42185596);
 }
 
+/**
+ * ReadRuntimeAccountUsage keeps split-pane usage cards scoped to their own
+ * provider instead of leaking the globally active provider's counters.
+ */
+export function ReadRuntimeAccountUsage(runtimeName: string): $CancellablePromise<{ [_ in string]?: any } | null> {
+    return $Call.ByID(3422692968, runtimeName);
+}
+
 export function ReadThread(threadID: string): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3198804358, threadID);
 }
@@ -631,6 +647,14 @@ export function SelectBrowserDownloadDir(): $CancellablePromise<string> {
 
 export function SelectClaudeWorkspace(): $CancellablePromise<$models.WorkspaceInfo> {
     return $Call.ByID(3764125613);
+}
+
+/**
+ * SelectComposerFiles keeps image attachments on the managed attachment path
+ * and returns other user-selected files as explicit context paths.
+ */
+export function SelectComposerFiles(): $CancellablePromise<$models.ComposerFileSelection> {
+    return $Call.ByID(733641159);
 }
 
 export function SelectGrokWorkspace(): $CancellablePromise<$models.WorkspaceInfo> {

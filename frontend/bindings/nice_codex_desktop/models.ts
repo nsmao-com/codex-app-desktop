@@ -305,6 +305,11 @@ export interface CodexFeatureFlags {
     "inAppBrowser": boolean;
 }
 
+export interface ComposerFileSelection {
+    "images": string[] | null;
+    "files": string[] | null;
+}
+
 export interface ExternalInstructionsSaveRequest {
     "runtime": string;
     "workspace": string;
@@ -434,6 +439,23 @@ export interface GitChange {
 
 export interface GitCommitRequest {
     "message": string;
+}
+
+export interface GitHubIssueContent {
+    "number": number;
+    "title": string;
+    "body": string;
+    "url": string;
+    "state": string;
+    "author": string;
+    "labels": string[] | null;
+}
+
+export interface GitHubIssueImportContext {
+    "available": boolean;
+    "ownerRepo": string;
+    "remoteUrl": string;
+    "reason"?: string;
 }
 
 /**

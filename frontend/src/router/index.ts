@@ -1,17 +1,20 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
+import SettingsView from '@/views/SettingsView.vue'
+import WorkbenchView from '@/views/WorkbenchView.vue'
+
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     {
       path: '/',
       name: 'workbench',
-      component: () => import('@/views/WorkbenchView.vue'),
+      component: WorkbenchView,
     },
     {
       path: '/settings',
       name: 'settings',
-      component: () => import('@/views/SettingsView.vue'),
+      component: SettingsView,
     },
     {
       path: '/capabilities',

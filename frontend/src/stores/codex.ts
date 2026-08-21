@@ -1886,7 +1886,7 @@ export const useCodexStore = defineStore('codex', () => {
     targetWorkspace?: string,
   ): boolean {
     const message = text.trim()
-    const imagePaths = uniqueImagePaths(images).slice(0, 4)
+    const imagePaths = uniqueImagePaths(images)
     if ((!message && !imagePaths.length) || creatingThread.value) return false
     const now = Date.now()
     const sequence = ++queuedMessageSequence
@@ -2348,6 +2348,16 @@ export const useCodexStore = defineStore('codex', () => {
     scheduleThreadQueueDrain(queueID)
   }
 
+  function updateQueuedMessage(messageID: string, text: string, threadID = activeThreadId.value): boolean {
+    const queueID = queueThreadKey(resolveThreadID(threadID) || threadID.trim())
+    const message = queuedMessagesByThread.value[queueID]?.find((item) => item.id === messageID)
+    if (!message || message.state === 'sending') return false
+    const nextText = text.trim()
+    if (!nextText && message.images.length === 0) return false
+    patchQueuedMessage(queueID, messageID, { text: nextText })
+    return true
+  }
+
   function retryQueuedMessage(messageID: string, threadID = activeThreadId.value): void {
     const queueID = queueThreadKey(resolveThreadID(threadID) || threadID.trim())
     const message = queuedMessagesByThread.value[queueID]?.find((item) => item.id === messageID)
@@ -2427,7 +2437,7 @@ export const useCodexStore = defineStore('codex', () => {
     const message = text.trim()
     const threadID = activeThreadId.value
     const turnID = activeTurnId.value
-    const imagePaths = uniqueImagePaths(images).slice(0, 4)
+    const imagePaths = uniqueImagePaths(images)
     if ((!message && !imagePaths.length) || !canSteerActiveTurn.value || !threadID || !turnID) return false
 
     const localItemID = `local-steer-${Date.now()}-${++queuedMessageSequence}`
@@ -5428,6 +5438,7 @@ export const useCodexStore = defineStore('codex', () => {
     retryMessage,
     retryLastMessage,
     removeQueuedMessage,
+    updateQueuedMessage,
     retryQueuedMessage,
     reorderQueuedMessage,
     sendQueuedMessageNow,

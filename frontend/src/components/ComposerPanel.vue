@@ -2,12 +2,16 @@
 import {
   AlertCircle,
   ArrowUp,
+  Check,
   ChevronDown,
   ChevronUp,
   Command,
   Ellipsis,
+  FileUp,
   Folder,
+  FolderPlus,
   GitBranch,
+  GitPullRequestArrow,
   Image as ImageIcon,
   ListOrdered,
   ListTodo,
@@ -16,7 +20,10 @@ import {
   Minimize2,
   Monitor,
   Octagon,
+  Pencil,
+  Plug,
   Plus,
+  Puzzle,
   RotateCcw,
   Shield,
   X,
@@ -44,7 +51,7 @@ import {
 } from '@/components/ui/popover'
 import { SimpleTooltip } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
-import { useAppStore, useArenaStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import {
@@ -82,6 +89,7 @@ const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const capabilitiesStore = useCapabilitiesStore()
+const dialogStore = useDialogStore()
 // claudeStore used for Claude Code runtime composer path
 const router = useRouter()
 const { t } = useI18n()
@@ -89,6 +97,12 @@ const { t } = useI18n()
 const props = defineProps<{
   draftKey: string
 }>()
+type EditableQueuedMessage = {
+  id: string
+  text: string
+  images: string[]
+  state: 'queued' | 'sending' | 'failed'
+}
 const modelValue = defineModel<string>({ required: true })
 const attachedImages = defineModel<string[]>('images', { required: true })
 const emit = defineEmits<{
@@ -112,7 +126,17 @@ const sendAdmissionPending = shallowRef(false)
 const effortPopoverOpen = shallowRef(false)
 const effortPreviewIndex = shallowRef(-1)
 const effortDragging = shallowRef(false)
+const addMenuOpen = shallowRef(false)
+const fileSelectionPending = shallowRef(false)
+const githubIssuePending = shallowRef(false)
+const githubIssueAvailable = shallowRef<boolean | null>(null)
+const githubIssueOwnerRepo = shallowRef('')
+const githubIssueUnavailableReason = shallowRef('')
+const editingQueuedId = shallowRef('')
+const queuedEditDraft = shallowRef('')
+const queuedEditError = shallowRef('')
 let applyingSentHistory = false
+let githubContextRequest = 0
 const COMPOSER_MAX_COLLAPSED = 200
 const COMPOSER_MAX_EXPANDED = 480
 
@@ -766,7 +790,7 @@ const composerRuntimeLabel = computed(() =>
     || (paneRuntime.value === 'opencode' ? 'OpenCode' : paneRuntime.value.charAt(0).toUpperCase() + paneRuntime.value.slice(1)),
 )
 
-function relatedQueueRows<T extends { id: string; createdAt: number }>(
+function relatedQueueRows<T extends { id: string }>(
   record: Record<string, T[]>,
   sessionId: string,
   sameSession: (left: string, right: string) => boolean,
@@ -774,7 +798,6 @@ function relatedQueueRows<T extends { id: string; createdAt: number }>(
   const rows = Object.entries(record)
     .filter(([id]) => sameSession(id, sessionId))
     .flatMap(([, queue]) => queue)
-    .sort((left, right) => left.createdAt - right.createdAt)
   return [...new Map(rows.map((row) => [row.id, row])).values()]
 }
 
@@ -865,6 +888,67 @@ function removeQueued(messageId: string): void {
   else if (isClaudeMode.value) claudeStore.removeQueuedMessage(messageId)
   else codexStore.removeQueuedMessage(messageId, composerSessionId.value)
 }
+
+function updateQueued(messageId: string, text: string): boolean {
+  if (isGrokMode.value) return grokStore.updateQueuedMessage(messageId, text)
+  if (isClaudeMode.value) return claudeStore.updateQueuedMessage(messageId, text)
+  return codexStore.updateQueuedMessage(messageId, text, composerSessionId.value)
+}
+
+function cancelQueuedEdit(): void {
+  editingQueuedId.value = ''
+  queuedEditDraft.value = ''
+  queuedEditError.value = ''
+}
+
+function beginQueuedEdit(message: EditableQueuedMessage): void {
+  if (message.state === 'sending') return
+  editingQueuedId.value = message.id
+  queuedEditDraft.value = message.text
+  queuedEditError.value = ''
+  void nextTick(() => {
+    const selector = `[data-queue-edit="${CSS.escape(message.id)}"]`
+    const field = composer.value?.querySelector<HTMLTextAreaElement>(selector)
+    field?.focus()
+    field?.setSelectionRange(field.value.length, field.value.length)
+  })
+}
+
+function saveQueuedEdit(message: EditableQueuedMessage): void {
+  if (message.id !== editingQueuedId.value || message.state === 'sending') {
+    cancelQueuedEdit()
+    return
+  }
+  const nextText = queuedEditDraft.value.trim()
+  if (!nextText && message.images.length === 0) {
+    queuedEditError.value = t('chat.queuedEditEmpty')
+    return
+  }
+  if (!updateQueued(message.id, nextText)) {
+    queuedEditError.value = t('chat.queuedEditUnavailable')
+    return
+  }
+  cancelQueuedEdit()
+  notify('success', t('chat.queuedEditSaved'))
+}
+
+function handleQueuedEditKeydown(event: KeyboardEvent, message: EditableQueuedMessage): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    cancelQueuedEdit()
+    return
+  }
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) {
+    event.preventDefault()
+    saveQueuedEdit(message)
+  }
+}
+
+watch(activeQueuedMessages, (messages) => {
+  if (!editingQueuedId.value) return
+  const message = messages.find((row) => row.id === editingQueuedId.value)
+  if (!message || message.state === 'sending') cancelQueuedEdit()
+})
 
 function clearFailedQueued(): void {
   for (const message of activeQueuedMessages.value) {
@@ -1046,6 +1130,11 @@ function navigateSentHistory(event: KeyboardEvent, direction: -1 | 1): boolean {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'u') {
+    event.preventDefault()
+    void selectComposerFiles()
+    return
+  }
   if (pluginOpen.value && pluginOptions.value.length) {
     if (event.key === 'ArrowDown') {
       event.preventDefault()
@@ -1485,17 +1574,166 @@ function onStop(): void {
 }
 
 async function attachImages(): Promise<void> {
-  if (attachedImages.value.length >= 4) return
+  const draftKey = props.draftKey
   try {
     const selected = await backend.SelectImages() ?? []
     if (!selected.length) return
-    const next = [...new Set([...attachedImages.value, ...selected])].slice(0, 4)
+    if (props.draftKey !== draftKey) {
+      emit('append-draft-images', { draftKey, images: selected })
+      return
+    }
+    const next = [...new Set([...attachedImages.value, ...selected])]
     attachedImages.value = next
     for (const path of selected) void loadAttachmentPreview(path)
   } catch (error) {
     notify('error', t('notifications.imagesNotSelected'), error instanceof Error ? error.message : t('notifications.unexpected'))
   }
 }
+
+function focusComposerInput(): void {
+  void nextTick(() => {
+    const textarea = composer.value?.querySelector('textarea')
+    textarea?.focus()
+    if (textarea) textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+  })
+}
+
+function appendComposerText(value: string): void {
+  const addition = value.trim()
+  if (!addition) return
+  const current = modelValue.value.trimEnd()
+  modelValue.value = current ? `${current}\n\n${addition}` : addition
+  focusComposerInput()
+}
+
+async function selectComposerFiles(): Promise<void> {
+  if (fileSelectionPending.value) return
+  const draftKey = props.draftKey
+  fileSelectionPending.value = true
+  try {
+    const selected = await backend.SelectComposerFiles()
+    const images = selected?.images ?? []
+    const files = selected?.files ?? []
+    const fileReferences = files.map((path) => `@${path}`).join('\n')
+    if (props.draftKey !== draftKey) {
+      if (images.length || fileReferences) {
+        emit('restore-draft', { draftKey, text: fileReferences, images })
+      }
+      return
+    }
+    if (images.length) {
+      attachedImages.value = [...new Set([...attachedImages.value, ...images])]
+      for (const path of images) void loadAttachmentPreview(path)
+    }
+    if (fileReferences) appendComposerText(fileReferences)
+  } catch (error) {
+    notify('error', t('notifications.filesNotSelected'), error instanceof Error ? error.message : t('notifications.unexpected'))
+  } finally {
+    fileSelectionPending.value = false
+  }
+}
+
+async function ensureComposerRuntimeActive(): Promise<boolean> {
+  if (appStore.activeRuntime === paneRuntime.value) return true
+  return await appStore.setActiveRuntime(paneRuntime.value as WorkspaceRuntime)
+}
+
+async function selectComposerWorkspace(): Promise<void> {
+  if (!await ensureComposerRuntimeActive()) return
+  const selected = await workspaceStore.selectWorkspace()
+  if (selected) focusComposerInput()
+}
+
+function openSlashCommands(): void {
+  const current = modelValue.value.trimEnd()
+  modelValue.value = current ? `${current} /` : '/'
+  focusComposerInput()
+}
+
+async function openComposerCapabilities(kind: 'connectors' | 'plugins'): Promise<void> {
+  if (!await ensureComposerRuntimeActive()) return
+  const tab = kind === 'plugins'
+    ? 'plugins'
+    : (isCodexMode.value ? 'apps' : 'mcp')
+  await router.push({ name: 'capabilities', query: { tab } })
+}
+
+async function loadGitHubIssueContext(): Promise<void> {
+  const workspace = composerWorkspacePath.value
+  const request = ++githubContextRequest
+  githubIssueAvailable.value = null
+  githubIssueOwnerRepo.value = ''
+  githubIssueUnavailableReason.value = ''
+  if (!workspace) {
+    githubIssueAvailable.value = false
+    githubIssueUnavailableReason.value = t('chat.githubIssueNeedsWorkspace')
+    return
+  }
+  try {
+    const context = await backend.GetGitHubIssueImportContext(workspace)
+    if (request !== githubContextRequest || composerWorkspacePath.value !== workspace) return
+    githubIssueAvailable.value = Boolean(context.available)
+    githubIssueOwnerRepo.value = context.ownerRepo || ''
+    githubIssueUnavailableReason.value = context.reason || ''
+  } catch (error) {
+    if (request !== githubContextRequest || composerWorkspacePath.value !== workspace) return
+    githubIssueAvailable.value = false
+    githubIssueUnavailableReason.value = error instanceof Error ? error.message : t('notifications.unexpected')
+  }
+}
+
+function onAddMenuOpenChange(open: boolean): void {
+  addMenuOpen.value = open
+  if (open) void loadGitHubIssueContext()
+}
+
+async function importGitHubIssue(): Promise<void> {
+  if (githubIssuePending.value) return
+  const workspace = composerWorkspacePath.value
+  if (!workspace) {
+    notify('warning', t('chat.githubIssueTitle'), t('chat.githubIssueNeedsWorkspace'))
+    return
+  }
+  if (githubIssueAvailable.value !== true) await loadGitHubIssueContext()
+  if (githubIssueAvailable.value !== true) {
+    notify('warning', t('chat.githubIssueTitle'), githubIssueUnavailableReason.value || t('chat.githubIssueUnavailable'))
+    return
+  }
+  const reference = await dialogStore.prompt({
+    title: t('chat.githubIssueTitle'),
+    description: t('chat.githubIssueDescription', { repository: githubIssueOwnerRepo.value }),
+    placeholder: t('chat.githubIssuePlaceholder'),
+    confirmLabel: t('chat.githubIssueImport'),
+    maxlength: 240,
+  })
+  if (!reference) return
+  const draftKey = props.draftKey
+  githubIssuePending.value = true
+  try {
+    const issue = await backend.ImportGitHubIssue(workspace, reference)
+    const labels = (issue.labels ?? []).filter(Boolean)
+    const metadata = [
+      issue.state ? `State: ${issue.state}` : '',
+      issue.author ? `Author: @${issue.author}` : '',
+      labels.length ? `Labels: ${labels.join(', ')}` : '',
+    ].filter(Boolean).join(' · ')
+    const issueContext = [
+      `GitHub Issue #${issue.number}: ${issue.title}`,
+      metadata,
+      issue.body?.trim() || t('chat.githubIssueNoBody'),
+      issue.url,
+    ].filter(Boolean).join('\n\n')
+    if (props.draftKey === draftKey) appendComposerText(issueContext)
+    else emit('restore-draft', { draftKey, text: issueContext, images: [] })
+    notify('success', t('chat.githubIssueImported'), `#${issue.number} ${issue.title}`)
+  } catch (error) {
+    notify('error', t('chat.githubIssueImportFailed'), error instanceof Error ? error.message : t('notifications.unexpected'))
+  } finally {
+    githubIssuePending.value = false
+  }
+}
+
+const composerPluginsSupported = computed(() => isCodexMode.value || isClaudeMode.value || isGrokMode.value)
 
 function isImageFile(file: File): boolean {
   if (file.type.startsWith('image/')) return true
@@ -1554,16 +1792,11 @@ async function attachImageFiles(files: File[]): Promise<void> {
   if (!images.length) return
   const draftKey = props.draftKey
   const existingImages = [...attachedImages.value]
-  const room = 4 - existingImages.length
-  if (room <= 0) {
-    notify('warning', t('chat.attachLimitTitle'), t('chat.attachLimit'))
-    return
-  }
   const added: string[] = []
   const previewPatch: Record<string, string> = {}
   attachingImageTasks.value += 1
   try {
-    for (const file of images.slice(0, room)) {
+    for (const file of images) {
       const dataBase64 = await fileToBase64(file)
       const path = await backend.AttachImageData(
         file.name || `paste-${Date.now()}.png`,
@@ -1867,7 +2100,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       </div>
 
       <div
-        class="composer-input-frame relative flex flex-col gap-1.5 rounded-2xl border bg-card px-2.5 pb-2.5 pt-2 shadow-sm transition-[border-color,box-shadow,background-color] duration-200"
+        class="composer-input-frame relative flex flex-col gap-1 rounded-2xl border bg-card px-2.5 py-1.5 shadow-sm transition-[border-color,box-shadow,background-color] duration-200"
         :class="[
           isDraggingFiles
             ? 'border-primary border-dashed bg-primary/5'
@@ -1993,14 +2226,39 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                 >{{ queueIndex + 1 }}</span>
 
                 <div class="min-w-0 flex-1">
-                  <p class="line-clamp-2 text-[12px] leading-4 text-foreground/90">{{ message.text || t('chat.queuedImageOnly') }}</p>
+                  <Textarea
+                    v-if="editingQueuedId === message.id"
+                    v-model="queuedEditDraft"
+                    :data-queue-edit="message.id"
+                    rows="2"
+                    class="min-h-14 resize-y rounded-md bg-background px-2 py-1.5 text-[12px] leading-4"
+                    :aria-label="t('chat.editQueued')"
+                    @input="queuedEditError = ''"
+                    @keydown="handleQueuedEditKeydown($event, message)"
+                  />
+                  <p v-else class="line-clamp-2 text-[12px] leading-4 text-foreground/90">
+                    {{ message.text || t('chat.queuedImageOnly') }}
+                  </p>
                   <div class="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
                     <span v-if="message.state === 'sending'">{{ t('chat.queuedSending') }}</span>
                     <span v-else-if="message.state === 'failed'" class="text-destructive">{{ t('chat.queuedFailed') }}</span>
                     <span v-else>{{ t('chat.queuedWaiting') }}</span>
                     <span v-if="message.images.length">· {{ t('chat.queuedAttachments', { count: message.images.length }) }}</span>
                   </div>
-                  <p v-if="message.error" class="mt-0.5 line-clamp-2 text-[10px] text-destructive/90">
+                  <p
+                    v-if="editingQueuedId === message.id && queuedEditError"
+                    class="mt-1 text-[10px] leading-4 text-destructive"
+                    role="alert"
+                  >
+                    {{ queuedEditError }}
+                  </p>
+                  <p
+                    v-else-if="editingQueuedId === message.id"
+                    class="mt-1 text-[10px] leading-4 text-muted-foreground"
+                  >
+                    {{ t('chat.queuedEditHint') }}
+                  </p>
+                  <p v-else-if="message.error" class="mt-0.5 line-clamp-2 text-[10px] text-destructive/90">
                     {{ message.error }}
                   </p>
                 </div>
@@ -2009,6 +2267,43 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                   v-if="message.state !== 'sending'"
                   class="flex shrink-0 items-center"
                 >
+                  <template v-if="editingQueuedId === message.id">
+                    <SimpleTooltip :content="t('chat.saveQueuedEdit')">
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        class="size-6 text-muted-foreground hover:text-foreground"
+                        :aria-label="t('chat.saveQueuedEdit')"
+                        :disabled="!queuedEditDraft.trim() && !message.images.length"
+                        @click="saveQueuedEdit(message)"
+                      >
+                        <Check :size="12" />
+                      </Button>
+                    </SimpleTooltip>
+                    <SimpleTooltip :content="t('chat.cancelQueuedEdit')">
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        class="size-6 text-muted-foreground"
+                        :aria-label="t('chat.cancelQueuedEdit')"
+                        @click="cancelQueuedEdit"
+                      >
+                        <X :size="12" />
+                      </Button>
+                    </SimpleTooltip>
+                  </template>
+                  <template v-else>
+                  <SimpleTooltip :content="t('chat.editQueued')">
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      class="size-6 text-muted-foreground"
+                      :aria-label="t('chat.editQueued')"
+                      @click="beginQueuedEdit(message)"
+                    >
+                      <Pencil :size="11" />
+                    </Button>
+                  </SimpleTooltip>
                   <SimpleTooltip :content="t('chat.queueMoveUp')">
                     <Button
                       variant="ghost"
@@ -2066,6 +2361,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                       <X :size="11" />
                     </Button>
                   </SimpleTooltip>
+                  </template>
                 </div>
               </div>
             </div>
@@ -2145,7 +2441,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         rows="1"
         :placeholder="composerPlaceholder"
         :aria-description="composerShortcutHint"
-        class="min-h-[64px] resize-none border-0 bg-transparent px-1.5 pb-2 pt-2 pr-14 text-[15px] leading-7 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
+        class="min-h-[42px] resize-none border-0 bg-transparent px-1.5 py-1 pr-14 text-[15px] leading-6 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
         :class="composerExpanded ? 'overflow-y-auto' : ''"
         @compositionend="composing = false"
         @compositionstart="composing = true"
@@ -2154,12 +2450,12 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         @pointerdown="resetSentHistoryNavigation"
       />
 
-      <div class="absolute bottom-3 right-3 z-[3]">
+      <div class="absolute bottom-2 right-2.5 z-[3]">
         <SimpleTooltip :content="primaryActionLabel">
           <Button
             type="button"
             size="icon-sm"
-            class="composer-primary-action size-8 rounded-full transition-[transform,opacity,box-shadow] duration-200"
+            class="composer-primary-action size-7 rounded-full transition-[transform,opacity,box-shadow] duration-200"
             :class="[
               activeRuntimeTurnRunning ? 'is-running text-destructive' : '',
               !activeRuntimeTurnRunning && !canSend ? 'opacity-35' : 'opacity-100',
@@ -2184,18 +2480,80 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
 
       <div class="flex min-h-8 items-center justify-between gap-2 px-0.5">
         <div class="flex min-w-0 items-center gap-0.5">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            class="size-8 rounded-full text-muted-foreground hover:bg-muted/70"
-            :aria-label="t('chat.attachImages')"
-            :disabled="attachedImages.length >= 4 || attachingImages"
-            :aria-busy="attachingImages"
-            @click="attachImages"
-          >
-            <LoaderCircle v-if="attachingImages" :size="14" class="animate-spin" />
-            <Plus v-else :size="17" />
-          </Button>
+          <DropdownMenu :open="addMenuOpen" @update:open="onAddMenuOpenChange">
+            <DropdownMenuTrigger as-child>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                class="size-8 rounded-full text-muted-foreground hover:bg-muted/70"
+                :aria-label="t('chat.addContext')"
+                :disabled="fileSelectionPending || githubIssuePending"
+                :aria-busy="fileSelectionPending || githubIssuePending"
+              >
+                <LoaderCircle v-if="fileSelectionPending || githubIssuePending" :size="14" class="animate-spin" />
+                <Plus v-else :size="17" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" side="top" :side-offset="10" class="w-72 rounded-xl p-1.5 shadow-xl">
+              <DropdownMenuItem class="gap-3 rounded-lg px-2.5 py-2" @click="selectComposerFiles">
+                <FileUp :size="15" class="shrink-0 text-muted-foreground" />
+                <span class="flex min-w-0 flex-1 flex-col">
+                  <span class="text-xs">{{ t('chat.addFilesOrPhotos') }}</span>
+                  <span class="text-[10px] text-muted-foreground">{{ t('chat.addFilesOrPhotosHint') }}</span>
+                </span>
+                <kbd class="text-[9px] text-muted-foreground">Ctrl U</kbd>
+              </DropdownMenuItem>
+              <DropdownMenuItem class="gap-3 rounded-lg px-2.5 py-2" @click="selectComposerWorkspace">
+                <FolderPlus :size="15" class="shrink-0 text-muted-foreground" />
+                <span class="flex min-w-0 flex-1 flex-col">
+                  <span class="text-xs">{{ t('chat.addWorkspaceFolder') }}</span>
+                  <span class="text-[10px] text-muted-foreground">{{ t('chat.addWorkspaceFolderHint') }}</span>
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                class="gap-3 rounded-lg px-2.5 py-2"
+                :disabled="githubIssueAvailable !== true || githubIssuePending"
+                @click="importGitHubIssue"
+              >
+                <LoaderCircle v-if="githubIssueAvailable === null || githubIssuePending" :size="15" class="shrink-0 animate-spin text-muted-foreground" />
+                <GitPullRequestArrow v-else :size="15" class="shrink-0 text-muted-foreground" />
+                <span class="flex min-w-0 flex-1 flex-col">
+                  <span class="text-xs">{{ t('chat.importGitHubIssue') }}</span>
+                  <span class="truncate text-[10px] text-muted-foreground">
+                    {{ githubIssueAvailable ? githubIssueOwnerRepo : (githubIssueUnavailableReason || t('common.loading')) }}
+                  </span>
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem class="gap-3 rounded-lg px-2.5 py-2" @click="openSlashCommands">
+                <Command :size="15" class="shrink-0 text-muted-foreground" />
+                <span class="flex min-w-0 flex-1 flex-col">
+                  <span class="text-xs">{{ t('slash.title') }}</span>
+                  <span class="text-[10px] text-muted-foreground">{{ t('slash.hint') }}</span>
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem class="gap-3 rounded-lg px-2.5 py-2" @click="openComposerCapabilities('connectors')">
+                <Plug :size="15" class="shrink-0 text-muted-foreground" />
+                <span class="flex min-w-0 flex-1 flex-col">
+                  <span class="text-xs">{{ t('chat.connectors') }}</span>
+                  <span class="text-[10px] text-muted-foreground">{{ t('chat.connectorsHint') }}</span>
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                class="gap-3 rounded-lg px-2.5 py-2"
+                :disabled="!composerPluginsSupported"
+                @click="openComposerCapabilities('plugins')"
+              >
+                <Puzzle :size="15" class="shrink-0 text-muted-foreground" />
+                <span class="flex min-w-0 flex-1 flex-col">
+                  <span class="text-xs">{{ t('capabilities.plugins') }}</span>
+                  <span class="text-[10px] text-muted-foreground">
+                    {{ composerPluginsSupported ? t('chat.pluginsHint') : t('chat.pluginsUnsupported') }}
+                  </span>
+                </span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
           <DropdownMenu>
             <DropdownMenuTrigger as-child>

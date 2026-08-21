@@ -171,7 +171,7 @@ function migrateComposerDraft(fromKey: string, toKey: string): void {
   delete next[sourceKey]
   next[targetKey] = {
     text: mergeComposerDraftText(source.text, target?.text || ''),
-    images: [...new Set([...source.images, ...(target?.images ?? [])])].slice(0, 4),
+    images: [...new Set([...source.images, ...(target?.images ?? [])])],
   }
   composerDrafts.value = next
 }
@@ -204,7 +204,7 @@ function restoreComposerDraft(payload: { draftKey: string; text: string; images:
   const current = composerDrafts.value[key] ?? { text: '', images: [] }
   setComposerDraft(key, {
     text: mergeComposerDraftText(payload.text, current.text),
-    images: [...new Set([...current.images, ...payload.images])].slice(0, 4),
+    images: [...new Set([...current.images, ...payload.images])],
   })
 }
 
@@ -212,7 +212,7 @@ function appendComposerDraftImages(payload: { draftKey: string; images: string[]
   const key = resolveDraftKey(payload.draftKey)
   const current = composerDrafts.value[key] ?? { text: '', images: [] }
   setComposerDraft(key, {
-    images: [...new Set([...current.images, ...payload.images])].slice(0, 4),
+    images: [...new Set([...current.images, ...payload.images])],
   })
 }
 
@@ -545,7 +545,7 @@ function commitFromBar(): void {
 </script>
 
 <template>
-  <div class="relative flex h-full flex-col">
+  <div class="relative flex h-full min-h-0 flex-col overflow-hidden">
     <div
       v-if="usesCodexTimeline && paneIsFocused && codexStore.creatingThread"
       class="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center"
@@ -673,7 +673,7 @@ function commitFromBar(): void {
 
     <div class="min-h-0 flex-1 overflow-hidden">
       <WorkspaceWelcome
-        v-if="!hasConversation && !paneSessionId"
+        v-if="!hasConversation"
         :key="`welcome-${paneRuntime}-${welcomeEpoch}`"
         @suggestion="useSuggestion"
       />

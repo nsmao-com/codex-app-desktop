@@ -612,10 +612,6 @@ func (s *AppService) SelectImages() ([]string, error) {
 	if len(paths) == 0 {
 		return []string{}, nil
 	}
-	if len(paths) > 4 {
-		return nil, errors.New("attach up to 4 images per message")
-	}
-
 	result := make([]string, 0, len(paths))
 	for _, path := range paths {
 		cleanPath, err := s.importSelectedImageAttachment(path)
@@ -629,6 +625,58 @@ func (s *AppService) SelectImages() ([]string, error) {
 		s.allowedImages[imageAttachmentKey(path)] = struct{}{}
 	}
 	s.mu.Unlock()
+	return result, nil
+}
+
+type ComposerFileSelection struct {
+	Images []string `json:"images"`
+	Files  []string `json:"files"`
+}
+
+// SelectComposerFiles keeps image attachments on the managed attachment path
+// and returns other user-selected files as explicit context paths.
+func (s *AppService) SelectComposerFiles() (ComposerFileSelection, error) {
+	paths, err := s.app.Dialog.OpenFile().
+		SetTitle("Add files or photos").
+		CanChooseFiles(true).
+		PromptForMultipleSelection()
+	if err != nil {
+		if isDialogCancelled(err) {
+			return ComposerFileSelection{Images: []string{}, Files: []string{}}, nil
+		}
+		return ComposerFileSelection{}, err
+	}
+	result := ComposerFileSelection{Images: []string{}, Files: []string{}}
+	for _, path := range paths {
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" || ext == ".gif" {
+			cleanPath, importErr := s.importSelectedImageAttachment(path)
+			if importErr != nil {
+				return ComposerFileSelection{}, importErr
+			}
+			result.Images = append(result.Images, cleanPath)
+			continue
+		}
+		absolute, absErr := filepath.Abs(strings.TrimSpace(path))
+		if absErr != nil {
+			return ComposerFileSelection{}, absErr
+		}
+		info, statErr := os.Stat(absolute)
+		if statErr != nil {
+			return ComposerFileSelection{}, statErr
+		}
+		if !info.Mode().IsRegular() {
+			return ComposerFileSelection{}, errors.New("selected context must be a file")
+		}
+		result.Files = append(result.Files, filepath.Clean(absolute))
+	}
+	if len(result.Images) > 0 {
+		s.mu.Lock()
+		for _, path := range result.Images {
+			s.allowedImages[imageAttachmentKey(path)] = struct{}{}
+		}
+		s.mu.Unlock()
+	}
 	return result, nil
 }
 
@@ -2088,10 +2136,6 @@ func (s *AppService) buildUserInput(text string, images []string) ([]any, error)
 }
 
 func (s *AppService) validateImageAttachments(images []string) ([]string, error) {
-	if len(images) > 4 {
-		return nil, errors.New("attach up to 4 images per message")
-	}
-
 	validated := make([]string, 0, len(images))
 	seenImages := make(map[string]struct{}, len(images))
 	for _, path := range images {
@@ -2167,7 +2211,30 @@ func (s *AppService) InterruptTurn(threadID string, turnID string) error {
 		"threadId": backendID,
 		"turnId":   turnID,
 	}, 8*time.Second)
-	return err
+	if err == nil {
+		return nil
+	}
+
+	// turn/completed can race with a user's stop click, and a missed lifecycle
+	// event can leave the WebView holding an older turn id. Reconcile against the
+	// authoritative thread snapshot so an already-finished turn is idempotent and
+	// a changed active turn can still be stopped without affecting another thread.
+	liveness, livenessErr := s.ReadThreadLiveness(threadID)
+	if livenessErr != nil || !liveness.Running {
+		if livenessErr == nil {
+			return nil
+		}
+		return err
+	}
+	activeTurnID := strings.TrimSpace(liveness.TurnID)
+	if activeTurnID == "" || activeTurnID == turnID {
+		return err
+	}
+	_, retryErr := s.callWithTimeout("turn/interrupt", map[string]any{
+		"threadId": backendID,
+		"turnId":   activeTurnID,
+	}, 8*time.Second)
+	return retryErr
 }
 
 // resolveInterruptBackendID maps NiceCodex session ids to Codex app-server thread ids.
@@ -2711,6 +2778,22 @@ func (s *AppService) ReadAccountRateLimits() (map[string]any, error) {
 // Claude backfills from ~/.claude/projects/**/*.jsonl assistant message.usage when missing.
 func (s *AppService) ReadAccountUsage() (map[string]any, error) {
 	runtime := normalizeUsageRuntime(s.Settings().ActiveRuntime)
+	return s.readAccountUsageForRuntime(runtime)
+}
+
+// ReadRuntimeAccountUsage keeps split-pane usage cards scoped to their own
+// provider instead of leaking the globally active provider's counters.
+func (s *AppService) ReadRuntimeAccountUsage(runtimeName string) (map[string]any, error) {
+	runtimeName = strings.ToLower(strings.TrimSpace(runtimeName))
+	switch runtimeName {
+	case "codex", "claude", "grok", "gemini", "opencode", "open-code":
+		return s.readAccountUsageForRuntime(normalizeUsageRuntime(runtimeName))
+	default:
+		return nil, errors.New("unsupported usage runtime")
+	}
+}
+
+func (s *AppService) readAccountUsageForRuntime(runtime string) (map[string]any, error) {
 
 	// Grok: rebuild breakdown from local sessions when the bucket is empty or total-only.
 	if runtime == "grok" && s.shouldRunUsageBackfill(runtime) {

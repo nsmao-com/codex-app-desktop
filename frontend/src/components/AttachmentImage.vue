@@ -26,6 +26,8 @@ const dialogOpen = shallowRef(false)
 let generation = 0
 
 function safeRemoteURL(source: string): string {
+  const inline = safePreviewURL(source)
+  if (inline) return inline
   try {
     const url = new URL(source)
     return url.protocol === 'https:' || url.protocol === 'http:' ? url.toString() : ''
