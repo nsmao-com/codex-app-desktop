@@ -993,11 +993,6 @@ func (s *AppService) executeExternalTurn(
 	if sessionID == "" {
 		sessionID = generatedSessionID
 	}
-	if onStream != nil && sessionID != "" {
-		// Expose the concrete native session before the process starts so runtimes can
-		// observe provider-owned tool history without mixing it into the text stream.
-		onStream("session", sessionID)
-	}
 	commandPath, commandArgs, resolveErr := providerCommand(executable, args)
 	if resolveErr != nil {
 		return "", sessionID, nil, resolveErr
@@ -1017,6 +1012,11 @@ func (s *AppService) executeExternalTurn(
 		return "", sessionID, nil, err
 	}
 	defer cleanup()
+	if onStream != nil && sessionID != "" {
+		// The process now owns this concrete native id. Publish it before reading
+		// stdout so session switches cannot outrun lifecycle/event routing.
+		onStream("session", sessionID)
+	}
 	stderrResult := make(chan []byte, 1)
 	go func() {
 		payload, _ := io.ReadAll(io.LimitReader(stderr, 256*1024))

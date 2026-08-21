@@ -850,11 +850,26 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 	toolPollingDone := make(chan struct{})
 	toolPollingStarted := false
 	pollSessionID := ""
+	boundNativeID := ""
+	bindNativeSession := func(nativeID string) {
+		nativeID = strings.TrimSpace(nativeID)
+		if nativeID == "" || nativeID == request.SessionID || nativeID == boundNativeID {
+			return
+		}
+		fromID := request.SessionID
+		if boundNativeID != "" {
+			fromID = boundNativeID
+		}
+		s.rekeyGrokRun(request.Backend, fromID, nativeID, turnID)
+		boundNativeID = nativeID
+		s.emitGrokEvent("session.bound", grokBackendBuild, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{"sessionId": nativeID}))
+	}
 	_, nativeID, usage, err := s.executeExternalTurn(ctx, "grok", resumeID, request.Workspace, turnSettings, request.Text, request.Images, func(kind, delta string) {
 		if delta == "" {
 			return
 		}
 		if kind == "session" {
+			bindNativeSession(delta)
 			if toolPollingStarted {
 				return
 			}
@@ -903,15 +918,13 @@ func (s *AppService) runGrokBuildTurn(ctx context.Context, turnID string, reques
 		// Capture a result written immediately before process exit.
 		s.emitGrokBuildActivitySnapshot(request.SessionID, turnID, pollSessionID, request.Text, request.ClientTurnID, historyStart)
 	}
-	bindNativeSession := err == nil
-	if !bindNativeSession && nativeID != "" {
+	shouldBindNativeSession := err == nil
+	if !shouldBindNativeSession && nativeID != "" {
 		_, findErr := findGrokNativeSession(nativeID)
-		bindNativeSession = findErr == nil
+		shouldBindNativeSession = findErr == nil
 	}
-	if bindNativeSession && nativeID != "" && nativeID != request.SessionID {
-		// Re-key the live run under the native session id so Interrupt works after bind.
-		s.rekeyGrokRun(request.Backend, request.SessionID, nativeID, turnID)
-		s.emitGrokEvent("session.bound", grokBackendBuild, request.SessionID, turnID, grokClientTurnPayload(request.ClientTurnID, map[string]any{"sessionId": nativeID}))
+	if shouldBindNativeSession && nativeID != "" && nativeID != request.SessionID {
+		bindNativeSession(nativeID)
 	}
 	return usage, err
 }

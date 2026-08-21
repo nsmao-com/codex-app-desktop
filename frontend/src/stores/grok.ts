@@ -2100,24 +2100,26 @@ export const useGrokStore = defineStore('grok', () => {
         || !sameWorkspacePath(requestedWorkspace, workspacePath.value)
         || requestedSearch !== search.value.trim()
       ) return
-      const pending = sessions.value.filter((item) =>
+      // Grok announces its native id before summary.json is guaranteed to exist.
+      // Keep that promoted optimistic row visible while it still owns work/queue;
+      // otherwise a list refresh makes a live turn impossible to reopen or stop.
+      const retained = sessions.value.filter((item) =>
         item.backend === requestedBackend
-        && item.id.startsWith('pending-grok-')
         && (
-          sameGrokSession(activeSessionId.value, item.id)
+          (item.id.startsWith('pending-grok-') && sameGrokSession(activeSessionId.value, item.id))
           || isSessionBusy(item.id)
           || relatedSessionKeys(queuedBySession.value, item.id)
             .some((key) => (queuedBySession.value[key] || []).length > 0)
         ),
       )
-      const pendingIds = new Set(pending.map((item) => resolveSessionId(item.id)))
+      const retainedIds = new Set(retained.map((item) => resolveSessionId(item.id)))
       for (const item of list ?? []) {
         const activeTurnId = snapshotActiveTurnId(item)
         if (activeTurnId) reconcileSnapshotTurn(item.id, requestedBackend, activeTurnId)
       }
       sessions.value = [
-        ...pending,
-        ...(list ?? []).filter((item) => !pendingIds.has(resolveSessionId(item.id))),
+        ...retained,
+        ...(list ?? []).filter((item) => !retainedIds.has(resolveSessionId(item.id))),
       ]
       sessionsLoadedAt = Date.now()
       sessionsLoadedKey = requestKey

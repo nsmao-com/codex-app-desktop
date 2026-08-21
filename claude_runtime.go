@@ -1101,14 +1101,19 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 		func(kind, delta string) {
 			switch kind {
 			case "session":
-				if delta == "" || toolPollingStarted {
+				nativeSessionID := strings.TrimSpace(delta)
+				if nativeSessionID == "" {
+					return
+				}
+				s.bindClaudeBackendRef(request.SessionID, nativeSessionID)
+				if toolPollingStarted {
 					return
 				}
 				toolPollingStarted = true
-				pollSessionID = delta
+				pollSessionID = nativeSessionID
 				go func() {
 					defer close(toolPollingDone)
-					s.pollClaudeActivity(pollCtx, request.SessionID, turnID, delta, request.Text)
+					s.pollClaudeActivity(pollCtx, request.SessionID, turnID, nativeSessionID, request.Text)
 				}()
 			case "thought":
 				if delta == "" {
@@ -1431,6 +1436,22 @@ func (s *AppService) ensureClaudeSessionLocked(request ClaudeSendRequest, model,
 		s.claudeSessions[request.SessionID] = session
 	}
 	return session
+}
+
+func (s *AppService) bindClaudeBackendRef(sessionID, backendRef string) {
+	sessionID = strings.TrimSpace(sessionID)
+	backendRef = strings.TrimSpace(backendRef)
+	if sessionID == "" || backendRef == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.claudeSessions[sessionID]
+	if session == nil || session.BackendRef == backendRef {
+		return
+	}
+	session.BackendRef = backendRef
+	s.persistClaudeSessionsLocked()
 }
 
 // patchClaudeAssistantDraft updates only the in-memory session index. The final
