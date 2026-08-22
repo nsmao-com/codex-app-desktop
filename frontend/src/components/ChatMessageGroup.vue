@@ -69,8 +69,14 @@ const { t } = useI18n()
 const appStore = useAppStore()
 const openRows = shallowRef<Record<string, boolean>>({})
 const copiedKey = shallowRef('')
+const messageRootRef = shallowRef<HTMLElement | null>(null)
 const parsedTurnDiffCache = new Map<string, ReturnType<typeof parseUnifiedDiff>>()
 const displayWorkspacePath = computed(() => props.workspacePath || appStore.currentWorkspacePath)
+const streamGraphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+function streamGraphemes(value: string): string[] {
+  return Array.from(streamGraphemeSegmenter.segment(value), (part) => part.segment)
+}
 
 /** Soft enter for live/recent groups only — history mounts stay instant. */
 const animateEnter = computed(() => Boolean(props.streaming || props.animated))
@@ -344,6 +350,66 @@ const liveTextId = computed(() => {
   }
   return ''
 })
+const liveStreamText = computed(() => {
+  const id = liveTextId.value
+  if (!id) return ''
+  const block = stream.value.find((entry) => entry.kind === 'text' && entry.item.id === id)
+  return block?.kind === 'text' ? plainStreamText(block.item) : ''
+})
+
+/** Give only the newest visible characters a short blur-to-sharp trail. */
+function revealLiveStreamTail(): void {
+  const root = messageRootRef.value?.querySelector<HTMLElement>('.streaming-markdown-caret')
+  if (!root || typeof document === 'undefined') return
+  const nodes: Text[] = []
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const text = node as Text
+      const parent = text.parentElement
+      if (!text.data || !parent) return NodeFilter.FILTER_REJECT
+      if (parent.closest('pre, code, button, [aria-hidden="true"], .markdown-code')) {
+        return NodeFilter.FILTER_REJECT
+      }
+      return NodeFilter.FILTER_ACCEPT
+    },
+  })
+  let current = walker.nextNode()
+  while (current) {
+    nodes.push(current as Text)
+    current = walker.nextNode()
+  }
+  const lengths = nodes.map((node) => streamGraphemes(node.data).length)
+  const total = lengths.reduce((sum, length) => sum + length, 0)
+  const revealStart = Math.max(0, total - 28)
+  let cursor = 0
+  nodes.forEach((node) => {
+    const chars = streamGraphemes(node.data)
+    const nodeStart = cursor
+    cursor += chars.length
+    if (cursor <= revealStart) return
+    const localStart = Math.max(0, revealStart - nodeStart)
+    const fragment = document.createDocumentFragment()
+    if (localStart > 0) fragment.append(document.createTextNode(chars.slice(0, localStart).join('')))
+    for (let index = localStart; index < chars.length; index += 1) {
+      const span = document.createElement('span')
+      span.className = 'stream-reveal-char'
+      const age = Math.min(28, total - (nodeStart + index + 1))
+      span.style.animationDelay = `${age * -9}ms`
+      span.textContent = chars[index] || ''
+      fragment.append(span)
+    }
+    node.replaceWith(fragment)
+  })
+}
+
+watch(
+  () => [liveTextId.value, liveStreamText.value] as const,
+  ([id, text]) => {
+    if (!id || !text) return
+    revealLiveStreamTail()
+  },
+  { flush: 'post' },
+)
 const visibleResolvedFileChanges = computed(() =>
   resolvedFileChanges.value.slice(0, FILE_CHANGE_PAGE + extraFileChanges.value),
 )
@@ -908,6 +974,7 @@ function diffStats(diff: string): { add: number; del: number } {
 
 <template>
   <div
+    ref="messageRootRef"
     class="group w-full"
     :class="[
       animateEnter ? 'timeline-message-enter' : '',

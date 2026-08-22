@@ -9,7 +9,7 @@ import type {
   GrokSessionSummary,
   GrokTurnRef,
 } from '../../bindings/nice_codex_desktop/models'
-import type { MessageAttachment, TimelineItem, TokenUsageBreakdown, TurnMetrics } from '@/types/codex'
+import type { MessageAttachment, TimelineItem, TokenUsageBreakdown, TurnFeedback, TurnMetrics } from '@/types/codex'
 import {
   archiveGrokSession as archiveGrokSessionApi,
   deleteGrokSession as deleteGrokSessionApi,
@@ -452,6 +452,7 @@ export const useGrokStore = defineStore('grok', () => {
   const runningSessionIdsState = shallowRef<string[]>([])
   const interruptingSessionIds = shallowRef<string[]>([])
   const activeTurnBySession = shallowRef<Record<string, GrokTurnRef | undefined>>({})
+  const turnFeedbackBySession = shallowRef<Record<string, TurnFeedback>>({})
   const liveTextBySession = shallowRef<Record<string, string>>({})
   /** Live Grok Build thought stream (planning shimmer label). */
   const liveThoughtBySession = shallowRef<Record<string, string>>({})
@@ -770,6 +771,35 @@ export const useGrokStore = defineStore('grok', () => {
     return Object.keys(bucket).find((key) => sameGrokSession(key, id)) || resolved || id
   }
 
+  function turnFeedback(sessionId: string): TurnFeedback | null {
+    if (!sessionId) return null
+    const key = sessionStateKey(turnFeedbackBySession.value, sessionId)
+    return (key && turnFeedbackBySession.value[key]) || null
+  }
+
+  function setTurnFeedback(sessionId: string, feedback: TurnFeedback): void {
+    const id = resolveSessionId(sessionId) || sessionId.trim()
+    if (!id) return
+    const next = { ...turnFeedbackBySession.value }
+    for (const key of Object.keys(next)) {
+      if (key !== id && sameGrokSession(key, id)) delete next[key]
+    }
+    next[id] = feedback
+    turnFeedbackBySession.value = next
+  }
+
+  function clearTurnFeedback(sessionId: string): void {
+    if (!sessionId) return
+    const next = { ...turnFeedbackBySession.value }
+    let changed = false
+    for (const key of Object.keys(next)) {
+      if (!sameGrokSession(key, sessionId)) continue
+      delete next[key]
+      changed = true
+    }
+    if (changed) turnFeedbackBySession.value = next
+  }
+
   function relatedSessionKeys<T>(bucket: Record<string, T>, sessionId: string): string[] {
     const id = sessionId.trim()
     if (!id) return []
@@ -869,6 +899,15 @@ export const useGrokStore = defineStore('grok', () => {
       for (const key of historyKeys) delete next[key]
       if (history) next[to] = { ...history, loadingEarlier: false }
       historyBySession.value = next
+    }
+
+    const feedbackKeys = relatedSessionKeys(turnFeedbackBySession.value, to)
+    if (feedbackKeys.length) {
+      const next = { ...turnFeedbackBySession.value }
+      const feedback = next[to] ?? next[feedbackKeys[0]!]
+      for (const key of feedbackKeys) delete next[key]
+      if (feedback) next[to] = feedback
+      turnFeedbackBySession.value = next
     }
 
     const mergeTextBucket = (bucket: Record<string, string>): Record<string, string> => {
@@ -1122,17 +1161,34 @@ export const useGrokStore = defineStore('grok', () => {
     const current = turnForSession(ref.sessionId)
     if (!current || current.turnId !== ref.turnId || finalizedTurnIds.has(ref.turnId)) return
     const sessionId = resolveSessionId(current.sessionId) || current.sessionId
-    rememberFinalizedGrokTurn(ref.turnId)
     flushLiveStreams()
+    const liveKey = liveWriteKey(sessionId) || sessionId
+    const hasAssistantOutput = Boolean((liveTextBySession.value[liveKey] || '').trim())
+      || (liveActivityBySession.value[liveKey] || []).some((message) =>
+        (message.role || '').toLowerCase() === 'assistant' && Boolean((message.text || '').trim()),
+      )
+    const wasInterrupting = isSessionInterrupting(sessionId)
+    const terminalStatus = wasInterrupting || !hasAssistantOutput ? 'interrupted' : 'completed'
+    rememberFinalizedGrokTurn(ref.turnId)
     applyTurnUsageMetrics(sessionId, ref.turnId, {})
     clearTurnState(sessionId, ref.turnId)
     resetLiveSessionState(sessionId)
+    if (terminalStatus === 'interrupted') {
+      setTurnFeedback(sessionId, {
+        state: 'interrupted',
+        message: wasInterrupting ? translate('chat.interrupted') : translate('chat.turnProcessEnded'),
+        turnId: ref.turnId,
+        intentional: wasInterrupting,
+      })
+    } else {
+      clearTurnFeedback(sessionId)
+    }
     void appStore.loadLocalUsage()
     void (async () => {
       if (current.backend === backendId.value) {
         try {
           if (sessionId && !sessionId.startsWith('pending-grok-')) {
-            await openSession(sessionId, { terminalStatus: 'completed', activate: false })
+            await openSession(sessionId, { terminalStatus, activate: false })
           } else {
             await loadSessions(true)
           }
@@ -1820,6 +1876,7 @@ export const useGrokStore = defineStore('grok', () => {
     }
     if (type === 'turn.completed' || type === 'turn.failed' || type === 'turn.interrupted') {
       const terminalTurn = turnForSession(sessionId)
+      const wasInterrupting = isSessionInterrupting(sessionId)
       const activeClientTurnId = clientTurnIdForTurn(terminalTurn)
       if (
         eventClientTurnId
@@ -1888,7 +1945,18 @@ export const useGrokStore = defineStore('grok', () => {
         liveActivityBySession.value = nextActivity
       }
       if (type === 'turn.failed') {
-        notify('error', translate('chat.turnFailed'), friendlyErrorMessage(data.message))
+        const message = friendlyErrorMessage(data.message, translate('chat.turnEndedUnexpectedly'))
+        setTurnFeedback(targetSession, { state: 'failed', message, turnId })
+        notify('error', translate('chat.turnFailed'), message)
+      } else if (type === 'turn.interrupted') {
+        setTurnFeedback(targetSession, {
+          state: 'interrupted',
+          message: wasInterrupting ? translate('chat.interrupted') : translate('chat.turnEndedUnexpectedly'),
+          turnId,
+          intentional: wasInterrupting,
+        })
+      } else {
+        clearTurnFeedback(targetSession)
       }
       // Reload sidebar usage after local usage.json is updated by the backend.
       void appStore.loadLocalUsage()
@@ -2584,6 +2652,7 @@ export const useGrokStore = defineStore('grok', () => {
     },
   ): Promise<'sent' | 'failed' | 'deferred'> {
     const turnBackend = options?.backend || backendId.value
+    clearTurnFeedback(sessionId)
     const workspace = options?.workspace || workspacePath.value
     if (!workspace) {
       notify('warning', translate('app.needWorkspace'), translate('app.needWorkspaceHintReady'))
@@ -2696,6 +2765,7 @@ export const useGrokStore = defineStore('grok', () => {
       clearTurnState(sessionId, pendingTurnId)
       if (options?.localMessageId) removeLocalMessage(sessionId, options.localMessageId)
       if (/Grok turn is already running/i.test(failure)) return 'deferred'
+      setTurnFeedback(sessionId, { state: 'failed', message: failure, turnId: pendingTurnId })
       notify('error', translate('notifications.messageNotSent'), failure)
       return 'failed'
     }
@@ -2917,6 +2987,12 @@ export const useGrokStore = defineStore('grok', () => {
         rememberFinalizedGrokTurn(ref.turnId)
         clearTurnState(ref.sessionId, ref.turnId)
         markSessionState(interruptingSessionIds, ref.sessionId, false)
+        setTurnFeedback(ref.sessionId, {
+          state: 'interrupted',
+          message: translate('chat.interrupted'),
+          turnId: ref.turnId,
+          intentional: true,
+        })
         await drainQueue(ref.sessionId)
         return
       }
@@ -2933,6 +3009,12 @@ export const useGrokStore = defineStore('grok', () => {
       if (!await isGrokTurnRunningApi(ref)) {
         rememberFinalizedGrokTurn(ref.turnId)
         clearTurnState(ref.sessionId, ref.turnId)
+        setTurnFeedback(ref.sessionId, {
+          state: 'interrupted',
+          message: translate('chat.interrupted'),
+          turnId: ref.turnId,
+          intentional: true,
+        })
         await drainQueue(ref.sessionId)
         return
       }
@@ -2993,6 +3075,7 @@ export const useGrokStore = defineStore('grok', () => {
     liveThoughtBySession.value = withoutRelated(liveThoughtBySession.value)
     liveActivityBySession.value = withoutRelated(liveActivityBySession.value)
     tokenUsageBySession.value = withoutRelated(tokenUsageBySession.value)
+    turnFeedbackBySession.value = withoutRelated(turnFeedbackBySession.value)
 
     for (const id of [...pendingLiveText.keys()]) if (matches(id)) pendingLiveText.delete(id)
     for (const id of [...pendingLiveThought.keys()]) if (matches(id)) pendingLiveThought.delete(id)
@@ -3205,6 +3288,7 @@ export const useGrokStore = defineStore('grok', () => {
     patchSessionPreferences,
     activeTurn,
     activeTurnBySession,
+    turnFeedbackBySession,
     sendingSessionIds,
     historyBySession,
     queuedBySession,
@@ -3226,6 +3310,7 @@ export const useGrokStore = defineStore('grok', () => {
     interrupting,
     runningSessionIds,
     sameSession: sameGrokSession,
+    turnFeedback,
     resolveSessionId,
     isSessionBusy,
     isSessionLoading,

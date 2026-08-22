@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowDown, LoaderCircle, RefreshCw } from '@lucide/vue'
+import { AlertCircle, ArrowDown, LoaderCircle, RefreshCw } from '@lucide/vue'
 import { computed, nextTick, onMounted, onUnmounted, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -130,7 +130,26 @@ const timelineSending = computed(() => {
 
 const timelineTurnFeedback = computed(() => {
   const id = timelineThreadId.value
-  return id ? codexStore.threadFeedback(id) : null
+  if (!id) return null
+  if (isGrokMode.value) return grokStore.turnFeedback(id)
+  if (isClaudeMode.value) return claudeStore.turnFeedback(id)
+  return codexStore.threadFeedback(id)
+})
+const terminalTurnFeedback = computed(() => {
+  const feedback = timelineTurnFeedback.value
+  return feedback?.state === 'failed' || feedback?.state === 'interrupted' ? feedback : null
+})
+const terminalFeedbackTitle = computed(() => {
+  const feedback = terminalTurnFeedback.value
+  if (!feedback) return ''
+  if (feedback.state === 'failed') return t('chat.turnFailed')
+  const intentional = feedback.intentional === true
+    || (feedback.intentional === undefined && feedback.message === t('chat.interrupted'))
+  return intentional ? t('chat.interrupted') : t('chat.turnInterrupted')
+})
+const terminalFeedbackDetail = computed(() => {
+  const message = terminalTurnFeedback.value?.message.trim() || ''
+  return message && message !== terminalFeedbackTitle.value ? message : ''
 })
 const timelineCodexTurnMetrics = computed(() => {
   const id = timelineThreadId.value
@@ -887,11 +906,13 @@ watch(showThinking, (visible) => {
 watch(
   () => timelineTurnFeedback.value?.state,
   (state, prev) => {
-    if (isGrokMode.value || isClaudeMode.value || !stickToBottom.value) return
-    if (prev === 'running' || prev === 'submitting') {
-      if (state === 'failed' || state === 'interrupted' || !state) {
-        void settleToBottom({ maxFrames: 16, followUp: true })
-      }
+    if (!stickToBottom.value) return
+    if (state === 'failed' || state === 'interrupted') {
+      void settleToBottom({ maxFrames: 16, followUp: true })
+      return
+    }
+    if ((prev === 'running' || prev === 'submitting') && !state) {
+      void settleToBottom({ maxFrames: 16, followUp: true })
     }
   },
 )
@@ -1122,6 +1143,19 @@ onUnmounted(() => {
               <span class="reasoning-shimmer__base truncate text-[13px]">{{ thinkingLabel }}</span>
               <span class="reasoning-shimmer__sheen truncate text-[13px]" aria-hidden="true">{{ thinkingLabel }}</span>
             </span>
+          </div>
+
+          <div
+            v-if="terminalTurnFeedback && !showThinking"
+            class="timeline-terminal-feedback flex min-w-0 items-start gap-2 rounded-xl border border-destructive/20 bg-destructive/5 px-3 py-2 text-destructive"
+            role="alert"
+            aria-live="polite"
+          >
+            <AlertCircle :size="15" class="mt-0.5 shrink-0" />
+            <p class="min-w-0 text-[12px] leading-5">
+              <span class="font-medium">{{ terminalFeedbackTitle }}</span>
+              <span v-if="terminalFeedbackDetail" class="text-destructive/85"> · {{ terminalFeedbackDetail }}</span>
+            </p>
           </div>
         </template>
       </div>

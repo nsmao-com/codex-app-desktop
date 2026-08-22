@@ -34,6 +34,7 @@ export interface TurnFeedback {
   state: TurnFeedbackState
   message: string
   turnId: string
+  intentional?: boolean
 }
 
 export type QueuedMessageState = 'queued' | 'sending' | 'failed'

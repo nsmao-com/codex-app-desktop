@@ -2,7 +2,7 @@ import { Events } from '@wailsio/runtime'
 import { defineStore } from 'pinia'
 import { computed, shallowRef, watch } from 'vue'
 
-import type { TimelineItem, TokenUsageBreakdown, TurnMetrics } from '@/types/codex'
+import type { TimelineItem, TokenUsageBreakdown, TurnFeedback, TurnMetrics } from '@/types/codex'
 import {
   archiveClaudeSession as archiveClaudeSessionApi,
   compactClaudeSession as compactClaudeSessionApi,
@@ -262,6 +262,7 @@ export const useClaudeStore = defineStore('claude', () => {
   const search = shallowRef('')
   const runningSessionIds = shallowRef<string[]>([])
   const activeTurnBySession = shallowRef<Record<string, ClaudeTurnRef | undefined>>({})
+  const turnFeedbackBySession = shallowRef<Record<string, TurnFeedback>>({})
   /** turnId → metrics for timeline token footer */
   const activeTurnMetrics = shallowRef<Record<string, TurnMetrics>>({})
   const turnStartedAtById = shallowRef<Record<string, number>>({})
@@ -370,6 +371,35 @@ export const useClaudeStore = defineStore('claude', () => {
     const resolved = resolveSessionId(id)
     if (resolved && bucket[resolved] !== undefined) return resolved
     return Object.keys(bucket).find((key) => sameClaudeSession(key, id)) || resolved || id
+  }
+
+  function turnFeedback(sessionId: string): TurnFeedback | null {
+    if (!sessionId) return null
+    const key = sessionStateKey(turnFeedbackBySession.value, sessionId)
+    return (key && turnFeedbackBySession.value[key]) || null
+  }
+
+  function setTurnFeedback(sessionId: string, feedback: TurnFeedback): void {
+    const id = resolveSessionId(sessionId) || sessionId.trim()
+    if (!id) return
+    const next = { ...turnFeedbackBySession.value }
+    for (const key of Object.keys(next)) {
+      if (key !== id && sameClaudeSession(key, id)) delete next[key]
+    }
+    next[id] = feedback
+    turnFeedbackBySession.value = next
+  }
+
+  function clearTurnFeedback(sessionId: string): void {
+    if (!sessionId) return
+    const next = { ...turnFeedbackBySession.value }
+    let changed = false
+    for (const key of Object.keys(next)) {
+      if (!sameClaudeSession(key, sessionId)) continue
+      delete next[key]
+      changed = true
+    }
+    if (changed) turnFeedbackBySession.value = next
   }
 
   function clearClaudeTurnState(sessionId: string, turnId = ''): boolean {
@@ -511,8 +541,17 @@ export const useClaudeStore = defineStore('claude', () => {
     const current = turnRefForSession(ref.sessionId)
     if (!current || current.turnId !== ref.turnId || finalizedTurnIds.has(ref.turnId)) return
     const sessionId = resolveSessionId(current.sessionId) || current.sessionId
-    rememberFinalizedClaudeTurn(ref.turnId)
     flushStreamPatches()
+    const itemKey = sessionStateKey(itemsBySession.value, sessionId)
+    const activityKey = sessionStateKey(liveActivityBySession.value, sessionId)
+    const hasAssistantOutput = (itemsBySession.value[itemKey] || []).some((item) =>
+      item.turnId === ref.turnId && item.type === 'agentMessage' && Boolean(item.text.trim()),
+    ) || (liveActivityBySession.value[activityKey] || []).some((message) =>
+      (message.role || '').toLowerCase() === 'assistant' && Boolean((message.text || '').trim()),
+    )
+    const wasInterrupting = isSessionInterrupting(sessionId)
+    const terminalStatus = wasInterrupting || !hasAssistantOutput ? 'interrupted' : 'completed'
+    rememberFinalizedClaudeTurn(ref.turnId)
     materializeLiveActivity(sessionId, ref.turnId)
     const nextActivity = { ...liveActivityBySession.value }
     for (const id of Object.keys(nextActivity)) {
@@ -521,12 +560,21 @@ export const useClaudeStore = defineStore('claude', () => {
     liveActivityBySession.value = nextActivity
     applyTurnMetrics(sessionId, ref.turnId, {})
     clearClaudeTurnState(sessionId, ref.turnId)
-    const itemKey = sessionStateKey(itemsBySession.value, sessionId)
     if (itemKey && itemsBySession.value[itemKey]) {
       itemsBySession.value = {
         ...itemsBySession.value,
-        [itemKey]: finalizeTimelineItemStatuses(itemsBySession.value[itemKey], 'completed'),
+        [itemKey]: finalizeTimelineItemStatuses(itemsBySession.value[itemKey], terminalStatus),
       }
+    }
+    if (terminalStatus === 'interrupted') {
+      setTurnFeedback(sessionId, {
+        state: 'interrupted',
+        message: wasInterrupting ? translate('chat.interrupted') : translate('chat.turnProcessEnded'),
+        turnId: ref.turnId,
+        intentional: wasInterrupting,
+      })
+    } else {
+      clearTurnFeedback(sessionId)
     }
     void appStore.loadLocalUsage().catch(() => undefined)
     void (async () => {
@@ -534,7 +582,7 @@ export const useClaudeStore = defineStore('claude', () => {
         if (sessionId && !sessionId.startsWith('pending-claude-')) {
           await openSession(sessionId, {
             switchWorkspace: false,
-            terminalStatus: 'completed',
+            terminalStatus,
             activate: false,
           })
         } else {
@@ -588,6 +636,11 @@ export const useClaudeStore = defineStore('claude', () => {
     sessions.value = [...dedupedSessions.values()]
     if (sameClaudeSession(activeSessionId.value, pendingId)) activeSessionId.value = realId
     remapSessionBusy(pendingId, realId)
+    const pendingFeedback = turnFeedback(pendingId)
+    if (pendingFeedback) {
+      clearTurnFeedback(pendingId)
+      setTurnFeedback(realId, pendingFeedback)
+    }
 
     const pendingActivity = liveActivityBySession.value[pendingId]
     if (pendingActivity?.length) {
@@ -987,6 +1040,8 @@ export const useClaudeStore = defineStore('claude', () => {
     }
 
     if (kind === 'turn.completed') {
+      const terminalStatus = String(data.status || (data.error ? 'failed' : 'completed'))
+      const wasInterrupting = isSessionInterrupting(sessionId)
       const activeBeforeTerminal = turnRefForSession(sessionId)
       if (
         clientTurnId
@@ -1048,8 +1103,19 @@ export const useClaudeStore = defineStore('claude', () => {
       liveActivityBySession.value = nextActivity
       applyTurnMetrics(sessionId, turnId, data as Record<string, unknown>)
       clearClaudeTurnState(sessionId, turnId)
-      if (data.error) {
-        notify('error', translate('chat.turnFailed'), friendlyErrorMessage(data.error))
+      if (terminalStatus === 'failed') {
+        const message = friendlyErrorMessage(data.error, translate('chat.turnEndedUnexpectedly'))
+        setTurnFeedback(sessionId, { state: 'failed', message, turnId })
+        notify('error', translate('chat.turnFailed'), message)
+      } else if (terminalStatus === 'interrupted') {
+        setTurnFeedback(sessionId, {
+          state: 'interrupted',
+          message: wasInterrupting ? translate('chat.interrupted') : translate('chat.turnEndedUnexpectedly'),
+          turnId,
+          intentional: wasInterrupting,
+        })
+      } else {
+        clearTurnFeedback(sessionId)
       }
       void appStore.loadLocalUsage().catch(() => undefined)
       void (async () => {
@@ -1057,7 +1123,7 @@ export const useClaudeStore = defineStore('claude', () => {
           if (sessionId && !sessionId.startsWith('pending-claude-')) {
             await openSession(sessionId, {
               switchWorkspace: false,
-              terminalStatus: String(data.status || (data.error ? 'failed' : 'completed')),
+              terminalStatus,
               activate: false,
             })
           } else {
@@ -2019,6 +2085,7 @@ export const useClaudeStore = defineStore('claude', () => {
   ): Promise<'sent' | 'failed' | 'deferred'> {
     const workspace = options?.workspace || workspacePath.value
     if (!workspace) return 'failed'
+    clearTurnFeedback(sessionId)
     markSending(sessionId, true)
     // Mark busy BEFORE await so a second sendMessage cannot also dispatch.
     markRunning(sessionId, true)
@@ -2146,7 +2213,8 @@ export const useClaudeStore = defineStore('claude', () => {
           [sessionId]: list.filter((item) => item.turnId !== localTurnId),
         }
       }
-      notify('error', translate('notifications.sendFailed'), errorMessage(error))
+      setTurnFeedback(sessionId, { state: 'failed', message: failure, turnId: localTurnId })
+      notify('error', translate('notifications.sendFailed'), failure)
       return 'failed'
     } finally {
       markSending(sessionId, false)
@@ -2348,6 +2416,13 @@ export const useClaudeStore = defineStore('claude', () => {
       }
     }
     itemsBySession.value = nextItems
+
+    setTurnFeedback(ref.sessionId, {
+      state: 'interrupted',
+      message: translate('chat.interrupted'),
+      turnId: ref.turnId,
+      intentional: true,
+    })
 
     const canonicalId = resolveSessionId(ref.sessionId) || ref.sessionId
     if (canonicalId && !canonicalId.startsWith('pending-claude-')) {
@@ -2567,6 +2642,7 @@ export const useClaudeStore = defineStore('claude', () => {
     activeTurnBySession.value = withoutRelated(activeTurnBySession.value)
     liveActivityBySession.value = withoutRelated(liveActivityBySession.value)
     tokenUsageBySession.value = withoutRelated(tokenUsageBySession.value)
+    turnFeedbackBySession.value = withoutRelated(turnFeedbackBySession.value)
 
     const nextMetrics = { ...activeTurnMetrics.value }
     const nextStarts = { ...turnStartedAtById.value }
@@ -2776,6 +2852,7 @@ export const useClaudeStore = defineStore('claude', () => {
     queueBySession,
     historyBySession,
     activeTurnBySession,
+    turnFeedbackBySession,
     sendingSessionIds,
     loadingSessionId,
     sending,
@@ -2798,6 +2875,7 @@ export const useClaudeStore = defineStore('claude', () => {
     activeTurn,
     sessionGroups,
     sameSession: sameClaudeSession,
+    turnFeedback,
     resolveSessionId,
     isSessionBusy,
     isSessionLoading,
