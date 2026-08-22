@@ -2115,16 +2115,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       </div>
 
       <div
-        v-if="activeRuntimeTurnRunning || activeRuntimeSending"
-        class="composer-live-orb absolute right-3 top-2.5 z-[2]"
-        aria-hidden="true"
-      >
-        <i /><i /><i />
-      </div>
-
-      <div
-        class="absolute top-2 z-[2] transition-[right] duration-200"
-        :class="activeRuntimeTurnRunning || activeRuntimeSending ? 'right-11' : 'right-2'"
+        class="absolute right-2 top-2 z-[2]"
       >
         <SimpleTooltip :content="composerExpanded ? t('chat.collapseComposer') : t('chat.expandComposer')">
           <Button

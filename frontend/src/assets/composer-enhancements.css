@@ -39,49 +39,6 @@
     0 8px 24px color-mix(in oklab, var(--foreground) 6%, transparent);
 }
 
-.composer-live-orb {
-  isolation: isolate;
-  width: 1.45rem;
-  height: 1.45rem;
-  filter: drop-shadow(0 3px 5px color-mix(in oklab, var(--primary) 24%, transparent));
-  animation: composer-orb-float 2.4s ease-in-out infinite;
-}
-
-.composer-live-orb::after {
-  position: absolute;
-  z-index: -1;
-  inset: 0.1rem;
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--primary) 20%, transparent);
-  content: '';
-  animation: composer-orb-halo 1.7s ease-out infinite;
-}
-
-.composer-live-orb i {
-  position: absolute;
-  display: block;
-  border-radius: 999px;
-  background: var(--primary);
-  transform-origin: 50% 50%;
-}
-
-.composer-live-orb i:nth-child(1) {
-  inset: 0.18rem 0.58rem 0.18rem 0.12rem;
-  animation: composer-orb-lobe-a 1.7s ease-in-out infinite;
-}
-
-.composer-live-orb i:nth-child(2) {
-  inset: 0.28rem 0.08rem 0.56rem 0.72rem;
-  background: color-mix(in oklab, var(--primary) 72%, white);
-  animation: composer-orb-lobe-b 1.7s ease-in-out -0.42s infinite;
-}
-
-.composer-live-orb i:nth-child(3) {
-  inset: 0.82rem 0.32rem 0.08rem 0.62rem;
-  background: color-mix(in oklab, var(--primary) 58%, transparent);
-  animation: composer-orb-lobe-b 1.7s ease-in-out -0.85s infinite;
-}
-
 .composer-primary-action.is-running {
   border-color: color-mix(in oklab, var(--destructive) 34%, var(--border));
   background: color-mix(in oklab, var(--background) 92%, var(--destructive));
@@ -324,55 +281,7 @@
   opacity: 0.45;
 }
 
-.reasoning-live-row::before {
-  content: '';
-  width: 1.05rem;
-  height: 1.05rem;
-  margin-right: 0.55rem;
-  flex: none;
-  border-radius: 999px;
-  background:
-    radial-gradient(circle at 31% 31%, color-mix(in oklab, var(--primary) 92%, white) 0 16%, transparent 18%),
-    radial-gradient(circle at 72% 42%, color-mix(in oklab, var(--primary) 74%, white) 0 13%, transparent 15%),
-    radial-gradient(circle at 47% 75%, color-mix(in oklab, var(--primary) 72%, transparent) 0 19%, transparent 21%);
-  filter: drop-shadow(0 2px 4px color-mix(in oklab, var(--primary) 26%, transparent));
-  animation: reasoning-orb-drift 2.25s cubic-bezier(0.65, 0, 0.35, 1) infinite;
-}
-
-@keyframes composer-orb-float {
-  0%, 100% { transform: translateY(0) rotate(0deg); }
-  50% { transform: translateY(-0.16rem) rotate(7deg); }
-}
-
-@keyframes composer-orb-lobe-a {
-  0%, 100% { transform: scale(0.9) rotate(0deg); }
-  50% { transform: scale(1.08) rotate(18deg); }
-}
-
-@keyframes composer-orb-lobe-b {
-  0%, 100% { transform: scale(0.82) translate(0, 0); opacity: 0.68; }
-  50% { transform: scale(1.12) translate(0.08rem, -0.04rem); opacity: 1; }
-}
-
-@keyframes composer-orb-halo {
-  0% { transform: scale(0.65); opacity: 0.7; }
-  70%, 100% { transform: scale(1.55); opacity: 0; }
-}
-
-@keyframes reasoning-orb-drift {
-  0%, 100% { transform: rotate(0deg) scale(0.9); opacity: 0.72; }
-  45% { transform: rotate(155deg) scale(1.06); opacity: 1; }
-  70% { transform: rotate(250deg) scale(0.96); opacity: 0.88; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .composer-live-orb,
-  .composer-live-orb i,
-  .composer-live-orb::after,
-  .reasoning-live-row::before {
-    animation: none;
-  }
-
   .effort-scale-fill,
   .effort-scale-marker,
   .effort-slider-input::-webkit-slider-thumb,

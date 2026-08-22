@@ -9,6 +9,7 @@ import { useClaudeStore, useCodexStore, useGrokStore } from '@/stores'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import type { TimelineItem } from '@/types/codex'
 import ChatMessageGroup from './ChatMessageGroup.vue'
+import ThinkingOrb from './ThinkingOrb.vue'
 
 const props = defineProps<{
   sentEpoch: number
@@ -1106,10 +1107,9 @@ onUnmounted(() => {
 
           <div
             v-if="showThinking"
-            class="timeline-thinking reasoning-live-row flex min-w-0 items-center py-1.5"
-            :aria-label="thinkingLabel"
+            class="timeline-thinking reasoning-live-row flex min-w-0 items-center gap-2 py-1.5"
           >
-            <!-- Same Cursor-style sweep as in-message planning shimmer -->
+            <ThinkingOrb state="breathing" :size="20" :label="thinkingLabel" />
             <span class="reasoning-shimmer min-w-0 max-w-full">
               <span class="reasoning-shimmer__base truncate text-[13px]">{{ thinkingLabel }}</span>
               <span class="reasoning-shimmer__sheen truncate text-[13px]" aria-hidden="true">{{ thinkingLabel }}</span>
@@ -1126,7 +1126,6 @@ onUnmounted(() => {
         class="jump-latest-button absolute bottom-4 left-1/2 z-20 flex h-8 items-center gap-1.5 rounded-full border border-border/70 bg-card/95 px-3 text-[11px] text-muted-foreground shadow-md backdrop-blur hover:text-foreground"
         @click="jumpToLatest"
       >
-        <span v-if="showThinking" class="jump-latest-live" aria-hidden="true" />
         <ArrowDown :size="12" class="jump-latest-arrow" />
         {{ $t('chat.jumpLatest', 'Latest') }}
       </button>
@@ -1148,15 +1147,6 @@ onUnmounted(() => {
   transform: translateY(2px);
 }
 
-.jump-latest-live {
-  width: 0.38rem;
-  height: 0.38rem;
-  border-radius: 999px;
-  background: var(--primary);
-  box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 28%, transparent);
-  animation: jump-latest-pulse 1.35s ease-out infinite;
-}
-
 .jump-latest-enter-active,
 .jump-latest-leave-active {
   transition: opacity 180ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -1168,12 +1158,7 @@ onUnmounted(() => {
   transform: translate(-50%, 8px) scale(0.96);
 }
 
-@keyframes jump-latest-pulse {
-  65%, 100% { box-shadow: 0 0 0 0.38rem transparent; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .jump-latest-live { animation: none; }
   .jump-latest-arrow,
   .jump-latest-enter-active,
   .jump-latest-leave-active { transition: none; }
