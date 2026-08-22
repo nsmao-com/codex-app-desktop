@@ -48,20 +48,25 @@
 }
 
 .composer-input-frame {
-  min-height: 3.75rem;
+  min-height: 4.25rem;
 }
 
 .composer-input-frame:focus-within {
-  border-color: color-mix(in oklab, var(--ring) 62%, var(--border));
+  border-color: color-mix(in oklab, var(--foreground) 24%, var(--border));
   box-shadow:
-    0 0 0 3px color-mix(in oklab, var(--ring) 12%, transparent),
-    0 8px 24px color-mix(in oklab, var(--foreground) 7%, transparent);
+    0 0 0 3px color-mix(in oklab, var(--foreground) 6%, transparent),
+    0 10px 28px color-mix(in oklab, var(--foreground) 7%, transparent);
 }
 
 .composer-input-frame.is-active {
   box-shadow:
-    0 0 0 3px color-mix(in oklab, var(--primary) 8%, transparent),
-    0 8px 24px color-mix(in oklab, var(--foreground) 6%, transparent);
+    0 0 0 3px color-mix(in oklab, var(--foreground) 5%, transparent),
+    0 10px 28px color-mix(in oklab, var(--foreground) 6%, transparent);
+}
+
+.composer-toolbar {
+  border: 0;
+  background: transparent;
 }
 
 .composer-primary-action.is-running {

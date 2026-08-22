@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronUp,
   Command,
+  CornerDownLeft,
   Ellipsis,
   FileUp,
   Folder,
@@ -16,8 +17,6 @@ import {
   ListOrdered,
   ListTodo,
   LoaderCircle,
-  Maximize2,
-  Minimize2,
   Monitor,
   Octagon,
   Pencil,
@@ -107,7 +106,9 @@ type EditableQueuedMessage = {
 const modelValue = defineModel<string>({ required: true })
 const attachedImages = defineModel<string[]>('images', { required: true })
 const emit = defineEmits<{
-  sent: []
+  sent: [payload: { draftKey: string }]
+  'send-pending-change': [payload: { requestId: string; draftKey: string; pending: boolean }]
+  'consume-draft': [payload: { draftKey: string }]
   'restore-draft': [payload: { draftKey: string; text: string; images: string[] }]
   'append-draft-images': [payload: { draftKey: string; images: string[] }]
 }>()
@@ -118,12 +119,12 @@ const slashIndex = shallowRef(0)
 const skillIndex = shallowRef(0)
 const pluginIndex = shallowRef(0)
 const dragDepth = shallowRef(0)
-const composerExpanded = shallowRef(false)
 const sentHistoryIndex = shallowRef(-1)
 const sentHistorySnapshot = shallowRef<string[]>([])
 const sentHistoryDraft = shallowRef('')
 const attachingImageTasks = shallowRef(0)
-const sendAdmissionPending = shallowRef(false)
+const sendAdmissionPendingByDraft = shallowRef<Record<string, boolean>>({})
+const sendAdmissionPending = computed(() => Boolean(sendAdmissionPendingByDraft.value[props.draftKey]))
 const effortPopoverOpen = shallowRef(false)
 const effortPreviewIndex = shallowRef(-1)
 const effortDragging = shallowRef(false)
@@ -138,8 +139,8 @@ const queuedEditDraft = shallowRef('')
 const queuedEditError = shallowRef('')
 let applyingSentHistory = false
 let githubContextRequest = 0
+let sendAdmissionSequence = 0
 const COMPOSER_MAX_COLLAPSED = 200
-const COMPOSER_MAX_EXPANDED = 480
 
 const composerSessionId = computed(() => {
   if (isArenaPane.value) return boundSessionId.value
@@ -1035,7 +1036,6 @@ watch(modelValue, () => {
   if (!applyingSentHistory && sentHistoryIndex.value >= 0) resetSentHistoryNavigation()
   resize()
 }, { flush: 'post' })
-watch(composerExpanded, resize, { flush: 'post' })
 watch(() => props.draftKey, resetSentHistoryNavigation, { flush: 'sync' })
 watch(
   [selectableModels, displayModel],
@@ -1055,21 +1055,10 @@ function resize(): void {
   void nextTick(() => {
     const textarea = composer.value?.querySelector('textarea')
     if (!textarea) return
-    const max = composerExpanded.value
-      ? Math.min(COMPOSER_MAX_EXPANDED, Math.max(220, Math.floor(window.innerHeight * 0.44)))
-      : Math.min(COMPOSER_MAX_COLLAPSED, Math.max(120, Math.floor(window.innerHeight * 0.3)))
+    const max = Math.min(COMPOSER_MAX_COLLAPSED, Math.max(120, Math.floor(window.innerHeight * 0.3)))
     textarea.style.height = '0px'
-    if (composerExpanded.value) {
-      textarea.style.height = `${max}px`
-      return
-    }
     textarea.style.height = `${Math.min(textarea.scrollHeight, max)}px`
   })
-}
-
-function toggleComposerHeight(): void {
-  composerExpanded.value = !composerExpanded.value
-  resize()
 }
 
 function resetSentHistoryNavigation(): void {
@@ -1456,6 +1445,15 @@ async function prepareArenaSession(
   return sessionId
 }
 
+function consumeSubmittedDraft(draftKey: string): void {
+  if (props.draftKey === draftKey) {
+    modelValue.value = ''
+    attachedImages.value = []
+    return
+  }
+  emit('consume-draft', { draftKey })
+}
+
 async function performSend(): Promise<void> {
   const message = modelValue.value.trim()
   const images = [...attachedImages.value]
@@ -1475,8 +1473,7 @@ async function performSend(): Promise<void> {
     // Do not gate on sending — busy turns enqueue like Codex.
     if (!grokStore.isReady) return
     resetSentHistoryNavigation()
-    modelValue.value = ''
-    attachedImages.value = []
+    consumeSubmittedDraft(draftKey)
     const sendPromise = grokStore.sendMessage(
       message,
       images,
@@ -1491,7 +1488,7 @@ async function performSend(): Promise<void> {
     ) {
       arenaStore.setPaneSession(targetPaneId, grokStore.activeSessionId)
     }
-    emit('sent')
+    emit('sent', { draftKey })
     const ok = await sendPromise
     if (!ok) {
       emit('restore-draft', { draftKey, text: message, images })
@@ -1504,15 +1501,14 @@ async function performSend(): Promise<void> {
     if (!claudeStore.isReady) return
     // Capture then clear immediately so a second Enter cannot re-send the same text.
     resetSentHistoryNavigation()
-    modelValue.value = ''
-    attachedImages.value = []
+    consumeSubmittedDraft(draftKey)
     const sendPromise = claudeStore.sendMessage(
       message,
       images,
       targetSessionId || '',
       composerTargetWorkspace(targetRuntime, targetSessionId || ''),
     )
-    emit('sent')
+    emit('sent', { draftKey })
     const ok = await sendPromise
     if (!ok) {
       // Only restore when the send truly failed (not when it was queued).
@@ -1548,8 +1544,7 @@ async function performSend(): Promise<void> {
       : '')
   if (!codexTargetWorkspace) return
   resetSentHistoryNavigation()
-  modelValue.value = ''
-  attachedImages.value = []
+  consumeSubmittedDraft(draftKey)
   const sendPromise = codexStore.sendMessage(
     message,
     images,
@@ -1557,7 +1552,7 @@ async function performSend(): Promise<void> {
     targetRuntime,
     codexTargetWorkspace,
   )
-  emit('sent')
+  emit('sent', { draftKey })
   const ok = await sendPromise
   if (!ok) {
     emit('restore-draft', { draftKey, text: message, images })
@@ -1567,12 +1562,21 @@ async function performSend(): Promise<void> {
 }
 
 async function send(): Promise<void> {
-  if (sendAdmissionPending.value) return
-  sendAdmissionPending.value = true
+  const draftKey = props.draftKey
+  if (sendAdmissionPendingByDraft.value[draftKey]) return
+  sendAdmissionPendingByDraft.value = {
+    ...sendAdmissionPendingByDraft.value,
+    [draftKey]: true,
+  }
+  const requestId = `composer-send-${Date.now()}-${++sendAdmissionSequence}`
+  emit('send-pending-change', { requestId, draftKey, pending: true })
   try {
     await performSend()
   } finally {
-    sendAdmissionPending.value = false
+    const nextPending = { ...sendAdmissionPendingByDraft.value }
+    delete nextPending[draftKey]
+    sendAdmissionPendingByDraft.value = nextPending
+    emit('send-pending-change', { requestId, draftKey, pending: false })
   }
 }
 
@@ -2096,7 +2100,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
   <div class="shrink-0 px-3 pb-4 pt-1 sm:px-5">
     <div
       ref="composer"
-      class="relative mx-auto flex w-full max-w-[980px] flex-col gap-2"
+      class="relative mx-auto flex w-full max-w-[980px] flex-col gap-1.5"
       @dragenter="onDragEnter"
       @dragover="onDragOver"
       @dragleave="onDragLeave"
@@ -2165,11 +2169,11 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       </div>
 
       <div
-        class="composer-input-frame relative flex flex-col gap-1 rounded-2xl border bg-card px-2.5 pb-1.5 pt-2 shadow-sm transition-[border-color,box-shadow,background-color] duration-200"
+        class="composer-input-frame relative flex flex-col gap-1 rounded-2xl border bg-card px-3 pb-2 pt-2 shadow-sm transition-[border-color,box-shadow,background-color] duration-200"
         :class="[
           isDraggingFiles
             ? 'border-primary border-dashed bg-primary/5'
-            : ((activeRuntimeTurnRunning || activeRuntimeSending) ? 'is-active border-primary/40' : 'border-border/90'),
+            : ((activeRuntimeTurnRunning || activeRuntimeSending) ? 'is-active border-foreground/20' : 'border-border/90'),
         ]"
       >
       <div
@@ -2179,24 +2183,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         {{ t('chat.dropImages') }}
       </div>
 
-      <div
-        class="absolute right-2 top-2 z-[2]"
-      >
-        <SimpleTooltip :content="composerExpanded ? t('chat.collapseComposer') : t('chat.expandComposer')">
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            class="size-6 text-muted-foreground"
-            :aria-label="composerExpanded ? t('chat.collapseComposer') : t('chat.expandComposer')"
-            @click="toggleComposerHeight"
-          >
-            <Minimize2 v-if="composerExpanded" :size="12" />
-            <Maximize2 v-else :size="12" />
-          </Button>
-        </SimpleTooltip>
-      </div>
-
-      <div v-if="attachedImages.length" class="flex flex-wrap gap-1.5 px-1 pr-8">
+      <div v-if="attachedImages.length" class="flex flex-wrap gap-1.5 px-1">
         <div
           v-for="path in attachedImages"
           :key="path"
@@ -2497,23 +2484,29 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         rows="1"
         :placeholder="composerPlaceholder"
         :aria-description="composerShortcutHint"
-        class="min-h-10 resize-none border-0 bg-transparent px-1.5 py-1 pr-9 text-[15px] leading-6 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
-        :class="composerExpanded ? 'overflow-y-auto' : ''"
+        class="min-h-12 resize-none border-0 bg-transparent px-1.5 py-2 pr-9 text-[15px] leading-6 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
         @compositionend="composing = false"
         @compositionstart="composing = true"
         @keydown="onKeydown"
         @paste="onPaste"
         @pointerdown="resetSentHistoryNavigation"
       />
+      <span
+        class="pointer-events-none absolute bottom-3 right-4 grid size-5 place-items-center text-muted-foreground/55"
+        aria-hidden="true"
+      >
+        <CornerDownLeft :size="15" stroke-width="1.7" />
+      </span>
+      </div>
 
-      <div class="composer-toolbar flex min-h-8 items-center justify-between gap-2 px-0.5 pt-0.5">
-        <div class="flex min-w-0 items-center gap-0.5">
+      <div class="composer-toolbar flex min-h-8 flex-wrap items-center justify-between gap-x-2 gap-y-1 px-1">
+        <div class="flex min-w-0 flex-1 items-center gap-0.5">
           <DropdownMenu :open="addMenuOpen" @update:open="onAddMenuOpenChange">
             <DropdownMenuTrigger as-child>
               <Button
                 variant="ghost"
                 size="icon-sm"
-                class="size-8 rounded-full text-muted-foreground hover:bg-muted/70"
+                class="order-2 size-8 rounded-full text-muted-foreground hover:bg-muted/70"
                 :aria-label="t('chat.addContext')"
                 :disabled="fileSelectionPending || githubIssuePending"
                 :aria-busy="fileSelectionPending || githubIssuePending"
@@ -2580,9 +2573,9 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             <DropdownMenuTrigger as-child>
               <Button
                 v-if="!isArenaPane"
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                class="hidden h-8 gap-1.5 rounded-lg border-warning/35 bg-warning/10 px-2.5 text-[11px] font-normal text-foreground shadow-none hover:bg-warning/15 md:inline-flex"
+                class="order-1 hidden h-8 gap-1.5 rounded-lg px-2 text-[12px] font-normal text-foreground shadow-none hover:bg-muted/70 md:inline-flex"
                 :title="permissionDetail ? `${permissionLabel} (${permissionDetail})` : permissionLabel"
               >
                 <Shield :size="12" />
@@ -2619,7 +2612,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               type="button"
               variant="ghost"
               size="sm"
-              class="h-7 gap-1.5 px-2 text-[11px] font-normal"
+              class="order-3 h-7 gap-1.5 px-2 text-[11px] font-normal"
               :class="isPlanMode
                 ? 'bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary'
                 : 'text-muted-foreground'"
@@ -2637,7 +2630,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               <Button
                 variant="ghost"
                 size="icon-sm"
-                class="size-7 text-muted-foreground"
+                class="order-4 size-7 text-muted-foreground"
                 :class="isArenaPane ? '' : 'md:hidden'"
                 :aria-label="t('chat.composerMore')"
               >
@@ -2676,7 +2669,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
           </DropdownMenu>
         </div>
 
-        <div class="flex min-w-0 items-center gap-0.5">
+        <div class="ml-auto flex min-w-0 items-center gap-0.5">
           <SearchableSelect
             v-model="composerModelSelection"
             class="h-7 w-auto border-0 bg-transparent px-2 text-[11px] text-muted-foreground shadow-none hover:bg-muted/50"
@@ -2694,10 +2687,9 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               <Button
                 type="button"
                 variant="ghost"
-                class="hidden h-7 max-w-28 gap-1 px-2 text-[11px] font-normal text-muted-foreground md:flex"
+                class="hidden h-7 max-w-28 px-2 text-[11px] font-normal text-muted-foreground md:flex"
                 :aria-label="t('chat.reasoning')"
               >
-                <Zap :size="11" class="shrink-0" />
                 <span class="truncate">{{ effortPopoverLabel }}</span>
               </Button>
             </PopoverTrigger>
@@ -2837,7 +2829,6 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             </Button>
           </SimpleTooltip>
         </div>
-      </div>
       </div>
     </div>
   </div>

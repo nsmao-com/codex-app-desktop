@@ -87,6 +87,7 @@ function loadComposerDrafts(): Record<string, ComposerDraft> {
 }
 
 const composerDrafts = shallowRef<Record<string, ComposerDraft>>(loadComposerDrafts())
+const composerPendingDraftByRequest = shallowRef<Record<string, string>>({})
 const draftKeyAliases = new Map<string, string>()
 
 const activeComposerContext = computed<ComposerDraftContext>(() => {
@@ -199,6 +200,19 @@ const draftImages = computed<string[]>({
   set: (images) => setComposerDraft(activeComposerContext.value.key, { images }),
 })
 
+const composerSendPending = computed(() => {
+  const activeKey = resolveDraftKey(activeComposerContext.value.key)
+  return Object.values(composerPendingDraftByRequest.value)
+    .some((key) => resolveDraftKey(key) === activeKey)
+})
+
+function onComposerPendingChange(payload: { requestId: string; draftKey: string; pending: boolean }): void {
+  const next = { ...composerPendingDraftByRequest.value }
+  if (payload.pending) next[payload.requestId] = payload.draftKey
+  else delete next[payload.requestId]
+  composerPendingDraftByRequest.value = next
+}
+
 function restoreComposerDraft(payload: { draftKey: string; text: string; images: string[] }): void {
   const key = resolveDraftKey(payload.draftKey)
   const current = composerDrafts.value[key] ?? { text: '', images: [] }
@@ -206,6 +220,10 @@ function restoreComposerDraft(payload: { draftKey: string; text: string; images:
     text: mergeComposerDraftText(payload.text, current.text),
     images: [...new Set([...current.images, ...payload.images])],
   })
+}
+
+function consumeComposerDraft(payload: { draftKey: string }): void {
+  setComposerDraft(resolveDraftKey(payload.draftKey), { text: '', images: [] })
 }
 
 function appendComposerDraftImages(payload: { draftKey: string; images: string[] }): void {
@@ -270,7 +288,7 @@ const panePendingRequest = computed(() => isArenaPane.value
 const paneIsFocused = computed(() => !isArenaPane.value || arenaStore.focusedPaneId === paneId.value)
 const hasConversation = computed(() => {
   const id = paneSessionId.value
-  if (!id) return false
+  if (!id) return composerSendPending.value
   if (isClaudeMode.value) {
     if (claudeStore.sameSession(id, claudeStore.activeSessionId)) {
       return claudeStore.activeItems.length > 0 || Boolean(id)
@@ -331,7 +349,8 @@ function useSuggestion(prompt: string): void {
   draft.value = prompt
 }
 
-function onMessageSent(): void {
+function onMessageSent(payload: { draftKey: string }): void {
+  if (resolveDraftKey(payload.draftKey) !== resolveDraftKey(activeComposerContext.value.key)) return
   messageSentEpoch.value += 1
 }
 
@@ -680,6 +699,7 @@ function commitFromBar(): void {
       <ChatTimeline
         v-else
         :sent-epoch="messageSentEpoch"
+        :optimistic-pending="composerSendPending"
         @retry="onRetry"
         @rollback="onRollback"
         @inspect-diff="onInspectDiff"
@@ -768,6 +788,8 @@ function commitFromBar(): void {
       v-model:images="draftImages"
       :draft-key="activeComposerContext.key"
       @sent="onMessageSent"
+      @send-pending-change="onComposerPendingChange"
+      @consume-draft="consumeComposerDraft"
       @restore-draft="restoreComposerDraft"
       @append-draft-images="appendComposerDraftImages"
     />

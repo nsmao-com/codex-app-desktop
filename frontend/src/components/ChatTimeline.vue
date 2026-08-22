@@ -13,6 +13,7 @@ import ThinkingOrb from './ThinkingOrb.vue'
 
 const props = defineProps<{
   sentEpoch: number
+  optimisticPending: boolean
 }>()
 
 const {
@@ -171,7 +172,11 @@ const settleFollowUpTimers: number[] = []
 let loadTakingLongTimer: number | null = null
 
 const isLoading = timelineLoading
-const showLoadingPlaceholder = computed(() => isLoading.value && timelineItems.value.length === 0)
+const showLoadingPlaceholder = computed(() => (
+  isLoading.value
+  && timelineItems.value.length === 0
+  && !props.optimisticPending
+))
 const historyHasEarlier = computed(() => {
   const id = timelineThreadId.value
   if (isGrokMode.value) {
@@ -411,18 +416,19 @@ const lastStreamingTurnId = computed(() => {
 })
 
 const showThinking = computed(() => {
-  if (isLoading.value) return false
+  if (isLoading.value && !props.optimisticPending) return false
   // The streaming agent group already owns thinking / reasoning UI — never duplicate it below.
   if (lastStreamingTurnId.value) return false
   if (isGrokMode.value) {
     // Mirror Codex: show footer shimmer until the first live agent activity lands.
-    return timelineSending.value || timelineTurnRunning.value
+    return props.optimisticPending || timelineSending.value || timelineTurnRunning.value
   }
   if (isClaudeMode.value) {
-    return timelineSending.value || timelineTurnRunning.value
+    return props.optimisticPending || timelineSending.value || timelineTurnRunning.value
   }
   const feedback = timelineTurnFeedback.value
-  const waiting = timelineSending.value
+  const waiting = props.optimisticPending
+    || timelineSending.value
     || timelineTurnRunning.value
     || feedback?.state === 'submitting'
     || feedback?.state === 'running'
@@ -1036,7 +1042,7 @@ onUnmounted(() => {
         <!-- Keep a cached/live timeline visible while its background refresh runs. -->
         <template v-else>
           <div
-            v-if="groups.length === 0"
+            v-if="groups.length === 0 && !showThinking"
             class="flex flex-col items-center justify-center gap-1.5 py-16 text-center"
           >
             <p class="text-[13px] font-medium text-foreground/80">{{ $t('chat.emptyThread') }}</p>
@@ -1108,6 +1114,8 @@ onUnmounted(() => {
           <div
             v-if="showThinking"
             class="timeline-thinking reasoning-live-row flex min-w-0 items-center gap-2 py-1.5"
+            role="status"
+            aria-live="polite"
           >
             <ThinkingOrb state="solving" :size="20" :label="thinkingLabel" />
             <span class="reasoning-shimmer min-w-0 max-w-full">
