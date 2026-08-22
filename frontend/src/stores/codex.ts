@@ -3289,7 +3289,7 @@ export const useCodexStore = defineStore('codex', () => {
       usage.last.outputTokens,
       usage.last.reasoningOutputTokens,
     ].some((item) => item > 0)
-    if (!hasTokens && usage.modelContextWindow == null) return
+    if (!hasTokens && usage.modelContextWindow == null && usage.contextTokens == null) return
     pendingTokenUsage.set(`${threadID}:${turnID}`, { threadId: threadID, turnId: turnID, runtime, usage })
     if (!tokenUsageTimer) tokenUsageTimer = trackedTimeout(flushTokenUsage, 250)
   }
@@ -3872,10 +3872,39 @@ export const useCodexStore = defineStore('codex', () => {
       ...turnMetricsByThread.value,
       [threadID]: merge ? { ...existing, ...historical } : historical,
     }
+    const historicalContext = asArray(turns)
+      .map((turn) => {
+        const record = asRecord(turn)
+        return normalizeThreadTokenUsage(record.tokenUsage ?? record.token_usage ?? record.usage)
+      })
+      .filter((usage) => usage.contextTokens !== null)
+      .at(-1)
     const metrics = turnMetricsByThread.value[threadID] ?? {}
     const usageEntries = Object.values(metrics)
       .filter((item): item is TurnMetrics & { tokenUsage: TokenUsageBreakdown } => Boolean(item.tokenUsage))
-    if (!usageEntries.length) return
+    if (!usageEntries.length) {
+      const previous = tokenUsageByThread.value[threadID]
+      if (!merge && historicalContext) {
+        const emptyBreakdown: TokenUsageBreakdown = {
+          inputTokens: 0,
+          cachedInputTokens: 0,
+          outputTokens: 0,
+          reasoningOutputTokens: 0,
+          totalTokens: 0,
+        }
+        tokenUsageByThread.value = {
+          ...tokenUsageByThread.value,
+          [threadID]: {
+            total: previous?.total ?? emptyBreakdown,
+            last: previous?.last ?? emptyBreakdown,
+            modelContextWindow: previous?.modelContextWindow ?? null,
+            contextTokens: historicalContext.contextTokens,
+            contextUsageSource: historicalContext.contextUsageSource,
+          },
+        }
+      }
+      return
+    }
     const total: TokenUsageBreakdown = usageEntries.reduce((sum, item) => ({
       inputTokens: sum.inputTokens + item.tokenUsage.inputTokens,
       cachedInputTokens: sum.cachedInputTokens + item.tokenUsage.cachedInputTokens,
@@ -3900,6 +3929,12 @@ export const useCodexStore = defineStore('codex', () => {
         total,
         last,
         modelContextWindow: previous?.modelContextWindow ?? null,
+        contextTokens: merge
+          ? previous?.contextTokens ?? null
+          : historicalContext?.contextTokens ?? previous?.contextTokens ?? null,
+        contextUsageSource: merge
+          ? previous?.contextUsageSource || ''
+          : historicalContext?.contextUsageSource || previous?.contextUsageSource || '',
       },
     }
   }
@@ -3914,6 +3949,8 @@ export const useCodexStore = defineStore('codex', () => {
       total: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
       last: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0 },
       modelContextWindow: null,
+      contextTokens: null,
+      contextUsageSource: '',
     }
     tokenUsageByThread.value = {
       ...tokenUsageByThread.value,

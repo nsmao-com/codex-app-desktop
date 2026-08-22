@@ -12,7 +12,7 @@ import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { SimpleTooltip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { panelFromRight } from '@/lib/motion'
 import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
-import { buildContextUsageView, CODEX_CONTEXT_BASELINE_TOKENS } from '@/utils/accountUsage'
+import { buildContextUsageView, CODEX_CONTEXT_BASELINE_TOKENS, resolveProviderModelContextWindow } from '@/utils/accountUsage'
 import { compactDisplayPath, fullDisplayPath } from '@/utils/workspacePath'
 
 const appStore = useAppStore()
@@ -32,7 +32,15 @@ const changes = computed(() => workspaceStore.changes)
 const activeTokenUsage = computed(() => {
   if (appStore.isGrokMode) return grokStore.activeTokenUsage
   if (appStore.isClaudeMode) return claudeStore.activeTokenUsage
-  return codexStore.activeTokenUsage
+  const usage = codexStore.activeTokenUsage
+  if (!usage || (!appStore.isGeminiMode && !appStore.isOpenCodeMode)) return usage
+  const runtime = appStore.isGeminiMode ? 'gemini' : 'opencode'
+  const model = codexStore.activeThread?.model
+    || (runtime === 'gemini' ? appStore.settings.geminiModel : appStore.settings.openCodeModel)
+  const contextWindow = resolveProviderModelContextWindow(appStore.agentProviders, runtime, model || '')
+  return contextWindow > 0 && usage.modelContextWindow !== contextWindow
+    ? { ...usage, modelContextWindow: contextWindow }
+    : usage
 })
 const contextUsage = computed(() => buildContextUsageView(
   activeTokenUsage.value,
@@ -181,7 +189,9 @@ function statusClass(status: string): string {
             <CardContent>
               <div class="mb-2 flex items-center justify-between text-xs">
                 <span class="text-muted-foreground">{{ t('inspector.contextUsage') }}</span>
-                <span class="tabular-nums">{{ contextUsedPercent.toFixed(1) }}%</span>
+                <span class="tabular-nums" :title="contextUsage.estimated ? t('inspector.contextEstimated') : undefined">
+                  {{ contextUsage.estimated ? '≈' : '' }}{{ contextUsedPercent.toFixed(1) }}%
+                </span>
               </div>
               <Progress :model-value="contextUsedPercent" class="h-1.5" />
               <div class="mt-3 grid grid-cols-3 gap-2 text-center text-[10px]">

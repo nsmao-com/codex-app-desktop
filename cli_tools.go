@@ -121,7 +121,7 @@ func (s *AppService) CheckCLITools() CLIToolsReport {
 		CodexHome:      resolveCodexHome(),
 		ClaudeHome:     resolveClaudeHome(),
 		GrokHome:       resolveGrokHome(),
-		GeminiHome:     filepath.Join(home, ".gemini"),
+		GeminiHome:     resolveGeminiHome(),
 		OpenCodeHome:   openCodeConfigDir(home),
 	}
 }

@@ -772,8 +772,8 @@ export function UninstallPlugin(pluginID: string): $CancellablePromise<void> {
     return $Call.ByID(1232784559, pluginID);
 }
 
-export function UpdateProviderContextPolicy(providerID: string, tokens: number, threshold: number, autoCompactEnabled: boolean, pruneEnabled: boolean): $CancellablePromise<$models.ProviderApplyResult> {
-    return $Call.ByID(2761509943, providerID, tokens, threshold, autoCompactEnabled, pruneEnabled);
+export function UpdateProviderContextPolicy(providerID: string, tokens: number, threshold: number, autoCompactEnabled: boolean, pruneEnabled: boolean, thresholdScope: string): $CancellablePromise<$models.ProviderApplyResult> {
+    return $Call.ByID(2761509943, providerID, tokens, threshold, autoCompactEnabled, pruneEnabled, thresholdScope);
 }
 
 export function UpdateSessionMemories(request: $models.SessionMemoriesRequest): $CancellablePromise<void> {

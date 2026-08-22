@@ -90,8 +90,8 @@ func main() {
 		codexUsage.Total += hit.Breakdown.Total
 	}
 	result["usageProbe"] = map[string]any{
-		"codex": codexUsage,
-		"gemini": collectGeminiUsage(filepath.Join(home, ".gemini"), ""),
+		"codex":    codexUsage,
+		"gemini":   collectGeminiUsage(resolveGeminiHome(), ""),
 		"opencode": collectOpenCodeUsage(home, "", 0),
 	}
 	enc := json.NewEncoder(os.Stdout)

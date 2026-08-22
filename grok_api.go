@@ -474,6 +474,7 @@ func estimateTokenUsage(prompt, completion string) map[string]any {
 		"outputTokens":          output,
 		"reasoningOutputTokens": int64(0),
 		"totalTokens":           input + output,
+		"estimated":             true,
 	}
 }
 

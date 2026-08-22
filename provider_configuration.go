@@ -57,7 +57,7 @@ func providerConfigPath(providerID string) string {
 	case "grok":
 		return filepath.Join(resolveGrokHome(), "config.toml")
 	case "gemini":
-		return filepath.Join(home, ".gemini", "settings.json")
+		return filepath.Join(resolveGeminiHome(), "settings.json")
 	case "opencode":
 		return openCodeConfigPath(home)
 	default:
@@ -91,6 +91,12 @@ func selectedCatalogModel(provider AgentProviderRuntime, settings UserSettings) 
 		if selected != "" && strings.EqualFold(model.Model, selected) {
 			return model, true
 		}
+	}
+	// An explicit model that is absent from the native catalog has an unknown
+	// window. Falling back to an unrelated default would present a precise but
+	// incorrect context percentage for custom gateways and model aliases.
+	if selected != "" {
+		return AgentProviderModel{}, false
 	}
 	for _, model := range provider.Models {
 		if model.IsDefault {
@@ -129,6 +135,7 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 		text, _ := readProviderText(path)
 		configuredTokens, hasTokens := readTOMLInteger(text, "", "model_context_window")
 		threshold, hasThreshold := readTOMLInteger(text, "", "model_auto_compact_token_limit")
+		thresholdScope := readTOMLString(text, "", "model_auto_compact_token_limit_scope")
 		if hasTokens && configuredTokens > 0 {
 			policy.Tokens = configuredTokens
 			policy.ConfiguredTokens = configuredTokens
@@ -148,51 +155,76 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 		policy.AutoCompactThreshold = threshold
 		policy.ThresholdMinimum = 8_192
 		policy.ThresholdMaximum = 2_000_000
-		policy.Description = "Codex reads model_context_window and model_auto_compact_token_limit from config.toml; reconnect the app-server after changes."
+		policy.ThresholdScopeSupported = true
+		policy.ThresholdScopeOptions = []string{"total", "body_after_prefix"}
+		if validCodexAutoCompactScope(thresholdScope) && thresholdScope != "" {
+			policy.ThresholdScopeConfigured = true
+			policy.ThresholdScope = thresholdScope
+		}
+		policy.Description = "Codex reads model_context_window, model_auto_compact_token_limit, and its counting scope from config.toml; reconnect the app-server after changes."
 	case "claude":
-		catalogTokens := policy.Tokens
-		catalogIsFallback := policy.IsFallback
 		config := readProviderJSONMap(path)
 		env := mapFromAny(config["env"])
-		configuredTokens, hasTokens := integerFromConfig(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"])
-		threshold, hasThreshold := integerFromConfig(env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"])
-		if hasTokens && configuredTokens > 0 {
-			policy.ConfiguredTokens = configuredTokens
-			if policy.Tokens == 0 || configuredTokens < policy.Tokens {
-				policy.Tokens = configuredTokens
-			}
-			policy.Source = "claude-settings-env"
-			policy.IsFallback = false
+		autoCompact, hasAutoCompact := boolFromConfig(config["autoCompactEnabled"])
+		if !hasAutoCompact {
+			autoCompact = true
 		}
-		policy.Writable = true
-		policy.TokenMode = "client-limit"
-		policy.TokenMinimum = 16_384
-		policy.TokenMaximum = 1_000_000
-		if catalogTokens > 0 && !catalogIsFallback {
-			policy.TokenMaximum = catalogTokens
+		threshold, hasThreshold := integerFromConfig(config["autoCompactWindow"])
+		if override, ok := integerFromConfig(env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]); ok && override > 0 {
+			threshold = override
+			hasThreshold = true
 		}
 		policy.CompactStrategy = "native"
 		policy.CompactAvailable = true
 		policy.AutoCompactSupported = true
-		policy.AutoCompactEnabled = !truthyConfigValue(env["DISABLE_COMPACT"])
+		policy.AutoCompactEnabled = autoCompact
 		policy.AutoCompactToggleable = true
 		policy.ThresholdConfigurable = true
-		policy.ThresholdConfigured = hasThreshold && threshold > 0
+		policy.ThresholdConfigured = hasThreshold && threshold >= 100_000
 		policy.AutoCompactThreshold = threshold
-		policy.ThresholdUnit = "percent"
-		policy.ThresholdMinimum = 1
-		policy.ThresholdMaximum = 99
-		policy.ThresholdStep = 1
-		policy.Description = "Claude model context is fixed upstream. CLAUDE_CODE_MAX_CONTEXT_TOKENS is only a local client cap and cannot expand the model window."
+		policy.ThresholdMinimum = 100_000
+		policy.ThresholdMaximum = 1_000_000
+		policy.ThresholdStep = 10_000
+		policy.Description = "Claude model context is fixed upstream. autoCompactEnabled and autoCompactWindow are native settings; Nice Codex starts a fresh Claude process on the next turn."
 	case "grok":
+		selected := strings.TrimSpace(selectedProviderModel(settings, "grok"))
+		if selected == "" {
+			if model, ok := selectedCatalogModel(provider, settings); ok {
+				selected = model.Model
+			}
+		}
+		selectedWindow := int64(0)
+		selectedWindowFromCatalog := false
+		for _, model := range provider.Models {
+			if strings.EqualFold(model.Model, selected) {
+				selectedWindow = model.ContextWindow
+				selectedWindowFromCatalog = selectedWindow > 0
+				break
+			}
+		}
+		if selectedWindow <= 0 {
+			selectedWindow = knownProviderContextWindow("grok", selected)
+		}
+		if selectedWindow > 0 {
+			policy.Tokens = selectedWindow
+			policy.Source = "official-model-table"
+			if selectedWindowFromCatalog {
+				policy.Source = "native-catalog"
+			}
+			policy.IsFallback = false
+		}
 		if normalizeGrokBackend(settings.GrokBackend) == grokBackendAPI {
 			policy.Description = "Grok API context is fixed by the selected upstream model and cannot be overridden by Nice Codex."
 			break
 		}
 		text, _ := readProviderText(path)
 		threshold, hasThreshold := readTOMLInteger(text, "session", "auto_compact_threshold_percent")
-		if !hasThreshold || threshold <= 0 {
-			threshold = 85
+		if !hasThreshold {
+			if modelThreshold, ok := readGrokModelAutoCompactThreshold(filepath.Join(resolveGrokHome(), "models_cache.json"), selected); ok {
+				threshold = modelThreshold
+			} else {
+				threshold = 85
+			}
 		}
 		policy.CompactStrategy = "native"
 		policy.CompactAvailable = true
@@ -202,10 +234,9 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 		policy.ThresholdConfigured = hasThreshold
 		policy.AutoCompactThreshold = threshold
 		policy.ThresholdUnit = "percent"
-		policy.ThresholdMinimum = 1
-		policy.ThresholdMaximum = 99
+		policy.ThresholdMinimum = 0
+		policy.ThresholdMaximum = 100
 		policy.ThresholdStep = 1
-		selected := strings.TrimSpace(selectedProviderModel(settings, "grok"))
 		if section := findGrokModelSection(text, selected); section != "" {
 			policy.Writable = true
 			policy.TokenMode = "calculation-limit"
@@ -220,6 +251,11 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 		}
 		policy.Description = "Grok Build uses the percentage for native auto-compaction. A custom model context_window only controls compaction calculations; it does not expand the upstream model."
 	case "gemini":
+		if selectedWindow := knownProviderContextWindow("gemini", selectedProviderModel(settings, "gemini")); selectedWindow > 0 {
+			policy.Tokens = selectedWindow
+			policy.Source = "gemini-cli-fixed"
+			policy.IsFallback = false
+		}
 		config := readProviderJSONMap(path)
 		model := mapFromAny(config["model"])
 		threshold := int64(50)
@@ -237,7 +273,7 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 		policy.AutoCompactThreshold = threshold
 		policy.ThresholdUnit = "percent"
 		policy.ThresholdMinimum = 1
-		policy.ThresholdMaximum = 99
+		policy.ThresholdMaximum = 100
 		policy.ThresholdStep = 1
 		policy.Description = "Gemini CLI fixes the context window per model. model.compressionThreshold controls native compression and is loaded by the next CLI process."
 	case "opencode":
@@ -250,7 +286,7 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 		prune, _ := boolFromConfig(compaction["prune"])
 		reserved, hasReserved := integerFromConfig(compaction["reserved"])
 		if !hasReserved || reserved < 0 {
-			reserved = 10_000
+			reserved = 0
 		}
 		policy.CompactStrategy = "native"
 		policy.CompactAvailable = true
@@ -261,7 +297,7 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 		policy.ThresholdConfigured = hasReserved
 		policy.AutoCompactThreshold = reserved
 		policy.ThresholdUnit = "reserved-tokens"
-		policy.ThresholdMinimum = 1_024
+		policy.ThresholdMinimum = 0
 		policy.ThresholdMaximum = 1_000_000
 		policy.PruneSupported = true
 		policy.PruneEnabled = prune
@@ -282,7 +318,7 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 		if policy.Tokens > policy.ThresholdMinimum+1_024 {
 			policy.ThresholdMaximum = policy.Tokens - 1_024
 		}
-		policy.Description = "OpenCode compaction.auto, compaction.prune, and reserved tokens are native settings. Model limit.context is editable only for models already declared in opencode.json."
+		policy.Description = "OpenCode compaction.auto, compaction.prune, and reserved tokens are native settings. Leaving reserved empty keeps OpenCode's model-dependent default; limit.context is editable only for declared models."
 	}
 	return policy
 }
@@ -300,8 +336,24 @@ func providerConfigurationView(provider AgentProviderRuntime, settings UserSetti
 		view.ApplyLevel = "reconnect"
 		view.CanRestart = true
 		view.PermissionModes = []string{"on-request", "never"}
+		if text, err := readProviderText(providerConfigPath("codex")); err == nil {
+			if scope := readTOMLString(text, "", "model_auto_compact_token_limit_scope"); scope != "" && !validCodexAutoCompactScope(scope) {
+				view.Warnings = append(view.Warnings, "model_auto_compact_token_limit_scope is invalid; Codex accepts only total or body_after_prefix.")
+			}
+		}
 	case "claude":
 		view.PermissionModes = []string{"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}
+		config := readProviderJSONMap(providerConfigPath("claude"))
+		env := mapFromAny(config["env"])
+		if _, ok := integerFromConfig(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]); ok {
+			view.Warnings = append(view.Warnings, "CLAUDE_CODE_MAX_CONTEXT_TOKENS is a gateway/model-ID correction, not a general model context limit; the displayed window remains fixed by the resolved model.")
+		}
+		if _, ok := integerFromConfig(env["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]); ok {
+			view.Warnings = append(view.Warnings, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE is present and may force earlier compaction than autoCompactWindow.")
+		}
+		if _, ok := integerFromConfig(env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]); ok {
+			view.Warnings = append(view.Warnings, "CLAUDE_CODE_AUTO_COMPACT_WINDOW overrides the top-level autoCompactWindow; Nice Codex keeps both values synchronized when saving.")
+		}
 	case "grok":
 		if normalizeGrokBackend(settings.GrokBackend) == grokBackendAPI {
 			view.ApplyLevel = "immediate"
@@ -421,7 +473,7 @@ func (s *AppService) providerHasActiveWork(providerID string) bool {
 	return false
 }
 
-func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, threshold int64, autoCompactEnabled, pruneEnabled bool) (ProviderApplyResult, error) {
+func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, threshold int64, autoCompactEnabled, pruneEnabled bool, thresholdScope string) (ProviderApplyResult, error) {
 	providerID = normalizeProviderID(providerID)
 	if providerID == "" {
 		return ProviderApplyResult{}, errors.New("unsupported provider")
@@ -440,6 +492,10 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 
 	switch providerID {
 	case "codex":
+		thresholdScope = strings.TrimSpace(thresholdScope)
+		if !validCodexAutoCompactScope(thresholdScope) {
+			return ProviderApplyResult{}, errors.New("Codex auto-compact scope must be total or body_after_prefix")
+		}
 		tokens, threshold = normalizeCodexContextSettings(tokens, threshold)
 		if tokens == 0 && threshold > 0 {
 			if model, ok := selectedCatalogModel(current.Runtime, s.Settings()); ok && model.ContextWindow > 0 && threshold >= model.ContextWindow {
@@ -452,27 +508,34 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 		}
 		text = upsertTOMLScalar(text, "", "model_context_window", optionalIntegerLiteral(tokens))
 		text = upsertTOMLScalar(text, "", "model_auto_compact_token_limit", optionalIntegerLiteral(threshold))
+		quotedScope := ""
+		if thresholdScope != "" {
+			quotedScope = strconv.Quote(thresholdScope)
+		}
+		text = upsertTOMLScalar(text, "", "model_auto_compact_token_limit_scope", quotedScope)
 		if err := writeTextFileAtomic(path, text); err != nil {
 			return ProviderApplyResult{}, err
 		}
 	case "claude":
-		if tokens > 0 && tokens < 16_384 {
-			return ProviderApplyResult{}, errors.New("Claude client context cap must be at least 16384 tokens")
-		}
-		if tokens > 0 && current.Context.TokenMaximum > 0 && tokens > current.Context.TokenMaximum {
-			return ProviderApplyResult{}, errors.New("Claude client context cap cannot exceed the selected model context window")
-		}
-		if threshold > 0 && (threshold < 1 || threshold > 99) {
-			return ProviderApplyResult{}, errors.New("Claude auto-compact percentage must be between 1 and 99")
+		if threshold > 0 && (threshold < 100_000 || threshold > 1_000_000) {
+			return ProviderApplyResult{}, errors.New("Claude auto-compact window must be between 100000 and 1000000 tokens")
 		}
 		config := readProviderJSONMap(path)
-		env := ensureMap(config, "env")
-		setOptionalStringInteger(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS", tokens)
-		setOptionalStringInteger(env, "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", threshold)
-		if autoCompactEnabled {
-			delete(env, "DISABLE_COMPACT")
+		config["autoCompactEnabled"] = autoCompactEnabled
+		if threshold > 0 {
+			config["autoCompactWindow"] = threshold
 		} else {
-			env["DISABLE_COMPACT"] = "1"
+			delete(config, "autoCompactWindow")
+		}
+		if env := mapFromAny(config["env"]); env != nil {
+			if _, exists := env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]; exists {
+				if threshold > 0 {
+					env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = strconv.FormatInt(threshold, 10)
+				} else {
+					delete(env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+				}
+			}
+			delete(env, "DISABLE_COMPACT")
 		}
 		if err := writeProviderJSONMap(path, config); err != nil {
 			return ProviderApplyResult{}, err
@@ -481,8 +544,8 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 		if normalizeGrokBackend(s.Settings().GrokBackend) == grokBackendAPI {
 			return ProviderApplyResult{}, errors.New("Grok API context and compaction are controlled by the upstream model")
 		}
-		if threshold < 1 || threshold > 99 {
-			return ProviderApplyResult{}, errors.New("Grok auto-compact percentage must be between 1 and 99")
+		if threshold < 0 || threshold > 100 {
+			return ProviderApplyResult{}, errors.New("Grok auto-compact percentage must be between 0 and 100")
 		}
 		text, err := readProviderText(path)
 		if err != nil {
@@ -503,8 +566,8 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 			return ProviderApplyResult{}, err
 		}
 	case "gemini":
-		if threshold < 1 || threshold > 99 {
-			return ProviderApplyResult{}, errors.New("Gemini compression percentage must be between 1 and 99")
+		if threshold < 1 || threshold > 100 {
+			return ProviderApplyResult{}, errors.New("Gemini compression percentage must be between 1 and 100")
 		}
 		config := readProviderJSONMap(path)
 		model := ensureMap(config, "model")
@@ -513,8 +576,8 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 			return ProviderApplyResult{}, err
 		}
 	case "opencode":
-		if threshold < 1_024 {
-			return ProviderApplyResult{}, errors.New("OpenCode reserved context must be at least 1024 tokens")
+		if threshold < 0 {
+			return ProviderApplyResult{}, errors.New("OpenCode reserved context cannot be negative")
 		}
 		effectiveContext := current.Context.Tokens
 		if current.Context.Writable {
@@ -531,7 +594,11 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 		compaction := ensureMap(config, "compaction")
 		compaction["auto"] = autoCompactEnabled
 		compaction["prune"] = pruneEnabled
-		compaction["reserved"] = threshold
+		if threshold > 0 {
+			compaction["reserved"] = threshold
+		} else {
+			delete(compaction, "reserved")
+		}
 		if current.Context.Writable {
 			model := openCodeModelConfig(config, selectedProviderModel(s.Settings(), "opencode"))
 			if model == nil {
@@ -562,6 +629,15 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 		RestartRequired: providerID == "codex", Configuration: configuration,
 		Warnings: configuration.Warnings,
 	}, nil
+}
+
+func validCodexAutoCompactScope(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "", "total", "body_after_prefix":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *AppService) RestartProvider(providerID string) (ProviderApplyResult, error) {
@@ -693,25 +769,6 @@ func boolFromConfig(value any) (bool, bool) {
 	}
 }
 
-func truthyConfigValue(value any) bool {
-	if parsed, ok := boolFromConfig(value); ok {
-		return parsed
-	}
-	if number, ok := integerFromConfig(value); ok {
-		return number != 0
-	}
-	text := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
-	return text == "yes" || text == "on"
-}
-
-func setOptionalStringInteger(target map[string]any, key string, value int64) {
-	if value > 0 {
-		target[key] = strconv.FormatInt(value, 10)
-		return
-	}
-	delete(target, key)
-}
-
 func rootTOMLText(text string) string {
 	if index := regexp.MustCompile(`(?m)^\s*\[`).FindStringIndex(text); index != nil {
 		return text[:index[0]]
@@ -816,6 +873,26 @@ func findGrokModelSection(text, model string) string {
 		}
 	}
 	return ""
+}
+
+func readGrokModelAutoCompactThreshold(path, model string) (int64, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return 0, false
+	}
+	models := mapFromAny(readProviderJSONMap(path)["models"])
+	for key, raw := range models {
+		if !strings.EqualFold(strings.TrimSpace(key), model) {
+			continue
+		}
+		info := mapFromAny(mapFromAny(raw)["info"])
+		threshold, ok := integerFromConfig(info["auto_compact_threshold_percent"])
+		if ok && threshold >= 0 && threshold <= 100 {
+			return threshold, true
+		}
+		return 0, false
+	}
+	return 0, false
 }
 
 func openCodeModelConfig(config map[string]any, selected string) map[string]any {

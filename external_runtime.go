@@ -135,6 +135,17 @@ type ExternalRuntimeCatalog struct {
 	ReadOnlyNotice      string                  `json:"readOnlyNotice,omitempty"`
 }
 
+func resolveGeminiHome() string {
+	if value := strings.TrimSpace(os.Getenv("GEMINI_CLI_HOME")); value != "" {
+		return filepath.Clean(value)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".gemini")
+}
+
 type ExternalInstructionsSaveRequest struct {
 	Runtime   string `json:"runtime"`
 	Workspace string `json:"workspace"`
@@ -192,7 +203,7 @@ func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCu
 	}
 	switch runtime {
 	case "gemini":
-		catalog.NativeHome = filepath.Join(home, ".gemini")
+		catalog.NativeHome = resolveGeminiHome()
 		catalog.ConfigPath = filepath.Join(catalog.NativeHome, "settings.json")
 		catalog.ProviderSource = "Gemini CLI settings.json / environment"
 		catalog.MCP = readExternalMCPByScope("gemini", catalog.ConfigPath, workspace)
@@ -203,7 +214,7 @@ func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCu
 		catalog.ActiveProvider = geminiActiveProvider(catalog.ConfigPath)
 		catalog.Providers = []ExternalProviderView{{
 			ID: "gemini", Name: "Gemini API / OAuth", Source: catalog.ProviderSource,
-			Configured: geminiConfigured(catalog.ConfigPath, home), Authenticated: geminiAuthenticated(catalog.ConfigPath, home),
+			Configured: geminiConfigured(catalog.ConfigPath, catalog.NativeHome), Authenticated: geminiAuthenticated(catalog.ConfigPath, catalog.NativeHome),
 			Models: catalog.Models,
 		}}
 		catalog.Sessions = listGeminiNativeSessions(catalog.NativeHome, workspace)
@@ -268,11 +279,10 @@ func (s *AppService) syncNativeExternalSessions(runtime, workspace string) {
 	s.nativeSessionsSyncedAt[key] = now
 	s.mu.Unlock()
 
-	home, _ := os.UserHomeDir()
 	var views []ExternalSessionView
 	switch runtime {
 	case "gemini":
-		views = listGeminiNativeSessions(filepath.Join(home, ".gemini"), workspace)
+		views = listGeminiNativeSessions(resolveGeminiHome(), workspace)
 	case "opencode":
 		views = listOpenCodeNativeSessions(workspace)
 	}
@@ -464,7 +474,7 @@ func (s *AppService) SaveExternalRuntimeInstructions(request ExternalInstruction
 	var path string
 	if scope == "global" {
 		if runtime == "gemini" {
-			path = filepath.Join(home, ".gemini", "GEMINI.md")
+			path = filepath.Join(resolveGeminiHome(), "GEMINI.md")
 		} else {
 			path = filepath.Join(openCodeConfigDir(home), "AGENTS.md")
 		}
@@ -602,8 +612,8 @@ func geminiActiveProvider(configPath string) string {
 	return "gemini"
 }
 
-func geminiConfigured(configPath, home string) bool {
-	if readEnvValue(filepath.Join(home, ".gemini", ".env"), "GEMINI_API_KEY") != "" || strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" {
+func geminiConfigured(configPath, geminiHome string) bool {
+	if readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_API_KEY") != "" || strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" {
 		return true
 	}
 	var config map[string]any
@@ -618,12 +628,12 @@ func geminiConfigured(configPath, home string) bool {
 	return false
 }
 
-func geminiAuthenticated(configPath, home string) bool {
-	if strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" || readEnvValue(filepath.Join(home, ".gemini", ".env"), "GEMINI_API_KEY") != "" {
+func geminiAuthenticated(configPath, geminiHome string) bool {
+	if strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" || readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_API_KEY") != "" {
 		return true
 	}
 	var accounts map[string]any
-	return readLimitedJSON(filepath.Join(home, ".gemini", "google_accounts.json"), &accounts) && len(accounts) > 0
+	return readLimitedJSON(filepath.Join(geminiHome, "google_accounts.json"), &accounts) && len(accounts) > 0
 }
 
 func firstGeminiModel(models []AgentProviderModel) string {
@@ -704,7 +714,7 @@ func externalRuntimeConfigPath(runtime, scope, workspace string) string {
 	home, _ := os.UserHomeDir()
 	if scope != "project" || strings.TrimSpace(workspace) == "" {
 		if runtime == "gemini" {
-			return filepath.Join(home, ".gemini", "settings.json")
+			return filepath.Join(resolveGeminiHome(), "settings.json")
 		}
 		return openCodeConfigPath(home)
 	}
@@ -1314,6 +1324,7 @@ func collectOpenCodeSessionUsage(home, sessionID string, startedAtMillis int64) 
 		return nil
 	}
 	var input, outputTokens, cached, reasoning, total int64
+	var contextTokens int64
 	for _, row := range rows {
 		data, ok := row["data"].(string)
 		if !ok || strings.TrimSpace(data) == "" {
@@ -1326,7 +1337,16 @@ func collectOpenCodeSessionUsage(home, sessionID string, startedAtMillis int64) 
 		if !strings.EqualFold(stringFromAny(message["role"]), "assistant") {
 			continue
 		}
-		collectNativeUsage(message, &input, &outputTokens, &cached, &reasoning, &total)
+		var messageInput, messageOutput, messageCached, messageReasoning, messageTotal int64
+		collectNativeUsage(message, &messageInput, &messageOutput, &messageCached, &messageReasoning, &messageTotal)
+		input += messageInput
+		outputTokens += messageOutput
+		cached += messageCached
+		reasoning += messageReasoning
+		total += messageTotal
+		if promptTokens := messageInput + messageCached; promptTokens > 0 {
+			contextTokens = promptTokens
+		}
 	}
 	if input == 0 && outputTokens == 0 && cached == 0 && reasoning == 0 && total == 0 {
 		return nil
@@ -1334,13 +1354,18 @@ func collectOpenCodeSessionUsage(home, sessionID string, startedAtMillis int64) 
 	if total <= 0 {
 		total = input + cached + outputTokens + reasoning
 	}
-	return map[string]any{
+	result := map[string]any{
 		"inputTokens":           input,
 		"cachedInputTokens":     cached,
 		"outputTokens":          outputTokens,
 		"reasoningOutputTokens": reasoning,
 		"totalTokens":           total,
 	}
+	if contextTokens > 0 {
+		result["contextTokens"] = contextTokens
+		result["contextUsageSource"] = "native-history"
+	}
+	return result
 }
 
 func nativeSQLQuote(value string) string {
@@ -1448,7 +1473,7 @@ func readOpenCodeNativeHistoryPage(record *SessionRecord, before int) (externalN
 		turn := &page.Turns[len(page.Turns)-1]
 		completedAt := int64FromAny(message["time_created"]) / 1000
 		if role == "assistant" {
-			mergeNativeUsage(turn, data)
+			mergeNativeUsage(turn, data, false)
 			if completedAt > turn.CompletedAt {
 				turn.CompletedAt = completedAt
 			}
@@ -1517,12 +1542,17 @@ func parseNativeJSONValue(value any) any {
 	return value
 }
 
-func mergeNativeUsage(turn *externalTurn, value any) {
+func mergeNativeUsage(turn *externalTurn, value any, promptIncludesCache bool) {
 	if turn == nil {
 		return
 	}
 	var input, output, cached, reasoning, total int64
 	collectNativeUsage(value, &input, &output, &cached, &reasoning, &total)
+	if promptIncludesCache && cached > 0 && input >= cached {
+		// Gemini's promptTokenCount already includes cachedContentTokenCount.
+		// Store uncached + cached separately so every consumer can safely add them.
+		input -= cached
+	}
 	if input == 0 && output == 0 && cached == 0 && reasoning == 0 && total == 0 {
 		return
 	}
@@ -1535,6 +1565,10 @@ func mergeNativeUsage(turn *externalTurn, value any) {
 		total = input + cached + output + reasoning
 	}
 	usage["totalTokens"] = int64FromAny(usage["totalTokens"]) + total
+	if contextTokens := input + cached; contextTokens > 0 {
+		usage["contextTokens"] = contextTokens
+		usage["contextUsageSource"] = "native-history"
+	}
 	turn.Usage = usage
 }
 
@@ -1594,8 +1628,7 @@ func (s *AppService) readNativeExternalHistoryPageUncached(record *SessionRecord
 
 func readGeminiNativeHistoryPage(record *SessionRecord, before int) (externalNativeHistoryPage, error) {
 	page := externalNativeHistoryPage{Turns: []externalTurn{}}
-	home, _ := os.UserHomeDir()
-	path := findGeminiNativeSessionFile(filepath.Join(home, ".gemini"), record.BackendRef)
+	path := findGeminiNativeSessionFile(resolveGeminiHome(), record.BackendRef)
 	if path == "" {
 		return page, errors.New("Gemini native session file was not found")
 	}
@@ -1692,7 +1725,7 @@ func geminiTurnsFromMessages(messages []map[string]any) []externalTurn {
 		if completed > turn.CompletedAt {
 			turn.CompletedAt = completed
 		}
-		mergeNativeUsage(turn, message)
+		mergeNativeUsage(turn, message, true)
 		for thoughtIndex, thought := range nativeAnySlice(message["thoughts"]) {
 			thoughtMap := asStringKeyMap(thought)
 			text := stringFromAny(thoughtMap["description"])
@@ -1830,26 +1863,40 @@ func collectGeminiSessionUsage(home, sessionID string, startedAtMillis int64) ma
 	if path == "" {
 		return nil
 	}
-	payload, err := os.ReadFile(path)
-	if err != nil || len(payload) > 16*1024*1024 {
-		return nil
-	}
 	var input, output, cached, reasoning, total int64
+	var contextTokens int64
 	var latestSnapshot map[string]any
-	for _, line := range strings.Split(string(payload), "\n") {
+	_ = visitJSONLLinesReverse(path, 64*1024*1024, func(line []byte) bool {
 		var value map[string]any
-		if json.Unmarshal([]byte(line), &value) != nil {
-			continue
+		if json.Unmarshal(line, &value) != nil {
+			return false
 		}
 		if snapshot, ok := value["$set"].(map[string]any); ok {
-			latestSnapshot = snapshot
-			continue
+			if latestSnapshot == nil {
+				latestSnapshot = snapshot
+			}
+			return false
 		}
 		if !geminiMessageAtOrAfter(value, startedAtMillis) {
-			continue
+			if startedAtMillis > 0 {
+				if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(stringFromAny(value["timestamp"]))); err == nil && parsed.UnixMilli() < startedAtMillis {
+					return true
+				}
+			}
+			return false
 		}
-		collectNativeUsage(value, &input, &output, &cached, &reasoning, &total)
-	}
+		var messageInput, messageOutput, messageCached, messageReasoning, messageTotal int64
+		collectGeminiNativeUsage(value, &messageInput, &messageOutput, &messageCached, &messageReasoning, &messageTotal)
+		input += messageInput
+		output += messageOutput
+		cached += messageCached
+		reasoning += messageReasoning
+		total += messageTotal
+		if promptTokens := messageInput + messageCached; promptTokens > 0 && contextTokens == 0 {
+			contextTokens = promptTokens
+		}
+		return false
+	})
 	if input == 0 && output == 0 && cached == 0 && reasoning == 0 && total == 0 && latestSnapshot != nil {
 		if messages, ok := latestSnapshot["messages"].([]any); ok {
 			for _, raw := range messages {
@@ -1857,7 +1904,16 @@ func collectGeminiSessionUsage(home, sessionID string, startedAtMillis int64) ma
 				if !geminiMessageAtOrAfter(message, startedAtMillis) {
 					continue
 				}
-				collectNativeUsage(message, &input, &output, &cached, &reasoning, &total)
+				var messageInput, messageOutput, messageCached, messageReasoning, messageTotal int64
+				collectGeminiNativeUsage(message, &messageInput, &messageOutput, &messageCached, &messageReasoning, &messageTotal)
+				input += messageInput
+				output += messageOutput
+				cached += messageCached
+				reasoning += messageReasoning
+				total += messageTotal
+				if promptTokens := messageInput + messageCached; promptTokens > 0 {
+					contextTokens = promptTokens
+				}
 			}
 		}
 	}
@@ -1867,13 +1923,18 @@ func collectGeminiSessionUsage(home, sessionID string, startedAtMillis int64) ma
 	if total <= 0 {
 		total = input + cached + output + reasoning
 	}
-	return map[string]any{
+	result := map[string]any{
 		"inputTokens":           input,
 		"cachedInputTokens":     cached,
 		"outputTokens":          output,
 		"reasoningOutputTokens": reasoning,
 		"totalTokens":           total,
 	}
+	if contextTokens > 0 {
+		result["contextTokens"] = contextTokens
+		result["contextUsageSource"] = "native-history"
+	}
+	return result
 }
 
 func geminiMessageAtOrAfter(message map[string]any, startedAtMillis int64) bool {
@@ -2062,7 +2123,7 @@ func collectGeminiUsage(home, workspace string) ExternalUsageSummary {
 	byModel := make(map[string]*ExternalUsageModelView)
 	addUsage := func(value any, modelHint string) bool {
 		var input, output, cached, reasoning, reportedTotal int64
-		collectNativeUsage(value, &input, &output, &cached, &reasoning, &reportedTotal)
+		collectGeminiNativeUsage(value, &input, &output, &cached, &reasoning, &reportedTotal)
 		if input == 0 && output == 0 && cached == 0 && reasoning == 0 && reportedTotal == 0 {
 			return false
 		}
@@ -2217,6 +2278,15 @@ func collectNativeUsage(value any, input, output, cached, reasoning, total *int6
 		for _, nested := range typed {
 			collectNativeUsage(nested, input, output, cached, reasoning, total)
 		}
+	}
+}
+
+func collectGeminiNativeUsage(value any, input, output, cached, reasoning, total *int64) {
+	collectNativeUsage(value, input, output, cached, reasoning, total)
+	if *cached > 0 && *input >= *cached {
+		// Gemini persists promptTokenCount as `tokens.input`; the API defines it
+		// as the complete prompt, including cached content.
+		*input -= *cached
 	}
 }
 

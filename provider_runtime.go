@@ -70,30 +70,34 @@ type AgentProviderReasoningEffort struct {
 }
 
 type ProviderContextPolicyView struct {
-	Tokens                int64  `json:"tokens"`
-	ConfiguredTokens      int64  `json:"configuredTokens"`
-	Source                string `json:"source"`
-	Writable              bool   `json:"writable"`
-	TokenMode             string `json:"tokenMode"`
-	TokenMinimum          int64  `json:"tokenMinimum"`
-	TokenMaximum          int64  `json:"tokenMaximum"`
-	TokenStep             int64  `json:"tokenStep"`
-	IsFallback            bool   `json:"isFallback"`
-	CompactStrategy       string `json:"compactStrategy"`
-	CompactAvailable      bool   `json:"compactAvailable"`
-	AutoCompactSupported  bool   `json:"autoCompactSupported"`
-	AutoCompactEnabled    bool   `json:"autoCompactEnabled"`
-	AutoCompactToggleable bool   `json:"autoCompactToggleable"`
-	ThresholdConfigurable bool   `json:"thresholdConfigurable"`
-	ThresholdConfigured   bool   `json:"thresholdConfigured"`
-	AutoCompactThreshold  int64  `json:"autoCompactThreshold"`
-	ThresholdUnit         string `json:"thresholdUnit"`
-	ThresholdMinimum      int64  `json:"thresholdMinimum"`
-	ThresholdMaximum      int64  `json:"thresholdMaximum"`
-	ThresholdStep         int64  `json:"thresholdStep"`
-	PruneSupported        bool   `json:"pruneSupported"`
-	PruneEnabled          bool   `json:"pruneEnabled"`
-	Description           string `json:"description"`
+	Tokens                   int64    `json:"tokens"`
+	ConfiguredTokens         int64    `json:"configuredTokens"`
+	Source                   string   `json:"source"`
+	Writable                 bool     `json:"writable"`
+	TokenMode                string   `json:"tokenMode"`
+	TokenMinimum             int64    `json:"tokenMinimum"`
+	TokenMaximum             int64    `json:"tokenMaximum"`
+	TokenStep                int64    `json:"tokenStep"`
+	IsFallback               bool     `json:"isFallback"`
+	CompactStrategy          string   `json:"compactStrategy"`
+	CompactAvailable         bool     `json:"compactAvailable"`
+	AutoCompactSupported     bool     `json:"autoCompactSupported"`
+	AutoCompactEnabled       bool     `json:"autoCompactEnabled"`
+	AutoCompactToggleable    bool     `json:"autoCompactToggleable"`
+	ThresholdConfigurable    bool     `json:"thresholdConfigurable"`
+	ThresholdConfigured      bool     `json:"thresholdConfigured"`
+	AutoCompactThreshold     int64    `json:"autoCompactThreshold"`
+	ThresholdUnit            string   `json:"thresholdUnit"`
+	ThresholdMinimum         int64    `json:"thresholdMinimum"`
+	ThresholdMaximum         int64    `json:"thresholdMaximum"`
+	ThresholdStep            int64    `json:"thresholdStep"`
+	ThresholdScopeSupported  bool     `json:"thresholdScopeSupported"`
+	ThresholdScopeConfigured bool     `json:"thresholdScopeConfigured"`
+	ThresholdScope           string   `json:"thresholdScope"`
+	ThresholdScopeOptions    []string `json:"thresholdScopeOptions"`
+	PruneSupported           bool     `json:"pruneSupported"`
+	PruneEnabled             bool     `json:"pruneEnabled"`
+	Description              string   `json:"description"`
 }
 
 type ProviderConfigurationView struct {
@@ -404,14 +408,15 @@ func discoverProviderCatalog(kind string) ([]AgentProviderModel, []AgentProvider
 			addModel(model.Model, model.DisplayName, model.Description, model.IsDefault, model.ContextWindow)
 		}
 	case "gemini":
-		if model := readEnvValue(filepath.Join(home, ".gemini", ".env"), "GEMINI_MODEL"); model != "" {
-			addModel(model, model, "Configured by GEMINI_MODEL", true, 0)
+		geminiHome := resolveGeminiHome()
+		if model := readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_MODEL"); model != "" {
+			addModel(model, model, "Configured by GEMINI_MODEL", true, knownProviderContextWindow("gemini", model))
 		}
-		for _, model := range readJSONModelValues(filepath.Join(home, ".gemini", "settings.json")) {
-			addModel(model, model, "Discovered in Gemini CLI configuration", len(models) == 0, 0)
+		for _, model := range readJSONModelValues(filepath.Join(geminiHome, "settings.json")) {
+			addModel(model, model, "Discovered in Gemini CLI configuration", len(models) == 0, knownProviderContextWindow("gemini", model))
 		}
-		for _, model := range readModelIDsFromDirectory(filepath.Join(home, ".gemini"), geminiModelPattern) {
-			addModel(model, model, "Discovered in local Gemini CLI data", len(models) == 0, 0)
+		for _, model := range readModelIDsFromDirectory(geminiHome, geminiModelPattern) {
+			addModel(model, model, "Discovered in local Gemini CLI data", len(models) == 0, knownProviderContextWindow("gemini", model))
 		}
 	case "opencode":
 		if discovered, discoveredEfforts, _ := discoverOpenCodeCatalog(home); len(discovered) > 0 {
@@ -433,11 +438,19 @@ func discoverProviderCatalog(kind string) ([]AgentProviderModel, []AgentProvider
 			}
 		}
 	case "grok":
-		configured := readTOMLModel(filepath.Join(home, ".grok", "config.toml"))
+		grokHome := resolveGrokHome()
+		configPath := filepath.Join(grokHome, "config.toml")
+		configured := readTOMLModel(configPath)
 		if configured != "" {
-			addModel(configured, configured, "Configured in Grok Build", true, 0)
+			configuredWindow := int64(0)
+			if text, err := readProviderText(configPath); err == nil {
+				if section := findGrokModelSection(text, configured); section != "" {
+					configuredWindow, _ = readTOMLInteger(text, section, "context_window")
+				}
+			}
+			addModel(configured, configured, "Configured in Grok Build", true, configuredWindow)
 		}
-		cacheModels, cacheEfforts := readGrokModelCache(filepath.Join(home, ".grok", "models_cache.json"))
+		cacheModels, cacheEfforts := readGrokModelCache(filepath.Join(grokHome, "models_cache.json"))
 		for _, model := range cacheModels {
 			addModel(model.Model, model.DisplayName, model.Description, model.IsDefault || len(models) == 0, model.ContextWindow)
 		}
@@ -475,7 +488,10 @@ func fallbackProviderModels(kind string) []AgentProviderModel {
 			{Model: "fable", DisplayName: "Claude Fable", Description: "alias `fable` → latest Fable (e.g. claude-fable-5)", ContextWindow: 1_000_000},
 		}
 	case "gemini":
-		return nil
+		return []AgentProviderModel{
+			{Model: "gemini-2.5-pro", DisplayName: "Gemini 2.5 Pro", Description: "Gemini CLI default model fallback", IsDefault: true, ContextWindow: 1_048_576},
+			{Model: "gemini-2.5-flash", DisplayName: "Gemini 2.5 Flash", Description: "Gemini CLI flash model fallback", ContextWindow: 1_048_576},
+		}
 	case "grok":
 		return []AgentProviderModel{
 			{Model: "grok-4.6", DisplayName: "Grok 4.6", Description: "Grok frontier reasoning model", IsDefault: true, ContextWindow: 500_000},
@@ -497,9 +513,24 @@ func knownProviderContextWindow(kind, model string) int64 {
 	}
 	switch kind {
 	case "grok":
-		if strings.HasPrefix(lower, "grok-4") {
+		if strings.Contains(lower, "grok-build-0.1") {
+			return 256_000
+		}
+		if strings.Contains(lower, "grok-4.20") || strings.Contains(lower, "grok-4-20") ||
+			strings.Contains(lower, "grok-4.3") || strings.Contains(lower, "grok-4-3") {
+			return 1_000_000
+		}
+		if strings.Contains(lower, "grok-4.6") || strings.Contains(lower, "grok-4-6") ||
+			strings.Contains(lower, "grok-4.5") || strings.Contains(lower, "grok-4-5") {
 			return 500_000
 		}
+	case "gemini":
+		// Gemini CLI 0.56 tokenLimits.ts fixes Gemini models at 1,048,576
+		// tokens and the two Gemma 4 variants at 256,000.
+		if strings.Contains(lower, "gemma-4") || strings.Contains(lower, "gemma_4") {
+			return 256_000
+		}
+		return 1_048_576
 	case "claude":
 		switch lower {
 		case "sonnet", "opus", "fable":
@@ -604,9 +635,10 @@ func readJSONModelValues(paths ...string) []string {
 	return result
 }
 
-func discoverClaudeModels(home string) []AgentProviderModel {
-	settings := readClaudeSettings(filepath.Join(home, ".claude", "settings.json"))
-	provider := readClaudeProvider(filepath.Join(home, ".claude", "providers.json"))
+func discoverClaudeModels(_ string) []AgentProviderModel {
+	claudeHome := resolveClaudeHome()
+	settings := readClaudeSettings(filepath.Join(claudeHome, "settings.json"))
+	provider := readClaudeProvider(filepath.Join(claudeHome, "providers.json"))
 	configuredEnv := func(key string) string {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value

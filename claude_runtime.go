@@ -1165,6 +1165,12 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 			}
 		},
 	)
+	usageSource := "provider"
+	if usage == nil {
+		usageSource = ""
+	}
+	contextTokens := int64(0)
+	contextUsageSource := ""
 	stopToolPolling()
 	if toolPollingStarted {
 		<-toolPollingDone
@@ -1177,24 +1183,41 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 	}
 	agentText.Reset()
 	agentText.WriteString(finalBody)
-	// If stream-json omitted usage, try the native transcript written by Claude Code.
-	if usage == nil && newSessionID != "" {
+	// Claude's final stream-json usage can aggregate several model calls in a
+	// tool-heavy turn. The last native assistant row is the current prompt
+	// snapshot, so prefer it for context occupancy even when aggregate usage exists.
+	if newSessionID != "" {
 		if native, ok := findClaudeNativeSession(newSessionID); ok {
-			if hits := collectClaudeNativeTurnUsage(native.Path, newSessionID); len(hits) > 0 {
-				last := hits[len(hits)-1]
-				usage = map[string]any{
-					"inputTokens":           last.Breakdown.Input,
-					"cachedInputTokens":     last.Breakdown.Cached,
-					"outputTokens":          last.Breakdown.Output,
-					"reasoningOutputTokens": last.Breakdown.Reasoning,
-					"totalTokens":           last.Breakdown.Total,
+			hits := collectClaudeNativeTurnUsage(native.Path, newSessionID)
+			for index := len(hits) - 1; index >= 0; index-- {
+				last := hits[index]
+				if last.At.Unix() < now {
+					break
 				}
+				contextTokens = last.Breakdown.Input + last.Breakdown.Cached
+				contextUsageSource = "native-history"
+				if usage == nil {
+					usage = map[string]any{
+						"inputTokens":           last.Breakdown.Input,
+						"cachedInputTokens":     last.Breakdown.Cached,
+						"outputTokens":          last.Breakdown.Output,
+						"reasoningOutputTokens": last.Breakdown.Reasoning,
+						"totalTokens":           last.Breakdown.Total,
+					}
+					usageSource = "native-history"
+				}
+				break
 			}
 		}
 	}
 	// Last resort: rough estimate so the timeline is not blank.
 	if usage == nil {
 		usage = estimateTokenUsage(request.Text, agentText.String())
+		usageSource = "estimated-text"
+	}
+	if contextTokens <= 0 {
+		contextTokens = int64FromAny(usage["inputTokens"]) + int64FromAny(usage["cachedInputTokens"])
+		contextUsageSource = usageSource
 	}
 	completed := time.Now().Unix()
 	status := "completed"
@@ -1275,10 +1298,15 @@ func (s *AppService) runClaudeTurn(ctx context.Context, cancel context.CancelFun
 	}
 	// Token usage for timeline footer + account usage popover (same shape as Grok/Codex).
 	if usage != nil {
-		payload["tokenUsage"] = map[string]any{
+		tokenUsage := map[string]any{
 			"last":  usage,
 			"total": usage,
 		}
+		if contextTokens > 0 {
+			tokenUsage["contextTokens"] = contextTokens
+			tokenUsage["contextUsageSource"] = contextUsageSource
+		}
+		payload["tokenUsage"] = tokenUsage
 		payload["usage"] = usage
 	}
 	// Session reload follows the terminal event immediately. Release the native

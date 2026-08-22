@@ -2868,7 +2868,7 @@ func (s *AppService) readExternalUsageCached(runtimeName, workspace string) map[
 	var usage ExternalUsageSummary
 	switch runtimeName {
 	case "gemini":
-		usage = collectGeminiUsage(filepath.Join(home, ".gemini"), workspace)
+		usage = collectGeminiUsage(resolveGeminiHome(), workspace)
 	case "opencode":
 		// The usage summary is presented as lifetime totals. The native SQLite
 		// query is already aggregated, so do not silently discard older sessions.
@@ -3715,8 +3715,7 @@ func readSettings(path string) (UserSettings, error) {
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
 	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
 	migratedGeminiModel := false
-	geminiHome, _ := os.UserHomeDir()
-	if nativeModel := readEnvValue(filepath.Join(geminiHome, ".gemini", ".env"), "GEMINI_MODEL"); nativeModel != "" {
+	if nativeModel := readEnvValue(filepath.Join(resolveGeminiHome(), ".env"), "GEMINI_MODEL"); nativeModel != "" {
 		legacy := strings.ToLower(strings.TrimSpace(settings.GeminiModel))
 		if legacy == "" || legacy == "gemini-2.5-pro" || legacy == "gemini-2.5-flash" {
 			settings.GeminiModel = nativeModel

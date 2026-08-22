@@ -58,6 +58,7 @@ import {
   buildContextUsageView,
   CODEX_CONTEXT_BASELINE_TOKENS,
   formatTokenCount,
+  resolveProviderModelContextWindow,
 } from '@/utils/accountUsage'
 import { rememberLocalImagePreview, resolveImagePreview } from '@/utils/imagePreview'
 import { notify } from '@/utils/notify'
@@ -490,7 +491,13 @@ const activeTokenUsage = computed(() => {
     return key ? (claudeStore.tokenUsageBySession[key] || null) : null
   }
   const key = matchingCodexThreadKey(codexStore.tokenUsageByThread, sessionId)
-  return (key && codexStore.tokenUsageByThread[key]) || null
+  const usage = (key && codexStore.tokenUsageByThread[key]) || null
+  if (!usage || (!isGeminiMode.value && !isOpenCodeMode.value)) return usage
+  const runtime = isGeminiMode.value ? 'gemini' : 'opencode'
+  const contextWindow = resolveProviderModelContextWindow(appStore.agentProviders, runtime, displayModel.value)
+  return contextWindow > 0 && usage.modelContextWindow !== contextWindow
+    ? { ...usage, modelContextWindow: contextWindow }
+    : usage
 })
 const contextUsage = computed(() => buildContextUsageView(
   activeTokenUsage.value,
@@ -508,7 +515,8 @@ const contextUsageTone = computed(() => {
 })
 const contextUsageTooltip = computed(() => {
   if (!hasContextUsage.value) return `${t('inspector.contextUsage')} · ${t('common.unavailable')}`
-  return `${t('inspector.contextUsage')} ${contextUsedPercent.value.toFixed(1)}% · ${formatTokenCount(contextUsedTokens.value)} / ${formatTokenCount(contextWindow.value)}`
+  const precision = contextUsage.value.estimated ? ` · ${t('inspector.contextEstimated')}` : ''
+  return `${t('inspector.contextUsage')} ${contextUsedPercent.value.toFixed(1)}% · ${formatTokenCount(contextUsedTokens.value)} / ${formatTokenCount(contextWindow.value)}${precision}`
 })
 const sessionLocked = computed(() => Boolean(
   (isCodexMode.value || isGeminiMode.value || isOpenCodeMode.value)

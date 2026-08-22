@@ -105,7 +105,12 @@ const providerContextTokens = shallowRef('')
 const providerCompactThreshold = shallowRef('')
 const providerAutoCompactEnabled = shallowRef(true)
 const providerPruneEnabled = shallowRef(false)
+const providerThresholdScope = shallowRef('native')
 const providerContextSaving = shallowRef(false)
+let providerConfigurationRequestSequence = 0
+let providerContextSaveSequence = 0
+let providerRestartSequence = 0
+let externalCatalogRequestSequence = 0
 const providerApplyLabel = computed(() => {
   switch (providerConfiguration.value?.applyLevel) {
     case 'immediate': return t('providerConfig.applyImmediate')
@@ -139,9 +144,10 @@ const providerThresholdLabel = computed(() => {
   return t('providerConfig.compactThreshold')
 })
 const providerThresholdSliderValue = computed(() => {
+  if (!providerCompactThreshold.value.trim()) return providerContextPolicy.value?.thresholdMinimum || 0
   const value = Number(providerCompactThreshold.value)
-  if (value > 0) return value
-  return providerContextPolicy.value?.thresholdMinimum || 1
+  if (Number.isFinite(value)) return value
+  return providerContextPolicy.value?.thresholdMinimum || 0
 })
 const providerThresholdProgress = computed(() => {
   const minimum = providerContextPolicy.value?.thresholdMinimum || 0
@@ -150,6 +156,11 @@ const providerThresholdProgress = computed(() => {
   const value = Math.min(maximum, Math.max(minimum, providerThresholdSliderValue.value))
   return (value - minimum) / (maximum - minimum) * 100
 })
+function providerThresholdScopeLabel(scope: string): string {
+  if (scope === 'total') return t('providerConfig.scopeTotal')
+  if (scope === 'body_after_prefix') return t('providerConfig.scopeBodyAfterPrefix')
+  return t('providerConfig.scopeNative')
+}
 const providerBusy = computed(() => {
   if (isClaudeMode.value) return claudeStore.runningSessionIds.length > 0
   if (isGrokMode.value) return grokStore.runningSessionIds.length > 0
@@ -383,24 +394,29 @@ function hydrateExternalEditors(): void {
 }
 
 async function loadExternalCatalog(): Promise<void> {
+  const runtime = externalRuntimeID()
+  const workspace = appStore.currentWorkspacePath || ''
+  const sequence = ++externalCatalogRequestSequence
   externalCatalogLoading.value = true
   try {
-    externalCatalog.value = await backend.ReadExternalRuntimeCatalog(
-      externalRuntimeID(),
-      appStore.settings.workspace || '',
-    )
+    const catalog = await backend.ReadExternalRuntimeCatalog(runtime, workspace)
+    if (sequence !== externalCatalogRequestSequence || runtime !== appStore.activeRuntime) return
+    externalCatalog.value = catalog
     hydrateExternalEditors()
   } catch (error) {
+    if (sequence !== externalCatalogRequestSequence || runtime !== appStore.activeRuntime) return
     notify('error', t('capabilities.externalRuntime'), error instanceof Error ? error.message : String(error))
   } finally {
-    externalCatalogLoading.value = false
+    if (sequence === externalCatalogRequestSequence && runtime === appStore.activeRuntime) {
+      externalCatalogLoading.value = false
+    }
   }
 }
 
 async function saveExternalInstructions(): Promise<void> {
   try {
     await backend.SaveExternalRuntimeInstructions({
-      runtime: externalRuntimeID(), workspace: appStore.settings.workspace || '',
+      runtime: externalRuntimeID(), workspace: appStore.currentWorkspacePath || '',
       scope: externalInstructionScope.value, content: externalInstructionDraft.value,
     })
     await loadExternalCatalog()
@@ -414,7 +430,7 @@ async function saveExternalMCP(): Promise<void> {
   externalMcpSaving.value = true
   try {
     await backend.SaveExternalRuntimeMCP({
-      runtime: externalRuntimeID(), workspace: appStore.settings.workspace || '', json: externalMcpJSON.value,
+      runtime: externalRuntimeID(), workspace: appStore.currentWorkspacePath || '', json: externalMcpJSON.value,
       scope: externalMcpScope.value,
     })
     await loadExternalCatalog()
@@ -428,91 +444,116 @@ async function saveExternalMCP(): Promise<void> {
 
 async function checkProviderConfiguration(force = true): Promise<void> {
   const providerID = appStore.activeRuntime
+  const sequence = ++providerConfigurationRequestSequence
   providerConfigurationLoading.value = true
   try {
     const configuration = await backend.CheckProviderConfiguration(providerID, force)
-    if (providerID !== appStore.activeRuntime) return
-    providerConfiguration.value = configuration
-    hydrateProviderContext(configuration)
-    const next = [...appStore.agentProviders]
-    const index = next.findIndex((item) => item.kind === configuration.runtime.kind)
-    if (index >= 0) next[index] = configuration.runtime
-    else next.push(configuration.runtime)
-    appStore.agentProviders = next
+    if (sequence !== providerConfigurationRequestSequence || providerID !== appStore.activeRuntime) return
+    applyProviderConfiguration(configuration)
   } catch (error) {
+    if (sequence !== providerConfigurationRequestSequence || providerID !== appStore.activeRuntime) return
     notify('error', t('providerConfig.checkFailed'), error instanceof Error ? error.message : String(error))
   } finally {
-    providerConfigurationLoading.value = false
+    if (sequence === providerConfigurationRequestSequence && providerID === appStore.activeRuntime) {
+      providerConfigurationLoading.value = false
+    }
   }
+}
+
+function applyProviderConfiguration(configuration: ProviderConfigurationView): void {
+  providerConfiguration.value = configuration
+  hydrateProviderContext(configuration)
+  const next = [...appStore.agentProviders]
+  const index = next.findIndex((item) => item.kind === configuration.runtime.kind)
+  if (index >= 0) next[index] = configuration.runtime
+  else next.push(configuration.runtime)
+  appStore.agentProviders = next
 }
 
 function hydrateProviderContext(configuration: ProviderConfigurationView): void {
   providerContextTokens.value = configuration.context.configuredTokens
     ? String(configuration.context.configuredTokens)
     : ''
-  providerCompactThreshold.value = configuration.context.autoCompactThreshold
-    ? String(configuration.context.autoCompactThreshold)
-    : ''
+  const threshold = Number(configuration.context.autoCompactThreshold)
+  providerCompactThreshold.value = Number.isFinite(threshold) && (
+    configuration.context.thresholdConfigured
+    || (threshold > 0 && threshold >= configuration.context.thresholdMinimum)
+  ) ? String(threshold) : ''
   providerAutoCompactEnabled.value = configuration.context.autoCompactEnabled
   providerPruneEnabled.value = configuration.context.pruneEnabled
+  providerThresholdScope.value = configuration.context.thresholdScopeConfigured && configuration.context.thresholdScope
+    ? configuration.context.thresholdScope
+    : 'native'
 }
 
 async function reloadProviderConfiguration(): Promise<void> {
   const providerID = appStore.activeRuntime
+  const sequence = ++providerConfigurationRequestSequence
   providerConfigurationLoading.value = true
   try {
     const result = await backend.ReloadProviderConfiguration(providerID)
-    if (providerID !== appStore.activeRuntime) return
-    providerConfiguration.value = result.configuration
-    hydrateProviderContext(result.configuration)
-    loadWhenReady()
+    if (sequence !== providerConfigurationRequestSequence || providerID !== appStore.activeRuntime) return
+    applyProviderConfiguration(result.configuration)
+    loadNativeProviderDetails()
     notify('success', t('providerConfig.reloaded'), providerApplyLabel.value)
   } catch (error) {
+    if (sequence !== providerConfigurationRequestSequence || providerID !== appStore.activeRuntime) return
     notify('error', t('providerConfig.reloadFailed'), error instanceof Error ? error.message : String(error))
   } finally {
-    providerConfigurationLoading.value = false
+    if (sequence === providerConfigurationRequestSequence && providerID === appStore.activeRuntime) {
+      providerConfigurationLoading.value = false
+    }
   }
 }
 
 async function restartProvider(): Promise<void> {
   const providerID = appStore.activeRuntime
+  const sequence = ++providerRestartSequence
   providerRestarting.value = true
   try {
     const result = await backend.RestartProvider(providerID)
-    if (providerID !== appStore.activeRuntime) return
-    providerConfiguration.value = result.configuration
-    hydrateProviderContext(result.configuration)
-    loadWhenReady()
+    if (sequence !== providerRestartSequence || providerID !== appStore.activeRuntime) return
+    applyProviderConfiguration(result.configuration)
+    loadNativeProviderDetails()
     notify('success', t('providerConfig.restarted'), providerApplyLabel.value)
   } catch (error) {
+    if (sequence !== providerRestartSequence || providerID !== appStore.activeRuntime) return
     notify('error', t('providerConfig.restartFailed'), error instanceof Error ? error.message : String(error))
   } finally {
-    providerRestarting.value = false
+    if (sequence === providerRestartSequence && providerID === appStore.activeRuntime) {
+      providerRestarting.value = false
+    }
   }
 }
 
 async function saveProviderContextPolicy(): Promise<void> {
+  const providerID = appStore.activeRuntime
+  const sequence = ++providerContextSaveSequence
   providerContextSaving.value = true
   try {
     const result = await backend.UpdateProviderContextPolicy(
-      appStore.activeRuntime,
+      providerID,
       Number(providerContextTokens.value) || 0,
       Number(providerCompactThreshold.value) || 0,
       providerAutoCompactEnabled.value,
       providerPruneEnabled.value,
+      providerThresholdScope.value === 'native' ? '' : providerThresholdScope.value,
     )
-    providerConfiguration.value = result.configuration
-    hydrateProviderContext(result.configuration)
+    if (sequence !== providerContextSaveSequence || providerID !== appStore.activeRuntime) return
+    applyProviderConfiguration(result.configuration)
+    loadNativeProviderDetails()
     notify('success', t('providerConfig.contextSaved'), result.restartRequired ? t('providerConfig.applyReconnect') : providerApplyLabel.value)
   } catch (error) {
+    if (sequence !== providerContextSaveSequence || providerID !== appStore.activeRuntime) return
     notify('error', t('providerConfig.contextSaveFailed'), error instanceof Error ? error.message : String(error))
   } finally {
-    providerContextSaving.value = false
+    if (sequence === providerContextSaveSequence && providerID === appStore.activeRuntime) {
+      providerContextSaving.value = false
+    }
   }
 }
 
-function loadWhenReady(): void {
-  void checkProviderConfiguration(false)
+function loadNativeProviderDetails(): void {
   if (isGrokMode.value) {
     void loadGrokCatalog()
     return
@@ -523,9 +564,13 @@ function loadWhenReady(): void {
   }
   if (isGeminiMode.value || isOpenCodeMode.value) {
     void loadExternalCatalog()
-    return
   }
-  if (appStore.codexAvailable && !capabilitiesStore.capabilitiesLoading) {
+}
+
+function loadWhenReady(): void {
+  void checkProviderConfiguration(false)
+  loadNativeProviderDetails()
+  if (appStore.isCodexMode && appStore.codexAvailable && !capabilitiesStore.capabilitiesLoading) {
     void capabilitiesStore.loadCapabilities()
   }
 }
@@ -552,7 +597,16 @@ onMounted(() => {
 })
 watch(() => appStore.codexAvailable, loadWhenReady)
 watch(() => appStore.activeRuntime, () => {
+  providerConfigurationRequestSequence += 1
+  providerContextSaveSequence += 1
+  providerRestartSequence += 1
+  externalCatalogRequestSequence += 1
+  providerConfigurationLoading.value = false
+  providerContextSaving.value = false
+  providerRestarting.value = false
+  externalCatalogLoading.value = false
   providerConfiguration.value = null
+  externalCatalog.value = null
   loadWhenReady()
 })
 watch([externalInstructionScope, externalMcpScope], () => hydrateExternalEditors())
@@ -1070,12 +1124,38 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                     :max="providerContextPolicy.thresholdMaximum"
                     :step="providerContextPolicy.thresholdStep || 1"
                     class="h-8 pr-7 text-[11px]"
+                    :placeholder="t('providerConfig.useNativeDefault')"
                     :disabled="providerContextPolicy.autoCompactToggleable && !providerAutoCompactEnabled"
                   />
                   <span class="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[8px] text-muted-foreground">
                     {{ providerContextPolicy.thresholdUnit === 'percent' ? '%' : '' }}
                   </span>
                 </div>
+              </div>
+              <div v-if="providerContextPolicy?.thresholdScopeSupported" class="mt-3 rounded-md bg-muted/40 px-2.5 py-2">
+                <div class="grid grid-cols-[minmax(0,1fr)_minmax(180px,220px)] items-center gap-3">
+                  <Label for="provider-threshold-scope" class="text-[10px] text-muted-foreground">
+                    {{ t('providerConfig.thresholdScope') }}
+                  </Label>
+                  <Select v-model="providerThresholdScope">
+                    <SelectTrigger id="provider-threshold-scope" class="h-8 w-full text-[10px]">
+                      <SelectValue :placeholder="t('providerConfig.scopeNative')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="native">{{ t('providerConfig.scopeNative') }}</SelectItem>
+                      <SelectItem
+                        v-for="scope in providerContextPolicy.thresholdScopeOptions"
+                        :key="scope"
+                        :value="scope"
+                      >
+                        {{ providerThresholdScopeLabel(scope) }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <p class="mt-1.5 text-[9px] leading-4 text-muted-foreground">
+                  {{ t('providerConfig.thresholdScopeHint') }}
+                </p>
               </div>
               <div v-if="providerContextPolicy?.pruneSupported" class="mt-2 flex items-center justify-between rounded-md bg-muted/40 px-2.5 py-2">
                 <span class="text-[10px] text-muted-foreground">{{ t('providerConfig.pruneTools') }}</span>

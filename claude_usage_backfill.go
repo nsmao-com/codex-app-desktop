@@ -80,9 +80,11 @@ func (s *AppService) ListClaudeSessionTurnUsages(sessionID string) ([]map[string
 	out := make([]map[string]any, 0, len(hits))
 	for i, hit := range hits {
 		out = append(out, map[string]any{
-			"index":     i + 1,
-			"turnId":    hit.TurnID,
-			"sessionId": sessionID,
+			"index":              i + 1,
+			"turnId":             hit.TurnID,
+			"sessionId":          sessionID,
+			"contextTokens":      hit.Breakdown.Input + hit.Breakdown.Cached,
+			"contextUsageSource": "native-history",
 			"tokenUsage": map[string]any{
 				"inputTokens":           hit.Breakdown.Input,
 				"cachedInputTokens":     hit.Breakdown.Cached,

@@ -682,6 +682,10 @@ export interface ProviderContextPolicyView {
     "thresholdMinimum": number;
     "thresholdMaximum": number;
     "thresholdStep": number;
+    "thresholdScopeSupported": boolean;
+    "thresholdScopeConfigured": boolean;
+    "thresholdScope": string;
+    "thresholdScopeOptions": string[] | null;
     "pruneSupported": boolean;
     "pruneEnabled": boolean;
     "description": string;

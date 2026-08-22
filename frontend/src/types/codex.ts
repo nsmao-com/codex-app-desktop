@@ -265,6 +265,8 @@ export interface ThreadTokenUsage {
   total: TokenUsageBreakdown
   last: TokenUsageBreakdown
   modelContextWindow: number | null
+  contextTokens: number | null
+  contextUsageSource: string
 }
 
 export interface TurnMetrics {

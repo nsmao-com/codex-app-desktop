@@ -2059,6 +2059,7 @@ export const useGrokStore = defineStore('grok', () => {
       },
     }
     if (tokenUsage) {
+      const normalizedUsage = normalizeThreadTokenUsage(data.tokenUsage ?? data.usage ?? data.token_usage)
       const previous = tokenUsageBySession.value[sessionId]
       const prevTotal = previous?.total
       const nextTotal: TokenUsageBreakdown = prevTotal
@@ -2076,6 +2077,8 @@ export const useGrokStore = defineStore('grok', () => {
           total: nextTotal,
           last: tokenUsage,
           modelContextWindow: previous?.modelContextWindow ?? null,
+          contextTokens: normalizedUsage.contextTokens ?? previous?.contextTokens ?? null,
+          contextUsageSource: normalizedUsage.contextUsageSource || previous?.contextUsageSource || '',
         },
       }
     }
@@ -2439,6 +2442,8 @@ export const useGrokStore = defineStore('grok', () => {
       const next = { ...turnMetricsByKey.value }
       let totalUsage: TokenUsageBreakdown | null = null
       let lastUsage: TokenUsageBreakdown | null = null
+      let contextTokens: number | null = null
+      let contextUsageSource = ''
       for (const item of list) {
         const usage = item.tokenUsage
         if (!usage) continue
@@ -2461,6 +2466,10 @@ export const useGrokStore = defineStore('grok', () => {
           completedAt: item.at || current.completedAt,
         }
         lastUsage = breakdown
+        if (Number.isFinite(Number(item.contextTokens)) && Number(item.contextTokens) > 0) {
+          contextTokens = Number(item.contextTokens)
+          contextUsageSource = item.contextUsageSource || 'estimated-turn-average'
+        }
         totalUsage = totalUsage
           ? {
               inputTokens: totalUsage.inputTokens + breakdown.inputTokens,
@@ -2479,6 +2488,8 @@ export const useGrokStore = defineStore('grok', () => {
             last: lastUsage,
             total: totalUsage,
             modelContextWindow: tokenUsageBySession.value[id]?.modelContextWindow ?? null,
+            contextTokens,
+            contextUsageSource,
           },
         }
       }

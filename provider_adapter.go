@@ -763,7 +763,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	home, _ := os.UserHomeDir()
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "gemini":
-		if nativeUsage := collectGeminiSessionUsage(filepath.Join(home, ".gemini"), sessionID, started.UnixMilli()); nativeUsage != nil {
+		if nativeUsage := collectGeminiSessionUsage(resolveGeminiHome(), sessionID, started.UnixMilli()); nativeUsage != nil {
 			usage = nativeUsage
 		}
 	case "opencode":
@@ -885,20 +885,26 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 			runtime = "opencode"
 		}
 		s.persistTurnUsage(runtime, threadID, turnID, b, completed)
+		tokenUsage := map[string]any{
+			"last":  usage,
+			"total": usage,
+		}
+		if contextTokens, source := normalizedUsageContext(runtime, usage); contextTokens > 0 {
+			tokenUsage["contextTokens"] = contextTokens
+			tokenUsage["contextUsageSource"] = source
+		}
 		s.emitExternalNotification("thread/tokenUsage/updated", map[string]any{
-			"threadId": threadID,
-			"turnId":   turnID,
-			"runtime":  runtime,
-			"tokenUsage": map[string]any{
-				"last":  usage,
-				"total": usage,
-			},
+			"threadId":   threadID,
+			"turnId":     turnID,
+			"runtime":    runtime,
+			"tokenUsage": tokenUsage,
 		})
 	}
 	turn := externalTurn{
 		ID: turnID, UserText: strings.TrimSpace(text), Images: append([]string(nil), images...),
 		AgentText: output, Items: timelineItems, Status: status, Error: errorText,
 		StartedAt: started.Unix(), CompletedAt: completed.Unix(), DurationMS: completed.Sub(started).Milliseconds(),
+		Usage: usage,
 	}
 	nameChanged := false
 	s.mu.Lock()
@@ -1805,13 +1811,43 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	if total <= 0 && input <= 0 && output <= 0 && cached <= 0 && reasoning <= 0 {
 		return nil
 	}
-	return map[string]any{
+	result := map[string]any{
 		"inputTokens":           int64(input),
 		"cachedInputTokens":     int64(cached),
 		"outputTokens":          int64(output),
 		"reasoningOutputTokens": int64(reasoning),
 		"totalTokens":           int64(total),
 	}
+	if modelCalls := firstPositiveInt64(raw, "modelCalls", "model_calls"); modelCalls > 0 {
+		result["modelCalls"] = modelCalls
+	}
+	return result
+}
+
+func normalizedUsageContext(provider string, usage map[string]any) (int64, string) {
+	if usage == nil {
+		return 0, ""
+	}
+	if contextTokens := int64FromAny(usage["contextTokens"]); contextTokens > 0 {
+		source := strings.TrimSpace(stringFromAny(usage["contextUsageSource"]))
+		if source == "" {
+			source = "provider"
+		}
+		return contextTokens, source
+	}
+	promptTokens := int64FromAny(usage["inputTokens"]) + int64FromAny(usage["cachedInputTokens"])
+	if promptTokens <= 0 {
+		return 0, ""
+	}
+	if estimated, _ := boolFromConfig(usage["estimated"]); estimated {
+		return promptTokens, "estimated-text"
+	}
+	if provider == "grok" {
+		if calls := int64FromAny(usage["modelCalls"]); calls > 1 {
+			return (promptTokens + calls - 1) / calls, "estimated-turn-average"
+		}
+	}
+	return promptTokens, "provider"
 }
 
 func almostEqualFloat(a, b, tol float64) bool {
@@ -2491,8 +2527,7 @@ func (s *AppService) deleteNativeExternalSession(record *SessionRecord) error {
 		return nil
 	}
 	if provider == "gemini" {
-		home, _ := os.UserHomeDir()
-		root := filepath.Join(home, ".gemini")
+		root := resolveGeminiHome()
 		path := findGeminiNativeSessionFile(root, backendRef)
 		if path == "" {
 			return nil

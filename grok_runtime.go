@@ -810,12 +810,17 @@ func grokTurnUsagePayload(usage map[string]any) map[string]any {
 		return nil
 	}
 	// Mirror Codex thread/tokenUsage shape so the frontend can reuse normalizers.
+	tokenUsage := map[string]any{
+		"last":  usage,
+		"total": usage,
+	}
+	if contextTokens, source := normalizedUsageContext("grok", usage); contextTokens > 0 {
+		tokenUsage["contextTokens"] = contextTokens
+		tokenUsage["contextUsageSource"] = source
+	}
 	return map[string]any{
-		"tokenUsage": map[string]any{
-			"last":  usage,
-			"total": usage,
-		},
-		"usage": usage,
+		"tokenUsage": tokenUsage,
+		"usage":      usage,
 	}
 }
 

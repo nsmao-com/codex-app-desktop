@@ -1172,6 +1172,7 @@ export const useClaudeStore = defineStore('claude', () => {
       [turnId]: next,
     }
     if (tokenUsage && sessionId) {
+      const normalizedUsage = normalizeThreadTokenUsage(data.tokenUsage ?? data.usage ?? data.token_usage)
       const previous = tokenUsageBySession.value[sessionId]
       const prevTotal = previous?.total
       const nextTotal: TokenUsageBreakdown = prevTotal
@@ -1189,6 +1190,8 @@ export const useClaudeStore = defineStore('claude', () => {
           last: tokenUsage,
           total: nextTotal,
           modelContextWindow: previous?.modelContextWindow ?? 0,
+          contextTokens: normalizedUsage.contextTokens ?? previous?.contextTokens ?? null,
+          contextUsageSource: normalizedUsage.contextUsageSource || previous?.contextUsageSource || '',
         },
       }
     }
@@ -1515,6 +1518,8 @@ export const useClaudeStore = defineStore('claude', () => {
       let totalUsage: TokenUsageBreakdown | null = null
       let lastUsage: TokenUsageBreakdown | null = null
       let lastUsageAt = 0
+      let contextTokens: number | null = null
+      let contextUsageSource = ''
       for (const item of list) {
         const usage = item.tokenUsage
         if (!usage) continue
@@ -1531,6 +1536,10 @@ export const useClaudeStore = defineStore('claude', () => {
         }
         lastUsage = breakdown
         lastUsageAt = Math.max(lastUsageAt, Number(item.at) || 0)
+        if (Number.isFinite(Number(item.contextTokens)) && Number(item.contextTokens) > 0) {
+          contextTokens = Number(item.contextTokens)
+          contextUsageSource = item.contextUsageSource || 'native-history'
+        }
         totalUsage = totalUsage
           ? {
               inputTokens: totalUsage.inputTokens + breakdown.inputTokens,
@@ -1550,7 +1559,8 @@ export const useClaudeStore = defineStore('claude', () => {
         const normalizedLastUsageAt = lastUsageAt > 1_000_000_000_000 ? lastUsageAt : lastUsageAt * 1000
         const normalizedCompactionAt = compactionAt > 1_000_000_000_000 ? compactionAt : compactionAt * 1000
         if (contextCompaction && normalizedCompactionAt >= normalizedLastUsageAt) {
-          lastUsage = { ...lastUsage, totalTokens: Number(contextCompaction.detail) }
+          contextTokens = Number(contextCompaction.detail)
+          contextUsageSource = 'provider-compaction'
         }
         tokenUsageBySession.value = {
           ...tokenUsageBySession.value,
@@ -1558,6 +1568,8 @@ export const useClaudeStore = defineStore('claude', () => {
             last: lastUsage,
             total: totalUsage,
             modelContextWindow: tokenUsageBySession.value[sessionId]?.modelContextWindow ?? null,
+            contextTokens,
+            contextUsageSource,
           },
         }
       }
@@ -2706,9 +2718,11 @@ export const useClaudeStore = defineStore('claude', () => {
         tokenUsageBySession.value = {
           ...tokenUsageBySession.value,
           [id]: {
-            last: { ...last, totalTokens: result.postTokens },
+            last,
             total: previous?.total ?? last,
             modelContextWindow: previous?.modelContextWindow ?? null,
+            contextTokens: result.postTokens,
+            contextUsageSource: 'provider-compaction',
           },
         }
       }

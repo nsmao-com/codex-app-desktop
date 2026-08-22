@@ -269,6 +269,20 @@ export function normalizeThreadTokenUsage(value: unknown): ThreadTokenUsage {
       ?? outer.modelContextWindow
       ?? outer.contextWindow,
     ),
+    contextTokens: nullableNumber(
+      record.contextTokens
+      ?? record.context_tokens
+      ?? record.currentContextTokens
+      ?? record.current_context_tokens
+      ?? outer.contextTokens
+      ?? outer.context_tokens,
+    ),
+    contextUsageSource: asString(
+      record.contextUsageSource
+      ?? record.context_usage_source
+      ?? outer.contextUsageSource
+      ?? outer.context_usage_source,
+    ),
   }
 }
 

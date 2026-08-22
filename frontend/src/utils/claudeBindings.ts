@@ -73,6 +73,8 @@ export interface ClaudeTurnUsageView {
   index: number
   turnId: string
   sessionId: string
+  contextTokens?: number
+  contextUsageSource?: string
   tokenUsage: {
     inputTokens: number
     cachedInputTokens: number

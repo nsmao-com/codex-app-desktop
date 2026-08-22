@@ -18,6 +18,8 @@ export type ContextUsageView = {
   usedTokens: number
   contextWindow: number
   usedPercent: number
+  source: string
+  estimated: boolean
 }
 
 type ProviderModelContext = {
@@ -32,7 +34,7 @@ type ProviderContextCatalog = {
 
 export function resolveProviderModelContextWindow(
   providers: ProviderContextCatalog[] | null | undefined,
-  runtime: 'grok' | 'claude',
+  runtime: 'grok' | 'claude' | 'gemini' | 'opencode',
   model: string,
 ): number {
   const normalizedModel = model.trim().toLowerCase()
@@ -53,6 +55,11 @@ export function resolveProviderModelContextWindow(
       return Math.max(0, Number(alias?.contextWindow) || 0)
     }
   }
+  if (runtime === 'gemini') {
+    return normalizedModel.includes('gemma-4') || normalizedModel.includes('gemma_4')
+      ? 256_000
+      : 1_048_576
+  }
   return 0
 }
 
@@ -61,9 +68,18 @@ export function buildContextUsageView(
   baselineTokens = 0,
 ): ContextUsageView {
   const contextWindow = Math.max(0, Number(usage?.modelContextWindow) || 0)
-  const usedTokens = Math.max(0, Number(usage?.last.totalTokens) || 0)
+  const explicitContext = usage?.contextTokens
+  const hasExplicitContext = explicitContext !== null
+    && explicitContext !== undefined
+    && Number.isFinite(Number(explicitContext))
+  const usedTokens = Math.max(0, hasExplicitContext
+    ? Number(explicitContext)
+    : Number(usage?.last.totalTokens) || 0)
+  const source = usage?.contextUsageSource
+    || (hasExplicitContext ? 'provider' : baselineTokens > 0 ? 'codex-protocol' : 'legacy-turn-total')
+  const estimated = source.startsWith('estimated') || source === 'legacy-turn-total'
   if (!contextWindow) {
-    return { available: false, usedTokens, contextWindow: 0, usedPercent: 0 }
+    return { available: false, usedTokens, contextWindow: 0, usedPercent: 0, source, estimated }
   }
 
   const requestedBaseline = Math.max(0, baselineTokens)
@@ -72,7 +88,7 @@ export function buildContextUsageView(
   const effectiveUsed = Math.max(0, usedTokens - baseline)
   const usedPercent = Math.min(100, Math.max(0, (effectiveUsed / effectiveWindow) * 100))
 
-  return { available: true, usedTokens, contextWindow, usedPercent }
+  return { available: true, usedTokens, contextWindow, usedPercent, source, estimated }
 }
 
 function startOfLocalDay(date: Date): Date {

@@ -50,10 +50,12 @@ func (s *AppService) backfillGrokUsageFromSessions() bool {
 }
 
 type grokTurnUsageHit struct {
-	SessionID string
-	TurnID    string
-	Breakdown tokenBreakdown
-	At        time.Time
+	SessionID     string
+	TurnID        string
+	Breakdown     tokenBreakdown
+	ContextTokens int64
+	ContextSource string
+	At            time.Time
 }
 
 func scanGrokSessionTurnUsage(root string) []grokTurnUsageHit {
@@ -104,9 +106,11 @@ func (s *AppService) ListGrokSessionTurnUsages(sessionID string) ([]map[string]a
 	out := make([]map[string]any, 0, len(hits))
 	for i, hit := range hits {
 		out = append(out, map[string]any{
-			"index":     indexOffset + i + 1,
-			"turnId":    hit.TurnID,
-			"sessionId": sessionID,
+			"index":              indexOffset + i + 1,
+			"turnId":             hit.TurnID,
+			"sessionId":          sessionID,
+			"contextTokens":      hit.ContextTokens,
+			"contextUsageSource": hit.ContextSource,
 			"tokenUsage": map[string]any{
 				"inputTokens":           hit.Breakdown.Input,
 				"cachedInputTokens":     hit.Breakdown.Cached,
@@ -117,7 +121,44 @@ func (s *AppService) ListGrokSessionTurnUsages(sessionID string) ([]map[string]a
 			"at": hit.At.UnixMilli(),
 		})
 	}
+	if contextTokens, source := latestGrokContextSnapshot(path); contextTokens > 0 && len(out) > 0 {
+		out[len(out)-1]["contextTokens"] = contextTokens
+		out[len(out)-1]["contextUsageSource"] = source
+	}
 	return out, nil
+}
+
+func latestGrokContextSnapshot(path string) (int64, string) {
+	var contextTokens int64
+	var source string
+	_ = visitJSONLLinesReverse(path, 64*1024*1024, func(line []byte) bool {
+		if !bytes.Contains(line, []byte("turn_completed")) && !bytes.Contains(line, []byte("compact")) {
+			return false
+		}
+		var event map[string]any
+		if json.Unmarshal(line, &event) != nil {
+			return false
+		}
+		params, _ := event["params"].(map[string]any)
+		update, _ := params["update"].(map[string]any)
+		if update == nil {
+			return false
+		}
+		kind := strings.ToLower(firstMapString(update, "sessionUpdate", "session_update", "type"))
+		switch kind {
+		case "auto_compact_completed", "auto-compact-completed":
+			contextTokens = int64(anyToFloat(update["tokens_after"]))
+			source = "provider-compaction"
+		case "auto_compact_started", "auto-compact-started":
+			contextTokens = int64(anyToFloat(update["tokens_used"]))
+			source = "provider-compaction"
+		default:
+			normalized := normalizeTokenUsageMap(update["usage"])
+			contextTokens, source = normalizedUsageContext("grok", normalized)
+		}
+		return contextTokens > 0
+	})
+	return contextTokens, source
 }
 
 func parseGrokUpdatesUsage(path string) []grokTurnUsageHit {
@@ -232,6 +273,7 @@ func parseGrokUsageLine(line []byte, path string) (grokTurnUsageHit, bool) {
 	if !breakdown.valid() {
 		return grokTurnUsageHit{}, false
 	}
+	contextTokens, contextSource := normalizedUsageContext("grok", normalized)
 	sessionID := firstMapString(params, "sessionId", "session_id")
 	if sessionID == "" {
 		sessionID = filepath.Base(filepath.Dir(path))
@@ -262,9 +304,11 @@ func parseGrokUsageLine(line []byte, path string) (grokTurnUsageHit, bool) {
 		}
 	}
 	return grokTurnUsageHit{
-		SessionID: sessionID,
-		TurnID:    turnID,
-		Breakdown: breakdown,
-		At:        at,
+		SessionID:     sessionID,
+		TurnID:        turnID,
+		Breakdown:     breakdown,
+		ContextTokens: contextTokens,
+		ContextSource: contextSource,
+		At:            at,
 	}, true
 }
