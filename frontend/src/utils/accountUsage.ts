@@ -2,7 +2,7 @@ import type { AccountUsageDailyBucket, AccountUsageSummary, ThreadTokenUsage } f
 
 export const CODEX_CONTEXT_BASELINE_TOKENS = 12_000
 
-export type UsageRangeDays = 1 | 7 | 14 | 30 | 'cumulative'
+export type UsageRangeDays = 1 | 7 | 14 | 30 | 90 | 'cumulative'
 
 export type UsageRangeView = {
   days: number

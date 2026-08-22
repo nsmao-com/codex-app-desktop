@@ -238,43 +238,42 @@
   --font-family-sans: var(--font-custom, system-ui), system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
-/* Claude Desktop-inspired light palette: warm paper surfaces, quiet chrome,
-   restrained terracotta emphasis, and crisp system typography. */
+/* Claude Desktop light palette, measured against the native Windows app. */
 :root[data-theme='claude'] {
-  --shell: #f4f3ef;
-  --background: #fbfaf7;
-  --foreground: #252522;
+  --shell: #fbfbf9;
+  --background: #fcfcfb;
+  --foreground: #20201e;
 
-  --card: #fffefa;
-  --card-foreground: #252522;
-  --popover: #fffefa;
-  --popover-foreground: #252522;
+  --card: #fcfcfb;
+  --card-foreground: #20201e;
+  --popover: #ffffff;
+  --popover-foreground: #20201e;
 
   --primary: #d97757;
   --primary-foreground: #fffaf7;
-  --secondary: #efeee9;
-  --secondary-foreground: #32312d;
-  --muted: #efeee9;
-  --muted-foreground: #77746d;
-  --accent: #e9e7e1;
-  --accent-foreground: #2d2c29;
+  --secondary: #f2f2f2;
+  --secondary-foreground: #292927;
+  --muted: #f2f2f2;
+  --muted-foreground: #777773;
+  --accent: #ececea;
+  --accent-foreground: #292927;
 
   --destructive: #c94f48;
   --destructive-foreground: #ffffff;
-  --border: #dedbd3;
-  --input: #d7d3ca;
+  --border: #e2e2df;
+  --input: #dededb;
   --ring: #d97757;
 
-  --sidebar: #f6f5f2;
-  --sidebar-foreground: #292824;
-  --sidebar-border: #e3e0d9;
-  --sidebar-accent: #ebe9e3;
-  --sidebar-accent-foreground: #292824;
+  --sidebar: #fbfbf9;
+  --sidebar-foreground: #292927;
+  --sidebar-border: #e3e3e1;
+  --sidebar-accent: #edece8;
+  --sidebar-accent-foreground: #292927;
 
-  --panel: #fffefa;
-  --surface: #efeee9;
-  --surface-raised: #fffefa;
-  --surface-soft: #f8f7f3;
+  --panel: #ffffff;
+  --surface: #f2f2f2;
+  --surface-raised: #ffffff;
+  --surface-soft: #f7f7f5;
 
   --accent-legacy: #d97757;
   --accent-legacy-strong: #c86647;
@@ -696,10 +695,14 @@ body {
 }
 
 :root[data-theme='claude'] .workbench-card {
-  border-color: rgb(76 70 61 / 0.1);
+  border-color: rgb(42 42 39 / 0.09);
   box-shadow:
-    0 1px 2px rgb(45 40 34 / 0.03),
-    0 8px 22px rgb(45 40 34 / 0.035);
+    0 1px 2px rgb(32 32 30 / 0.025),
+    0 8px 22px rgb(32 32 30 / 0.03);
+}
+
+:root[data-theme='claude'] .settings-content-card {
+  background: #ffffff;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -1354,6 +1357,22 @@ kbd {
   background-size: 42px 42px;
   mask-image: radial-gradient(ellipse 55% 48% at 50% 42%, black, transparent 75%);
   opacity: 0.35;
+}
+
+:root[data-theme='claude'] .welcome-aurora {
+  background: radial-gradient(
+    ellipse 58% 42% at 50% 42%,
+    color-mix(in oklab, var(--primary) 3.5%, transparent),
+    transparent 74%
+  );
+  animation: none;
+  opacity: 0.55;
+}
+
+:root[data-theme='claude'] .welcome-orb,
+:root[data-theme='claude'] .welcome-grid {
+  animation: none;
+  opacity: 0;
 }
 
 .welcome-kicker {

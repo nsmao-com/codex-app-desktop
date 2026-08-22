@@ -13,8 +13,10 @@ import { normalizeAccountUsage } from '@/utils/protocol'
 const props = withDefaults(defineProps<{
   runtime: WorkspaceRuntime
   compact?: boolean
+  detailed?: boolean
 }>(), {
   compact: false,
+  detailed: false,
 })
 
 const appStore = useAppStore()
@@ -26,9 +28,15 @@ const { t, locale } = useI18n()
 type OverviewTab = 'overview' | 'models'
 type RangeOption = { value: UsageRangeDays; label: string }
 type HeatmapDay = { key: string; date: Date; tokens: number; intensity: number }
+type TrendDay = HeatmapDay & {
+  inputTokens: number
+  cachedInputTokens: number
+  outputTokens: number
+  reasoningOutputTokens: number
+}
 
 const activeTab = shallowRef<OverviewTab>('overview')
-const activeRange = shallowRef<UsageRangeDays>('cumulative')
+const activeRange = shallowRef<UsageRangeDays>(props.detailed ? 30 : 'cumulative')
 const usage = shallowRef<AccountUsageSummary | null>(null)
 const loading = shallowRef(false)
 const loadError = shallowRef('')
@@ -39,11 +47,18 @@ let dragPointerId: number | null = null
 let dragStartX = 0
 let dragStartScrollLeft = 0
 
-const rangeOptions = computed<RangeOption[]>(() => [
-  { value: 'cumulative', label: t('usageOverview.rangeAll') },
-  { value: 30, label: t('usageOverview.rangeMonth') },
-  { value: 7, label: t('usageOverview.rangeWeek') },
-])
+const rangeOptions = computed<RangeOption[]>(() => props.detailed
+  ? [
+      { value: 7, label: t('usageOverview.rangeWeek') },
+      { value: 30, label: t('usageOverview.rangeMonth') },
+      { value: 90, label: t('usageOverview.rangeQuarter') },
+      { value: 'cumulative', label: t('usageOverview.rangeAll') },
+    ]
+  : [
+      { value: 'cumulative', label: t('usageOverview.rangeAll') },
+      { value: 30, label: t('usageOverview.rangeMonth') },
+      { value: 7, label: t('usageOverview.rangeWeek') },
+    ])
 const rangeView = computed(() => buildUsageRangeView(usage.value, activeRange.value))
 const rangeTotal = computed(() => {
   if (activeRange.value === 'cumulative' && rangeView.value.totalTokens <= 0) {
@@ -57,6 +72,13 @@ function localDateKey(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function parseLocalDate(value: string): Date | null {
+  const match = value.trim().match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!match) return null
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+  return Number.isNaN(date.getTime()) ? null : date
 }
 
 const heatmapSpanDays = computed(() => {
@@ -81,6 +103,157 @@ const heatmapDays = computed<HeatmapDay[]>(() => {
     ...item,
     intensity: item.tokens <= 0 || max <= 0 ? 0 : Math.max(1, Math.ceil((item.tokens / max) * 4)),
   }))
+})
+
+const trendSpanDays = computed(() => {
+  if (activeRange.value !== 'cumulative') return activeRange.value
+  const dates = (usage.value?.dailyBuckets ?? [])
+    .map((item) => parseLocalDate(item.startDate)?.getTime() ?? Number.NaN)
+    .filter(Number.isFinite)
+  if (!dates.length) return 30
+  const first = Math.min(...dates)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  return Math.min(365, Math.max(30, Math.round((today.getTime() - first) / 86_400_000) + 1))
+})
+
+const trendDays = computed<TrendDay[]>(() => {
+  const buckets = new Map((usage.value?.dailyBuckets ?? []).map((item) => [item.startDate.slice(0, 10), item]))
+  const end = new Date()
+  end.setHours(0, 0, 0, 0)
+  const start = new Date(end)
+  start.setDate(start.getDate() - (trendSpanDays.value - 1))
+  const rows: TrendDay[] = []
+  for (let cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+    const date = new Date(cursor)
+    const key = localDateKey(date)
+    const bucket = buckets.get(key)
+    rows.push({
+      key,
+      date,
+      tokens: Math.max(0, bucket?.tokens ?? 0),
+      inputTokens: Math.max(0, bucket?.inputTokens ?? 0),
+      cachedInputTokens: Math.max(0, bucket?.cachedInputTokens ?? 0),
+      outputTokens: Math.max(0, bucket?.outputTokens ?? 0),
+      reasoningOutputTokens: Math.max(0, bucket?.reasoningOutputTokens ?? 0),
+      intensity: 0,
+    })
+  }
+  return rows
+})
+
+const chartGeometry = {
+  width: 720,
+  height: 252,
+  left: 58,
+  right: 18,
+  top: 14,
+  bottom: 38,
+} as const
+const chartPlotWidth = chartGeometry.width - chartGeometry.left - chartGeometry.right
+const chartPlotHeight = chartGeometry.height - chartGeometry.top - chartGeometry.bottom
+const chartBaseline = chartGeometry.top + chartPlotHeight
+const trendMax = computed(() => trendDays.value.reduce((highest, day) => Math.max(highest, day.tokens), 0))
+const trendHasData = computed(() => trendMax.value > 0)
+const trendPoints = computed(() => trendDays.value.map((day, index, rows) => {
+  const x = chartGeometry.left + (rows.length <= 1 ? 0 : (index / (rows.length - 1)) * chartPlotWidth)
+  const y = trendMax.value > 0
+    ? chartGeometry.top + chartPlotHeight - (day.tokens / trendMax.value) * chartPlotHeight
+    : chartBaseline
+  return { ...day, x, y }
+}))
+const trendLinePath = computed(() => trendPoints.value
+  .map((point, index) => `${index ? 'L' : 'M'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`)
+  .join(' '))
+const trendAreaPath = computed(() => {
+  const points = trendPoints.value
+  if (!points.length) return ''
+  return `${trendLinePath.value} L ${points.at(-1)?.x.toFixed(2)} ${chartBaseline} L ${points[0].x.toFixed(2)} ${chartBaseline} Z`
+})
+const chartGradientId = computed(() => `usage-area-${props.runtime}-${props.detailed ? 'detail' : 'compact'}`)
+const trendYAxisTicks = computed(() => Array.from({ length: 5 }, (_, index) => {
+  const ratio = 1 - index / 4
+  return {
+    value: trendMax.value * ratio,
+    y: chartGeometry.top + chartPlotHeight * (index / 4),
+  }
+}))
+const trendXAxisTicks = computed(() => {
+  const points = trendPoints.value
+  if (!points.length) return []
+  const indexes = [0, Math.round((points.length - 1) / 3), Math.round(((points.length - 1) * 2) / 3), points.length - 1]
+  return [...new Set(indexes)].map((index) => points[index])
+})
+const trendPointMarkers = computed(() => trendPoints.value.length <= 31
+  ? trendPoints.value.filter((point) => point.tokens > 0)
+  : [])
+
+function trendDateLabel(date: Date, includeYear = false): string {
+  return new Intl.DateTimeFormat(locale.value, includeYear
+    ? { month: 'short', day: 'numeric', year: '2-digit' }
+    : { month: 'short', day: 'numeric' }).format(date)
+}
+
+function trendTooltip(day: TrendDay): string {
+  return `${trendDateLabel(day.date, true)} · ${formatTokenCount(day.tokens)} ${t('usageOverview.tokens')}`
+}
+
+const tokenBreakdown = computed(() => {
+  const buckets = rangeView.value.buckets
+  const useLifetime = activeRange.value === 'cumulative'
+  const sum = (field: 'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'reasoningOutputTokens'): number => (
+    buckets.reduce((total, bucket) => total + Math.max(0, bucket[field] ?? 0), 0)
+  )
+  const values = [
+    {
+      key: 'input',
+      label: t('usageOverview.inputTokens'),
+      value: useLifetime && usage.value?.lifetimeInputTokens != null ? Math.max(0, usage.value.lifetimeInputTokens) : sum('inputTokens'),
+      color: 'var(--usage-input)',
+    },
+    {
+      key: 'cached',
+      label: t('usageOverview.cachedTokens'),
+      value: useLifetime && usage.value?.lifetimeCachedInputTokens != null ? Math.max(0, usage.value.lifetimeCachedInputTokens) : sum('cachedInputTokens'),
+      color: 'var(--usage-cached)',
+    },
+    {
+      key: 'output',
+      label: t('usageOverview.outputTokens'),
+      value: useLifetime && usage.value?.lifetimeOutputTokens != null ? Math.max(0, usage.value.lifetimeOutputTokens) : sum('outputTokens'),
+      color: 'var(--usage-output)',
+    },
+    {
+      key: 'reasoning',
+      label: t('usageOverview.reasoningTokens'),
+      value: useLifetime && usage.value?.lifetimeReasoningTokens != null ? Math.max(0, usage.value.lifetimeReasoningTokens) : sum('reasoningOutputTokens'),
+      color: 'var(--usage-reasoning)',
+    },
+  ]
+  const classified = values.reduce((total, item) => total + item.value, 0)
+  const unclassified = Math.max(0, rangeTotal.value - classified)
+  if (unclassified > 0) {
+    values.push({
+      key: 'unclassified',
+      label: t('usageOverview.unclassifiedTokens'),
+      value: unclassified,
+      color: 'var(--usage-unclassified)',
+    })
+  }
+  const total = values.reduce((sumValue, item) => sumValue + item.value, 0)
+  return values
+    .filter((item) => item.value > 0)
+    .map((item) => ({ ...item, percent: total ? (item.value / total) * 100 : 0 }))
+})
+const tokenDonutStyle = computed(() => {
+  if (!tokenBreakdown.value.length) return { background: 'var(--muted)' }
+  let cursor = 0
+  const segments = tokenBreakdown.value.map((item) => {
+    const start = cursor
+    cursor += item.percent
+    return `${item.color} ${start}% ${cursor}%`
+  })
+  return { background: `conic-gradient(${segments.join(', ')})` }
 })
 
 function heatmapClass(intensity: number): string {
@@ -249,7 +422,216 @@ watch(
 </script>
 
 <template>
+  <section v-if="detailed" class="usage-dashboard w-full text-left">
+    <header class="usage-dashboard-header">
+      <div class="min-w-0">
+        <h2 class="text-[15px] font-semibold tracking-tight">{{ t('usageOverview.dashboardTitle') }}</h2>
+        <p class="mt-1 max-w-2xl text-[11px] leading-5 text-muted-foreground">
+          {{ t('usageOverview.dashboardDescription') }}
+        </p>
+      </div>
+      <div class="usage-range-control" role="group" :aria-label="t('usageOverview.rangeLabel')">
+        <button
+          v-for="option in rangeOptions"
+          :key="String(option.value)"
+          type="button"
+          class="usage-range-button"
+          :class="{ 'is-active': activeRange === option.value }"
+          :aria-pressed="activeRange === option.value"
+          @click="activeRange = option.value"
+        >
+          {{ option.label }}
+        </button>
+      </div>
+    </header>
+
+    <div class="usage-stat-grid" aria-live="polite">
+      <article class="usage-stat-card">
+        <p>{{ t('usageOverview.totalTokens') }}</p>
+        <span v-if="loading" class="usage-skeleton mt-2 h-6 w-20" aria-hidden="true" />
+        <strong v-else>{{ formatTokenCount(rangeTotal) }}</strong>
+        <small>{{ t('usageOverview.selectedRange') }}</small>
+      </article>
+      <article class="usage-stat-card">
+        <p>{{ t('usageOverview.sessions') }}</p>
+        <span v-if="loading" class="usage-skeleton mt-2 h-6 w-14" aria-hidden="true" />
+        <strong v-else>{{ modelSessionCount.toLocaleString() }}</strong>
+        <small>{{ t('usageOverview.loadedSessions') }}</small>
+      </article>
+      <article class="usage-stat-card">
+        <p>{{ t('usageOverview.activeDays') }}</p>
+        <span v-if="loading" class="usage-skeleton mt-2 h-6 w-12" aria-hidden="true" />
+        <strong v-else>{{ rangeView.dayCount.toLocaleString() }}</strong>
+        <small>{{ t('usageOverview.daysWithActivity') }}</small>
+      </article>
+      <article class="usage-stat-card">
+        <p>{{ t('usageOverview.dailyAverage') }}</p>
+        <span v-if="loading" class="usage-skeleton mt-2 h-6 w-16" aria-hidden="true" />
+        <strong v-else>{{ formatTokenCount(rangeView.averageTokens) }}</strong>
+        <small>{{ t('usageOverview.perActiveDay') }}</small>
+      </article>
+    </div>
+
+    <section class="usage-panel usage-trend-panel">
+      <div class="usage-panel-heading">
+        <div>
+          <h3>{{ t('usageOverview.trendTitle') }}</h3>
+          <p>{{ t('usageOverview.trendDescription') }}</p>
+        </div>
+        <div class="usage-chart-legend" aria-hidden="true">
+          <span><i class="is-total" />{{ t('usageOverview.totalTokens') }}</span>
+        </div>
+      </div>
+
+      <div v-if="loading" class="usage-chart-loading" aria-hidden="true">
+        <span v-for="index in 10" :key="index" class="usage-chart-loading-bar" :style="{ height: `${22 + ((index * 29) % 68)}%`, animationDelay: `${index * 45}ms` }" />
+      </div>
+      <svg
+        v-else-if="trendHasData"
+        class="usage-trend-svg"
+        :viewBox="`0 0 ${chartGeometry.width} ${chartGeometry.height}`"
+        role="img"
+        :aria-label="t('usageOverview.trendAriaLabel')"
+      >
+        <defs>
+          <linearGradient :id="chartGradientId" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="var(--primary)" stop-opacity="0.22" />
+            <stop offset="100%" stop-color="var(--primary)" stop-opacity="0.015" />
+          </linearGradient>
+        </defs>
+        <g class="usage-chart-grid">
+          <g v-for="tick in trendYAxisTicks" :key="tick.y">
+            <line :x1="chartGeometry.left" :x2="chartGeometry.width - chartGeometry.right" :y1="tick.y" :y2="tick.y" />
+            <text :x="chartGeometry.left - 10" :y="tick.y + 3" text-anchor="end">{{ formatTokenCount(tick.value) }}</text>
+          </g>
+        </g>
+        <path :d="trendAreaPath" :fill="`url(#${chartGradientId})`" />
+        <path class="usage-trend-line" :d="trendLinePath" />
+        <circle
+          v-for="point in trendPointMarkers"
+          :key="point.key"
+          class="usage-trend-point"
+          :cx="point.x"
+          :cy="point.y"
+          r="3"
+        >
+          <title>{{ trendTooltip(point) }}</title>
+        </circle>
+        <g class="usage-chart-x-labels">
+          <text
+            v-for="(point, index) in trendXAxisTicks"
+            :key="point.key"
+            :x="point.x"
+            :y="chartGeometry.height - 12"
+            :text-anchor="index === 0 ? 'start' : index === trendXAxisTicks.length - 1 ? 'end' : 'middle'"
+          >{{ trendDateLabel(point.date) }}</text>
+        </g>
+      </svg>
+      <div v-else class="usage-chart-empty">
+        <BarChart3 :size="22" />
+        <p>{{ t('usageOverview.noUsage') }}</p>
+        <span>{{ t('usageOverview.noUsageHint') }}</span>
+      </div>
+    </section>
+
+    <div class="usage-insight-strip">
+      <span>{{ t('usageOverview.currentStreak') }} <strong>{{ usage?.currentStreakDays ?? 0 }}{{ t('usageOverview.dayUnit') }}</strong></span>
+      <span>{{ t('usageOverview.longestStreak') }} <strong>{{ usage?.longestStreakDays ?? 0 }}{{ t('usageOverview.dayUnit') }}</strong></span>
+      <span>{{ t('usageOverview.peakDay') }} <strong>{{ formatTokenCount(usage?.peakDailyTokens) }}</strong></span>
+      <span class="min-w-0">{{ t('usageOverview.favoriteModel') }} <strong class="inline-block max-w-44 truncate align-bottom" :title="favoriteModel">{{ favoriteModel }}</strong></span>
+    </div>
+
+    <div class="usage-secondary-grid">
+      <section class="usage-panel usage-breakdown-panel">
+        <div class="usage-panel-heading">
+          <div>
+            <h3>{{ t('usageOverview.breakdownTitle') }}</h3>
+            <p>{{ t('usageOverview.breakdownDescription') }}</p>
+          </div>
+        </div>
+        <div v-if="tokenBreakdown.length" class="usage-donut-layout">
+          <div class="usage-token-donut" :style="tokenDonutStyle" aria-hidden="true">
+            <div><strong>{{ formatTokenCount(rangeTotal) }}</strong><span>Token</span></div>
+          </div>
+          <div class="usage-breakdown-list">
+            <div v-for="item in tokenBreakdown" :key="item.key" class="usage-breakdown-row">
+              <span class="min-w-0 truncate"><i :style="{ background: item.color }" />{{ item.label }}</span>
+              <strong>{{ formatTokenCount(item.value) }}</strong>
+              <em>{{ item.percent.toFixed(item.percent >= 10 ? 0 : 1) }}%</em>
+            </div>
+          </div>
+        </div>
+        <div v-else class="usage-small-empty">{{ t('usageOverview.noBreakdown') }}</div>
+      </section>
+
+      <section class="usage-panel usage-model-panel">
+        <div class="usage-panel-heading">
+          <div>
+            <h3>{{ t('usageOverview.modelDistribution') }}</h3>
+            <p>{{ t('usageOverview.modelDistributionDescription') }}</p>
+          </div>
+        </div>
+        <div v-if="modelRows.length" class="usage-model-list">
+          <div v-for="(row, index) in modelRows" :key="row.model" class="usage-model-row">
+            <div>
+              <span :title="row.model"><i :style="{ background: modelChartPalette[index % modelChartPalette.length] }" />{{ row.model }}</span>
+              <strong>{{ t('usageOverview.sessionCount', { count: row.sessions }) }}</strong>
+            </div>
+            <div class="usage-model-track"><span :style="{ width: `${Math.max(2, row.percent)}%`, background: modelChartPalette[index % modelChartPalette.length] }" /></div>
+          </div>
+        </div>
+        <div v-else class="usage-small-empty">{{ t('usageOverview.noModelsHint') }}</div>
+      </section>
+    </div>
+
+    <section class="usage-panel usage-activity-panel">
+      <div class="usage-panel-heading">
+        <div>
+          <h3>{{ t('usageOverview.activityTitle') }}</h3>
+          <p>{{ t('usageOverview.activityDescription') }}</p>
+        </div>
+      </div>
+      <div
+        ref="heatmapScroller"
+        class="usage-heatmap usage-dashboard-heatmap overflow-x-auto outline-none ring-primary/25 transition-shadow focus-visible:ring-2"
+        :class="{ 'can-scroll': activeRange === 'cumulative', 'is-dragging': heatmapDragging }"
+        tabindex="0"
+        role="region"
+        :aria-label="t('usageOverview.heatmapLabel')"
+        @wheel="handleHeatmapWheel"
+        @keydown="handleHeatmapKeydown"
+        @pointerdown="startHeatmapDrag"
+        @pointermove="moveHeatmapDrag"
+        @pointerup="stopHeatmapDrag"
+        @pointercancel="stopHeatmapDrag"
+        @lostpointercapture="stopHeatmapDrag"
+      >
+        <div
+          class="heatmap-grid"
+          :class="[activeRange === 7 || activeRange === 30 ? 'is-strip' : 'is-calendar', { 'is-scrollable': activeRange === 'cumulative' }]"
+          aria-hidden="true"
+        >
+          <span
+            v-for="(day, index) in heatmapDays"
+            :key="day.key"
+            class="usage-heatmap-cell h-full w-full rounded-[3px] ring-1 ring-inset ring-foreground/[0.025]"
+            :class="loading ? 'usage-loading-cell bg-muted-foreground/15' : heatmapClass(day.intensity)"
+            :title="loading ? undefined : dateTooltip(day)"
+            :style="index === 0 && activeRange !== 7 && activeRange !== 30 ? { gridRowStart: day.date.getDay() + 1 } : undefined"
+          />
+        </div>
+      </div>
+      <p v-if="activeRange === 'cumulative'" class="mt-2 text-[10px] text-muted-foreground">{{ t('usageOverview.heatmapScrollHint') }}</p>
+    </section>
+
+    <div v-if="loadError" class="usage-error" role="alert">
+      <span>{{ t('usageOverview.loadFailed') }}</span>
+      <button type="button" @click="loadUsage">{{ t('common.retry') }}</button>
+    </div>
+  </section>
+
   <section
+    v-else
     class="usage-overview overflow-hidden rounded-xl border border-border/60 bg-card/80 text-left shadow-[0_10px_30px_-24px_color-mix(in_oklab,var(--foreground)_42%,transparent)] backdrop-blur-sm"
     :class="compact ? 'w-full' : 'w-full max-w-xl'"
   >
@@ -403,6 +785,463 @@ watch(
 </template>
 
 <style scoped>
+.usage-dashboard {
+  --usage-input: #d97757;
+  --usage-cached: #2f9e76;
+  --usage-output: #4f83bf;
+  --usage-reasoning: #9a72b0;
+  --usage-unclassified: color-mix(in oklab, var(--muted-foreground) 72%, transparent);
+  container-type: inline-size;
+  display: grid;
+  gap: 1rem;
+  animation: usage-card-in 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.usage-dashboard-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.25rem;
+}
+
+.usage-range-control {
+  display: flex;
+  flex: 0 0 auto;
+  padding: 0.2rem;
+  border-radius: 0.65rem;
+  background: var(--muted);
+}
+
+.usage-range-button {
+  min-width: 2.75rem;
+  height: 1.75rem;
+  padding: 0 0.65rem;
+  border-radius: 0.48rem;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  line-height: 1;
+  transition: background-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.usage-range-button:hover {
+  color: var(--foreground);
+}
+
+.usage-range-button:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--ring) 48%, transparent);
+  outline-offset: 1px;
+}
+
+.usage-range-button.is-active {
+  background: var(--background);
+  box-shadow: 0 1px 2px color-mix(in oklab, var(--foreground) 13%, transparent);
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.usage-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.usage-stat-card,
+.usage-panel {
+  border: 1px solid color-mix(in oklab, var(--border) 78%, transparent);
+  background: color-mix(in oklab, var(--card) 96%, var(--muted));
+}
+
+.usage-stat-card {
+  min-width: 0;
+  min-height: 7rem;
+  padding: 0.9rem 1rem;
+  border-radius: 0.8rem;
+}
+
+.usage-stat-card p {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  line-height: 1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-stat-card strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 0.35rem;
+  color: var(--foreground);
+  font-size: clamp(1.25rem, 2.8cqi, 1.65rem);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-stat-card small {
+  display: block;
+  overflow: hidden;
+  margin-top: 0.3rem;
+  color: color-mix(in oklab, var(--muted-foreground) 82%, transparent);
+  font-size: 0.625rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-panel {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 0.9rem;
+}
+
+.usage-panel-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.1rem 0.75rem;
+}
+
+.usage-panel-heading h3 {
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.25rem;
+}
+
+.usage-panel-heading p {
+  margin-top: 0.15rem;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  line-height: 1rem;
+}
+
+.usage-chart-legend {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding-top: 0.15rem;
+  color: var(--muted-foreground);
+  font-size: 0.625rem;
+}
+
+.usage-chart-legend span,
+.usage-breakdown-row > span,
+.usage-model-row span {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.usage-chart-legend i,
+.usage-breakdown-row i,
+.usage-model-row i {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  flex: 0 0 auto;
+  border-radius: 0.16rem;
+}
+
+.usage-chart-legend i.is-total {
+  background: var(--primary);
+}
+
+.usage-trend-svg {
+  display: block;
+  width: 100%;
+  min-height: 15.75rem;
+  padding: 0 0.5rem 0.3rem;
+}
+
+.usage-chart-grid line {
+  stroke: color-mix(in oklab, var(--border) 72%, transparent);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.usage-chart-grid text,
+.usage-chart-x-labels text {
+  fill: var(--muted-foreground);
+  font-family: var(--font-family-sans);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-trend-line {
+  fill: none;
+  stroke: var(--primary);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.usage-trend-point {
+  fill: var(--card);
+  stroke: var(--primary);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.usage-chart-loading {
+  display: flex;
+  height: 15.75rem;
+  align-items: flex-end;
+  gap: 0.65rem;
+  margin: 0 1.1rem 1rem;
+  padding: 1.2rem 1rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-chart-loading-bar {
+  flex: 1;
+  border-radius: 0.25rem 0.25rem 0 0;
+  background: color-mix(in oklab, var(--primary) 26%, var(--muted));
+  animation: usage-cell-pulse 1.4s ease-in-out infinite;
+}
+
+.usage-chart-empty {
+  display: grid;
+  min-height: 15.75rem;
+  place-content: center;
+  justify-items: center;
+  padding: 2rem;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.usage-chart-empty p {
+  margin-top: 0.6rem;
+  color: var(--foreground);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.usage-chart-empty span {
+  max-width: 22rem;
+  margin-top: 0.2rem;
+  font-size: 0.65rem;
+  line-height: 1rem;
+}
+
+.usage-insight-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--border) 74%, transparent);
+  border-radius: 0.75rem;
+  background: color-mix(in oklab, var(--muted) 42%, transparent);
+}
+
+.usage-insight-strip > span {
+  min-width: 0;
+  padding: 0.65rem 0.8rem;
+  border-left: 1px solid color-mix(in oklab, var(--border) 66%, transparent);
+  color: var(--muted-foreground);
+  font-size: 0.625rem;
+  text-align: center;
+}
+
+.usage-insight-strip > span:first-child {
+  border-left: 0;
+}
+
+.usage-insight-strip strong {
+  margin-left: 0.25rem;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.usage-secondary-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.usage-donut-layout {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 1rem;
+  min-height: 12.5rem;
+  padding: 0.35rem 1.1rem 1rem;
+}
+
+.usage-token-donut {
+  display: grid;
+  width: 7rem;
+  height: 7rem;
+  place-items: center;
+  border-radius: 999px;
+}
+
+.usage-token-donut > div {
+  display: grid;
+  width: 4.7rem;
+  height: 4.7rem;
+  place-content: center;
+  border-radius: 999px;
+  background: var(--card);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--border) 60%, transparent);
+  text-align: center;
+}
+
+.usage-token-donut strong {
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.usage-token-donut span {
+  color: var(--muted-foreground);
+  font-size: 0.5625rem;
+  text-transform: uppercase;
+}
+
+.usage-breakdown-list {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.usage-breakdown-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 2.4rem;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--muted-foreground);
+  font-size: 0.625rem;
+}
+
+.usage-breakdown-row strong {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.usage-breakdown-row em {
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.usage-model-list {
+  display: grid;
+  align-content: center;
+  gap: 0.8rem;
+  min-height: 12.5rem;
+  padding: 0.35rem 1.1rem 1rem;
+}
+
+.usage-model-row {
+  min-width: 0;
+}
+
+.usage-model-row > div:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.6875rem;
+}
+
+.usage-model-row span {
+  overflow: hidden;
+  color: var(--foreground);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-model-row strong {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 0.625rem;
+  font-weight: 400;
+}
+
+.usage-model-track {
+  height: 0.3rem;
+  margin-top: 0.35rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+.usage-model-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.usage-small-empty {
+  display: grid;
+  min-height: 12.5rem;
+  place-items: center;
+  padding: 2rem;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  text-align: center;
+}
+
+.usage-activity-panel {
+  padding-bottom: 0.85rem;
+}
+
+.usage-dashboard-heatmap {
+  min-height: 6.5rem;
+  margin: 0 1.1rem;
+  padding: 0.75rem;
+  border-radius: 0.65rem;
+  background: color-mix(in oklab, var(--muted) 42%, transparent);
+}
+
+.usage-activity-panel > p {
+  padding: 0 1.1rem;
+}
+
+.usage-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid color-mix(in oklab, var(--destructive) 24%, var(--border));
+  border-radius: 0.65rem;
+  background: color-mix(in oklab, var(--destructive) 7%, var(--card));
+  color: var(--foreground);
+  font-size: 0.6875rem;
+}
+
+.usage-error button {
+  flex: 0 0 auto;
+  color: var(--destructive);
+  font-weight: 600;
+}
+
+.usage-error button:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--destructive) 38%, transparent);
+  outline-offset: 2px;
+}
+
+.usage-skeleton {
+  display: block;
+  border-radius: 0.35rem;
+  background: color-mix(in oklab, var(--muted-foreground) 18%, var(--muted));
+  animation: usage-cell-pulse 1.4s ease-in-out infinite;
+}
+
 .heatmap-grid {
   display: grid;
   flex: 0 0 auto;
@@ -543,8 +1382,63 @@ watch(
 
 @media (prefers-reduced-motion: reduce) {
   .usage-overview,
-  .usage-loading-cell {
+  .usage-dashboard,
+  .usage-loading-cell,
+  .usage-chart-loading-bar,
+  .usage-skeleton {
     animation: none;
+  }
+}
+
+@container (max-width: 680px) {
+  .usage-dashboard-header {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .usage-range-control {
+    align-self: stretch;
+  }
+
+  .usage-range-button {
+    flex: 1;
+  }
+
+  .usage-stat-grid,
+  .usage-insight-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .usage-insight-strip > span:nth-child(3) {
+    border-left: 0;
+    border-top: 1px solid color-mix(in oklab, var(--border) 66%, transparent);
+  }
+
+  .usage-insight-strip > span:nth-child(4) {
+    border-top: 1px solid color-mix(in oklab, var(--border) 66%, transparent);
+  }
+
+  .usage-secondary-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container (max-width: 420px) {
+  .usage-stat-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .usage-stat-card {
+    min-height: 5.7rem;
+  }
+
+  .usage-donut-layout {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+  }
+
+  .usage-breakdown-list {
+    width: 100%;
   }
 }
 

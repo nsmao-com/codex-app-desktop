@@ -743,7 +743,7 @@ const themeOptions = computed<Array<{
 }>>(() => [
   { value: 'light', label: t('settings.light'), shell: '#f3f4f6', surface: '#ffffff', accent: '#339cff' },
   { value: 'dark', label: t('settings.dark'), shell: '#181818', surface: '#2b2b29', accent: '#d97757' },
-  { value: 'claude', label: t('settings.claude'), shell: '#f4f3ef', surface: '#fffefa', accent: '#d97757' },
+  { value: 'claude', label: t('settings.claude'), shell: '#fbfbf9', surface: '#fcfcfb', accent: '#d97757' },
   { value: 'system', label: t('settings.system'), shell: '#e9e9e7', surface: '#fafaf9', accent: '#6f6f6b' },
 ])
 
@@ -1962,14 +1962,14 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
   <div class="flex h-full w-full overflow-hidden bg-transparent text-foreground">
     <!-- Left menu sits on the gray shell, matching the main workbench sidebar. -->
     <aside class="flex w-[210px] shrink-0 flex-col lg:w-[248px]">
-      <div class="space-y-2 px-3 pb-2 pt-1">
+      <div class="px-4 pb-3 pt-4">
         <div class="relative">
-          <Search class="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Search class="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
             v-model="settingsSearch"
             type="search"
             :placeholder="t('settings.searchPlaceholder')"
-            class="h-8 rounded-lg border-transparent bg-foreground/[0.06] pl-8 text-xs shadow-none focus-visible:border-transparent focus-visible:bg-card"
+            class="h-8 rounded-lg border-border/70 bg-background pl-9 pr-3 text-xs shadow-none focus-visible:border-ring/45 focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-ring/15"
           />
         </div>
       </div>
@@ -2005,7 +2005,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
 
     <!-- Rounded content card -->
     <div class="flex min-h-0 min-w-0 flex-1 flex-col pb-2 pr-2 pl-1.5 pt-0">
-      <section class="workbench-card relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[14px] border bg-card">
+      <section class="settings-content-card workbench-card relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[14px] border bg-card">
         <header class="flex shrink-0 flex-col gap-2 border-b px-5 py-2.5">
           <div class="flex h-8 items-center gap-3">
             <div class="min-w-0 flex-1">
@@ -3238,7 +3238,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
 
             <!-- Provider usage -->
             <template v-else-if="activePanel === 'usage'">
-              <UsageOverviewCard :runtime="appStore.activeRuntime" compact />
+              <UsageOverviewCard :runtime="appStore.activeRuntime" detailed />
             </template>
 
             <!-- Account -->
