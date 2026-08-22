@@ -1109,7 +1109,7 @@ onUnmounted(() => {
             v-if="showThinking"
             class="timeline-thinking reasoning-live-row flex min-w-0 items-center gap-2 py-1.5"
           >
-            <ThinkingOrb state="breathing" :size="20" :label="thinkingLabel" />
+            <ThinkingOrb state="solving" :size="20" :label="thinkingLabel" />
             <span class="reasoning-shimmer min-w-0 max-w-full">
               <span class="reasoning-shimmer__base truncate text-[13px]">{{ thinkingLabel }}</span>
               <span class="reasoning-shimmer__sheen truncate text-[13px]" aria-hidden="true">{{ thinkingLabel }}</span>

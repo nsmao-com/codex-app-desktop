@@ -1295,7 +1295,7 @@ function diffStats(diff: string): { add: number; del: number } {
           key="reasoning-live"
           class="reasoning-live-row timeline-step-item--enter flex min-w-0 items-center gap-2 py-1"
         >
-          <ThinkingOrb state="breathing" :size="20" :label="planningShimmerLabel" />
+          <ThinkingOrb state="solving" :size="20" :label="planningShimmerLabel" />
           <span class="reasoning-shimmer min-w-0 max-w-full">
             <span class="reasoning-shimmer__base truncate text-[13px]">{{ planningShimmerLabel }}</span>
             <span class="reasoning-shimmer__sheen truncate text-[13px]" aria-hidden="true">{{ planningShimmerLabel }}</span>
