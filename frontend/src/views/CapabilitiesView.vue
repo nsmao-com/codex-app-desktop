@@ -31,6 +31,14 @@ import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -878,6 +886,121 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
 
 <template>
   <div class="flex h-full w-full overflow-hidden bg-transparent text-foreground">
+    <Dialog v-model:open="mcpImportOpen">
+      <DialogContent class="gap-0 overflow-hidden p-0 sm:max-w-2xl">
+        <DialogHeader class="border-b px-5 py-4 text-left">
+          <DialogTitle class="flex items-center gap-2 text-[14px]">
+            <Braces :size="15" class="text-primary" />
+            {{ t('capabilities.importMcpTitle') }}
+          </DialogTitle>
+          <DialogDescription class="text-[11px] leading-5">
+            {{ t('capabilities.importMcpJsonHint') }}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div class="max-h-[min(68vh,640px)] space-y-4 overflow-y-auto px-5 py-4">
+          <div class="grid w-full grid-cols-2 rounded-lg border bg-muted/40 p-1" role="tablist" :aria-label="t('capabilities.importMcpTitle')">
+            <Button
+              type="button"
+              size="sm"
+              :variant="mcpImportMode === 'visual' ? 'secondary' : 'ghost'"
+              class="h-9 text-[11px]"
+              role="tab"
+              :aria-selected="mcpImportMode === 'visual'"
+              @click="mcpImportMode = 'visual'"
+            >
+              <FileUp :size="13" class="mr-1.5" />
+              {{ t('capabilities.mcpImportFile') }}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              :variant="mcpImportMode === 'json' ? 'secondary' : 'ghost'"
+              class="h-9 text-[11px]"
+              role="tab"
+              :aria-selected="mcpImportMode === 'json'"
+              @click="mcpImportMode = 'json'"
+            >
+              <Braces :size="13" class="mr-1.5" />
+              {{ t('capabilities.mcpImportPasteJson') }}
+            </Button>
+          </div>
+
+          <div
+            v-if="mcpImportMode === 'visual'"
+            class="rounded-xl border border-dashed bg-muted/20 px-5 py-8 text-center"
+            @dragover.prevent
+            @drop.prevent="onMcpImportDrop"
+          >
+            <input
+              ref="mcpImportFileInput"
+              type="file"
+              accept=".json,application/json"
+              class="hidden"
+              @change="onMcpImportFile"
+            >
+            <FileUp :size="26" class="mx-auto text-muted-foreground" />
+            <p class="mt-3 text-[12px] font-medium">{{ t('capabilities.mcpImportDrop') }}</p>
+            <p class="mt-1 text-[10px] leading-4 text-muted-foreground">{{ t('capabilities.mcpImportFileHint') }}</p>
+            <Button type="button" variant="outline" size="sm" class="mt-4 h-8" @click="chooseMcpImportFile">
+              {{ t('capabilities.mcpImportChoose') }}
+            </Button>
+          </div>
+
+          <div v-else class="space-y-2">
+            <div class="flex items-center justify-between gap-3">
+              <Label for="mcp-import-json" class="text-[11px]">{{ t('capabilities.mcpImportPasteJson') }}</Label>
+              <span class="text-[10px] tabular-nums text-muted-foreground">
+                {{ mcpImportJSON.length.toLocaleString() }} / {{ MCP_IMPORT_MAX_LENGTH.toLocaleString() }}
+              </span>
+            </div>
+            <Textarea
+              id="mcp-import-json"
+              v-model="mcpImportJSON"
+              class="h-64 min-h-64 resize-y font-mono text-[11px] leading-5"
+              :placeholder="t('capabilities.importMcpJsonPlaceholder')"
+              :maxlength="MCP_IMPORT_MAX_LENGTH"
+              :aria-invalid="Boolean(mcpImportError)"
+              autofocus
+              spellcheck="false"
+              @paste="onMcpImportPaste"
+            />
+            <p class="text-[10px] leading-4 text-muted-foreground">{{ t('capabilities.mcpImportRawSafety') }}</p>
+          </div>
+
+          <div v-if="mcpImportError" class="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] leading-4 text-destructive" role="alert">
+            {{ mcpImportError }}
+          </div>
+
+          <div v-else-if="mcpImportParsing" class="flex items-center gap-2 rounded-lg bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground" role="status">
+            <LoaderCircle :size="13" class="animate-spin" />
+            {{ t('common.loading') }}
+          </div>
+
+          <div v-if="mcpImportPreview.length" class="space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-[11px] font-medium">{{ t('capabilities.mcpImportPreview', { count: mcpImportPreview.length }) }}</p>
+              <span v-if="mcpImportSource" class="max-w-56 truncate text-[10px] text-muted-foreground">{{ mcpImportSource }}</span>
+            </div>
+            <div class="max-h-48 space-y-1 overflow-y-auto rounded-lg border p-1.5">
+              <div v-for="server in mcpImportPreview" :key="server.name" class="flex items-center gap-2 rounded-md px-2 py-1.5 text-[11px] hover:bg-muted/40">
+                <Badge variant="outline" class="shrink-0 text-[9px]">{{ server.url ? 'HTTP' : 'STDIO' }}</Badge>
+                <span class="min-w-0 flex-1 truncate font-medium">{{ server.name }}</span>
+                <span class="max-w-[48%] truncate font-mono text-[9px] text-muted-foreground">{{ server.url || server.command }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter class="border-t bg-background px-5 py-3">
+          <Button type="button" variant="ghost" size="sm" @click="mcpImportOpen = false">{{ t('common.cancel') }}</Button>
+          <Button type="button" size="sm" :disabled="!mcpImportValid || capabilitiesStore.capabilityMutation !== ''" @click="saveMcpImport">
+            {{ t('capabilities.mcpImportConfirm', { count: mcpImportPreview.length }) }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <!-- Left tab rail on the gray shell -->
     <aside class="flex w-[248px] shrink-0 flex-col">
       <div class="space-y-2 px-3 pb-2 pt-1">
@@ -1828,104 +1951,6 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
             </TabsContent>
 
             <TabsContent value="mcp" class="mt-0 space-y-3">
-              <Card v-if="mcpImportOpen" class="gap-0 rounded-md py-0 shadow-none">
-                <CardContent class="space-y-4 py-4">
-                  <div class="flex items-start justify-between gap-3">
-                    <div>
-                      <Label class="text-xs">{{ t('capabilities.importMcpTitle') }}</Label>
-                      <p class="mt-1 text-[10px] leading-4 text-muted-foreground">{{ t('capabilities.importMcpJsonHint') }}</p>
-                    </div>
-                    <div class="grid min-w-[240px] grid-cols-2 rounded-md border bg-muted/40 p-0.5" role="tablist" :aria-label="t('capabilities.importMcpTitle')">
-                      <Button
-                        type="button"
-                        size="xs"
-                        :variant="mcpImportMode === 'visual' ? 'secondary' : 'ghost'"
-                        class="h-8 px-2 text-[11px]"
-                        role="tab"
-                        :aria-selected="mcpImportMode === 'visual'"
-                        @click="mcpImportMode = 'visual'"
-                      >
-                        <FileUp :size="12" class="mr-1" />
-                        {{ t('capabilities.mcpImportFile') }}
-                      </Button>
-                      <Button
-                        type="button"
-                        size="xs"
-                        :variant="mcpImportMode === 'json' ? 'secondary' : 'ghost'"
-                        class="h-8 px-2 text-[11px]"
-                        role="tab"
-                        :aria-selected="mcpImportMode === 'json'"
-                        @click="mcpImportMode = 'json'"
-                      >
-                        <Braces :size="12" class="mr-1" />
-                        {{ t('capabilities.mcpImportPasteJson') }}
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div
-                    v-if="mcpImportMode === 'visual'"
-                    class="rounded-lg border border-dashed bg-muted/20 px-4 py-6 text-center"
-                    @dragover.prevent
-                    @drop.prevent="onMcpImportDrop"
-                  >
-                    <input
-                      ref="mcpImportFileInput"
-                      type="file"
-                      accept=".json,application/json"
-                      class="hidden"
-                      @change="onMcpImportFile"
-                    >
-                    <FileUp :size="22" class="mx-auto text-muted-foreground" />
-                    <p class="mt-2 text-[11px] font-medium">{{ t('capabilities.mcpImportDrop') }}</p>
-                    <p class="mt-1 text-[10px] text-muted-foreground">{{ t('capabilities.mcpImportFileHint') }}</p>
-                    <Button type="button" variant="outline" size="sm" class="mt-3 h-8" @click="chooseMcpImportFile">
-                      {{ t('capabilities.mcpImportChoose') }}
-                    </Button>
-                  </div>
-
-                  <div v-else class="space-y-1.5">
-                    <Textarea
-                      v-model="mcpImportJSON"
-                      class="min-h-44 font-mono text-[11px] leading-5"
-                      :placeholder="t('capabilities.importMcpJsonPlaceholder')"
-                      :maxlength="MCP_IMPORT_MAX_LENGTH"
-                      spellcheck="false"
-                      @paste="onMcpImportPaste"
-                    />
-                    <p class="text-[10px] text-muted-foreground">{{ t('capabilities.mcpImportRawSafety') }}</p>
-                  </div>
-
-                  <div v-if="mcpImportError" class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive" role="alert">
-                    {{ mcpImportError }}
-                  </div>
-
-                  <div v-else-if="mcpImportParsing" class="flex items-center gap-2 rounded-md bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground" role="status">
-                    <LoaderCircle :size="13" class="animate-spin" />
-                    {{ t('common.loading') }}
-                  </div>
-
-                  <div v-if="mcpImportPreview.length" class="space-y-2">
-                    <div class="flex items-center justify-between gap-2">
-                      <p class="text-[11px] font-medium">{{ t('capabilities.mcpImportPreview', { count: mcpImportPreview.length }) }}</p>
-                      <span v-if="mcpImportSource" class="max-w-56 truncate text-[10px] text-muted-foreground">{{ mcpImportSource }}</span>
-                    </div>
-                    <div class="max-h-48 space-y-1 overflow-y-auto rounded-lg border p-1.5">
-                      <div v-for="server in mcpImportPreview" :key="server.name" class="flex items-center gap-2 rounded-md px-2 py-1.5 text-[11px] hover:bg-muted/40">
-                        <Badge variant="outline" class="shrink-0 text-[9px]">{{ server.url ? 'HTTP' : 'STDIO' }}</Badge>
-                        <span class="min-w-0 flex-1 truncate font-medium">{{ server.name }}</span>
-                        <span class="max-w-[48%] truncate font-mono text-[9px] text-muted-foreground">{{ server.url || server.command }}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="flex items-center justify-end gap-2">
-                    <Button variant="ghost" size="sm" @click="mcpImportOpen = false">{{ t('common.cancel') }}</Button>
-                    <Button size="sm" :disabled="!mcpImportValid || capabilitiesStore.capabilityMutation !== ''" @click="saveMcpImport">
-                      {{ t('capabilities.mcpImportConfirm', { count: mcpImportPreview.length }) }}
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
               <Card v-if="mcpEditorOpen" class="gap-0 rounded-md py-0 shadow-none">
                 <CardContent class="space-y-4 py-4">
                   <div class="grid gap-2 sm:grid-cols-2">

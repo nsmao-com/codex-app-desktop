@@ -182,69 +182,71 @@ async function chooseWorkspace(): Promise<void> {
 </script>
 
 <template>
-  <div class="welcome-stage scrollbar-thin relative flex h-full flex-col items-center justify-center overflow-x-hidden overflow-y-auto px-4 py-5 text-center sm:px-6">
+  <div class="welcome-stage scrollbar-thin relative flex h-full min-h-0 flex-col items-center justify-start overflow-x-hidden overflow-y-auto px-4 text-center sm:px-6">
     <div class="welcome-aurora pointer-events-none absolute inset-0" aria-hidden="true" />
     <div class="welcome-orb welcome-orb-a pointer-events-none absolute" aria-hidden="true" />
     <div class="welcome-orb welcome-orb-b pointer-events-none absolute" aria-hidden="true" />
     <div class="welcome-grid pointer-events-none absolute inset-0" aria-hidden="true" />
 
-    <div class="welcome-enter relative z-[1] flex flex-col items-center">
-      <p class="welcome-kicker mb-3 text-[10px] font-medium tracking-[0.2em] text-muted-foreground uppercase">
-        {{ kickerText }}
-      </p>
+    <div class="relative z-[1] my-auto flex w-full shrink-0 flex-col items-center py-5">
+      <div class="welcome-enter flex flex-col items-center">
+        <p class="welcome-kicker mb-3 text-[10px] font-medium tracking-[0.2em] text-muted-foreground uppercase">
+          {{ kickerText }}
+        </p>
 
-      <h2 class="welcome-headline text-xl font-semibold tracking-tight text-foreground sm:text-3xl">
-        <span
-          v-for="(char, index) in titleChars"
-          :key="`${char}-${index}`"
-          class="welcome-char"
-          :style="{ animationDelay: `${120 + index * 28}ms` }"
-        >{{ char === ' ' ? '\u00A0' : char }}</span>
-      </h2>
-      <div class="welcome-underline mt-3 h-[2px] w-24 rounded-full" aria-hidden="true" />
+        <h2 class="welcome-headline text-xl font-semibold tracking-tight text-foreground sm:text-3xl">
+          <span
+            v-for="(char, index) in titleChars"
+            :key="`${char}-${index}`"
+            class="welcome-char"
+            :style="{ animationDelay: `${120 + index * 28}ms` }"
+          >{{ char === ' ' ? '\u00A0' : char }}</span>
+        </h2>
+        <div class="welcome-underline mt-3 h-[2px] w-24 rounded-full" aria-hidden="true" />
 
-      <p class="welcome-desc mt-4 max-w-md text-[13px] leading-6 text-muted-foreground">
-        {{ descriptionText }}
-      </p>
-    </div>
+        <p class="welcome-desc mt-4 max-w-md text-[13px] leading-6 text-muted-foreground">
+          {{ descriptionText }}
+        </p>
+      </div>
 
-    <div class="welcome-note relative z-[1] mt-6 flex w-full justify-center">
-      <UsageOverviewCard :runtime="paneRuntime" :compact="isArenaPane" />
-    </div>
+      <div class="welcome-note mt-5 flex w-full justify-center">
+        <UsageOverviewCard :runtime="paneRuntime" :compact="isArenaPane" />
+      </div>
 
-    <div class="relative z-[1] mt-4 flex w-full max-w-xl flex-wrap items-center justify-center gap-2">
-      <button
-        v-for="(suggestion, index) in suggestions"
-        :key="suggestion.title"
-        type="button"
-        class="welcome-chip inline-flex h-9 items-center gap-1.5 rounded-full border border-border/70 bg-card/90 px-3.5 text-[12px] text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:border-foreground/20 hover:bg-muted/60 hover:text-foreground"
-        :style="{ animationDelay: `${520 + index * 90}ms` }"
-        :title="suggestion.prompt"
-        @click="emit('suggestion', suggestion.prompt)"
+      <div class="mt-4 flex w-full max-w-xl flex-wrap items-center justify-center gap-2">
+        <button
+          v-for="(suggestion, index) in suggestions"
+          :key="suggestion.title"
+          type="button"
+          class="welcome-chip inline-flex h-9 items-center gap-1.5 rounded-full border border-border/70 bg-card/90 px-3.5 text-[12px] text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:border-foreground/20 hover:bg-muted/60 hover:text-foreground"
+          :style="{ animationDelay: `${520 + index * 90}ms` }"
+          :title="suggestion.prompt"
+          @click="emit('suggestion', suggestion.prompt)"
+        >
+          <component :is="suggestion.icon" :size="13" class="opacity-70" />
+          {{ suggestion.title }}
+        </button>
+      </div>
+
+      <div
+        v-if="runtimeWarning"
+        class="welcome-note mt-6 max-w-md rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2.5 text-[12px] leading-5 text-destructive"
       >
-        <component :is="suggestion.icon" :size="13" class="opacity-70" />
-        {{ suggestion.title }}
-      </button>
-    </div>
+        {{ runtimeWarning }}
+      </div>
 
-    <div
-      v-if="runtimeWarning"
-      class="welcome-note relative z-[1] mt-6 max-w-md rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2.5 text-[12px] leading-5 text-destructive"
-    >
-      {{ runtimeWarning }}
-    </div>
+      <div
+        v-else-if="needsWorkspace"
+        class="welcome-note mt-6 max-w-md rounded-md border border-border/70 bg-muted/30 px-3 py-2.5 text-[12px] leading-5 text-muted-foreground"
+      >
+        {{ t('app.needWorkspaceHintReady') }}
+      </div>
 
-    <div
-      v-else-if="needsWorkspace"
-      class="welcome-note relative z-[1] mt-6 max-w-md rounded-md border border-border/70 bg-muted/30 px-3 py-2.5 text-[12px] leading-5 text-muted-foreground"
-    >
-      {{ t('app.needWorkspaceHintReady') }}
-    </div>
-
-    <div v-if="needsWorkspace" class="welcome-note relative z-[1] mt-5">
-      <Button variant="secondary" size="sm" class="h-8 text-[12px]" @click="chooseWorkspace">
-        {{ t('welcome.chooseWorkspace') }}
-      </Button>
+      <div v-if="needsWorkspace" class="welcome-note mt-5">
+        <Button variant="secondary" size="sm" class="h-8 text-[12px]" @click="chooseWorkspace">
+          {{ t('welcome.chooseWorkspace') }}
+        </Button>
+      </div>
     </div>
   </div>
 </template>

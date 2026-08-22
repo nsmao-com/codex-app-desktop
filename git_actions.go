@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,11 @@ import (
 
 type GitBranchRequest struct {
 	Name string `json:"name"`
+}
+
+type GitBranchSwitchRequest struct {
+	Workspace string `json:"workspace"`
+	Name      string `json:"name"`
 }
 
 type GitCommitRequest struct {
@@ -222,6 +228,78 @@ func (s *AppService) CreateGitBranch(request GitBranchRequest) (GitActionResult,
 		return GitActionResult{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(output))
 	}
 	return GitActionResult{OK: true, Message: "branch created", Branch: name}, nil
+}
+
+func (s *AppService) ListGitBranches(workspace string) ([]string, error) {
+	cleanWorkspace, err := validateWorkspace(workspace)
+	if err != nil {
+		return nil, err
+	}
+	return listLocalGitBranches(cleanWorkspace)
+}
+
+func (s *AppService) SwitchGitBranch(request GitBranchSwitchRequest) (GitActionResult, error) {
+	workspace, err := validateWorkspace(request.Workspace)
+	if err != nil {
+		return GitActionResult{}, err
+	}
+	name := strings.TrimSpace(request.Name)
+	if name == "" {
+		return GitActionResult{}, errors.New("branch name is required")
+	}
+	if output, formatErr := runGit(workspace, 5*time.Second, "check-ref-format", "--branch", name); formatErr != nil {
+		return GitActionResult{}, fmt.Errorf("invalid branch name: %s", strings.TrimSpace(output))
+	}
+	branches, err := listLocalGitBranches(workspace)
+	if err != nil {
+		return GitActionResult{}, err
+	}
+	found := false
+	for _, branch := range branches {
+		if branch == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return GitActionResult{}, errors.New("local branch does not exist")
+	}
+	if currentGitBranch(workspace) == name {
+		return GitActionResult{OK: true, Message: "branch already active", Branch: name}, nil
+	}
+	output, err := runGit(workspace, 20*time.Second, "switch", name)
+	if err != nil {
+		return GitActionResult{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(output))
+	}
+	return GitActionResult{OK: true, Message: "branch switched", Branch: name}, nil
+}
+
+func listLocalGitBranches(workspace string) ([]string, error) {
+	output, err := runGit(workspace, 8*time.Second, "for-each-ref", "--format=%(refname:short)", "refs/heads")
+	if err != nil {
+		return nil, fmt.Errorf("could not list local branches: %w: %s", err, strings.TrimSpace(output))
+	}
+	current := currentGitBranch(workspace)
+	branches := make([]string, 0)
+	for _, line := range strings.Split(output, "\n") {
+		name := strings.TrimSpace(line)
+		if name != "" {
+			branches = append(branches, name)
+		}
+	}
+	sort.Strings(branches)
+	if current == "" {
+		return branches, nil
+	}
+	for index, branch := range branches {
+		if branch != current {
+			continue
+		}
+		copy(branches[1:index+1], branches[0:index])
+		branches[0] = current
+		break
+	}
+	return branches, nil
 }
 
 func (s *AppService) CommitGitChanges(request GitCommitRequest) (GitActionResult, error) {

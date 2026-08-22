@@ -432,6 +432,11 @@ export interface GitBranchRequest {
     "name": string;
 }
 
+export interface GitBranchSwitchRequest {
+    "workspace": string;
+    "name": string;
+}
+
 export interface GitChange {
     "status": string;
     "path": string;

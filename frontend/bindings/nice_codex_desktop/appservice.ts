@@ -231,6 +231,10 @@ export function ListExperimentalFeatures(): $CancellablePromise<{ [_ in string]?
     return $Call.ByID(626848283);
 }
 
+export function ListGitBranches(workspace: string): $CancellablePromise<string[] | null> {
+    return $Call.ByID(1470002806, workspace);
+}
+
 /**
  * ListGrokSessionTurnUsages returns per-turn token breakdown for one Grok session
  * (from updates.jsonl turn_completed). Used to populate the chat message footer.
@@ -751,6 +755,10 @@ export function StopCodex(): $CancellablePromise<void> {
 
 export function StopTerminalSession(processID: string): $CancellablePromise<void> {
     return $Call.ByID(1898194606, processID);
+}
+
+export function SwitchGitBranch(request: $models.GitBranchSwitchRequest): $CancellablePromise<$models.GitActionResult> {
+    return $Call.ByID(1528710970, request);
 }
 
 export function UnarchiveClaudeSession(sessionID: string): $CancellablePromise<void> {

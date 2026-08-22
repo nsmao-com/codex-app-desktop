@@ -42,6 +42,7 @@ export type {
     ExternalUsageSummary,
     GitActionResult,
     GitBranchRequest,
+    GitBranchSwitchRequest,
     GitChange,
     GitCommitRequest,
     GitHubIssueContent,

@@ -2,9 +2,9 @@ import { computed, ref } from 'vue'
 
 import { isAppAccent, type AppAccent } from '@/lib/accents'
 
-export type AppTheme = 'light' | 'dark' | 'system'
+export type AppTheme = 'light' | 'dark' | 'claude' | 'system'
 export type { AppAccent }
-export type BuiltinFont = 'manrope' | 'system' | 'mono'
+export type BuiltinFont = 'manrope' | 'claude' | 'system' | 'mono'
 export type AppFont = BuiltinFont | string
 export type FontScale = 'sm' | 'md' | 'lg'
 
@@ -39,7 +39,7 @@ function readSystemTheme(): 'light' | 'dark' {
 }
 
 function isBuiltinFont(value: string): value is BuiltinFont {
-  return value === 'manrope' || value === 'system' || value === 'mono'
+  return value === 'manrope' || value === 'claude' || value === 'system' || value === 'mono'
 }
 
 function normalizeScale(value?: string): FontScale {
@@ -71,7 +71,7 @@ function applyAttributes(): void {
 
 const resolvedTheme = computed<'light' | 'dark'>(() => {
   if (theme.value === 'system') return readSystemTheme()
-  return theme.value
+  return theme.value === 'dark' ? 'dark' : 'light'
 })
 
 const isDark = computed(() => resolvedTheme.value === 'dark')

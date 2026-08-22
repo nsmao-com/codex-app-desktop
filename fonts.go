@@ -37,7 +37,7 @@ func isValidFontFamily(value string) bool {
 	if value == "" || len(value) > 120 {
 		return false
 	}
-	if isAllowed(value, "manrope", "system", "mono") {
+	if isAllowed(value, "manrope", "claude", "system", "mono") {
 		return true
 	}
 	for _, r := range value {

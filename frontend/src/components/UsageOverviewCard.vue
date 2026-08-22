@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { Activity, BarChart3 } from '@lucide/vue'
-import { computed, onMounted, shallowRef, watch } from 'vue'
+import { BarChart3 } from '@lucide/vue'
+import { computed, nextTick, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
@@ -32,7 +32,12 @@ const activeRange = shallowRef<UsageRangeDays>('cumulative')
 const usage = shallowRef<AccountUsageSummary | null>(null)
 const loading = shallowRef(false)
 const loadError = shallowRef('')
+const heatmapScroller = useTemplateRef<HTMLDivElement>('heatmapScroller')
+const heatmapDragging = shallowRef(false)
 let loadSequence = 0
+let dragPointerId: number | null = null
+let dragStartX = 0
+let dragStartScrollLeft = 0
 
 const rangeOptions = computed<RangeOption[]>(() => [
   { value: 'cumulative', label: t('usageOverview.rangeAll') },
@@ -54,26 +59,15 @@ function localDateKey(date: Date): string {
   return `${year}-${month}-${day}`
 }
 
+const heatmapSpanDays = computed(() => {
+  return activeRange.value === 'cumulative' ? 365 : activeRange.value
+})
+
 const heatmapDays = computed<HeatmapDay[]>(() => {
   const buckets = new Map((usage.value?.dailyBuckets ?? []).map((item) => [item.startDate.slice(0, 10), Math.max(0, item.tokens)]))
   const end = new Date()
   end.setHours(0, 0, 0, 0)
-  const oldestBucket = activeRange.value === 'cumulative'
-    ? [...buckets.keys()]
-        .map((key) => {
-          const [year, month, day] = key.split('-').map(Number)
-          return year && month && day ? new Date(year, month - 1, day) : null
-        })
-        .filter((date): date is Date => Boolean(date && !Number.isNaN(date.getTime())))
-        .sort((left, right) => left.getTime() - right.getTime())[0]
-    : null
-  const cumulativeDays = oldestBucket
-    ? Math.round((Date.UTC(end.getFullYear(), end.getMonth(), end.getDate())
-        - Date.UTC(oldestBucket.getFullYear(), oldestBucket.getMonth(), oldestBucket.getDate())) / 86_400_000) + 1
-    : 91
-  const span = activeRange.value === 'cumulative'
-    ? Math.min(182, Math.max(91, cumulativeDays))
-    : activeRange.value
+  const span = heatmapSpanDays.value
   const start = new Date(end)
   start.setDate(start.getDate() - (span - 1))
   const values: Array<{ key: string; date: Date; tokens: number }> = []
@@ -100,6 +94,64 @@ function heatmapClass(intensity: number): string {
 function dateTooltip(day: HeatmapDay): string {
   const date = new Intl.DateTimeFormat(locale.value, { month: 'short', day: 'numeric', year: 'numeric' }).format(day.date)
   return `${date} · ${formatTokenCount(day.tokens)} ${t('usageOverview.tokens')}`
+}
+
+function scrollHeatmapToLatest(): void {
+  void nextTick(() => {
+    const element = heatmapScroller.value
+    if (element) element.scrollLeft = element.scrollWidth
+  })
+}
+
+function handleHeatmapWheel(event: WheelEvent): void {
+  const element = heatmapScroller.value
+  if (!element || element.scrollWidth <= element.clientWidth) return
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+  if (!delta) return
+  const canScroll = delta < 0
+    ? element.scrollLeft > 0
+    : element.scrollLeft + element.clientWidth < element.scrollWidth - 1
+  if (!canScroll) return
+  event.preventDefault()
+  element.scrollLeft += delta
+}
+
+function handleHeatmapKeydown(event: KeyboardEvent): void {
+  const element = heatmapScroller.value
+  if (!element || element.scrollWidth <= element.clientWidth) return
+  const step = Math.max(80, Math.round(element.clientWidth * 0.72))
+  if (event.key === 'ArrowLeft') element.scrollLeft -= step
+  else if (event.key === 'ArrowRight') element.scrollLeft += step
+  else if (event.key === 'Home') element.scrollLeft = 0
+  else if (event.key === 'End') element.scrollLeft = element.scrollWidth
+  else return
+  event.preventDefault()
+}
+
+function startHeatmapDrag(event: PointerEvent): void {
+  const element = heatmapScroller.value
+  if (!element || event.button !== 0 || element.scrollWidth <= element.clientWidth) return
+  dragPointerId = event.pointerId
+  dragStartX = event.clientX
+  dragStartScrollLeft = element.scrollLeft
+  heatmapDragging.value = true
+  event.preventDefault()
+  element.focus({ preventScroll: true })
+  element.setPointerCapture(event.pointerId)
+}
+
+function moveHeatmapDrag(event: PointerEvent): void {
+  const element = heatmapScroller.value
+  if (!element || dragPointerId !== event.pointerId) return
+  element.scrollLeft = dragStartScrollLeft - (event.clientX - dragStartX)
+}
+
+function stopHeatmapDrag(event: PointerEvent): void {
+  const element = heatmapScroller.value
+  if (dragPointerId !== event.pointerId) return
+  if (element?.hasPointerCapture(event.pointerId)) element.releasePointerCapture(event.pointerId)
+  dragPointerId = null
+  heatmapDragging.value = false
 }
 
 const modelStats = computed(() => {
@@ -182,38 +234,33 @@ async function loadUsage(): Promise<void> {
   }
 }
 
-watch(() => props.runtime, loadUsage)
+watch(() => props.runtime, loadUsage, { immediate: true })
 watch(
   () => appStore.accountUsage,
   (value) => {
     if (appStore.activeRuntime === props.runtime && value) usage.value = value
   },
 )
-onMounted(loadUsage)
+watch(
+  () => [activeRange.value, loading.value, heatmapDays.value.length] as const,
+  scrollHeatmapToLatest,
+  { immediate: true, flush: 'post' },
+)
 </script>
 
 <template>
   <section
-    class="usage-overview overflow-hidden rounded-2xl border border-border/70 bg-card/90 text-left shadow-sm backdrop-blur-sm"
-    :class="compact ? 'w-full' : 'w-full max-w-2xl'"
+    class="usage-overview overflow-hidden rounded-xl border border-border/60 bg-card/80 text-left shadow-[0_10px_30px_-24px_color-mix(in_oklab,var(--foreground)_42%,transparent)] backdrop-blur-sm"
+    :class="compact ? 'w-full' : 'w-full max-w-xl'"
   >
-    <header class="flex items-center justify-between gap-3 border-b border-border/60 px-4 py-3">
-      <div class="flex min-w-0 items-center gap-2.5">
-        <div class="grid size-8 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary">
-          <Activity :size="15" />
-        </div>
-        <div class="min-w-0">
-          <h3 class="truncate text-[13px] font-semibold">{{ t('usageOverview.title') }}</h3>
-          <p class="truncate text-[10px] text-muted-foreground">{{ t('usageOverview.subtitle') }}</p>
-        </div>
-      </div>
-      <div class="flex shrink-0 rounded-lg bg-muted/65 p-0.5" role="tablist" :aria-label="t('usageOverview.title')">
+    <header class="flex items-center justify-between gap-2 px-3 py-2.5">
+      <div class="flex shrink-0 rounded-lg bg-muted/55 p-0.5" role="tablist" :aria-label="t('usageOverview.title')">
         <button
           v-for="tab in (['overview', 'models'] as OverviewTab[])"
           :key="tab"
           type="button"
           role="tab"
-          class="rounded-md px-2.5 py-1 text-[10px] transition-colors"
+          class="rounded-md px-2.5 py-1 text-[10px] transition-[background-color,color,box-shadow]"
           :class="activeTab === tab ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
           :aria-selected="activeTab === tab"
           @click="activeTab = tab"
@@ -221,48 +268,78 @@ onMounted(loadUsage)
           {{ t(`usageOverview.${tab}`) }}
         </button>
       </div>
+      <div v-if="activeTab === 'overview'" class="flex min-w-0 rounded-lg bg-muted/45 p-0.5">
+        <button
+          v-for="option in rangeOptions"
+          :key="String(option.value)"
+          type="button"
+          class="whitespace-nowrap rounded-md px-2 py-1 text-[10px] transition-colors"
+          :class="activeRange === option.value ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+          @click="activeRange = option.value"
+        >
+          {{ option.label }}
+        </button>
+      </div>
     </header>
 
-    <div v-if="activeTab === 'overview'" class="space-y-3 p-4">
-      <div class="flex items-center justify-end gap-3">
-        <div class="flex rounded-lg border border-border/60 p-0.5">
-          <button
-            v-for="option in rangeOptions"
-            :key="String(option.value)"
-            type="button"
-            class="rounded-md px-2 py-1 text-[10px] transition-colors"
-            :class="activeRange === option.value ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
-            @click="activeRange = option.value"
-          >
-            {{ option.label }}
-          </button>
+    <div v-if="activeTab === 'overview'" class="space-y-2.5 px-3 pb-3">
+      <div class="usage-metrics rounded-lg bg-muted/28 px-1.5 py-2">
+        <div class="usage-metric">
+          <p>{{ t('usageOverview.sessions') }}</p>
+          <strong>{{ modelSessionCount }}</strong>
+        </div>
+        <div class="usage-metric">
+          <p>{{ t('usageOverview.totalTokens') }}</p>
+          <strong>{{ formatTokenCount(rangeTotal) }}</strong>
+        </div>
+        <div class="usage-metric">
+          <p>{{ t('usageOverview.activeDays') }}</p>
+          <strong>{{ rangeView.dayCount }}</strong>
+        </div>
+        <div class="usage-metric">
+          <p>{{ t('usageOverview.dailyAverage') }}</p>
+          <strong>{{ formatTokenCount(rangeView.averageTokens) }}</strong>
         </div>
       </div>
 
-      <div class="usage-heatmap scrollbar-thin min-h-[74px] overflow-x-auto rounded-xl border border-border/55 bg-muted/20 p-2.5">
+      <div
+        ref="heatmapScroller"
+        class="usage-heatmap overflow-x-auto rounded-lg bg-muted/20 px-2 py-2.5 outline-none ring-primary/25 transition-shadow focus-visible:ring-2"
+        :class="{ 'can-scroll': activeRange === 'cumulative', 'is-dragging': heatmapDragging }"
+        tabindex="0"
+        role="region"
+        :aria-label="t('usageOverview.heatmapLabel')"
+        @wheel="handleHeatmapWheel"
+        @keydown="handleHeatmapKeydown"
+        @pointerdown="startHeatmapDrag"
+        @pointermove="moveHeatmapDrag"
+        @pointerup="stopHeatmapDrag"
+        @pointercancel="stopHeatmapDrag"
+        @lostpointercapture="stopHeatmapDrag"
+      >
         <div
           v-if="loading"
-          class="heatmap-grid min-w-full"
-          :class="activeRange === 7 ? 'is-strip' : 'is-calendar'"
+          class="heatmap-grid"
+          :class="[activeRange === 7 ? 'is-strip' : 'is-calendar', { 'is-scrollable': activeRange === 'cumulative' }]"
           aria-hidden="true"
         >
           <span
-            v-for="index in (activeRange === 7 ? 7 : activeRange === 30 ? 30 : 182)"
+            v-for="index in heatmapSpanDays"
             :key="index"
-            class="usage-loading-cell h-full w-full rounded-[3px] bg-muted-foreground/15"
-            :style="{ animationDelay: `${index * 24}ms` }"
+            class="usage-loading-cell h-full w-full rounded-[2px] bg-muted-foreground/15"
+            :style="{ animationDelay: `${(index % 18) * 30}ms` }"
           />
         </div>
         <div
           v-else
-          class="heatmap-grid min-w-full"
-          :class="activeRange === 7 ? 'is-strip' : 'is-calendar'"
-          aria-label="Token usage heatmap"
+          class="heatmap-grid"
+          :class="[activeRange === 7 ? 'is-strip' : 'is-calendar', { 'is-scrollable': activeRange === 'cumulative' }]"
+          aria-hidden="true"
         >
           <span
             v-for="(day, index) in heatmapDays"
             :key="day.key"
-            class="h-full w-full rounded-[3px] ring-1 ring-inset ring-foreground/[0.035] transition-transform hover:scale-125"
+            class="usage-heatmap-cell h-full w-full rounded-[2px] ring-1 ring-inset ring-foreground/[0.035]"
             :class="heatmapClass(day.intensity)"
             :title="dateTooltip(day)"
             :style="index === 0 && activeRange !== 7 ? { gridRowStart: day.date.getDay() + 1 } : undefined"
@@ -270,57 +347,34 @@ onMounted(loadUsage)
         </div>
       </div>
 
-      <div class="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-        <div class="rounded-lg bg-muted/45 px-2.5 py-2">
-          <p class="text-[10px] text-muted-foreground">{{ t('usageOverview.sessions') }}</p>
-          <p class="mt-0.5 truncate text-sm font-semibold tabular-nums">{{ modelSessionCount }}</p>
-        </div>
-        <div class="rounded-lg bg-muted/45 px-2.5 py-2">
-          <p class="text-[10px] text-muted-foreground">{{ t('usageOverview.totalTokens') }}</p>
-          <p class="mt-0.5 truncate text-sm font-semibold tabular-nums">{{ formatTokenCount(rangeTotal) }}</p>
-        </div>
-        <div class="rounded-lg bg-muted/45 px-2.5 py-2">
-          <p class="text-[10px] text-muted-foreground">{{ t('usageOverview.activeDays') }}</p>
-          <p class="mt-0.5 truncate text-sm font-semibold tabular-nums">{{ rangeView.dayCount }}</p>
-        </div>
-        <div class="rounded-lg bg-muted/45 px-2.5 py-2">
-          <p class="text-[10px] text-muted-foreground">{{ t('usageOverview.dailyAverage') }}</p>
-          <p class="mt-0.5 truncate text-sm font-semibold tabular-nums">{{ formatTokenCount(rangeView.averageTokens) }}</p>
-        </div>
-        <div class="rounded-lg bg-muted/45 px-2.5 py-2">
-          <p class="text-[10px] text-muted-foreground">{{ t('usageOverview.currentStreak') }}</p>
-          <p class="mt-0.5 truncate text-sm font-semibold tabular-nums">{{ usage?.currentStreakDays ?? 0 }}</p>
-        </div>
-        <div class="rounded-lg bg-muted/45 px-2.5 py-2">
-          <p class="text-[10px] text-muted-foreground">{{ t('usageOverview.longestStreak') }}</p>
-          <p class="mt-0.5 truncate text-sm font-semibold tabular-nums">{{ usage?.longestStreakDays ?? 0 }}</p>
-        </div>
-        <div class="rounded-lg bg-muted/45 px-2.5 py-2">
-          <p class="text-[10px] text-muted-foreground">{{ t('usageOverview.peakDay') }}</p>
-          <p class="mt-0.5 truncate text-sm font-semibold tabular-nums">{{ formatTokenCount(usage?.peakDailyTokens) }}</p>
-        </div>
-        <div class="rounded-lg bg-muted/45 px-2.5 py-2">
-          <p class="text-[10px] text-muted-foreground">{{ t('usageOverview.favoriteModel') }}</p>
-          <p class="mt-0.5 truncate text-sm font-semibold" :title="favoriteModel">{{ favoriteModel }}</p>
-        </div>
+      <div class="flex min-w-0 items-center justify-between gap-3 text-[9px] text-muted-foreground/75">
+        <span class="truncate">{{ activeRange === 'cumulative' ? t('usageOverview.heatmapScrollHint') : '' }}</span>
+        <span class="shrink-0">{{ t('usageOverview.subtitle') }}</span>
+      </div>
+
+      <div class="usage-details">
+        <span>{{ t('usageOverview.currentStreak') }} <strong>{{ usage?.currentStreakDays ?? 0 }}</strong></span>
+        <span>{{ t('usageOverview.longestStreak') }} <strong>{{ usage?.longestStreakDays ?? 0 }}</strong></span>
+        <span>{{ t('usageOverview.peakDay') }} <strong>{{ formatTokenCount(usage?.peakDailyTokens) }}</strong></span>
+        <span class="min-w-0">{{ t('usageOverview.favoriteModel') }} <strong class="inline-block max-w-28 truncate align-bottom" :title="favoriteModel">{{ favoriteModel }}</strong></span>
       </div>
       <p v-if="loadError" class="truncate text-[9px] text-muted-foreground" :title="loadError">
         {{ t('usageOverview.loadFailed') }}
       </p>
     </div>
 
-    <div v-else class="p-4">
-      <div v-if="modelRows.length" class="grid gap-5 sm:grid-cols-[168px_minmax(0,1fr)] sm:items-center">
-        <div class="relative mx-auto grid size-36 place-items-center rounded-full" :style="modelDonutStyle">
-          <div class="grid size-24 place-items-center rounded-full bg-card text-center shadow-inner">
+    <div v-else class="px-3 pb-3">
+      <div v-if="modelRows.length" class="grid gap-4 rounded-lg bg-muted/20 p-3 sm:grid-cols-[132px_minmax(0,1fr)] sm:items-center">
+        <div class="relative mx-auto grid size-28 place-items-center rounded-full" :style="modelDonutStyle">
+          <div class="grid size-[74px] place-items-center rounded-full bg-card text-center shadow-inner">
             <div>
               <p class="text-xl font-semibold tabular-nums">{{ modelSessionCount }}</p>
               <p class="text-[9px] text-muted-foreground">{{ t('usageOverview.sessions') }}</p>
             </div>
           </div>
         </div>
-        <div class="space-y-3">
-          <div v-for="(row, index) in modelRows" :key="row.model" class="space-y-1.5">
+        <div class="space-y-2.5">
+          <div v-for="(row, index) in modelRows" :key="row.model" class="space-y-1">
             <div class="flex items-center justify-between gap-3 text-[11px]">
               <span class="flex min-w-0 items-center gap-2 truncate font-medium" :title="row.model">
                 <i class="size-2 shrink-0 rounded-sm" :style="{ background: modelChartPalette[index % modelChartPalette.length] }" />
@@ -337,7 +391,7 @@ onMounted(loadUsage)
           </p>
         </div>
       </div>
-      <div v-else class="grid min-h-36 place-items-center text-center">
+      <div v-else class="grid min-h-28 place-items-center rounded-lg bg-muted/20 text-center">
         <div>
           <BarChart3 :size="20" class="mx-auto mb-2 text-muted-foreground/60" />
           <p class="text-xs font-medium">{{ t('usageOverview.noModels') }}</p>
@@ -351,23 +405,125 @@ onMounted(loadUsage)
 <style scoped>
 .heatmap-grid {
   display: grid;
+  flex: 0 0 auto;
   grid-auto-flow: column;
-  gap: 4px;
+  width: max-content;
+  min-width: 100%;
+  gap: 3px;
 }
 
 .heatmap-grid.is-strip {
-  grid-auto-columns: 14px;
-  grid-template-rows: 14px;
+  grid-auto-columns: 10px;
+  grid-template-rows: 10px;
   justify-content: center;
 }
 
 .heatmap-grid.is-calendar {
-  grid-auto-columns: 14px;
-  grid-template-rows: repeat(7, 14px);
+  grid-auto-columns: 10px;
+  grid-template-rows: repeat(7, 10px);
   justify-content: center;
 }
 
+.heatmap-grid.is-calendar.is-scrollable {
+  justify-content: end;
+}
+
+.usage-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+}
+
+.usage-metric {
+  min-width: 0;
+  padding: 0 0.625rem;
+  border-left: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
+}
+
+.usage-metric:first-child {
+  border-left-color: transparent;
+}
+
+.usage-metric p {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 9px;
+  line-height: 1rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-metric strong {
+  display: block;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  line-height: 1.125rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.875rem;
+  padding-top: 0.125rem;
+  color: var(--muted-foreground);
+  font-size: 9px;
+}
+
+.usage-details strong {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.usage-heatmap {
+  display: flex;
+  min-height: 104px;
+  align-items: center;
+  cursor: default;
+  overscroll-behavior-inline: contain;
+  scrollbar-color: color-mix(in oklab, var(--muted-foreground) 28%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.usage-heatmap.can-scroll {
+  cursor: grab;
+}
+
+.usage-heatmap.is-dragging {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.usage-heatmap::-webkit-scrollbar {
+  height: 6px;
+}
+
+.usage-heatmap::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.usage-heatmap::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted-foreground) 28%, transparent);
+  background-clip: padding-box;
+}
+
+.usage-heatmap-cell {
+  transition: filter 120ms ease, box-shadow 120ms ease;
+}
+
+.usage-heatmap-cell:hover {
+  filter: saturate(1.15) brightness(0.94);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--foreground) 20%, transparent);
+}
+
 .usage-overview {
+  container-type: inline-size;
   animation: usage-card-in 480ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -389,6 +545,17 @@ onMounted(loadUsage)
   .usage-overview,
   .usage-loading-cell {
     animation: none;
+  }
+}
+
+@container (max-width: 470px) {
+  .usage-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 0.5rem;
+  }
+
+  .usage-metric:nth-child(odd) {
+    border-left-color: transparent;
   }
 }
 </style>

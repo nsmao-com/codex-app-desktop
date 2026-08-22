@@ -1138,7 +1138,7 @@ onUnmounted(() => {
             role="status"
             aria-live="polite"
           >
-            <ThinkingOrb state="solving" :size="20" :label="thinkingLabel" />
+            <ThinkingOrb state="composing" :size="20" :label="thinkingLabel" />
             <span class="reasoning-shimmer min-w-0 max-w-full">
               <span class="reasoning-shimmer__base truncate text-[13px]">{{ thinkingLabel }}</span>
               <span class="reasoning-shimmer__sheen truncate text-[13px]" aria-hidden="true">{{ thinkingLabel }}</span>

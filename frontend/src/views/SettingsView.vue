@@ -2,7 +2,6 @@
 import {
   Anchor,
   Archive,
-  ArrowLeft,
   BarChart3,
   Blocks,
   Check,
@@ -27,6 +26,7 @@ import {
   LoaderCircle,
   Trash2,
   UserRound,
+  X,
   Zap,
 } from '@lucide/vue'
 import { computed, onMounted, onUnmounted, shallowRef, watch, type Component } from 'vue'
@@ -63,6 +63,7 @@ import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type { ExternalRuntimeCatalog } from '../../bindings/nice_codex_desktop/models'
 import { supportedLocales } from '@/i18n'
 import { ACCENT_OPTIONS, type AppAccent } from '@/lib/accents'
+import type { AppTheme } from '@/composables/useAppearance'
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
@@ -715,6 +716,7 @@ const sendModifierLabel = computed(() =>
 const fontOptions = computed<SelectOption[]>(() => {
   const builtins: SelectOption[] = [
     { value: 'manrope', label: t('settings.fontManrope'), description: t('settings.fontManropeHint') },
+    { value: 'claude', label: t('settings.fontClaude'), description: t('settings.fontClaudeHint') },
     { value: 'system', label: t('settings.fontSystem'), description: t('settings.fontSystemHint') },
     { value: 'mono', label: t('settings.fontMono'), description: t('settings.fontMonoHint') },
   ]
@@ -731,6 +733,27 @@ const fontOptions = computed<SelectOption[]>(() => {
   }
   return builtins
 })
+
+const themeOptions = computed<Array<{
+  value: AppTheme
+  label: string
+  shell: string
+  surface: string
+  accent: string
+}>>(() => [
+  { value: 'light', label: t('settings.light'), shell: '#f3f4f6', surface: '#ffffff', accent: '#339cff' },
+  { value: 'dark', label: t('settings.dark'), shell: '#181818', surface: '#2b2b29', accent: '#d97757' },
+  { value: 'claude', label: t('settings.claude'), shell: '#f4f3ef', surface: '#fffefa', accent: '#d97757' },
+  { value: 'system', label: t('settings.system'), shell: '#e9e9e7', surface: '#fafaf9', accent: '#6f6f6b' },
+])
+
+function selectTheme(value: AppTheme): void {
+  theme.value = value
+  if (value !== 'claude') return
+  fontFamily.value = 'claude'
+  accentColor.value = 'amber'
+  translucentSidebar.value = false
+}
 
 const terminalOptions = computed<SelectOption[]>(() => appStore.terminalProfiles.map((option) => ({
   value: option.id,
@@ -937,7 +960,7 @@ function deleteArchived(threadID: string): void {
 
 watch([theme, accentColor, fontFamily, translucentSidebar, highContrast, pointerCursor, reduceMotion, uiFontSize, codeFontSize], () => {
   appStore.previewAppearance({
-    theme: theme.value as 'light' | 'dark' | 'system',
+    theme: theme.value as AppTheme,
     accentColor: accentColor.value as AppAccent,
     fontFamily: fontFamily.value,
     translucentSidebar: translucentSidebar.value,
@@ -1940,10 +1963,6 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
     <!-- Left menu sits on the gray shell, matching the main workbench sidebar. -->
     <aside class="flex w-[210px] shrink-0 flex-col lg:w-[248px]">
       <div class="space-y-2 px-3 pb-2 pt-1">
-        <Button variant="ghost" class="h-8 w-full justify-start px-2 text-xs text-muted-foreground" @click="closeSettings">
-          <ArrowLeft :size="14" class="mr-2" />
-          {{ t('settings.backToApp') }}
-        </Button>
         <div class="relative">
           <Search class="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -1994,6 +2013,17 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
             </div>
             <Button v-if="activePanel !== 'usage' && activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching">
               {{ saving ? t('common.saving') : t('settings.save') }}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              class="size-8 rounded-lg text-foreground/80 hover:bg-muted"
+              :aria-label="t('settings.close')"
+              :title="t('settings.close')"
+              @click="closeSettings"
+            >
+              <X :size="18" />
             </Button>
           </div>
           <div class="space-y-1.5">
@@ -2301,22 +2331,47 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
             <template v-else-if="activePanel === 'appearance'">
               <section class="overflow-hidden rounded-xl border bg-card">
                 <div class="divide-y">
-                  <div class="flex items-center justify-between gap-4 px-4 py-3">
+                  <div class="space-y-2.5 px-4 py-3.5">
                     <p class="text-[13px]">{{ t('settings.theme') }}</p>
-                    <div class="flex rounded-md border p-0.5">
-                      <Button
-                        v-for="option in ['light', 'dark', 'system'] as const"
-                        :key="option"
+                    <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      <button
+                        v-for="option in themeOptions"
+                        :key="option.value"
                         type="button"
-                        variant="ghost"
-                        size="sm"
-                        class="h-7 px-2.5 text-xs"
-                        :class="theme === option ? 'bg-muted' : ''"
-                        @click="theme = option"
+                        class="group relative overflow-hidden rounded-lg border p-1.5 text-left outline-none transition-[border-color,box-shadow,transform] focus-visible:ring-2 focus-visible:ring-ring/40"
+                        :class="theme === option.value
+                          ? 'border-foreground/35 shadow-sm'
+                          : 'border-border/80 hover:border-foreground/20'"
+                        :aria-pressed="theme === option.value"
+                        @click="selectTheme(option.value)"
                       >
-                        {{ t(`settings.${option}`) }}
-                      </Button>
+                        <span
+                          class="relative block h-11 overflow-hidden rounded-md border border-black/[0.06]"
+                          :style="{ backgroundColor: option.shell }"
+                          aria-hidden="true"
+                        >
+                          <span
+                            class="absolute inset-y-0 left-0 w-[31%] border-r border-black/[0.06]"
+                            :style="{ backgroundColor: option.shell }"
+                          />
+                          <span
+                            class="absolute bottom-1.5 left-[38%] right-1.5 top-1.5 rounded-[5px] border border-black/[0.07]"
+                            :style="{ backgroundColor: option.surface }"
+                          />
+                          <span
+                            class="absolute bottom-2.5 right-2.5 size-2 rounded-full"
+                            :style="{ backgroundColor: option.accent }"
+                          />
+                        </span>
+                        <span class="mt-1.5 flex items-center justify-between gap-2 px-0.5 text-[11px] font-medium">
+                          <span class="truncate">{{ option.label }}</span>
+                          <Check v-if="theme === option.value" :size="12" class="shrink-0" />
+                        </span>
+                      </button>
                     </div>
+                    <p v-if="theme === 'claude'" class="text-[11px] leading-4 text-muted-foreground">
+                      {{ t('settings.claudeThemeHint') }}
+                    </p>
                   </div>
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <p class="text-[13px]">{{ t('settings.fontFamily') }}</p>

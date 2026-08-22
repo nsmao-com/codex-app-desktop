@@ -17,25 +17,33 @@ import {
   ListOrdered,
   ListTodo,
   LoaderCircle,
-  Monitor,
+  Maximize2,
+  Minimize2,
   Octagon,
   Pencil,
   Plug,
   Plus,
   Puzzle,
   RotateCcw,
+  Search,
   Shield,
   X,
   Zap,
 } from '@lucide/vue'
-import { computed, nextTick, onMounted, shallowRef, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onMounted, shallowRef, useTemplateRef, watch, type Component } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import AttachmentImage from '@/components/AttachmentImage.vue'
+import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
+import GeminiIcon from '@/components/icons/GeminiIcon.vue'
+import GrokIcon from '@/components/icons/GrokIcon.vue'
+import OpenAIIcon from '@/components/icons/OpenAIIcon.vue'
+import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -114,12 +122,18 @@ const emit = defineEmits<{
   'append-draft-images': [payload: { draftKey: string; images: string[] }]
 }>()
 const composer = useTemplateRef<HTMLElement>('composer')
+const composerInput = useTemplateRef<InstanceType<typeof Textarea>>('composerInput')
 const composing = shallowRef(false)
 const attachmentPreviews = shallowRef<Record<string, string>>({})
 const slashIndex = shallowRef(0)
 const skillIndex = shallowRef(0)
 const pluginIndex = shallowRef(0)
 const dragDepth = shallowRef(0)
+const composerExpanded = shallowRef(false)
+const composerRuntimeSwitching = shallowRef(false)
+const branchMenuOpen = shallowRef(false)
+const branchQuery = shallowRef('')
+const branchSearchInput = useTemplateRef<InstanceType<typeof Input>>('branchSearchInput')
 const sentHistoryIndex = shallowRef(-1)
 const sentHistorySnapshot = shallowRef<string[]>([])
 const sentHistoryDraft = shallowRef('')
@@ -142,6 +156,7 @@ let applyingSentHistory = false
 let githubContextRequest = 0
 let sendAdmissionSequence = 0
 const COMPOSER_MAX_COLLAPSED = 200
+const COMPOSER_MAX_EXPANDED = 480
 
 const composerSessionId = computed(() => {
   if (isArenaPane.value) return boundSessionId.value
@@ -742,10 +757,6 @@ const effortOptions = computed(() => {
 const effortCurrentIndex = computed(() => Math.max(0, effortOptions.value.findIndex((item) => item.value === displayEffort.value)))
 const effortDisplayIndex = computed(() => effortPreviewIndex.value >= 0 ? effortPreviewIndex.value : effortCurrentIndex.value)
 const effortPopoverLabel = computed(() => effortOptions.value[effortDisplayIndex.value]?.label || selectedEffortLabel.value)
-const effortProgress = computed(() => {
-  if (effortOptions.value.length <= 1) return 0
-  return effortDisplayIndex.value / (effortOptions.value.length - 1) * 100
-})
 
 function effortMarkerPosition(index: number): string {
   if (effortOptions.value.length <= 1) return '0%'
@@ -810,10 +821,50 @@ const {
   isArenaPane,
   currentWorkspacePath: composerWorkspacePath,
 })
-const composerRuntimeLabel = computed(() =>
-  appStore.agentProviders.find((item) => item.kind === paneRuntime.value)?.name
-    || (paneRuntime.value === 'opencode' ? 'OpenCode' : paneRuntime.value.charAt(0).toUpperCase() + paneRuntime.value.slice(1)),
+watch(composerWorkspacePath, () => {
+  branchMenuOpen.value = false
+  branchQuery.value = ''
+})
+type ComposerRuntimeOption = {
+  kind: WorkspaceRuntime
+  name: string
+  icon: Component
+  ready: boolean
+  message: string
+}
+
+const COMPOSER_RUNTIME_ORDER: WorkspaceRuntime[] = ['codex', 'claude', 'grok', 'gemini', 'opencode']
+const COMPOSER_RUNTIME_FALLBACK_NAMES: Record<WorkspaceRuntime, string> = {
+  codex: 'Codex',
+  claude: 'Claude',
+  grok: 'Grok',
+  gemini: 'Gemini',
+  opencode: 'OpenCode',
+}
+const COMPOSER_RUNTIME_ICONS: Record<WorkspaceRuntime, Component> = {
+  codex: OpenAIIcon,
+  claude: ClaudeIcon,
+  grok: GrokIcon,
+  gemini: GeminiIcon,
+  opencode: OpenCodeIcon,
+}
+const composerRuntimeOptions = computed<ComposerRuntimeOption[]>(() =>
+  COMPOSER_RUNTIME_ORDER.map((kind) => {
+    const provider = appStore.agentProviders.find((item) => item.kind === kind)
+    return {
+      kind,
+      name: provider?.name || COMPOSER_RUNTIME_FALLBACK_NAMES[kind],
+      icon: COMPOSER_RUNTIME_ICONS[kind],
+      ready: Boolean(provider?.runtimeReady),
+      message: provider?.message || '',
+    }
+  }),
 )
+const composerRuntimeLabel = computed(() =>
+  composerRuntimeOptions.value.find((item) => item.kind === paneRuntime.value)?.name
+    || COMPOSER_RUNTIME_FALLBACK_NAMES[paneRuntime.value],
+)
+const composerRuntimeIcon = computed(() => COMPOSER_RUNTIME_ICONS[paneRuntime.value])
 
 function relatedQueueRows<T extends { id: string }>(
   record: Record<string, T[]>,
@@ -1007,6 +1058,73 @@ const activeRuntimeSending = computed(() => {
   }
   return codexStore.isThreadSubmitting(composerSessionId.value)
 })
+const composerRuntimeInteractionDisabled = computed(() => Boolean(
+  composerRuntimeSwitching.value
+  || activeRuntimeTurnRunning.value
+  || activeRuntimeSending.value
+  || sendAdmissionPending.value,
+))
+
+async function selectComposerRuntime(runtime: WorkspaceRuntime): Promise<void> {
+  if (composerRuntimeInteractionDisabled.value || runtime === paneRuntime.value) return
+  composerRuntimeSwitching.value = true
+  try {
+    if (isArenaPane.value && paneId.value) {
+      arenaStore.setPaneRuntime(paneId.value, runtime)
+      return
+    }
+    const switched = await appStore.setActiveRuntime(runtime)
+    if (!switched) notify('error', t('sidebar.runtimeSwitchFailed'))
+  } catch (error) {
+    notify('error', t('sidebar.runtimeSwitchFailed'), error instanceof Error ? error.message : String(error))
+  } finally {
+    composerRuntimeSwitching.value = false
+  }
+}
+const branchInteractionDisabled = computed(() => Boolean(
+  composerWorkspaceSwitching.value
+  || workspaceStore.switchingWorkspace
+  || workspaceStore.branchSwitching
+  || activeRuntimeTurnRunning.value
+  || activeRuntimeSending.value
+  || sendAdmissionPending.value,
+))
+const filteredGitBranches = computed(() => {
+  const query = branchQuery.value.trim().toLocaleLowerCase()
+  if (!query) return workspaceStore.gitBranches
+  return workspaceStore.gitBranches.filter((branch) => branch.toLocaleLowerCase().includes(query))
+})
+watch(branchInteractionDisabled, (disabled) => {
+  if (disabled) branchMenuOpen.value = false
+})
+
+async function onBranchMenuOpenChange(open: boolean): Promise<void> {
+  if (!open) {
+    branchMenuOpen.value = false
+    branchQuery.value = ''
+    return
+  }
+  if (branchInteractionDisabled.value) return
+  branchMenuOpen.value = true
+  await nextTick()
+  const input = branchSearchInput.value?.$el as HTMLInputElement | undefined
+  input?.focus()
+  await workspaceStore.loadGitBranches(composerWorkspacePath.value)
+}
+
+async function selectGitBranch(branch: string): Promise<void> {
+  if (!branch || branchInteractionDisabled.value) return
+  branchMenuOpen.value = false
+  branchQuery.value = ''
+  if (branch === composerBranch.value) return
+  await workspaceStore.switchBranch(branch, composerWorkspacePath.value)
+}
+
+function selectFirstFilteredBranch(): void {
+  const branch = filteredGitBranches.value[0]
+  if (branch) void selectGitBranch(branch)
+}
+
 const stopDisabled = computed(() => {
   if (!isArenaPane.value && workspaceStore.switchingWorkspace) return true
   if (isGrokMode.value) return grokStore.isSessionInterrupting(composerSessionId.value)
@@ -1044,6 +1162,7 @@ watch(modelValue, () => {
   if (!applyingSentHistory && sentHistoryIndex.value >= 0) resetSentHistoryNavigation()
   resize()
 }, { flush: 'post' })
+watch(composerExpanded, resize, { flush: 'post' })
 watch(() => props.draftKey, resetSentHistoryNavigation, { flush: 'sync' })
 watch(
   [selectableModels, displayModel],
@@ -1061,11 +1180,28 @@ onMounted(resize)
 
 function resize(): void {
   void nextTick(() => {
-    const textarea = composer.value?.querySelector('textarea')
+    const textarea = composerInput.value?.$el as HTMLTextAreaElement | undefined
     if (!textarea) return
-    const max = Math.min(COMPOSER_MAX_COLLAPSED, Math.max(120, Math.floor(window.innerHeight * 0.3)))
+    const max = composerExpanded.value
+      ? Math.min(COMPOSER_MAX_EXPANDED, Math.max(220, Math.floor(window.innerHeight * 0.44)))
+      : Math.min(COMPOSER_MAX_COLLAPSED, Math.max(120, Math.floor(window.innerHeight * 0.3)))
     textarea.style.height = '0px'
-    textarea.style.height = `${Math.min(textarea.scrollHeight, max)}px`
+    if (composerExpanded.value) {
+      textarea.style.height = `${max}px`
+      textarea.style.overflowY = 'auto'
+      return
+    }
+    const height = Math.min(textarea.scrollHeight, max)
+    textarea.style.height = `${height}px`
+    textarea.style.overflowY = textarea.scrollHeight > max ? 'auto' : 'hidden'
+  })
+}
+
+function toggleComposerHeight(): void {
+  composerExpanded.value = !composerExpanded.value
+  void nextTick(() => {
+    const textarea = composerInput.value?.$el as HTMLTextAreaElement | undefined
+    textarea?.focus({ preventScroll: true })
   })
 }
 
@@ -1096,7 +1232,7 @@ function applySentHistoryValue(next: string): void {
   applyingSentHistory = true
   modelValue.value = next
   void nextTick(() => {
-    const textarea = composer.value?.querySelector('textarea')
+    const textarea = composerInput.value?.$el as HTMLTextAreaElement | undefined
     if (textarea) {
       const cursor = next.length
       textarea.setSelectionRange(cursor, cursor)
@@ -1620,7 +1756,7 @@ async function attachImages(): Promise<void> {
 
 function focusComposerInput(): void {
   void nextTick(() => {
-    const textarea = composer.value?.querySelector('textarea')
+    const textarea = composerInput.value?.$el as HTMLTextAreaElement | undefined
     textarea?.focus()
     if (textarea) textarea.setSelectionRange(textarea.value.length, textarea.value.length)
   })
@@ -2115,10 +2251,57 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       @drop="onDrop"
     >
       <div class="composer-context-row flex min-w-0 items-center gap-1.5 overflow-x-auto px-0.5 pb-0.5">
-        <span class="composer-context-chip">
-          <Monitor :size="12" />
-          {{ composerRuntimeLabel }}
-        </span>
+        <DropdownMenu v-if="!isArenaPane">
+          <DropdownMenuTrigger as-child>
+            <button
+              type="button"
+              class="composer-context-chip composer-context-chip-button"
+              :title="`${t('settings.modelProvider')}: ${composerRuntimeLabel}`"
+              :aria-label="`${t('settings.modelProvider')}: ${composerRuntimeLabel}`"
+              :aria-busy="composerRuntimeSwitching"
+              :disabled="composerRuntimeInteractionDisabled"
+            >
+              <LoaderCircle v-if="composerRuntimeSwitching" :size="12" class="shrink-0 animate-spin" />
+              <component :is="composerRuntimeIcon" v-else :size="12" class="shrink-0" />
+              <span>{{ composerRuntimeLabel }}</span>
+              <ChevronDown :size="11" class="shrink-0 opacity-55" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="start"
+            side="bottom"
+            :side-offset="6"
+            class="w-64 rounded-xl p-1.5 shadow-xl"
+          >
+            <div class="px-2.5 pb-2 pt-1.5">
+              <p class="text-xs font-medium">{{ t('settings.modelProvider') }}</p>
+              <p class="mt-0.5 text-[10px] leading-4 text-muted-foreground">{{ t('chat.providerSelectorHint') }}</p>
+            </div>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              v-for="runtime in composerRuntimeOptions"
+              :key="runtime.kind"
+              class="gap-2.5 rounded-lg px-2.5 py-2"
+              :title="runtime.message || runtime.name"
+              :disabled="composerRuntimeInteractionDisabled"
+              @click="selectComposerRuntime(runtime.kind)"
+            >
+              <component :is="runtime.icon" :size="14" class="shrink-0 text-muted-foreground" />
+              <span class="min-w-0 flex-1 truncate text-xs">{{ runtime.name }}</span>
+              <span
+                class="text-[10px]"
+                :class="runtime.ready ? 'text-muted-foreground' : 'text-destructive'"
+              >
+                {{ runtime.ready ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
+              </span>
+              <Check
+                :size="14"
+                class="shrink-0"
+                :class="runtime.kind === paneRuntime ? 'opacity-100' : 'opacity-0'"
+              />
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <DropdownMenu>
           <DropdownMenuTrigger as-child>
             <button
@@ -2170,10 +2353,88 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <span v-if="composerBranch" class="composer-context-chip">
-          <GitBranch :size="12" />
-          <span class="max-w-40 truncate">{{ composerBranch }}</span>
-        </span>
+        <Popover
+          v-if="composerBranch"
+          :open="branchMenuOpen"
+          @update:open="onBranchMenuOpenChange"
+        >
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              class="composer-context-chip composer-context-chip-button max-w-52"
+              :title="composerBranch"
+              :aria-label="`${t('settings.gitBranch')}: ${composerBranch}`"
+              :aria-expanded="branchMenuOpen"
+              :aria-busy="workspaceStore.gitBranchesLoading || workspaceStore.branchSwitching"
+              :disabled="branchInteractionDisabled"
+            >
+              <LoaderCircle
+                v-if="workspaceStore.gitBranchesLoading || workspaceStore.branchSwitching"
+                :size="12"
+                class="shrink-0 animate-spin"
+              />
+              <GitBranch v-else :size="12" class="shrink-0" />
+              <span class="max-w-36 truncate">{{ composerBranch }}</span>
+              <ChevronDown :size="11" class="shrink-0 opacity-55" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent
+            align="start"
+            side="bottom"
+            :side-offset="6"
+            class="w-72 max-w-[calc(100vw-1rem)] overflow-hidden rounded-xl p-0 shadow-xl"
+            @open-auto-focus.prevent
+          >
+            <div class="max-h-64 overflow-y-auto p-1.5">
+              <div
+                v-if="workspaceStore.gitBranchesLoading"
+                class="flex items-center justify-center gap-2 px-3 py-8 text-xs text-muted-foreground"
+              >
+                <LoaderCircle :size="14" class="animate-spin" />
+                {{ t('common.loading') }}
+              </div>
+              <template v-else>
+                <button
+                  v-for="branch in filteredGitBranches"
+                  :key="branch"
+                  type="button"
+                  class="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
+                  :disabled="workspaceStore.branchSwitching"
+                  :title="branch"
+                  @click="selectGitBranch(branch)"
+                >
+                  <GitBranch :size="13" class="shrink-0 text-muted-foreground" />
+                  <span class="min-w-0 flex-1 truncate">{{ branch }}</span>
+                  <Check
+                    :size="14"
+                    class="shrink-0"
+                    :class="branch === composerBranch ? 'opacity-100' : 'opacity-0'"
+                  />
+                </button>
+              </template>
+              <p
+                v-if="!workspaceStore.gitBranchesLoading && !filteredGitBranches.length"
+                class="px-3 py-8 text-center text-[11px] text-muted-foreground"
+              >
+                {{ t('git.noBranches') }}
+              </p>
+            </div>
+            <div class="flex items-center gap-2 border-t bg-muted/20 px-2.5">
+              <Search :size="13" class="shrink-0 text-muted-foreground" />
+              <Input
+                ref="branchSearchInput"
+                v-model="branchQuery"
+                type="search"
+                autocomplete="off"
+                spellcheck="false"
+                class="h-10 border-0 bg-transparent px-0 text-xs shadow-none focus-visible:border-0 focus-visible:ring-0"
+                :placeholder="t('git.searchBranches')"
+                @keydown.escape.stop="onBranchMenuOpenChange(false)"
+                @keydown.enter.prevent="selectFirstFilteredBranch"
+              />
+            </div>
+          </PopoverContent>
+        </Popover>
       </div>
 
       <div
@@ -2191,7 +2452,24 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         {{ t('chat.dropImages') }}
       </div>
 
-      <div v-if="attachedImages.length" class="flex flex-wrap gap-1.5 px-1">
+      <div class="absolute right-2 top-2 z-[2]">
+        <SimpleTooltip :content="composerExpanded ? t('chat.collapseComposer') : t('chat.expandComposer')">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            class="size-6 rounded-md bg-card/80 text-muted-foreground shadow-none backdrop-blur-sm hover:bg-muted"
+            :aria-label="composerExpanded ? t('chat.collapseComposer') : t('chat.expandComposer')"
+            :aria-pressed="composerExpanded"
+            @click="toggleComposerHeight"
+          >
+            <Minimize2 v-if="composerExpanded" :size="12" />
+            <Maximize2 v-else :size="12" />
+          </Button>
+        </SimpleTooltip>
+      </div>
+
+      <div v-if="attachedImages.length" class="flex flex-wrap gap-1.5 px-1 pr-8">
         <div
           v-for="path in attachedImages"
           :key="path"
@@ -2488,11 +2766,13 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       </div>
 
       <Textarea
+        ref="composerInput"
         v-model="modelValue"
         rows="1"
         :placeholder="composerPlaceholder"
         :aria-description="composerShortcutHint"
         class="min-h-12 resize-none border-0 bg-transparent px-1.5 py-2 pr-9 text-[15px] leading-6 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
+        :class="composerExpanded ? 'overflow-y-auto' : 'overflow-y-hidden'"
         @compositionend="composing = false"
         @compositionstart="composing = true"
         @keydown="onKeydown"
@@ -2714,16 +2994,13 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               <div
                 class="effort-scale"
                 :class="effortDragging ? 'is-dragging' : ''"
-                :style="`--effort-progress: ${effortProgress}%`"
               >
                 <div class="effort-scale-track" aria-hidden="true">
-                  <span class="effort-scale-fill" />
                   <span
                     v-for="(_, index) in effortOptions"
                     :key="`effort-marker-${index}`"
                     class="effort-scale-marker"
                     :class="{
-                      'is-reached': index <= effortDisplayIndex,
                       'is-current': index === effortDisplayIndex,
                     }"
                     :style="{ left: effortMarkerPosition(index) }"

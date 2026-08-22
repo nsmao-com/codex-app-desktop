@@ -8,18 +8,18 @@
 
 .composer-context-chip {
   display: inline-flex;
-  height: 1.8rem;
+  height: 1.65rem;
   flex: none;
   align-items: center;
   gap: 0.38rem;
   border: 1px solid color-mix(in oklab, var(--border) 78%, transparent);
-  border-radius: 0.6rem;
-  background: color-mix(in oklab, var(--card) 90%, transparent);
-  padding: 0 0.62rem;
+  border-radius: 0.52rem;
+  background: color-mix(in oklab, var(--surface-soft) 92%, transparent);
+  padding: 0 0.54rem;
   color: color-mix(in oklab, var(--foreground) 76%, transparent);
   font-size: 0.7rem;
   line-height: 1;
-  box-shadow: 0 1px 2px color-mix(in oklab, var(--foreground) 7%, transparent);
+  box-shadow: none;
 }
 
 .composer-context-chip-button {
@@ -77,48 +77,34 @@
 
 .effort-scale {
   position: relative;
-  height: 1.7rem;
-  --effort-progress: 0%;
+  height: 1.9rem;
 }
 
 .effort-scale-track {
   position: absolute;
-  inset: 50% 0.69rem auto;
-  height: 0.38rem;
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--muted) 86%, transparent);
+  inset: 50% 0.75rem auto;
+  height: 1.72rem;
+  border: 1px solid color-mix(in oklab, var(--border) 48%, transparent);
+  border-radius: 0.62rem;
+  background: color-mix(in oklab, var(--muted) 95%, var(--foreground));
+  box-shadow: inset 0 1px 0 color-mix(in oklab, var(--background) 45%, transparent);
   transform: translateY(-50%);
-}
-
-.effort-scale-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: var(--effort-progress);
-  border-radius: inherit;
-  background: color-mix(in oklab, var(--primary) 72%, var(--foreground));
-  transition: width 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .effort-scale-marker {
   position: absolute;
   top: 50%;
-  width: 0.34rem;
-  height: 0.34rem;
-  border: 1px solid color-mix(in oklab, var(--muted-foreground) 38%, transparent);
+  width: 0.24rem;
+  height: 0.24rem;
+  border: 0;
   border-radius: 999px;
-  background: var(--background);
+  background: color-mix(in oklab, var(--muted-foreground) 50%, transparent);
   transform: translate(-50%, -50%);
   transition: background-color 160ms ease, border-color 160ms ease, transform 160ms ease;
 }
 
-.effort-scale-marker.is-reached {
-  border-color: color-mix(in oklab, var(--primary) 78%, transparent);
-  background: var(--primary);
-}
-
 .effort-scale-marker.is-current {
-  transform: translate(-50%, -50%) scale(1.35);
-  box-shadow: 0 0 0 0.2rem color-mix(in oklab, var(--primary) 12%, transparent);
+  background: color-mix(in oklab, var(--primary) 72%, var(--muted-foreground));
 }
 
 .effort-slider-input {
@@ -137,26 +123,26 @@
 }
 
 .effort-slider-input::-webkit-slider-runnable-track {
-  height: 0.38rem;
+  height: 1.72rem;
   background: transparent;
 }
 
 .effort-slider-input::-webkit-slider-thumb {
-  width: 1.38rem;
-  height: 1.38rem;
-  margin-top: -0.5rem;
+  width: 1.5rem;
+  height: 1.72rem;
+  margin-top: 0;
   appearance: none;
-  border: 3px solid var(--background);
-  border-radius: 999px;
-  background: var(--primary);
+  border: 1px solid color-mix(in oklab, var(--border) 82%, var(--foreground));
+  border-radius: 0.58rem;
+  background: var(--popover);
   box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--primary) 35%, transparent),
-    0 4px 10px color-mix(in oklab, var(--foreground) 23%, transparent);
+    0 1px 2px color-mix(in oklab, var(--foreground) 12%, transparent),
+    0 3px 8px color-mix(in oklab, var(--foreground) 10%, transparent);
   transition: transform 160ms ease, box-shadow 160ms ease;
 }
 
 .effort-slider-input::-moz-range-track {
-  height: 0.38rem;
+  height: 1.72rem;
   border: 0;
   background: transparent;
 }
@@ -166,31 +152,47 @@
 }
 
 .effort-slider-input::-moz-range-thumb {
-  width: 1.12rem;
-  height: 1.12rem;
-  border: 3px solid var(--background);
-  border-radius: 999px;
-  background: var(--primary);
+  width: 1.5rem;
+  height: 1.72rem;
+  border: 1px solid color-mix(in oklab, var(--border) 82%, var(--foreground));
+  border-radius: 0.58rem;
+  background: var(--popover);
   box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--primary) 35%, transparent),
-    0 4px 10px color-mix(in oklab, var(--foreground) 23%, transparent);
+    0 1px 2px color-mix(in oklab, var(--foreground) 12%, transparent),
+    0 3px 8px color-mix(in oklab, var(--foreground) 10%, transparent);
   transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+:root[data-theme='dark'] .effort-slider-input::-webkit-slider-thumb {
+  border-color: color-mix(in oklab, white 78%, var(--border));
+  background: #f7f7f5;
+  box-shadow:
+    0 1px 2px color-mix(in oklab, black 28%, transparent),
+    0 3px 9px color-mix(in oklab, black 26%, transparent);
+}
+
+:root[data-theme='dark'] .effort-slider-input::-moz-range-thumb {
+  border-color: color-mix(in oklab, white 78%, var(--border));
+  background: #f7f7f5;
+  box-shadow:
+    0 1px 2px color-mix(in oklab, black 28%, transparent),
+    0 3px 9px color-mix(in oklab, black 26%, transparent);
 }
 
 .effort-scale.is-dragging .effort-slider-input::-webkit-slider-thumb,
 .effort-slider-input:focus-visible::-webkit-slider-thumb {
-  transform: scale(1.12);
+  transform: scale(1.04);
   box-shadow:
-    0 0 0 5px color-mix(in oklab, var(--primary) 14%, transparent),
-    0 5px 12px color-mix(in oklab, var(--foreground) 28%, transparent);
+    0 0 0 3px color-mix(in oklab, var(--primary) 12%, transparent),
+    0 4px 10px color-mix(in oklab, var(--foreground) 14%, transparent);
 }
 
 .effort-scale.is-dragging .effort-slider-input::-moz-range-thumb,
 .effort-slider-input:focus-visible::-moz-range-thumb {
-  transform: scale(1.12);
+  transform: scale(1.04);
   box-shadow:
-    0 0 0 5px color-mix(in oklab, var(--primary) 14%, transparent),
-    0 5px 12px color-mix(in oklab, var(--foreground) 28%, transparent);
+    0 0 0 3px color-mix(in oklab, var(--primary) 12%, transparent),
+    0 4px 10px color-mix(in oklab, var(--foreground) 14%, transparent);
 }
 
 .effort-slider-input:focus-visible {
@@ -226,9 +228,9 @@
 }
 
 .effort-scale-label.is-current {
-  background: color-mix(in oklab, var(--primary) 11%, transparent);
-  color: var(--primary);
-  box-shadow: 0 0 0 1px color-mix(in oklab, var(--primary) 12%, transparent);
+  background: color-mix(in oklab, var(--muted) 82%, transparent);
+  color: var(--foreground);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--border) 62%, transparent);
 }
 
 .effort-scale-label.is-first {
@@ -313,7 +315,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .composer-context-chip-button,
-  .effort-scale-fill,
   .effort-scale-marker,
   .effort-slider-input::-webkit-slider-thumb,
   .effort-slider-input::-moz-range-thumb,

@@ -27,7 +27,7 @@ import { translate } from '../i18n'
 import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.4.9'
+const AppVersionFallback = '1.4.10'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -150,7 +150,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.4.9')
+  const appVersion = shallowRef('1.4.10')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -351,7 +351,7 @@ export const useAppStore = defineStore('app', () => {
     terminalProfiles.value = data.terminalProfiles ?? []
     workspace.value = data.workspace ? { ...data.workspace, changes: data.workspace.changes ?? [] } : null
     initAppearance({
-      theme: settings.value.theme as 'light' | 'dark' | 'system',
+      theme: settings.value.theme as 'light' | 'dark' | 'claude' | 'system',
       accent: settings.value.accentColor as AppAccent,
       font: settings.value.fontFamily || 'system',
       uiFontSize: settings.value.uiFontSize,
@@ -677,7 +677,7 @@ export const useAppStore = defineStore('app', () => {
     const systemIsLight = window.matchMedia('(prefers-color-scheme: light)').matches
     const nextTheme = previous.theme === 'dark'
       ? 'light'
-      : previous.theme === 'light'
+      : previous.theme === 'light' || previous.theme === 'claude'
         ? 'dark'
         : systemIsLight ? 'dark' : 'light'
     const next = { ...previous, theme: nextTheme }
@@ -706,7 +706,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function applyAppearance(appearance: Pick<UserSettings, 'theme' | 'accentColor' | 'fontFamily' | 'uiFontSize' | 'codeFontSize' | 'translucentSidebar' | 'highContrast' | 'pointerCursor' | 'reduceMotion'>): void {
-    setTheme(appearance.theme as 'light' | 'dark' | 'system')
+    setTheme(appearance.theme as 'light' | 'dark' | 'claude' | 'system')
     setAccent(appearance.accentColor as AppAccent)
     setFont(appearance.fontFamily || 'system')
     setUiPrefs({

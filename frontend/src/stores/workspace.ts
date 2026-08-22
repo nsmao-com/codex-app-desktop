@@ -21,6 +21,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const switchingWorkspace = shallowRef(false)
+  const gitBranches = shallowRef<string[]>([])
+  const gitBranchesLoading = shallowRef(false)
+  const branchSwitching = shallowRef(false)
   const diffInspectionLoading = shallowRef(false)
   const inspectedDiff = shallowRef('')
   const inspectedDiffPath = shallowRef('')
@@ -28,6 +31,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const diffSource = shallowRef<'file' | 'turn'>('file')
   let workspaceSwitchSequence = 0
   let workspaceRefreshSequence = 0
+  let gitBranchesSequence = 0
+  let gitBranchesWorkspace = ''
   let workspaceSwitchSync: Promise<void> = Promise.resolve()
 
   const currentPath = computed(() => workspace.value?.path ?? '')
@@ -278,6 +283,60 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }
   }
 
+  async function loadGitBranches(path = currentPath.value): Promise<string[]> {
+    const targetPath = path.trim()
+    const sequence = ++gitBranchesSequence
+    if (!targetPath || !isGit.value || !sameWorkspace(targetPath, currentPath.value)) {
+      gitBranches.value = []
+      gitBranchesWorkspace = ''
+      gitBranchesLoading.value = false
+      return []
+    }
+    if (!sameWorkspace(targetPath, gitBranchesWorkspace)) {
+      gitBranches.value = []
+      gitBranchesWorkspace = targetPath
+    }
+    gitBranchesLoading.value = true
+    try {
+      const branches = await backend.ListGitBranches(targetPath)
+      if (sequence !== gitBranchesSequence || !sameWorkspace(targetPath, currentPath.value)) return []
+      gitBranches.value = branches ?? []
+      return gitBranches.value
+    } catch (error) {
+      if (sequence === gitBranchesSequence && sameWorkspace(targetPath, currentPath.value)) {
+        gitBranches.value = []
+        notify('error', translate('git.branchesLoadFailed'), errorMessage(error))
+      }
+      return []
+    } finally {
+      if (sequence === gitBranchesSequence) gitBranchesLoading.value = false
+    }
+  }
+
+  async function switchBranch(name: string, path = currentPath.value): Promise<boolean> {
+    const targetBranch = name.trim()
+    const targetPath = path.trim()
+    if (!targetBranch || !targetPath || branchSwitching.value) return false
+    branchSwitching.value = true
+    try {
+      const result = await backend.SwitchGitBranch({ workspace: targetPath, name: targetBranch })
+      if (sameWorkspace(targetPath, currentPath.value)) {
+        gitBranches.value = [
+          result.branch || targetBranch,
+          ...gitBranches.value.filter((item) => item !== (result.branch || targetBranch)),
+        ]
+        await refreshWorkspace()
+      }
+      notify('success', translate('git.branchSwitched'), result.branch || targetBranch)
+      return true
+    } catch (error) {
+      notify('error', translate('git.branchSwitchFailed'), errorMessage(error))
+      return false
+    } finally {
+      branchSwitching.value = false
+    }
+  }
+
   async function commitChanges(message: string): Promise<boolean> {
     const text = message.trim()
     if (!text) return false
@@ -307,6 +366,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   return {
     workspace,
     switchingWorkspace,
+    gitBranches,
+    gitBranchesLoading,
+    branchSwitching,
     diffInspectionLoading,
     inspectedDiff,
     inspectedDiffPath,
@@ -328,6 +390,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     clearDiff,
     closeDiffSidebar,
     createBranch,
+    loadGitBranches,
+    switchBranch,
     commitChanges,
     pushBranch,
   }

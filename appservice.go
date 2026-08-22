@@ -463,7 +463,7 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 		return UserSettings{}, errors.New("invalid Claude approval policy")
 	}
 	settings.ClaudePermissionMode = normalizeClaudePermissionMode(settings.ClaudePermissionMode)
-	if !isAllowed(settings.Theme, "dark", "light", "system") {
+	if !isAllowed(settings.Theme, "dark", "light", "claude", "system") {
 		return UserSettings{}, errors.New("invalid theme")
 	}
 	if !isAllowed(settings.AccentColor, "codex", "amber", "gold", "rose", "coral", "emerald", "moss", "ocean", "sky", "slate", "graphite") {

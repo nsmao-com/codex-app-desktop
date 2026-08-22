@@ -286,9 +286,13 @@ const grokGroups = computed(() => grokStore.sessionGroups)
 const claudeGroups = computed(() => claudeStore.sessionGroups)
 const usesCodexTimeline = computed(() => sidebarIsCodexMode.value || sidebarIsGeminiMode.value || sidebarIsOpenCodeMode.value)
 const sidebarNewSessionDisabled = computed(() => {
-  if (sidebarActionRuntime.value === 'grok') return !grokStore.workspacePath
-  if (sidebarActionRuntime.value === 'claude') return !claudeStore.workspacePath
-  return !codexStore.isRuntimeReady(sidebarActionRuntime.value) || codexStore.creatingThread
+  if (workspaceStore.switchingWorkspace || codexStore.creatingThread) return true
+  const runtime = sidebarActionRuntime.value
+  if (runtime === 'codex') return !appStore.codexAvailable
+  if (runtime === 'gemini' || runtime === 'opencode') {
+    return !appStore.agentProviders.some((provider) => provider.kind === runtime && provider.runtimeReady)
+  }
+  return false
 })
 const activeSidebarSessionId = computed(() => {
   if (arenaStore.isArenaMode) {
@@ -497,6 +501,17 @@ async function createSidebarSession(): Promise<void> {
   const runtime = sidebarActionRuntime.value
   const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
   const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
+  let workspacePath = appStore.currentWorkspacePath
+  if (!workspacePath) {
+    workspacePath = usesCodexTimeline.value
+      ? await codexStore.selectProject()
+      : await workspaceStore.selectWorkspace()
+    if (!workspacePath) return
+  }
+  if (runtime === 'codex' && !codexStore.isRuntimeReady(runtime)) {
+    await codexStore.connect(workspacePath)
+    if (!codexStore.isRuntimeReady(runtime)) return
+  }
   if (runtime === 'grok') {
     grokStore.newSession()
     bindFocusedArenaSession(runtime, '', paneId)
@@ -1082,23 +1097,16 @@ function formatGrokUpdated(value?: number | null): string {
         </Button>
       </div>
 
-      <Motion
-        as="div"
-        class="w-full"
-        :whileHover="{ scale: 1.015 }"
-        :whilePress="{ scale: 0.98 }"
-        :transition="springSnappy"
+      <Button
+        variant="ghost"
+        class="h-9 w-full justify-start rounded-lg bg-sidebar-accent/70 px-2.5 text-[13px] font-medium text-sidebar-foreground shadow-none ring-1 ring-foreground/[0.035] hover:bg-sidebar-accent disabled:opacity-60"
+        :disabled="sidebarNewSessionDisabled"
+        @click="void createSidebarSession()"
       >
-        <Button
-          class="h-9 w-full justify-start rounded-lg bg-primary px-2.5 text-xs text-primary-foreground shadow-sm hover:bg-primary/90 disabled:opacity-60"
-          :disabled="sidebarNewSessionDisabled"
-          @click="void createSidebarSession()"
-        >
-          <LoaderCircle v-if="usesCodexTimeline && codexStore.creatingThread" :size="14" class="mr-1.5 animate-spin" />
-          <Plus v-else :size="14" class="mr-1.5" />
-          {{ usesCodexTimeline && codexStore.creatingThread ? t('common.loading') : t('sidebar.newTask') }}
-        </Button>
-      </Motion>
+        <LoaderCircle v-if="workspaceStore.switchingWorkspace || (usesCodexTimeline && codexStore.creatingThread)" :size="15" class="mr-2 animate-spin" />
+        <Plus v-else :size="15" class="mr-2" stroke-width="1.8" />
+        {{ workspaceStore.switchingWorkspace || (usesCodexTimeline && codexStore.creatingThread) ? t('common.loading') : t('sidebar.newTask') }}
+      </Button>
 
       <Button
         variant="ghost"
