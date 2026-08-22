@@ -2997,10 +2997,15 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               >
                 <div class="effort-scale-track" aria-hidden="true">
                   <span
+                    class="effort-scale-progress"
+                    :style="{ width: effortMarkerPosition(effortDisplayIndex) }"
+                  />
+                  <span
                     v-for="(_, index) in effortOptions"
                     :key="`effort-marker-${index}`"
                     class="effort-scale-marker"
                     :class="{
+                      'is-passed': index <= effortDisplayIndex,
                       'is-current': index === effortDisplayIndex,
                     }"
                     :style="{ left: effortMarkerPosition(index) }"
