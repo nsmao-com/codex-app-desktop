@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -999,6 +1000,8 @@ func (s *AppService) executeExternalTurn(
 	}
 	command := exec.CommandContext(ctx, commandPath, commandArgs...)
 	command.Dir = workspace
+	grokEventsPath, grokEventsOffset := grokTurnEventsCursor(provider, sessionID)
+	grokTurnStartedAt := time.Now().UTC().Add(-2 * time.Second)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return "", sessionID, nil, err
@@ -1012,6 +1015,12 @@ func (s *AppService) executeExternalTurn(
 		return "", sessionID, nil, err
 	}
 	defer cleanup()
+	var grokTerminalOutcome <-chan string
+	if provider == "grok" {
+		grokTerminalOutcome = monitorGrokTurnEnd(
+			ctx, sessionID, grokEventsPath, grokEventsOffset, grokTurnStartedAt, cleanup,
+		)
+	}
 	if onStream != nil && sessionID != "" {
 		// The process now owns this concrete native id. Publish it before reading
 		// stdout so session switches cannot outrun lifecycle/event routing.
@@ -1036,6 +1045,7 @@ func (s *AppService) executeExternalTurn(
 	// produces duplicated or reordered output on proxy-backed Claude runtimes.
 	claudeSnapshotFallback := ""
 	claudeTextSource := ""
+	sawGrokTerminal := false
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
@@ -1045,6 +1055,10 @@ func (s *AppService) executeExternalTurn(
 			continue
 		}
 		chunk, nextSessionID, final, kind := parseExternalEvent(provider, event)
+		grokTerminal := provider == "grok" && final
+		if grokTerminal {
+			sawGrokTerminal = true
+		}
 		if nextSessionID != "" {
 			if sessionID == "" && onStream != nil {
 				onStream("session", nextSessionID)
@@ -1071,6 +1085,9 @@ func (s *AppService) executeExternalTurn(
 			} else if streamErr == "" {
 				streamErr = "provider stream error"
 			}
+			if grokTerminal {
+				break
+			}
 			continue
 		}
 		if kind == "thought" {
@@ -1081,6 +1098,9 @@ func (s *AppService) executeExternalTurn(
 			chunk = openCodeText.next(event, chunk)
 		}
 		if chunk == "" {
+			if grokTerminal {
+				break
+			}
 			continue
 		}
 		if provider == "claude" && final {
@@ -1103,6 +1123,9 @@ func (s *AppService) executeExternalTurn(
 				output.Reset()
 				output.WriteString(chunk)
 			}
+			if grokTerminal {
+				break
+			}
 			continue
 		}
 		// Incremental text only (Claude stream_event deltas, Grok text, …).
@@ -1117,6 +1140,14 @@ func (s *AppService) executeExternalTurn(
 		output.WriteString(chunk)
 		emitted = true
 		stream.Push("text", chunk)
+		if grokTerminal {
+			break
+		}
+	}
+	// Grok's official `end` event is a turn boundary. Some CLI builds leave their
+	// MCP children alive afterwards, so waiting for process EOF would lock queues.
+	if sawGrokTerminal {
+		cleanup()
 	}
 	stream.Flush()
 	// No live content at all — fall back to last full assistant/result snapshot.
@@ -1127,22 +1158,135 @@ func (s *AppService) executeExternalTurn(
 	scanErr := scanner.Err()
 	waitErr := command.Wait()
 	stderrText := strings.TrimSpace(string(<-stderrResult))
+	historyTerminalOutcome := ""
+	if grokTerminalOutcome != nil {
+		select {
+		case historyTerminalOutcome = <-grokTerminalOutcome:
+		default:
+		}
+	}
+	grokTerminated := sawGrokTerminal || historyTerminalOutcome != ""
 	if ctx.Err() != nil {
 		return output.String(), sessionID, usage, context.Canceled
 	}
 	if streamErr != "" {
 		return output.String(), sessionID, usage, errors.New(truncateRunes(streamErr, 1000))
 	}
-	if scanErr != nil {
+	// Closing Grok's process tree after a confirmed terminal event may make the
+	// stdout pipe report a platform-specific read error instead of a clean EOF.
+	if scanErr != nil && !grokTerminated {
 		return output.String(), sessionID, usage, scanErr
 	}
-	if waitErr != nil {
+	if historyTerminalOutcome != "" && historyTerminalOutcome != "completed" {
+		return output.String(), sessionID, usage, fmt.Errorf("Grok turn ended with status %s", historyTerminalOutcome)
+	}
+	if waitErr != nil && !grokTerminated {
 		if stderrText != "" {
 			return output.String(), sessionID, usage, errors.New(truncateRunes(stderrText, 1000))
 		}
 		return output.String(), sessionID, usage, waitErr
 	}
 	return output.String(), sessionID, usage, nil
+}
+
+func grokTurnEventsCursor(provider, sessionID string) (string, int64) {
+	if provider != "grok" || strings.TrimSpace(sessionID) == "" {
+		return "", 0
+	}
+	session, err := findGrokNativeSession(sessionID)
+	if err != nil {
+		return "", 0
+	}
+	path := filepath.Join(session.Dir, "events.jsonl")
+	info, err := os.Stat(path)
+	if err != nil {
+		return path, 0
+	}
+	return path, info.Size()
+}
+
+func monitorGrokTurnEnd(
+	ctx context.Context,
+	sessionID, initialPath string,
+	initialOffset int64,
+	startedAt time.Time,
+	cleanup func(),
+) <-chan string {
+	result := make(chan string, 1)
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		path := initialPath
+		offset := initialOffset
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if path == "" {
+					session, err := findGrokNativeSession(sessionID)
+					if err != nil {
+						continue
+					}
+					path = filepath.Join(session.Dir, "events.jsonl")
+					offset = 0
+				}
+				outcome, nextOffset := readGrokTurnEnd(path, offset, startedAt)
+				offset = nextOffset
+				if outcome == "" {
+					continue
+				}
+				result <- outcome
+				cleanup()
+				return
+			}
+		}
+	}()
+	return result
+}
+
+func readGrokTurnEnd(path string, offset int64, startedAt time.Time) (string, int64) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", offset
+	}
+	defer file.Close()
+	if info, statErr := file.Stat(); statErr == nil && info.Size() < offset {
+		offset = 0
+	}
+	if _, err = file.Seek(offset, io.SeekStart); err != nil {
+		return "", offset
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, 512*1024))
+	if err != nil || len(payload) == 0 {
+		return "", offset
+	}
+	lastNewline := bytes.LastIndexByte(payload, '\n')
+	if lastNewline < 0 {
+		return "", offset
+	}
+	complete := payload[:lastNewline+1]
+	nextOffset := offset + int64(len(complete))
+	for _, line := range bytes.Split(complete, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var event map[string]any
+		if json.Unmarshal(line, &event) != nil || !strings.EqualFold(firstMapString(event, "type"), "turn_ended") {
+			continue
+		}
+		if rawTime := strings.TrimSpace(firstMapString(event, "ts", "timestamp")); rawTime != "" {
+			if eventTime, parseErr := time.Parse(time.RFC3339Nano, rawTime); parseErr == nil && eventTime.Before(startedAt) {
+				continue
+			}
+		}
+		outcome := strings.ToLower(strings.TrimSpace(firstMapString(event, "outcome", "status")))
+		if outcome == "" {
+			outcome = "completed"
+		}
+		return outcome, nextOffset
+	}
+	return "", nextOffset
 }
 
 func mergeExternalSnapshot(current, next string) string {
