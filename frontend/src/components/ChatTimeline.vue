@@ -343,6 +343,15 @@ const turnIndexById = computed(() => new Map(
   turnOrder.value.map((turnId, index) => [turnId, index]),
 ))
 
+/** Item ownership reconciliation can temporarily split one turn into multiple agent groups. */
+const lastAgentGroupIndexByTurnId = computed(() => {
+  const indexes = new Map<string, number>()
+  groups.value.forEach((group, index) => {
+    if (group.kind === 'agent') indexes.set(group.turnId, index)
+  })
+  return indexes
+})
+
 const renderedGroups = computed(() => {
   const all = groups.value
   const order = turnOrder.value
@@ -353,6 +362,8 @@ const renderedGroups = computed(() => {
     index: start + index,
     turnIndex: turnIndexById.value.get(group.turnId) ?? -1,
     turnCount: order.length,
+    isTurnTail: group.kind === 'agent'
+      && lastAgentGroupIndexByTurnId.value.get(group.turnId) === start + index,
   }))
 })
 
@@ -390,13 +401,13 @@ const activeTurnKey = computed(() => {
   return (key && codexStore.activeTurnByThread[key]) || timelineTurnFeedback.value?.turnId || ''
 })
 
-function findLastAgentGroup(turnId: string): MessageGroup | undefined {
+function findLatestGroupIndex(turnId: string): number {
   const all = groups.value
   for (let index = all.length - 1; index >= 0; index -= 1) {
     const group = all[index]
-    if (group?.kind === 'agent' && group.turnId === turnId) return group
+    if (group?.turnId === turnId) return index
   }
-  return undefined
+  return -1
 }
 
 function isLiveExternalItem(item: TimelineItem): boolean {
@@ -405,6 +416,8 @@ function isLiveExternalItem(item: TimelineItem): boolean {
   return status === 'inprogress'
     || status === 'running'
     || status === 'pending'
+    || status === 'started'
+    || status === 'active'
     || item.id.startsWith('grok-live-')
     || item.id.startsWith('grok-thought-')
 }
@@ -415,29 +428,44 @@ function isLiveExternalItem(item: TimelineItem): boolean {
  * (`grok-turn-…`). Returning a non-matching runtime id used to suppress the
  * footer "正在思考" row while no agent group had `streaming=true` — blank wait.
  */
-const lastStreamingTurnId = computed(() => {
+const streamingAgentGroupIndex = computed(() => {
   if (isGrokMode.value || isClaudeMode.value) {
     const running = timelineTurnRunning.value || timelineSending.value
-    if (!running) return ''
+    if (!running) return -1
     // Runtime busy state can arrive before the optimistic user row. Do not
     // reactivate the previous completed group during that short window.
     const lastGroup = groups.value.at(-1)
     if (lastGroup?.kind === 'agent' && lastGroup.items.some(isLiveExternalItem)) {
-      return lastGroup.turnId
+      return groups.value.length - 1
     }
-    return ''
+    return -1
   }
-  if (!timelineTurnRunning.value && timelineTurnFeedback.value?.state !== 'running') return ''
+  if (!timelineTurnRunning.value && timelineTurnFeedback.value?.state !== 'running') return -1
   const turnID = activeTurnKey.value
-  if (!turnID) return ''
-  const agentGroup = findLastAgentGroup(turnID)
-  return agentGroup?.turnId ?? ''
+  // Prefer the physical tail when early item events are active but have not
+  // received their turn id yet. A stale item from a different turn cannot win.
+  const lastIndex = groups.value.length - 1
+  const lastGroup = groups.value[lastIndex]
+  if (
+    lastGroup?.kind === 'agent'
+    && lastGroup.items.some(isLiveExternalItem)
+    && (!turnID || !lastGroup.turnId || lastGroup.turnId === turnID)
+  ) return lastIndex
+  if (turnID) {
+    const groupIndex = findLatestGroupIndex(turnID)
+    if (groups.value[groupIndex]?.kind === 'agent') return groupIndex
+    // A steering user row is now the tail of this same turn. Keep the shimmer
+    // below that row until new agent activity arrives instead of reviving the
+    // earlier agent group.
+    if (groupIndex >= 0) return -1
+  }
+  return -1
 })
 
 const showThinking = computed(() => {
   if (isLoading.value && !props.optimisticPending) return false
   // The streaming agent group already owns thinking / reasoning UI — never duplicate it below.
-  if (lastStreamingTurnId.value) return false
+  if (streamingAgentGroupIndex.value >= 0) return false
   if (isGrokMode.value) {
     // Mirror Codex: show footer shimmer until the first live agent activity lands.
     return props.optimisticPending || timelineSending.value || timelineTurnRunning.value
@@ -453,22 +481,7 @@ const showThinking = computed(() => {
     || feedback?.state === 'running'
   if (!waiting) return false
 
-  const turnID = activeTurnKey.value
-  const hasTurnActivity = timelineItems.value.some((item) => {
-    if (item.type === 'userMessage') return false
-    if (turnID) {
-      // Prefer current-turn items; also accept live items that have not received turnId yet.
-      if (item.turnId === turnID) return true
-      if (!item.turnId && (item.status === 'inProgress' || item.status === 'running' || item.status === 'pending')) {
-        return true
-      }
-      return false
-    }
-    // Before turn id arrives, only count live non-user items so historical replies
-    // do not suppress the footer thinking row.
-    return item.status === 'inProgress' || item.status === 'running' || item.status === 'pending'
-  })
-  return !hasTurnActivity
+  return true
 })
 
 const thinkingLabel = computed(() => {
@@ -1101,15 +1114,17 @@ onUnmounted(() => {
               :kind="entry.group.kind"
               :items="entry.group.items"
               :workspace-path="timelineWorkspacePath"
-              :metrics="isGrokMode
-                ? grokStore.turnMetricsByKey[entry.group.turnId]
-                : isClaudeMode
-                  ? claudeStore.activeTurnMetrics[entry.group.turnId]
-                  : timelineCodexTurnMetrics[entry.group.turnId]"
+              :metrics="entry.isTurnTail
+                ? (isGrokMode
+                    ? grokStore.turnMetricsByKey[entry.group.turnId]
+                    : isClaudeMode
+                      ? claudeStore.activeTurnMetrics[entry.group.turnId]
+                      : timelineCodexTurnMetrics[entry.group.turnId])
+                : null"
               :animated="entry.index >= groups.length - 2"
-              :streaming="entry.group.kind === 'agent' && entry.group.turnId === lastStreamingTurnId"
-              :turn-diff="isCodexMode ? (codexStore.diffsByTurn[entry.group.turnId] || '') : ''"
-              :allow-turn-actions="isCodexMode"
+              :streaming="entry.index === streamingAgentGroupIndex"
+              :turn-diff="isCodexMode && entry.isTurnTail ? (codexStore.diffsByTurn[entry.group.turnId] || '') : ''"
+              :allow-turn-actions="isCodexMode && entry.isTurnTail"
               :turn-actions-disabled="isCodexMode && Boolean(codexStore.threadMutationForThread(timelineThreadId))"
               :turn-index="entry.turnIndex"
               :turn-count="entry.turnCount"
