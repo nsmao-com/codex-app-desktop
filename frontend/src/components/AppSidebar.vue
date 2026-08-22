@@ -2,7 +2,6 @@
 import {
   Archive,
   Blocks,
-  ChevronDown,
   ChevronRight,
   Coins,
   Columns2,
@@ -88,7 +87,6 @@ const claudeStore = useClaudeStore()
 const workspaceStore = useWorkspaceStore()
 const { locale, t } = useI18n()
 let externalSearchTimer = 0
-let projectSelectionSequence = 0
 const sidebarActionRuntime = computed(() => arenaStore.isArenaMode
   ? (arenaStore.focusedPane?.runtime || appStore.activeRuntime)
   : appStore.activeRuntime)
@@ -341,10 +339,6 @@ function formatUpdated(timestamp: number): string {
   return `${date.getMonth() + 1}/${date.getDate()}`
 }
 
-function workspaceName(path: string): string {
-  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path
-}
-
 function openSettings(): void {
   router.push('/settings')
 }
@@ -466,20 +460,6 @@ function onArenaMenuEscape(event: KeyboardEvent): void {
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
 const activeExternalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === sidebarActionRuntime.value))
 
-const recentWorkspacePaths = computed(() => {
-  let paths = sidebarRuntimeRecentWorkspacePaths(sidebarActionRuntime.value)
-  if (sidebarIsGrokMode.value) {
-    paths = (appStore.settings.grokRecentWorkspaces?.length
-      ? appStore.settings.grokRecentWorkspaces
-      : appStore.settings.recentWorkspaces) ?? []
-  } else if (sidebarIsClaudeMode.value) {
-    paths = (appStore.settings.claudeRecentWorkspaces?.length
-      ? appStore.settings.claudeRecentWorkspaces
-      : appStore.settings.recentWorkspaces) ?? []
-  }
-  return appStore.orderWorkspacePaths(sidebarActionRuntime.value, paths ?? [], paths ?? [])
-})
-
 function runtimeSlideX(): string {
   if (sidebarIsClaudeMode.value) return '100%'
   if (sidebarIsGrokMode.value) return '200%'
@@ -567,19 +547,6 @@ function arenaTargetIsCurrent(
   )
 }
 
-function preferredSessionForPane<T extends { id: string }>(
-  runtime: WorkspaceRuntime,
-  paneId: string,
-  sessions: T[],
-  activeSessionId: string,
-  sameSession: (left: string, right: string) => boolean,
-): T | undefined {
-  const selectedId = paneId ? arenaStore.sessionForPane(paneId) : activeSessionId
-  return sessions.find((session) => sameSession(session.id, selectedId))
-    || sessions.find((session) => !paneId || !arenaStore.isSessionTakenByOtherPane(paneId, session.id, runtime))
-    || sessions[0]
-}
-
 async function newInClaudeProject(group: { path: string; active: boolean }, event?: Event): Promise<void> {
   event?.stopPropagation()
   event?.preventDefault()
@@ -651,137 +618,6 @@ async function openThread(group: ThreadGroup, thread: ThreadSummary): Promise<vo
 function addArenaPaneFromMenu(): void {
   arenaStore.addPane(arenaContextMenu.value?.runtime || appStore.activeRuntime)
   closeArenaContextMenu()
-}
-
-async function switchWorkspace(path: string): Promise<void> {
-  const runtime = sidebarActionRuntime.value
-  const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
-  const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
-  const sequence = ++projectSelectionSequence
-  const selectionIsCurrent = () =>
-    sequence === projectSelectionSequence
-    && appStore.activeRuntime === runtime
-    && sameWorkspacePath(path, appStore.currentWorkspacePath)
-    && arenaTargetIsCurrent(paneId, runtime, previousSessionId)
-  const ready = appStore.activeRuntime === runtime
-    ? await appStore.ensureActiveRuntimeSynced(runtime)
-    : await appStore.setActiveRuntime(runtime)
-  if (!ready || !arenaTargetIsCurrent(paneId, runtime, previousSessionId)) return
-  if (runtime === 'grok') {
-    if (!await workspaceStore.useWorkspace(path)) return
-    if (!selectionIsCurrent()) return
-    await grokStore.loadSessions(true)
-    if (!selectionIsCurrent()) return
-    const activeGroup = grokStore.sessionGroups.find((group) => group.active)
-    const target = preferredSessionForPane(
-      runtime,
-      paneId,
-      activeGroup?.sessions || [],
-      grokStore.activeSessionId,
-      grokStore.sameSession,
-    )
-    if (target) {
-      if (!bindFocusedArenaSession(runtime, target.id, paneId)) {
-        await grokStore.openSession(target.id, { switchWorkspace: false })
-      }
-    } else {
-      grokStore.newSession()
-      bindFocusedArenaSession(runtime, '', paneId)
-    }
-    return
-  }
-  if (runtime === 'claude') {
-    if (!await workspaceStore.useWorkspace(path)) return
-    if (!selectionIsCurrent()) return
-    await claudeStore.loadSessions()
-    if (!selectionIsCurrent()) return
-    const activeGroup = claudeStore.sessionGroups.find((group) => group.active)
-    const target = preferredSessionForPane(
-      runtime,
-      paneId,
-      activeGroup?.sessions || [],
-      claudeStore.activeSessionId,
-      claudeStore.sameSession,
-    )
-    if (target) {
-      if (!bindFocusedArenaSession(runtime, target.id, paneId)) {
-        await claudeStore.openSession(target.id, { switchWorkspace: false })
-      }
-    } else {
-      const sessionId = claudeStore.newSession(arenaStore.isArenaMode)
-      if (sessionId) bindFocusedArenaSession(runtime, sessionId, paneId)
-    }
-    return
-  }
-  await codexStore.switchProject(path)
-  if (selectionIsCurrent()) bindFocusedArenaSession(runtime, codexStore.activeThreadId, paneId)
-}
-
-async function chooseWorkspace(): Promise<void> {
-  const runtime = sidebarActionRuntime.value
-  const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
-  const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
-  const sequence = ++projectSelectionSequence
-  const selectionIsCurrent = (path: string) =>
-    sequence === projectSelectionSequence
-    && appStore.activeRuntime === runtime
-    && sameWorkspacePath(path, appStore.currentWorkspacePath)
-    && arenaTargetIsCurrent(paneId, runtime, previousSessionId)
-  const ready = appStore.activeRuntime === runtime
-    ? await appStore.ensureActiveRuntimeSynced(runtime)
-    : await appStore.setActiveRuntime(runtime)
-  if (!ready || !arenaTargetIsCurrent(paneId, runtime, previousSessionId)) return
-  if (runtime === 'grok') {
-    const path = await workspaceStore.selectWorkspace()
-    if (!path || !selectionIsCurrent(path)) return
-    await grokStore.loadSessions(true)
-    if (!selectionIsCurrent(path)) return
-    const activeGroup = grokStore.sessionGroups.find((group) => group.active)
-    const target = preferredSessionForPane(
-      runtime,
-      paneId,
-      activeGroup?.sessions || [],
-      grokStore.activeSessionId,
-      grokStore.sameSession,
-    )
-    if (target) {
-      if (!bindFocusedArenaSession(runtime, target.id, paneId)) {
-        await grokStore.openSession(target.id, { switchWorkspace: false })
-      }
-    } else {
-      grokStore.newSession()
-      bindFocusedArenaSession(runtime, '', paneId)
-    }
-    return
-  }
-  if (runtime === 'claude') {
-    const path = await workspaceStore.selectWorkspace()
-    if (!path || !selectionIsCurrent(path)) return
-    await claudeStore.loadSessions()
-    if (!selectionIsCurrent(path)) return
-    const activeGroup = claudeStore.sessionGroups.find((group) => group.active)
-    const target = preferredSessionForPane(
-      runtime,
-      paneId,
-      activeGroup?.sessions || [],
-      claudeStore.activeSessionId,
-      claudeStore.sameSession,
-    )
-    if (target) {
-      if (!bindFocusedArenaSession(runtime, target.id, paneId)) {
-        await claudeStore.openSession(target.id, { switchWorkspace: false })
-      }
-    } else {
-      const sessionId = claudeStore.newSession(arenaStore.isArenaMode)
-      if (sessionId) bindFocusedArenaSession(runtime, sessionId, paneId)
-    }
-    return
-  }
-  await codexStore.selectProject()
-  if (
-    sequence === projectSelectionSequence
-    && arenaTargetIsCurrent(paneId, runtime, previousSessionId)
-  ) bindFocusedArenaSession(runtime, codexStore.activeThreadId, paneId)
 }
 
 async function archiveThread(threadID: string, event?: Event): Promise<void> {
@@ -938,7 +774,6 @@ const dragOverPosition = shallowRef<'before' | 'after' | ''>('')
 watch(
   sidebarActionRuntime,
   () => {
-    projectSelectionSequence += 1
     endProjectDrag()
   },
 )
@@ -1138,38 +973,6 @@ function formatGrokUpdated(value?: number | null): string {
     </div>
 
     <div class="space-y-2 px-3 pb-1">
-      <DropdownMenu>
-        <DropdownMenuTrigger as-child>
-          <Button
-            variant="ghost"
-            class="h-8 w-full justify-between rounded-lg px-2 text-xs hover:bg-sidebar-accent/70"
-            :disabled="workspaceStore.switchingWorkspace"
-          >
-            <span class="flex min-w-0 items-center gap-2">
-              <Folder :size="14" class="opacity-70" />
-              <span class="truncate">{{ workspaceStore.workspace?.name || t('sidebar.chooseFolder') }}</span>
-            </span>
-            <ChevronDown :size="13" class="opacity-50" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" class="w-60">
-          <DropdownMenuItem :disabled="workspaceStore.switchingWorkspace" @click="chooseWorkspace()">
-            <FolderOpen :size="14" class="mr-2" />
-            {{ t('sidebar.chooseAnother') }}
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            v-for="path in recentWorkspacePaths"
-            :key="path"
-            :disabled="workspaceStore.switchingWorkspace"
-            @click="switchWorkspace(path)"
-          >
-            <Folder :size="14" class="mr-2" />
-            <span class="truncate">{{ workspaceName(path) }}</span>
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
       <!-- Product runtime tabs stay icon-first so all five providers remain
            reachable without shrinking the hit targets. -->
       <TooltipProvider>

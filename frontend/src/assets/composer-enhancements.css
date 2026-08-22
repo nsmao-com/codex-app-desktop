@@ -22,6 +22,31 @@
   box-shadow: 0 1px 2px color-mix(in oklab, var(--foreground) 7%, transparent);
 }
 
+.composer-context-chip-button {
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.composer-context-chip-button:hover {
+  border-color: color-mix(in oklab, var(--foreground) 18%, var(--border));
+  background: color-mix(in oklab, var(--muted) 82%, var(--card));
+  color: var(--foreground);
+}
+
+.composer-context-chip-button:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--ring) 74%, transparent);
+  outline-offset: 2px;
+}
+
+.composer-context-chip-button:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
 .composer-input-frame {
   min-height: 3.75rem;
 }
@@ -282,6 +307,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .composer-context-chip-button,
   .effort-scale-fill,
   .effort-scale-marker,
   .effort-slider-input::-webkit-slider-thumb,

@@ -1354,13 +1354,16 @@ export const useCodexStore = defineStore('codex', () => {
     await activateProject(path, preferredThreadID, requestedRuntime)
   }
 
-  async function selectProject(): Promise<void> {
+  async function selectProject(): Promise<string> {
     const requestedRuntime = appStore.activeRuntime
     const currentPath = appStore.currentWorkspacePath
     if (activeThreadId.value && currentPath) rememberProjectThread(currentPath, activeThreadId.value, requestedRuntime)
     const path = await workspaceStore.selectWorkspace()
-    if (!path || appStore.activeRuntime !== requestedRuntime) return
+    if (!path || appStore.activeRuntime !== requestedRuntime) return ''
     await activateProject(path, '', requestedRuntime)
+    return appStore.activeRuntime === requestedRuntime && sameWorkspace(path, appStore.currentWorkspacePath)
+      ? path
+      : ''
   }
 
   async function activateProject(

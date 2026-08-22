@@ -9,7 +9,7 @@ import {
   Ellipsis,
   FileUp,
   Folder,
-  FolderPlus,
+  FolderOpen,
   GitBranch,
   GitPullRequestArrow,
   Image as ImageIcon,
@@ -53,6 +53,7 @@ import { SimpleTooltip } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
 import { useAppStore, useArenaStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
+import { useComposerWorkspaceSwitcher } from '@/composables/useComposerWorkspaceSwitcher'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import {
   buildContextUsageView,
@@ -779,11 +780,26 @@ const composerWorkspacePath = computed(() =>
 )
 const composerWorkspaceName = computed(() => {
   const clean = composerWorkspacePath.value.replace(/[\\/]+$/, '')
-  return clean.split(/[\\/]/).filter(Boolean).at(-1) || t('sidebar.workspace')
+  return clean.split(/[\\/]/).filter(Boolean).at(-1) || t('sidebar.chooseFolder')
 })
+function workspaceDisplayName(path: string): string {
+  const clean = path.replace(/[\\/]+$/, '')
+  return clean.split(/[\\/]/).filter(Boolean).at(-1) || path
+}
 const composerBranch = computed(() => {
   if (!workspaceStore.branch || !sameWorkspacePath(composerWorkspacePath.value, workspaceStore.currentPath)) return ''
   return workspaceStore.branch
+})
+const {
+  recentWorkspacePaths: composerRecentWorkspacePaths,
+  switching: composerWorkspaceSwitching,
+  selectWorkspace: selectWorkspaceForComposer,
+  switchWorkspace: switchWorkspaceForComposer,
+} = useComposerWorkspaceSwitcher({
+  runtime: paneRuntime,
+  paneId,
+  isArenaPane,
+  currentWorkspacePath: composerWorkspacePath,
 })
 const composerRuntimeLabel = computed(() =>
   appStore.agentProviders.find((item) => item.kind === paneRuntime.value)?.name
@@ -1639,9 +1655,11 @@ async function ensureComposerRuntimeActive(): Promise<boolean> {
 }
 
 async function selectComposerWorkspace(): Promise<void> {
-  if (!await ensureComposerRuntimeActive()) return
-  const selected = await workspaceStore.selectWorkspace()
-  if (selected) focusComposerInput()
+  if (await selectWorkspaceForComposer()) focusComposerInput()
+}
+
+async function switchComposerWorkspace(path: string): Promise<void> {
+  if (await switchWorkspaceForComposer(path)) focusComposerInput()
 }
 
 function openSlashCommands(): void {
@@ -2089,10 +2107,57 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
           <Monitor :size="12" />
           {{ composerRuntimeLabel }}
         </span>
-        <span class="composer-context-chip" :title="composerWorkspacePath">
-          <Folder :size="12" />
-          <span class="max-w-52 truncate">{{ composerWorkspaceName }}</span>
-        </span>
+        <DropdownMenu>
+          <DropdownMenuTrigger as-child>
+            <button
+              type="button"
+              class="composer-context-chip composer-context-chip-button max-w-64"
+              :title="composerWorkspacePath || t('sidebar.chooseFolder')"
+              :aria-label="`${t('sidebar.workspace')}: ${composerWorkspaceName}`"
+              :aria-busy="composerWorkspaceSwitching"
+              :disabled="composerWorkspaceSwitching"
+            >
+              <LoaderCircle v-if="composerWorkspaceSwitching" :size="12" class="shrink-0 animate-spin" />
+              <Folder v-else :size="12" class="shrink-0" />
+              <span class="max-w-52 truncate">{{ composerWorkspaceName }}</span>
+              <ChevronDown :size="11" class="shrink-0 opacity-55" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="start"
+            side="bottom"
+            :side-offset="6"
+            class="max-h-[min(20rem,calc(100vh-8rem))] w-72 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-xl p-1.5 shadow-xl"
+          >
+            <DropdownMenuItem
+              class="gap-2.5 rounded-lg px-2.5 py-2"
+              :disabled="composerWorkspaceSwitching"
+              @click="selectComposerWorkspace"
+            >
+              <FolderOpen :size="15" class="shrink-0 text-muted-foreground" />
+              <span class="truncate text-xs">{{ t('sidebar.chooseAnother') }}</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator v-if="composerRecentWorkspacePaths.length" />
+            <DropdownMenuItem
+              v-for="path in composerRecentWorkspacePaths"
+              :key="path"
+              class="gap-2.5 rounded-lg px-2.5 py-2"
+              :disabled="composerWorkspaceSwitching"
+              :title="path"
+              @click="switchComposerWorkspace(path)"
+            >
+              <Folder :size="14" class="shrink-0 text-muted-foreground" />
+              <span class="min-w-0 flex-1 truncate text-xs">
+                {{ workspaceDisplayName(path) }}
+              </span>
+              <Check
+                v-if="sameWorkspacePath(path, composerWorkspacePath)"
+                :size="14"
+                class="shrink-0 text-foreground"
+              />
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <span v-if="composerBranch" class="composer-context-chip">
           <GitBranch :size="12" />
           <span class="max-w-40 truncate">{{ composerBranch }}</span>
@@ -2465,13 +2530,6 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                   <span class="text-[10px] text-muted-foreground">{{ t('chat.addFilesOrPhotosHint') }}</span>
                 </span>
                 <kbd class="text-[9px] text-muted-foreground">Ctrl U</kbd>
-              </DropdownMenuItem>
-              <DropdownMenuItem class="gap-3 rounded-lg px-2.5 py-2" @click="selectComposerWorkspace">
-                <FolderPlus :size="15" class="shrink-0 text-muted-foreground" />
-                <span class="flex min-w-0 flex-1 flex-col">
-                  <span class="text-xs">{{ t('chat.addWorkspaceFolder') }}</span>
-                  <span class="text-[10px] text-muted-foreground">{{ t('chat.addWorkspaceFolderHint') }}</span>
-                </span>
               </DropdownMenuItem>
               <DropdownMenuItem
                 class="gap-3 rounded-lg px-2.5 py-2"
