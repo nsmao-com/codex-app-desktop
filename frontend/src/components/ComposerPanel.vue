@@ -2100,7 +2100,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       </div>
 
       <div
-        class="composer-input-frame relative flex flex-col gap-1 rounded-2xl border bg-card px-2.5 py-1.5 shadow-sm transition-[border-color,box-shadow,background-color] duration-200"
+        class="composer-input-frame relative flex flex-col gap-1 rounded-2xl border bg-card px-2.5 pb-1.5 pt-2 shadow-sm transition-[border-color,box-shadow,background-color] duration-200"
         :class="[
           isDraggingFiles
             ? 'border-primary border-dashed bg-primary/5'
@@ -2432,7 +2432,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         rows="1"
         :placeholder="composerPlaceholder"
         :aria-description="composerShortcutHint"
-        class="min-h-[42px] resize-none border-0 bg-transparent px-1.5 py-1 pr-14 text-[15px] leading-6 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
+        class="min-h-10 resize-none border-0 bg-transparent px-1.5 py-1 pr-9 text-[15px] leading-6 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
         :class="composerExpanded ? 'overflow-y-auto' : ''"
         @compositionend="composing = false"
         @compositionstart="composing = true"
@@ -2441,35 +2441,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         @pointerdown="resetSentHistoryNavigation"
       />
 
-      <div class="absolute bottom-2 right-2.5 z-[3]">
-        <SimpleTooltip :content="primaryActionLabel">
-          <Button
-            type="button"
-            size="icon-sm"
-            class="composer-primary-action size-7 rounded-full transition-[transform,opacity,box-shadow] duration-200"
-            :class="[
-              activeRuntimeTurnRunning ? 'is-running text-destructive' : '',
-              !activeRuntimeTurnRunning && !canSend ? 'opacity-35' : 'opacity-100',
-            ]"
-            :variant="activeRuntimeTurnRunning ? 'outline' : 'default'"
-            :aria-label="activeRuntimeTurnRunning ? t('chat.stopLabel') : sendButtonLabel"
-            :aria-busy="activeRuntimeTurnRunning ? stopDisabled : (sendAdmissionPending || activeRuntimeSending)"
-            :disabled="activeRuntimeTurnRunning ? stopDisabled : !canSend"
-            @click="activeRuntimeTurnRunning ? onStop() : send()"
-          >
-            <LoaderCircle
-              v-if="activeRuntimeTurnRunning ? stopDisabled : (sendAdmissionPending || activeRuntimeSending)"
-              :size="14"
-              class="animate-spin"
-            />
-            <Octagon v-else-if="activeRuntimeTurnRunning" :size="13" fill="currentColor" />
-            <ArrowUp v-else :size="16" stroke-width="2.5" />
-          </Button>
-        </SimpleTooltip>
-      </div>
-      </div>
-
-      <div class="flex min-h-8 items-center justify-between gap-2 px-0.5">
+      <div class="composer-toolbar flex min-h-8 items-center justify-between gap-2 px-0.5 pt-0.5">
         <div class="flex min-w-0 items-center gap-0.5">
           <DropdownMenu :open="addMenuOpen" @update:open="onAddMenuOpenChange">
             <DropdownMenuTrigger as-child>
@@ -2780,7 +2752,34 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             </span>
           </SimpleTooltip>
 
+          <SimpleTooltip :content="primaryActionLabel">
+            <Button
+              type="button"
+              size="icon-sm"
+              class="composer-primary-action ml-0.5 size-7 shrink-0 rounded-full transition-[transform,opacity,box-shadow] duration-200"
+              :class="[
+                activeRuntimeTurnRunning ? 'is-running text-destructive' : '',
+                !activeRuntimeTurnRunning && !canSend ? 'opacity-60 shadow-none' : 'opacity-100',
+              ]"
+              :variant="activeRuntimeTurnRunning
+                ? 'outline'
+                : (!canSend && !sendAdmissionPending && !activeRuntimeSending ? 'secondary' : 'default')"
+              :aria-label="activeRuntimeTurnRunning ? t('chat.stopLabel') : sendButtonLabel"
+              :aria-busy="activeRuntimeTurnRunning ? stopDisabled : (sendAdmissionPending || activeRuntimeSending)"
+              :disabled="activeRuntimeTurnRunning ? stopDisabled : !canSend"
+              @click="activeRuntimeTurnRunning ? onStop() : send()"
+            >
+              <LoaderCircle
+                v-if="activeRuntimeTurnRunning ? stopDisabled : (sendAdmissionPending || activeRuntimeSending)"
+                :size="14"
+                class="animate-spin"
+              />
+              <Octagon v-else-if="activeRuntimeTurnRunning" :size="13" fill="currentColor" />
+              <ArrowUp v-else :size="16" stroke-width="2.5" />
+            </Button>
+          </SimpleTooltip>
         </div>
+      </div>
       </div>
     </div>
   </div>
