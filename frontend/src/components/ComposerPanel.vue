@@ -105,12 +105,23 @@ const { t } = useI18n()
 
 const props = defineProps<{
   draftKey: string
+  sendPending: boolean
 }>()
 type EditableQueuedMessage = {
   id: string
   text: string
   images: string[]
   state: 'queued' | 'sending' | 'failed'
+}
+type ComposerSubmission = {
+  message: string
+  images: string[]
+  draftKey: string
+  arena: boolean
+  targetPaneId: string
+  targetRuntime: WorkspaceRuntime
+  targetSessionId: string
+  targetWorkspace: string
 }
 const modelValue = defineModel<string>({ required: true })
 const attachedImages = defineModel<string[]>('images', { required: true })
@@ -139,7 +150,9 @@ const sentHistorySnapshot = shallowRef<string[]>([])
 const sentHistoryDraft = shallowRef('')
 const attachingImageTasks = shallowRef(0)
 const sendAdmissionPendingByDraft = shallowRef<Record<string, boolean>>({})
-const sendAdmissionPending = computed(() => Boolean(sendAdmissionPendingByDraft.value[props.draftKey]))
+const sendAdmissionPending = computed(() =>
+  props.sendPending || Boolean(sendAdmissionPendingByDraft.value[props.draftKey]),
+)
 const effortPopoverOpen = shallowRef(false)
 const effortPreviewIndex = shallowRef(-1)
 const effortDragging = shallowRef(false)
@@ -1598,20 +1611,20 @@ function consumeSubmittedDraft(draftKey: string): void {
   emit('consume-draft', { draftKey })
 }
 
-async function performSend(): Promise<void> {
-  const message = modelValue.value.trim()
-  const images = [...attachedImages.value]
-  const draftKey = props.draftKey
+async function performSend(submission: ComposerSubmission): Promise<void> {
+  const {
+    message,
+    images,
+    draftKey,
+    arena,
+    targetPaneId,
+    targetRuntime,
+    targetWorkspace,
+  } = submission
   if (!message && !images.length) return
-  if (attachingImages.value) return
-  if (!isArenaPane.value && workspaceStore.switchingWorkspace && !canSendDuringWorkspaceSwitch.value) return
-  if (isArenaPane.value && workspaceStore.switchingWorkspace && !composerSessionId.value) return
-  const arena = isArenaPane.value
-  const targetPaneId = paneId.value
-  const targetRuntime = paneRuntime.value
-  const targetSessionId = arena
+  const targetSessionId = arena && !submission.targetSessionId
     ? await prepareArenaSession(targetPaneId, targetRuntime)
-    : composerSessionId.value
+    : submission.targetSessionId
   if (targetSessionId === null) return
   if (targetRuntime === 'grok') {
     // Do not gate on sending — busy turns enqueue like Codex.
@@ -1622,7 +1635,7 @@ async function performSend(): Promise<void> {
       message,
       images,
       targetSessionId || '',
-      composerTargetWorkspace(targetRuntime, targetSessionId || ''),
+      targetWorkspace,
     )
     if (
       arena
@@ -1650,7 +1663,7 @@ async function performSend(): Promise<void> {
       message,
       images,
       targetSessionId || '',
-      composerTargetWorkspace(targetRuntime, targetSessionId || ''),
+      targetWorkspace,
     )
     emit('sent', { draftKey })
     const ok = await sendPromise
@@ -1682,10 +1695,7 @@ async function performSend(): Promise<void> {
       || null
     if (!targetThread) return
   }
-  const codexTargetWorkspace = targetThread?.cwd
-    || (!workspaceStore.switchingWorkspace
-      ? composerTargetWorkspace(targetRuntime, targetSessionId || '')
-      : '')
+  const codexTargetWorkspace = targetThread?.cwd || targetWorkspace
   if (!codexTargetWorkspace) return
   resetSentHistoryNavigation()
   consumeSubmittedDraft(draftKey)
@@ -1705,22 +1715,60 @@ async function performSend(): Promise<void> {
   }
 }
 
+function waitForOptimisticThinkingPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (): void => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(fallback)
+      resolve()
+    }
+    const fallback = window.setTimeout(finish, 120)
+    requestAnimationFrame(() => requestAnimationFrame(finish))
+  })
+}
+
 async function send(): Promise<void> {
   const draftKey = props.draftKey
-  if (sendAdmissionPendingByDraft.value[draftKey]) return
+  if (sendAdmissionPending.value) return
+  if (attachingImages.value) return
+  if (!isArenaPane.value && workspaceStore.switchingWorkspace && !canSendDuringWorkspaceSwitch.value) return
+  if (isArenaPane.value && workspaceStore.switchingWorkspace && !composerSessionId.value) return
+  const targetRuntime = paneRuntime.value
+  const targetSessionId = composerSessionId.value
+  const submission: ComposerSubmission = {
+    message: modelValue.value.trim(),
+    images: [...attachedImages.value],
+    draftKey,
+    arena: isArenaPane.value,
+    targetPaneId: paneId.value,
+    targetRuntime,
+    targetSessionId,
+    targetWorkspace: composerTargetWorkspace(targetRuntime, targetSessionId),
+  }
+  if (!submission.message && !submission.images.length) return
+  const showOptimisticThinking = !willQueueOnSend.value
   sendAdmissionPendingByDraft.value = {
     ...sendAdmissionPendingByDraft.value,
     [draftKey]: true,
   }
   const requestId = `composer-send-${Date.now()}-${++sendAdmissionSequence}`
-  emit('send-pending-change', { requestId, draftKey, pending: true })
   try {
-    await performSend()
+    if (showOptimisticThinking) {
+      emit('send-pending-change', { requestId, draftKey, pending: true })
+      await nextTick()
+      // Let the optimistic Composing row paint before session creation or RPC work starts.
+      await waitForOptimisticThinkingPaint()
+    }
+    await performSend(submission)
   } finally {
     const nextPending = { ...sendAdmissionPendingByDraft.value }
     delete nextPending[draftKey]
     sendAdmissionPendingByDraft.value = nextPending
-    emit('send-pending-change', { requestId, draftKey, pending: false })
+    if (showOptimisticThinking) {
+      emit('send-pending-change', { requestId, draftKey, pending: false })
+    }
   }
 }
 

@@ -178,8 +178,18 @@ function migrateComposerDraft(fromKey: string, toKey: string): void {
 }
 
 function sameComposerSession(previous: ComposerDraftContext, current: ComposerDraftContext): boolean {
-  if (previous.runtime !== current.runtime || !previous.sessionId || !current.sessionId) return false
+  if (previous.runtime !== current.runtime) return false
   if (previous.sessionId === current.sessionId) return true
+  if (!previous.sessionId && current.sessionId) {
+    const pendingPrefix = current.runtime === 'grok'
+      ? 'pending-grok-'
+      : current.runtime === 'claude'
+        ? 'pending-claude-'
+        : 'pending-thread-'
+    return current.sessionId.startsWith(pendingPrefix)
+      && sameWorkspacePath(previous.workspace, current.workspace)
+  }
+  if (!previous.sessionId || !current.sessionId) return false
   if (current.runtime === 'grok') return grokStore.sameSession(previous.sessionId, current.sessionId)
   if (current.runtime === 'claude') return claudeStore.sameSession(previous.sessionId, current.sessionId)
   return codexStore.sameThread(previous.sessionId, current.sessionId)
@@ -787,6 +797,7 @@ function commitFromBar(): void {
       v-model="draft"
       v-model:images="draftImages"
       :draft-key="activeComposerContext.key"
+      :send-pending="composerSendPending"
       @sent="onMessageSent"
       @send-pending-change="onComposerPendingChange"
       @consume-draft="consumeComposerDraft"
