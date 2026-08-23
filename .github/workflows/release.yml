@@ -214,12 +214,28 @@ jobs:
           find artifacts -type f \( -name '*.exe' -o -name '*.zip' \) -print -exec cp {} dist/ \;
           ls -la dist
 
+      - name: Prepare release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v header="## ${VERSION}" '
+            $0 == header || index($0, header " - ") == 1 { found = 1 }
+            found && /^## / && !($0 == header || index($0, header " - ") == 1) { exit }
+            found { print }
+          ' update.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "Missing release notes for ${VERSION} in update.md" >&2
+            exit 1
+          fi
+          cat RELEASE_NOTES.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: Nice Codex ${{ needs.prepare.outputs.tag }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

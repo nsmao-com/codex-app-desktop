@@ -67,7 +67,8 @@ Tag 格式：**必须** `v` 前缀，如 `v1.2.7`（Actions 匹配 `v*`）。
 - 用**用户/测试能看懂**的中文（可带关键模块名）
 - 写「做了什么、解决什么」，不要只列文件名
 - 无某类变更时，该分类可省略，但至少要有一类有实质内容
-- 该内容同时作为 **annotated tag 正文** 与 GitHub Release 说明的基础
+- 该内容同时作为 **annotated tag 正文**，workflow 会按 tag 版本从 `update.md` 提取对应章节并写入 GitHub Release
+- workflow 找不到对应版本章节时会直接失败，禁止发布只有自动 commit 列表、没有分类说明的 Release
 
 ---
 
@@ -140,7 +141,8 @@ git push origin v1.2.7
 
 1. GitHub Actions 工作流 `.github/workflows/release.yml` 因 `on.push.tags: v*` 启动  
 2. 构建 Windows / macOS 产物  
-3. 创建 GitHub Release（`Nice Codex vX.Y.Z`）并上传安装包  
+3. 从 `update.md` 提取对应版本的「新增 / 修改 / 修复」
+4. 创建 GitHub Release（`Nice Codex vX.Y.Z`）、写入分类说明并上传安装包
 
 **没有这一步，就不会有自动化端产物。**
 
@@ -168,7 +170,7 @@ git push origin v1.2.7
 - [ ] 已创建 **annotated** tag `vX.Y.Z`，正文含三类说明  
 - [ ] 已 `git push origin vX.Y.Z`  
 - [ ] 已在 GitHub Actions 确认 Release workflow 已排队/运行  
-- [ ] （可选）打开 Releases 页确认资产与说明正确  
+- [ ] 已打开 Releases 页确认安装资产齐全，且正文包含本版「新增 / 修改 / 修复」
 
 ---
 
@@ -206,6 +208,7 @@ git push origin v1.2.7
 
 - 工作流：`.github/workflows/release.yml`  
 - 触发：`push` tags `v*`，或 `workflow_dispatch` 手动指定 tag  
+- 说明：按 tag 版本从 `update.md` 提取对应章节，缺失时终止发布
 - 产物：Windows `.exe`、macOS `.zip` 等上传到 GitHub Release  
 
 因此：**main = 源码线；tag = 发版线。** 两边都要推，tag 说明要当「端版本说明书」来写。
