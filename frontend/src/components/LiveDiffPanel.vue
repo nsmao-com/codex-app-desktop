@@ -5,6 +5,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { Button } from '@/components/ui/button'
+import { SimpleTooltip } from '@/components/ui/tooltip'
 import { panelFromRight } from '@/lib/motion'
 import { useCodexStore, useWorkspaceStore } from '@/stores'
 import DiffViewer from './DiffViewer.vue'
@@ -54,7 +55,7 @@ function close(): void {
       <FileDiff :size="14" class="shrink-0 text-warning" />
       <div class="min-w-0 flex-1">
         <p class="truncate text-xs font-semibold">{{ t('inspector.liveDiff') }}</p>
-        <p class="truncate text-[10px] text-muted-foreground" :title="title">{{ title }}</p>
+        <SimpleTooltip :content="title"><p class="truncate text-[10px] text-muted-foreground">{{ title }}</p></SimpleTooltip>
       </div>
       <Button variant="ghost" size="icon-xs" :aria-label="t('common.close')" @click="close">
         <PanelRightClose :size="14" />

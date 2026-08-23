@@ -4,6 +4,7 @@ import { computed, nextTick, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
+import { SimpleTooltip } from '@/components/ui/tooltip'
 import { useAppStore, useClaudeStore, useCodexStore, useGrokStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
 import type { AccountUsageSummary } from '@/types/codex'
@@ -42,6 +43,9 @@ const loading = shallowRef(false)
 const loadError = shallowRef('')
 const heatmapScroller = useTemplateRef<HTMLDivElement>('heatmapScroller')
 const heatmapDragging = shallowRef(false)
+const activeTrendIndex = shallowRef(-1)
+const heatmapTooltipDay = shallowRef<HeatmapDay | null>(null)
+const heatmapTooltipPosition = shallowRef({ x: 0, y: 0 })
 let loadSequence = 0
 let dragPointerId: number | null = null
 let dragStartX = 0
@@ -187,6 +191,7 @@ const trendXAxisTicks = computed(() => {
 const trendPointMarkers = computed(() => trendPoints.value.length <= 31
   ? trendPoints.value.filter((point) => point.tokens > 0)
   : [])
+const activeTrendPoint = computed(() => trendPoints.value[activeTrendIndex.value] ?? null)
 
 function trendDateLabel(date: Date, includeYear = false): string {
   return new Intl.DateTimeFormat(locale.value, includeYear
@@ -194,8 +199,36 @@ function trendDateLabel(date: Date, includeYear = false): string {
     : { month: 'short', day: 'numeric' }).format(date)
 }
 
-function trendTooltip(day: TrendDay): string {
-  return `${trendDateLabel(day.date, true)} · ${formatTokenCount(day.tokens)} ${t('usageOverview.tokens')}`
+function nonCachedInputTokens(day: TrendDay): number {
+  // Native usage normalization already stores inputTokens as the uncached part.
+  return Math.max(0, day.inputTokens)
+}
+
+function nonReasoningOutputTokens(day: TrendDay): number {
+  return Math.max(0, day.outputTokens - day.reasoningOutputTokens)
+}
+
+function updateTrendHover(event: PointerEvent): void {
+  const target = event.currentTarget as SVGElement
+  const rect = target.getBoundingClientRect()
+  const points = trendPoints.value
+  if (!rect.width || !points.length) return
+  const viewX = ((event.clientX - rect.left) / rect.width) * chartGeometry.width
+  const plotRatio = Math.min(1, Math.max(0, (viewX - chartGeometry.left) / chartPlotWidth))
+  activeTrendIndex.value = Math.round(plotRatio * (points.length - 1))
+}
+
+function moveTrendFocus(direction: number): void {
+  const last = trendPoints.value.length - 1
+  if (last < 0) return
+  const current = activeTrendIndex.value < 0 ? last : activeTrendIndex.value
+  activeTrendIndex.value = Math.min(last, Math.max(0, current + direction))
+}
+
+function onTrendKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+  event.preventDefault()
+  moveTrendFocus(event.key === 'ArrowLeft' ? -1 : 1)
 }
 
 const tokenBreakdown = computed(() => {
@@ -204,29 +237,41 @@ const tokenBreakdown = computed(() => {
   const sum = (field: 'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'reasoningOutputTokens'): number => (
     buckets.reduce((total, bucket) => total + Math.max(0, bucket[field] ?? 0), 0)
   )
+  const rawInput = useLifetime && usage.value?.lifetimeInputTokens != null
+    ? Math.max(0, usage.value.lifetimeInputTokens)
+    : sum('inputTokens')
+  const cachedInput = useLifetime && usage.value?.lifetimeCachedInputTokens != null
+    ? Math.max(0, usage.value.lifetimeCachedInputTokens)
+    : sum('cachedInputTokens')
+  const rawOutput = useLifetime && usage.value?.lifetimeOutputTokens != null
+    ? Math.max(0, usage.value.lifetimeOutputTokens)
+    : sum('outputTokens')
+  const reasoningOutput = useLifetime && usage.value?.lifetimeReasoningTokens != null
+    ? Math.max(0, usage.value.lifetimeReasoningTokens)
+    : sum('reasoningOutputTokens')
   const values = [
     {
       key: 'input',
       label: t('usageOverview.inputTokens'),
-      value: useLifetime && usage.value?.lifetimeInputTokens != null ? Math.max(0, usage.value.lifetimeInputTokens) : sum('inputTokens'),
+      value: rawInput,
       color: 'var(--usage-input)',
     },
     {
       key: 'cached',
       label: t('usageOverview.cachedTokens'),
-      value: useLifetime && usage.value?.lifetimeCachedInputTokens != null ? Math.max(0, usage.value.lifetimeCachedInputTokens) : sum('cachedInputTokens'),
+      value: cachedInput,
       color: 'var(--usage-cached)',
     },
     {
       key: 'output',
       label: t('usageOverview.outputTokens'),
-      value: useLifetime && usage.value?.lifetimeOutputTokens != null ? Math.max(0, usage.value.lifetimeOutputTokens) : sum('outputTokens'),
+      value: Math.max(0, rawOutput - reasoningOutput),
       color: 'var(--usage-output)',
     },
     {
       key: 'reasoning',
       label: t('usageOverview.reasoningTokens'),
-      value: useLifetime && usage.value?.lifetimeReasoningTokens != null ? Math.max(0, usage.value.lifetimeReasoningTokens) : sum('reasoningOutputTokens'),
+      value: reasoningOutput,
       color: 'var(--usage-reasoning)',
     },
   ]
@@ -269,6 +314,19 @@ function dateTooltip(day: HeatmapDay): string {
   return `${date} · ${formatTokenCount(day.tokens)} ${t('usageOverview.tokens')}`
 }
 
+function showHeatmapTooltip(day: HeatmapDay, event: PointerEvent): void {
+  if (loading.value || heatmapDragging.value) return
+  heatmapTooltipDay.value = day
+  heatmapTooltipPosition.value = {
+    x: Math.min(window.innerWidth - 220, Math.max(8, event.clientX + 12)),
+    y: Math.max(38, event.clientY - 12),
+  }
+}
+
+function hideHeatmapTooltip(): void {
+  heatmapTooltipDay.value = null
+}
+
 function scrollHeatmapToLatest(): void {
   void nextTick(() => {
     const element = heatmapScroller.value
@@ -308,6 +366,7 @@ function startHeatmapDrag(event: PointerEvent): void {
   dragStartX = event.clientX
   dragStartScrollLeft = element.scrollLeft
   heatmapDragging.value = true
+  hideHeatmapTooltip()
   event.preventDefault()
   element.focus({ preventScroll: true })
   element.setPointerCapture(event.pointerId)
@@ -398,6 +457,14 @@ async function loadUsage(): Promise<void> {
     const raw = await backend.ReadRuntimeAccountUsage(props.runtime)
     if (sequence !== loadSequence) return
     usage.value = normalizeAccountUsage(raw)
+    // Keep the sidebar/footer snapshot in sync with a rollout backfill. The
+    // runtime-scoped card used to show the repaired total while the footer kept
+    // displaying its stale launch-time value until the user reopened usage.
+    if (appStore.activeRuntime === props.runtime) {
+      await appStore.loadLocalUsage()
+      if (sequence !== loadSequence) return
+      if (appStore.accountUsage) usage.value = appStore.accountUsage
+    }
   } catch (error) {
     if (sequence !== loadSequence) return
     loadError.value = error instanceof Error ? error.message : String(error)
@@ -486,47 +553,78 @@ watch(
       <div v-if="loading" class="usage-chart-loading" aria-hidden="true">
         <span v-for="index in 10" :key="index" class="usage-chart-loading-bar" :style="{ height: `${22 + ((index * 29) % 68)}%`, animationDelay: `${index * 45}ms` }" />
       </div>
-      <svg
-        v-else-if="trendHasData"
-        class="usage-trend-svg"
-        :viewBox="`0 0 ${chartGeometry.width} ${chartGeometry.height}`"
-        role="img"
-        :aria-label="t('usageOverview.trendAriaLabel')"
-      >
-        <defs>
-          <linearGradient :id="chartGradientId" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="var(--primary)" stop-opacity="0.22" />
-            <stop offset="100%" stop-color="var(--primary)" stop-opacity="0.015" />
-          </linearGradient>
-        </defs>
-        <g class="usage-chart-grid">
-          <g v-for="tick in trendYAxisTicks" :key="tick.y">
-            <line :x1="chartGeometry.left" :x2="chartGeometry.width - chartGeometry.right" :y1="tick.y" :y2="tick.y" />
-            <text :x="chartGeometry.left - 10" :y="tick.y + 3" text-anchor="end">{{ formatTokenCount(tick.value) }}</text>
-          </g>
-        </g>
-        <path :d="trendAreaPath" :fill="`url(#${chartGradientId})`" />
-        <path class="usage-trend-line" :d="trendLinePath" />
-        <circle
-          v-for="point in trendPointMarkers"
-          :key="point.key"
-          class="usage-trend-point"
-          :cx="point.x"
-          :cy="point.y"
-          r="3"
+      <div v-else-if="trendHasData" class="usage-trend-chart">
+        <svg
+          class="usage-trend-svg"
+          :viewBox="`0 0 ${chartGeometry.width} ${chartGeometry.height}`"
+          role="img"
+          tabindex="0"
+          :aria-label="t('usageOverview.trendAriaLabel')"
+          @pointermove="updateTrendHover"
+          @pointerleave="activeTrendIndex = -1"
+          @focus="activeTrendIndex = trendPoints.length - 1"
+          @blur="activeTrendIndex = -1"
+          @keydown="onTrendKeydown"
         >
-          <title>{{ trendTooltip(point) }}</title>
-        </circle>
-        <g class="usage-chart-x-labels">
-          <text
-            v-for="(point, index) in trendXAxisTicks"
+          <defs>
+            <linearGradient :id="chartGradientId" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="var(--primary)" stop-opacity="0.22" />
+              <stop offset="100%" stop-color="var(--primary)" stop-opacity="0.015" />
+            </linearGradient>
+          </defs>
+          <g class="usage-chart-grid">
+            <g v-for="tick in trendYAxisTicks" :key="tick.y">
+              <line :x1="chartGeometry.left" :x2="chartGeometry.width - chartGeometry.right" :y1="tick.y" :y2="tick.y" />
+              <text :x="chartGeometry.left - 10" :y="tick.y + 3" text-anchor="end">{{ formatTokenCount(tick.value) }}</text>
+            </g>
+          </g>
+          <path :d="trendAreaPath" :fill="`url(#${chartGradientId})`" />
+          <path class="usage-trend-line" :d="trendLinePath" />
+          <circle
+            v-for="point in trendPointMarkers"
             :key="point.key"
-            :x="point.x"
-            :y="chartGeometry.height - 12"
-            :text-anchor="index === 0 ? 'start' : index === trendXAxisTicks.length - 1 ? 'end' : 'middle'"
-          >{{ trendDateLabel(point.date) }}</text>
-        </g>
-      </svg>
+            class="usage-trend-point"
+            :cx="point.x"
+            :cy="point.y"
+            r="3"
+          />
+          <g v-if="activeTrendPoint" class="usage-trend-active" aria-hidden="true">
+            <line
+              :x1="activeTrendPoint.x"
+              :x2="activeTrendPoint.x"
+              :y1="chartGeometry.top"
+              :y2="chartBaseline"
+            />
+            <circle :cx="activeTrendPoint.x" :cy="activeTrendPoint.y" r="4.5" />
+          </g>
+          <g class="usage-chart-x-labels">
+            <text
+              v-for="(point, index) in trendXAxisTicks"
+              :key="point.key"
+              :x="point.x"
+              :y="chartGeometry.height - 12"
+              :text-anchor="index === 0 ? 'start' : index === trendXAxisTicks.length - 1 ? 'end' : 'middle'"
+            >{{ trendDateLabel(point.date) }}</text>
+          </g>
+        </svg>
+        <div
+          v-if="activeTrendPoint"
+          class="usage-chart-tooltip"
+          :class="activeTrendPoint.x > chartGeometry.width * 0.68 ? 'is-left' : 'is-right'"
+          :style="{
+            left: `${(activeTrendPoint.x / chartGeometry.width) * 100}%`,
+            top: `${Math.max(8, (activeTrendPoint.y / chartGeometry.height) * 100)}%`,
+          }"
+          role="status"
+        >
+          <strong>{{ trendDateLabel(activeTrendPoint.date, true) }}</strong>
+          <span class="is-total"><i />{{ t('usageOverview.totalTokens') }} <b>{{ formatTokenCount(activeTrendPoint.tokens) }}</b></span>
+          <span class="is-input"><i />{{ t('usageOverview.inputTokens') }} <b>{{ formatTokenCount(nonCachedInputTokens(activeTrendPoint)) }}</b></span>
+          <span class="is-cached"><i />{{ t('usageOverview.cachedTokens') }} <b>{{ formatTokenCount(activeTrendPoint.cachedInputTokens) }}</b></span>
+          <span class="is-output"><i />{{ t('usageOverview.outputTokens') }} <b>{{ formatTokenCount(nonReasoningOutputTokens(activeTrendPoint)) }}</b></span>
+          <span class="is-reasoning"><i />{{ t('usageOverview.reasoningTokens') }} <b>{{ formatTokenCount(activeTrendPoint.reasoningOutputTokens) }}</b></span>
+        </div>
+      </div>
       <div v-else class="usage-chart-empty">
         <BarChart3 :size="22" />
         <p>{{ t('usageOverview.noUsage') }}</p>
@@ -538,7 +636,7 @@ watch(
       <span>{{ t('usageOverview.currentStreak') }} <strong>{{ usage?.currentStreakDays ?? 0 }}{{ t('usageOverview.dayUnit') }}</strong></span>
       <span>{{ t('usageOverview.longestStreak') }} <strong>{{ usage?.longestStreakDays ?? 0 }}{{ t('usageOverview.dayUnit') }}</strong></span>
       <span>{{ t('usageOverview.peakDay') }} <strong>{{ formatTokenCount(usage?.peakDailyTokens) }}</strong></span>
-      <span class="min-w-0">{{ t('usageOverview.favoriteModel') }} <strong class="inline-block max-w-44 truncate align-bottom" :title="favoriteModel">{{ favoriteModel }}</strong></span>
+      <span class="min-w-0">{{ t('usageOverview.favoriteModel') }} <SimpleTooltip :content="favoriteModel"><strong class="inline-block max-w-44 truncate align-bottom">{{ favoriteModel }}</strong></SimpleTooltip></span>
     </div>
 
     <div class="usage-secondary-grid">
@@ -574,7 +672,7 @@ watch(
         <div v-if="modelRows.length" class="usage-model-list">
           <div v-for="(row, index) in modelRows" :key="row.model" class="usage-model-row">
             <div>
-              <span :title="row.model"><i :style="{ background: modelChartPalette[index % modelChartPalette.length] }" />{{ row.model }}</span>
+              <SimpleTooltip :content="row.model"><span><i :style="{ background: modelChartPalette[index % modelChartPalette.length] }" />{{ row.model }}</span></SimpleTooltip>
               <strong>{{ t('usageOverview.sessionCount', { count: row.sessions }) }}</strong>
             </div>
             <div class="usage-model-track"><span :style="{ width: `${Math.max(2, row.percent)}%`, background: modelChartPalette[index % modelChartPalette.length] }" /></div>
@@ -598,6 +696,7 @@ watch(
         tabindex="0"
         role="region"
         :aria-label="t('usageOverview.heatmapLabel')"
+        @scroll.passive="hideHeatmapTooltip"
         @wheel="handleHeatmapWheel"
         @keydown="handleHeatmapKeydown"
         @pointerdown="startHeatmapDrag"
@@ -616,8 +715,10 @@ watch(
             :key="day.key"
             class="usage-heatmap-cell h-full w-full rounded-[3px] ring-1 ring-inset ring-foreground/[0.025]"
             :class="loading ? 'usage-loading-cell bg-muted-foreground/15' : heatmapClass(day.intensity)"
-            :title="loading ? undefined : dateTooltip(day)"
             :style="index === 0 && activeRange !== 7 && activeRange !== 30 ? { gridRowStart: day.date.getDay() + 1 } : undefined"
+            @pointerenter="showHeatmapTooltip(day, $event)"
+            @pointermove="showHeatmapTooltip(day, $event)"
+            @pointerleave="hideHeatmapTooltip"
           />
         </div>
       </div>
@@ -691,6 +792,7 @@ watch(
         tabindex="0"
         role="region"
         :aria-label="t('usageOverview.heatmapLabel')"
+        @scroll.passive="hideHeatmapTooltip"
         @wheel="handleHeatmapWheel"
         @keydown="handleHeatmapKeydown"
         @pointerdown="startHeatmapDrag"
@@ -723,8 +825,10 @@ watch(
             :key="day.key"
             class="usage-heatmap-cell h-full w-full rounded-[2px] ring-1 ring-inset ring-foreground/[0.035]"
             :class="heatmapClass(day.intensity)"
-            :title="dateTooltip(day)"
             :style="index === 0 && activeRange !== 7 ? { gridRowStart: day.date.getDay() + 1 } : undefined"
+            @pointerenter="showHeatmapTooltip(day, $event)"
+            @pointermove="showHeatmapTooltip(day, $event)"
+            @pointerleave="hideHeatmapTooltip"
           />
         </div>
       </div>
@@ -738,11 +842,11 @@ watch(
         <span>{{ t('usageOverview.currentStreak') }} <strong>{{ usage?.currentStreakDays ?? 0 }}</strong></span>
         <span>{{ t('usageOverview.longestStreak') }} <strong>{{ usage?.longestStreakDays ?? 0 }}</strong></span>
         <span>{{ t('usageOverview.peakDay') }} <strong>{{ formatTokenCount(usage?.peakDailyTokens) }}</strong></span>
-        <span class="min-w-0">{{ t('usageOverview.favoriteModel') }} <strong class="inline-block max-w-28 truncate align-bottom" :title="favoriteModel">{{ favoriteModel }}</strong></span>
+        <span class="min-w-0">{{ t('usageOverview.favoriteModel') }} <SimpleTooltip :content="favoriteModel"><strong class="inline-block max-w-28 truncate align-bottom">{{ favoriteModel }}</strong></SimpleTooltip></span>
       </div>
-      <p v-if="loadError" class="truncate text-[9px] text-muted-foreground" :title="loadError">
-        {{ t('usageOverview.loadFailed') }}
-      </p>
+      <SimpleTooltip v-if="loadError" :content="loadError">
+        <p class="truncate text-[9px] text-muted-foreground">{{ t('usageOverview.loadFailed') }}</p>
+      </SimpleTooltip>
     </div>
 
     <div v-else class="px-3 pb-3">
@@ -758,10 +862,12 @@ watch(
         <div class="space-y-2.5">
           <div v-for="(row, index) in modelRows" :key="row.model" class="space-y-1">
             <div class="flex items-center justify-between gap-3 text-[11px]">
-              <span class="flex min-w-0 items-center gap-2 truncate font-medium" :title="row.model">
+              <SimpleTooltip :content="row.model">
+                <span class="flex min-w-0 items-center gap-2 truncate font-medium">
                 <i class="size-2 shrink-0 rounded-sm" :style="{ background: modelChartPalette[index % modelChartPalette.length] }" />
                 <span class="truncate">{{ row.model }}</span>
-              </span>
+                </span>
+              </SimpleTooltip>
               <span class="shrink-0 text-muted-foreground">{{ t('usageOverview.sessionCount', { count: row.sessions }) }}</span>
             </div>
             <div class="h-1.5 overflow-hidden rounded-full bg-muted">
@@ -782,6 +888,19 @@ watch(
       </div>
     </div>
   </section>
+
+  <Teleport to="body">
+    <Transition name="usage-tooltip">
+      <div
+        v-if="heatmapTooltipDay"
+        class="usage-heatmap-tooltip"
+        :style="{ left: `${heatmapTooltipPosition.x}px`, top: `${heatmapTooltipPosition.y}px` }"
+        role="status"
+      >
+        {{ dateTooltip(heatmapTooltipDay) }}
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -953,11 +1072,20 @@ watch(
   background: var(--primary);
 }
 
+.usage-trend-chart {
+  position: relative;
+}
+
 .usage-trend-svg {
   display: block;
   width: 100%;
   min-height: 15.75rem;
   padding: 0 0.5rem 0.3rem;
+  outline: none;
+}
+
+.usage-trend-svg:focus-visible {
+  filter: drop-shadow(0 0 2px color-mix(in oklab, var(--ring) 55%, transparent));
 }
 
 .usage-chart-grid line {
@@ -988,6 +1116,103 @@ watch(
   stroke: var(--primary);
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
+}
+
+.usage-trend-active line {
+  stroke: color-mix(in oklab, var(--foreground) 32%, transparent);
+  stroke-dasharray: 3 3;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.usage-trend-active circle {
+  fill: var(--card);
+  stroke: var(--primary);
+  stroke-width: 2.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.usage-chart-tooltip {
+  position: absolute;
+  z-index: 4;
+  display: grid;
+  width: 10.75rem;
+  gap: 0.3rem;
+  padding: 0.65rem 0.7rem;
+  border: 1px solid color-mix(in oklab, var(--border) 86%, transparent);
+  border-radius: 0.65rem;
+  background: color-mix(in oklab, var(--popover) 96%, transparent);
+  box-shadow: 0 10px 30px -12px color-mix(in oklab, var(--foreground) 34%, transparent);
+  color: var(--popover-foreground);
+  font-size: 0.625rem;
+  pointer-events: none;
+  transform: translate(0.65rem, -50%);
+  backdrop-filter: blur(12px);
+}
+
+.usage-chart-tooltip.is-left {
+  transform: translate(calc(-100% - 0.65rem), -50%);
+}
+
+.usage-chart-tooltip strong {
+  margin-bottom: 0.12rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+.usage-chart-tooltip span {
+  display: grid;
+  grid-template-columns: 0.4rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted-foreground);
+}
+
+.usage-chart-tooltip i {
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 999px;
+  background: var(--muted-foreground);
+}
+
+.usage-chart-tooltip b {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.usage-chart-tooltip .is-total i { background: var(--primary); }
+.usage-chart-tooltip .is-input i { background: var(--usage-input); }
+.usage-chart-tooltip .is-cached i { background: var(--usage-cached); }
+.usage-chart-tooltip .is-output i { background: var(--usage-output); }
+.usage-chart-tooltip .is-reasoning i { background: var(--usage-reasoning); }
+
+.usage-heatmap-tooltip {
+  position: fixed;
+  z-index: 100;
+  max-width: min(17rem, calc(100vw - 1rem));
+  padding: 0.38rem 0.55rem;
+  border: 1px solid color-mix(in oklab, var(--border) 88%, transparent);
+  border-radius: 0.45rem;
+  background: color-mix(in oklab, var(--popover) 96%, transparent);
+  box-shadow: 0 8px 22px -12px color-mix(in oklab, var(--foreground) 38%, transparent);
+  color: var(--popover-foreground);
+  font-size: 0.625rem;
+  line-height: 1rem;
+  pointer-events: none;
+  transform: translateY(-100%);
+  backdrop-filter: blur(10px);
+}
+
+.usage-tooltip-enter-active,
+.usage-tooltip-leave-active {
+  transition: opacity 100ms ease, transform 100ms ease;
+}
+
+.usage-tooltip-enter-from,
+.usage-tooltip-leave-to {
+  opacity: 0;
+  transform: translateY(calc(-100% + 3px));
 }
 
 .usage-chart-loading {

@@ -716,16 +716,18 @@ async function settleToBottom(options: SettleOptions = {}): Promise<void> {
 
   const waitForLoad = options.waitForLoad === true
   if (waitForLoad) {
-    // Wait for openThread to finish (or give up after ~3s).
+    // Long rollouts can keep hydrating for tens of seconds. Start pinning as
+    // soon as real groups exist instead of waiting on the background read.
     for (let i = 0; i < 180; i += 1) {
       if (token !== settleToken || !stickToBottom.value) return
-      if (!isLoading.value) break
+      if (!isLoading.value || groups.value.length > 0) break
       await waitFrame()
     }
   }
 
-  // If still loading (user switched again into another load), bail — next settle will run.
-  if (isLoading.value) return
+  // A skeleton has no stable bottom yet. Once real groups are visible, loading
+  // only means older/history data is still being read and must not block pinning.
+  if (isLoading.value && groups.value.length === 0) return
 
   let previousHeight = -1
   let stableFrames = 0
@@ -735,11 +737,11 @@ async function settleToBottom(options: SettleOptions = {}): Promise<void> {
 
   for (let i = 0; i < maxFrames; i += 1) {
     if (token !== settleToken || !stickToBottom.value) return
-    // Thread switched mid-settle into a loading state — let that open own settle.
-    if (isLoading.value) return
+    // Thread switched mid-settle into a skeleton — let that open own settle.
+    if (isLoading.value && groups.value.length === 0) return
     await nextTick()
     await waitFrame()
-    if (token !== settleToken || !stickToBottom.value || isLoading.value) return
+    if (token !== settleToken || !stickToBottom.value || (isLoading.value && groups.value.length === 0)) return
     pinScrollTop()
     const container = scrollAreaRef.value
     if (!container) return
@@ -759,7 +761,7 @@ async function settleToBottom(options: SettleOptions = {}): Promise<void> {
   // Late layout: images, syntax highlight, fonts, tool rows.
   for (const delay of [100, 280, 560, 1000]) {
     const timer = window.setTimeout(() => {
-      if (token !== settleToken || !stickToBottom.value || isLoading.value) return
+      if (token !== settleToken || !stickToBottom.value || (isLoading.value && groups.value.length === 0)) return
       pinScrollTop()
       updateJumpBottom()
     }, delay)
@@ -1099,8 +1101,9 @@ onMounted(() => {
       updateJumpBottom()
       return
     }
-    // While loading a thread, height is skeleton — skip until real content is up.
-    if (isLoading.value) return
+    // Ignore skeleton resizes, but keep following real groups while a very long
+    // rollout continues hydrating in the background.
+    if (isLoading.value && groups.value.length === 0) return
     // Coalesce layout-driven scroll pins while content streams in.
     const now = performance.now()
     if (timelineTurnRunning.value || showThinking.value) {

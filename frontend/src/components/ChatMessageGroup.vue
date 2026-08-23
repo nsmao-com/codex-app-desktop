@@ -1373,13 +1373,13 @@ function diffStats(diff: string): { add: number; del: number } {
           v-else-if="completedReasoningText"
           class="py-0.5"
         >
-          <button
-            type="button"
-            class="group/reason inline-flex max-w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-            :aria-expanded="isOpen('completed-reasoning')"
-            :title="t('timeline.reasoningHint')"
-            @click="toggle('completed-reasoning')"
-          >
+          <SimpleTooltip :content="t('timeline.reasoningHint')">
+            <button
+              type="button"
+              class="group/reason inline-flex max-w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+              :aria-expanded="isOpen('completed-reasoning')"
+              @click="toggle('completed-reasoning')"
+            >
             <Brain :size="12" class="shrink-0 opacity-50" />
             <span class="min-w-0 truncate">{{ t('timeline.reasoningPreview') }}</span>
             <ChevronRight
@@ -1387,7 +1387,8 @@ function diffStats(diff: string): { add: number; del: number } {
               class="timeline-chevron shrink-0 opacity-40"
               :class="isOpen('completed-reasoning') ? 'is-open' : ''"
             />
-          </button>
+            </button>
+          </SimpleTooltip>
           <div class="timeline-collapse" :class="isOpen('completed-reasoning') ? 'is-open' : ''">
             <div class="timeline-collapse-inner">
               <div class="relative mt-1">

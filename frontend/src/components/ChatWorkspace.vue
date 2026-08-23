@@ -19,6 +19,7 @@ import ComposerPanel from './ComposerPanel.vue'
 import WorkspaceWelcome from './WorkspaceWelcome.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { SimpleTooltip } from '@/components/ui/tooltip'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -609,13 +610,9 @@ function commitFromBar(): void {
           {{ t('chat.switchingProject') }}
         </div>
         <template v-else>
-          <span
-            v-if="(isGrokMode || isClaudeMode) && activeSessionTitle"
-            class="truncate text-[12px] font-medium text-foreground/90"
-            :title="activeSessionTitle"
-          >
-            {{ activeSessionTitle }}
-          </span>
+          <SimpleTooltip v-if="(isGrokMode || isClaudeMode) && activeSessionTitle" :content="activeSessionTitle">
+            <span class="truncate text-[12px] font-medium text-foreground/90">{{ activeSessionTitle }}</span>
+          </SimpleTooltip>
           <span v-else-if="workspaceTag" class="truncate text-[12px] font-medium text-foreground/90">
             {{ workspaceTag }}
           </span>

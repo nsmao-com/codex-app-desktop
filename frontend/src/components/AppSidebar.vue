@@ -1199,11 +1199,9 @@ function formatGrokUpdated(value?: number | null): string {
                   />
                   <FolderOpen v-if="group.active" :size="13" class="shrink-0 text-foreground/70" />
                   <Folder v-else :size="13" class="shrink-0 opacity-60" />
-                  <span
-                    class="min-w-0 truncate"
-                    :class="group.active ? 'text-foreground' : ''"
-                    :title="group.path"
-                  >{{ group.name }}</span>
+                  <SimpleTooltip :content="group.path">
+                    <span class="min-w-0 truncate" :class="group.active ? 'text-foreground' : ''">{{ group.name }}</span>
+                  </SimpleTooltip>
                 </button>
               </CollapsibleTrigger>
               <span class="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/80">
@@ -1440,11 +1438,9 @@ function formatGrokUpdated(value?: number | null): string {
                 />
                 <FolderOpen v-if="group.active" :size="13" class="shrink-0 text-foreground/70" />
                 <Folder v-else :size="13" class="shrink-0 opacity-60" />
-                <span
-                  class="min-w-0 truncate"
-                  :class="group.active ? 'text-foreground' : ''"
-                  :title="group.path"
-                >{{ group.name }}</span>
+                <SimpleTooltip :content="group.path">
+                  <span class="min-w-0 truncate" :class="group.active ? 'text-foreground' : ''">{{ group.name }}</span>
+                </SimpleTooltip>
               </button>
             </CollapsibleTrigger>
 
@@ -1701,11 +1697,9 @@ function formatGrokUpdated(value?: number | null): string {
                   />
                   <FolderOpen v-if="group.active" :size="13" class="shrink-0 text-foreground/70" />
                   <Folder v-else :size="13" class="shrink-0 opacity-60" />
-                  <span
-                    class="min-w-0 truncate"
-                    :class="group.active ? 'text-foreground' : ''"
-                    :title="group.path"
-                  >{{ group.name }}</span>
+                  <SimpleTooltip :content="group.path">
+                    <span class="min-w-0 truncate" :class="group.active ? 'text-foreground' : ''">{{ group.name }}</span>
+                  </SimpleTooltip>
                 </button>
               </CollapsibleTrigger>
               <span class="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/80">

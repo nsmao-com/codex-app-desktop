@@ -126,6 +126,24 @@ async function activateRuntime(runtime: WorkspaceRuntime): Promise<void> {
   if (!arenaKeepSessions && runtime === 'codex') {
     await codexStore.clearActiveSession()
   }
+  const autoConnect = Boolean(
+    !codexStore.isReady
+    && appStore.settings.workspace
+    && appStore.settings.autoConnect
+    && appStore.codexAvailable,
+  )
+  if (autoConnect) {
+    // connect() already loads models, providers, threads, account, and workspace.
+    // Starting it here avoids doing all of that twice before launch can connect.
+    const connected = await codexStore.connect(appStore.settings.workspace)
+    if (!connected || sequence !== runtimeActivationSequence || appStore.activeRuntime !== runtime) return
+    const rememberedID = lastCodexTimelineThreadByRuntime.get('codex') || ''
+    const remembered = rememberedID
+      ? codexStore.threadGroups.flatMap((group) => group.threads).find((thread) => thread.id === rememberedID)
+      : undefined
+    if (!arenaKeepSessions && remembered) await codexStore.openThread(remembered.id)
+    return
+  }
   await Promise.all([
     codexStore.loadModels(),
     codexStore.loadModelProviders(),
@@ -137,14 +155,6 @@ async function activateRuntime(runtime: WorkspaceRuntime): Promise<void> {
     : undefined
   if (!arenaKeepSessions && remembered && sequence === runtimeActivationSequence && appStore.activeRuntime === runtime) {
     await codexStore.openThread(remembered.id)
-  }
-  if (
-    !codexStore.isReady
-    && appStore.settings.workspace
-    && appStore.settings.autoConnect
-    && appStore.codexAvailable
-  ) {
-    void codexStore.connect(appStore.settings.workspace)
   }
 }
 

@@ -493,11 +493,11 @@ watch(
           @update:model-value="(value) => void onSessionChange(value)"
           @update:open="onSessionMenuOpen"
         >
-          <SelectTrigger
-            class="h-8 min-w-0 w-full max-w-full flex-1 overflow-hidden border bg-background/60 px-1.5 text-[11px] shadow-none"
-            :aria-label="selectedSessionLabel"
-            :title="selectedSessionTooltip"
-          >
+          <SimpleTooltip :content="selectedSessionTooltip">
+            <SelectTrigger
+              class="h-8 min-w-0 w-full max-w-full flex-1 overflow-hidden border bg-background/60 px-1.5 text-[11px] shadow-none"
+              :aria-label="selectedSessionLabel"
+            >
             <SelectValue>
               <span class="flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden">
                 <component
@@ -510,7 +510,8 @@ watch(
                 </span>
               </span>
             </SelectValue>
-          </SelectTrigger>
+            </SelectTrigger>
+          </SimpleTooltip>
 
           <!-- Compact, icon-rich menu; fixed width so it never fills the page. -->
           <SelectContent

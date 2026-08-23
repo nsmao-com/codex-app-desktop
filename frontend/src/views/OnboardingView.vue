@@ -17,6 +17,7 @@ import { useI18n } from 'vue-i18n'
 
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { SimpleTooltip } from '@/components/ui/tooltip'
 import { useAppStore, useCodexStore, useWorkspaceStore } from '@/stores'
 import type { AppTheme } from '@/composables/useAppearance'
 import { notify } from '@/utils/notify'
@@ -203,13 +204,12 @@ onMounted(() => {
           <p class="mt-1 text-[13px] text-muted-foreground">{{ t('onboarding.kicker') }}</p>
         </div>
         <div class="flex items-center gap-1.5">
-          <span
-            v-for="(label, index) in steps"
-            :key="label"
-            class="onboarding-dot h-1.5 rounded-full"
-            :class="index === step ? 'is-active' : index < step ? 'is-done' : 'is-todo'"
-            :title="label"
-          />
+          <SimpleTooltip v-for="(label, index) in steps" :key="label" :content="label">
+            <span
+              class="onboarding-dot h-1.5 rounded-full"
+              :class="index === step ? 'is-active' : index < step ? 'is-done' : 'is-todo'"
+            />
+          </SimpleTooltip>
         </div>
       </div>
 

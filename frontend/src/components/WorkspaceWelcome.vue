@@ -4,6 +4,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { Button } from '@/components/ui/button'
+import { SimpleTooltip } from '@/components/ui/tooltip'
 import UsageOverviewCard from '@/components/UsageOverviewCard.vue'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
@@ -214,18 +215,17 @@ async function chooseWorkspace(): Promise<void> {
       </div>
 
       <div class="mt-4 flex w-full max-w-xl flex-wrap items-center justify-center gap-2">
-        <button
-          v-for="(suggestion, index) in suggestions"
-          :key="suggestion.title"
-          type="button"
-          class="welcome-chip inline-flex h-9 items-center gap-1.5 rounded-full border border-border/70 bg-card/90 px-3.5 text-[12px] text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:border-foreground/20 hover:bg-muted/60 hover:text-foreground"
-          :style="{ animationDelay: `${520 + index * 90}ms` }"
-          :title="suggestion.prompt"
-          @click="emit('suggestion', suggestion.prompt)"
-        >
-          <component :is="suggestion.icon" :size="13" class="opacity-70" />
-          {{ suggestion.title }}
-        </button>
+        <SimpleTooltip v-for="(suggestion, index) in suggestions" :key="suggestion.title" :content="suggestion.prompt">
+          <button
+            type="button"
+            class="welcome-chip inline-flex h-9 items-center gap-1.5 rounded-full border border-border/70 bg-card/90 px-3.5 text-[12px] text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:border-foreground/20 hover:bg-muted/60 hover:text-foreground"
+            :style="{ animationDelay: `${520 + index * 90}ms` }"
+            @click="emit('suggestion', suggestion.prompt)"
+          >
+            <component :is="suggestion.icon" :size="13" class="opacity-70" />
+            {{ suggestion.title }}
+          </button>
+        </SimpleTooltip>
       </div>
 
       <div

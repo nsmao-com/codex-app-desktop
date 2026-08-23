@@ -535,14 +535,9 @@ export const useCodexStore = defineStore('codex', () => {
     options: { forceRestart?: boolean } = {},
   ): Promise<boolean> {
     if (!path || busy.value) return false
-    let previousStatus: CodexStatus | null = null
-    try {
-      previousStatus = await backend.CodexStatus()
-    } catch {
-      // StartCodex below remains the source of truth when the status probe fails.
-    }
-    const restartingServer = options.forceRestart === true && previousStatus?.running === true
-    const reusingRunningServer = previousStatus?.running === true && !restartingServer
+    // Claim the connection attempt before the first await. This prevents two
+    // launch-time callers from racing through the status probe and also lets
+    // the UI enter its quiet initializing state immediately.
     busy.value = true
     connection.value = {
       ...connection.value,
@@ -551,6 +546,14 @@ export const useCodexStore = defineStore('codex', () => {
       message: translate('app.connecting'),
       workspace: path,
     }
+    let previousStatus: CodexStatus | null = null
+    try {
+      previousStatus = await backend.CodexStatus()
+    } catch {
+      // StartCodex below remains the source of truth when the status probe fails.
+    }
+    const restartingServer = options.forceRestart === true && previousStatus?.running === true
+    const reusingRunningServer = previousStatus?.running === true && !restartingServer
     try {
       if (restartingServer) await backend.StopCodex()
       await backend.StartCodex(path)

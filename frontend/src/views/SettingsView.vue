@@ -54,6 +54,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import {
+  SimpleTooltip,
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -2014,17 +2015,18 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
             <Button v-if="activePanel !== 'usage' && activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching">
               {{ saving ? t('common.saving') : t('settings.save') }}
             </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              class="size-8 rounded-lg text-foreground/80 hover:bg-muted"
-              :aria-label="t('settings.close')"
-              :title="t('settings.close')"
-              @click="closeSettings"
-            >
-              <X :size="18" />
-            </Button>
+            <SimpleTooltip :content="t('settings.close')">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                class="size-8 rounded-lg text-foreground/80 hover:bg-muted"
+                :aria-label="t('settings.close')"
+                @click="closeSettings"
+              >
+                <X :size="18" />
+              </Button>
+            </SimpleTooltip>
           </div>
           <div class="space-y-1.5">
             <div class="flex items-center justify-between gap-2">
@@ -2488,9 +2490,9 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                       <span v-if="claudeStatus.version" class="mr-1 font-mono">{{ claudeStatus.version }}</span>
                       {{ t('settings.providerClaudeHint') }}
                     </p>
-                    <p v-if="claudeStatus.executable" class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80" :title="claudeStatus.executable">
-                      {{ claudeStatus.executable }}
-                    </p>
+                    <SimpleTooltip v-if="claudeStatus.executable" :content="claudeStatus.executable">
+                      <p class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80">{{ claudeStatus.executable }}</p>
+                    </SimpleTooltip>
                   </div>
                   <Badge :variant="claudeStatus.runtimeReady ? 'default' : 'outline'" class="text-[9px]">
                     {{ claudeStatus.runtimeReady ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
@@ -2629,9 +2631,9 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                       <span v-if="grokStatus.version" class="mr-1 font-mono">{{ grokStatus.version }}</span>
                       {{ t('settings.providerGrokHint') }}
                     </p>
-                    <p v-if="grokStatus.executable" class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80" :title="grokStatus.executable">
-                      {{ grokStatus.executable }}
-                    </p>
+                    <SimpleTooltip v-if="grokStatus.executable" :content="grokStatus.executable">
+                      <p class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80">{{ grokStatus.executable }}</p>
+                    </SimpleTooltip>
                   </div>
                   <Badge :variant="grokStatus.runtimeReady ? 'default' : 'outline'" class="text-[9px]">
                     {{ grokStatus.runtimeReady ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
@@ -2815,9 +2817,9 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                     <p class="truncate text-[11px] text-muted-foreground">
                       {{ externalRuntimeProvider?.message || t('settings.externalRuntimeFallback', { runtime: isGeminiSettings ? 'Gemini CLI' : 'OpenCode' }) }}
                     </p>
-                    <p v-if="externalRuntimeProvider?.executable" class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80" :title="externalRuntimeProvider.executable">
-                      {{ externalRuntimeProvider.executable }}
-                    </p>
+                    <SimpleTooltip v-if="externalRuntimeProvider?.executable" :content="externalRuntimeProvider.executable">
+                      <p class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80">{{ externalRuntimeProvider.executable }}</p>
+                    </SimpleTooltip>
                   </div>
                   <Badge :variant="externalRuntimeProvider?.runtimeReady ? 'default' : 'outline'" class="text-[9px]">
                     {{ externalRuntimeProvider?.runtimeReady ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
@@ -2854,7 +2856,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                        <LoaderCircle :size="12" class="animate-spin" />{{ t('common.loading') }}
                      </div>
                      <div v-else-if="externalCatalogError" class="flex items-center justify-between gap-2 text-[10px] text-destructive">
-                       <span class="min-w-0 truncate" :title="externalCatalogError">{{ externalCatalogError }}</span>
+                       <SimpleTooltip :content="externalCatalogError"><span class="min-w-0 truncate">{{ externalCatalogError }}</span></SimpleTooltip>
                        <Button type="button" variant="ghost" size="sm" class="h-6 shrink-0 px-2 text-[10px]" @click="loadExternalSettingsCatalog">
                          <RefreshCw :size="11" class="mr-1" />{{ t('common.retry') }}
                        </Button>
@@ -3085,7 +3087,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                       {{ instructionsStatusLabel(globalInstructionsExists, globalInstructionsEmptyFile) }}
                     </Badge>
                     <span class="tabular-nums">{{ customInstructionsLength }} / 16000</span>
-                    <span v-if="globalInstructionsPath" class="min-w-0 truncate" :title="globalInstructionsPath">{{ globalInstructionsPath }}</span>
+                    <SimpleTooltip v-if="globalInstructionsPath" :content="globalInstructionsPath"><span class="min-w-0 truncate">{{ globalInstructionsPath }}</span></SimpleTooltip>
                   </div>
                   <Textarea
                     v-model="customInstructions"
@@ -3144,16 +3146,16 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                       {{ t('settings.projectInstructionsWorkspace') }}:
                       {{ projectInstructionsWorkspaceName || t('common.unknown') }}
                     </p>
-                    <p class="mt-0.5 truncate text-muted-foreground" :title="projectInstructionsWorkspace">
-                      {{ projectInstructionsWorkspace }}
-                    </p>
+                    <SimpleTooltip :content="projectInstructionsWorkspace">
+                      <p class="mt-0.5 truncate text-muted-foreground">{{ projectInstructionsWorkspace }}</p>
+                    </SimpleTooltip>
                     <div class="mt-1.5 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
                       <Badge variant="outline" class="text-[10px]">{{ projectInstructionsSource }}</Badge>
                       <Badge variant="outline" class="text-[10px]">
                         {{ instructionsStatusLabel(projectInstructionsExists, projectInstructionsEmptyFile) }}
                       </Badge>
                       <span class="tabular-nums">{{ projectInstructionsLength }} / 16000</span>
-                      <span v-if="projectInstructionsPath" class="min-w-0 truncate" :title="projectInstructionsPath">{{ projectInstructionsPath }}</span>
+                      <SimpleTooltip v-if="projectInstructionsPath" :content="projectInstructionsPath"><span class="min-w-0 truncate">{{ projectInstructionsPath }}</span></SimpleTooltip>
                     </div>
                   </div>
                   <p v-else class="text-[11px] text-muted-foreground">{{ t('settings.projectInstructionsUnavailable') }}</p>
@@ -3447,21 +3449,11 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                   class="space-y-1 border-b px-4 py-2.5 text-[11px] text-muted-foreground"
                 >
                   <p class="text-[12px] font-medium text-foreground">{{ t('settings.cliToolsHomes') }}</p>
-                  <p v-if="cliReport.codexHome" class="truncate font-mono text-[10px]" :title="cliReport.codexHome">
-                    {{ t('settings.cliToolsCodexHome') }}: {{ cliReport.codexHome }}
-                  </p>
-                  <p v-if="cliReport.claudeHome" class="truncate font-mono text-[10px]" :title="cliReport.claudeHome">
-                    {{ t('settings.cliToolsClaudeHome') }}: {{ cliReport.claudeHome }}
-                  </p>
-                  <p v-if="cliReport.grokHome" class="truncate font-mono text-[10px]" :title="cliReport.grokHome">
-                    {{ t('settings.cliToolsGrokHome') }}: {{ cliReport.grokHome }}
-                  </p>
-                  <p v-if="cliReport.geminiHome" class="truncate font-mono text-[10px]" :title="cliReport.geminiHome">
-                    {{ t('settings.cliToolsGeminiHome') }}: {{ cliReport.geminiHome }}
-                  </p>
-                  <p v-if="cliReport.openCodeHome" class="truncate font-mono text-[10px]" :title="cliReport.openCodeHome">
-                    {{ t('settings.cliToolsOpenCodeHome') }}: {{ cliReport.openCodeHome }}
-                  </p>
+                  <SimpleTooltip v-if="cliReport.codexHome" :content="cliReport.codexHome"><p class="truncate font-mono text-[10px]">{{ t('settings.cliToolsCodexHome') }}: {{ cliReport.codexHome }}</p></SimpleTooltip>
+                  <SimpleTooltip v-if="cliReport.claudeHome" :content="cliReport.claudeHome"><p class="truncate font-mono text-[10px]">{{ t('settings.cliToolsClaudeHome') }}: {{ cliReport.claudeHome }}</p></SimpleTooltip>
+                  <SimpleTooltip v-if="cliReport.grokHome" :content="cliReport.grokHome"><p class="truncate font-mono text-[10px]">{{ t('settings.cliToolsGrokHome') }}: {{ cliReport.grokHome }}</p></SimpleTooltip>
+                  <SimpleTooltip v-if="cliReport.geminiHome" :content="cliReport.geminiHome"><p class="truncate font-mono text-[10px]">{{ t('settings.cliToolsGeminiHome') }}: {{ cliReport.geminiHome }}</p></SimpleTooltip>
+                  <SimpleTooltip v-if="cliReport.openCodeHome" :content="cliReport.openCodeHome"><p class="truncate font-mono text-[10px]">{{ t('settings.cliToolsOpenCodeHome') }}: {{ cliReport.openCodeHome }}</p></SimpleTooltip>
                   <p v-if="cliReport.platform" class="text-[10px]">
                     {{ t('onboarding.cliPlatformHint', { platform: cliReport.platform }) }}
                   </p>

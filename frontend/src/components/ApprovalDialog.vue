@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { SimpleTooltip } from '@/components/ui/tooltip'
 import type { PendingServerRequest } from '@/types/codex'
 import { asArray, asRecord, asString } from '@/utils/protocol'
 
@@ -416,7 +417,7 @@ function statusIcon() {
           </div>
           <div v-for="row in permissionRows" :key="row" class="flex gap-2">
             <dt class="text-muted-foreground">{{ t('approval.requestedPermission') }}</dt>
-            <dd class="font-medium" :title="row">{{ row }}</dd>
+            <SimpleTooltip :content="row"><dd class="font-medium">{{ row }}</dd></SimpleTooltip>
           </div>
         </dl>
         <p class="rounded-md bg-muted p-2 text-[11px] text-muted-foreground">{{ t('approval.safetyNote') }}</p>

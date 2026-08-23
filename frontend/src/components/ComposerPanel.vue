@@ -14,6 +14,7 @@ import {
   GitBranch,
   GitPullRequestArrow,
   Image as ImageIcon,
+  Laptop,
   ListOrdered,
   ListTodo,
   LoaderCircle,
@@ -30,18 +31,13 @@ import {
   X,
   Zap,
 } from '@lucide/vue'
-import { computed, nextTick, onMounted, shallowRef, useTemplateRef, watch, type Component } from 'vue'
+import { computed, nextTick, onMounted, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import AttachmentImage from '@/components/AttachmentImage.vue'
-import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
-import GeminiIcon from '@/components/icons/GeminiIcon.vue'
-import GrokIcon from '@/components/icons/GrokIcon.vue'
-import OpenAIIcon from '@/components/icons/OpenAIIcon.vue'
-import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -141,7 +137,6 @@ const skillIndex = shallowRef(0)
 const pluginIndex = shallowRef(0)
 const dragDepth = shallowRef(0)
 const composerExpanded = shallowRef(false)
-const composerRuntimeSwitching = shallowRef(false)
 const branchMenuOpen = shallowRef(false)
 const branchQuery = shallowRef('')
 const branchSearchInput = useTemplateRef<InstanceType<typeof Input>>('branchSearchInput')
@@ -838,47 +833,6 @@ watch(composerWorkspacePath, () => {
   branchMenuOpen.value = false
   branchQuery.value = ''
 })
-type ComposerRuntimeOption = {
-  kind: WorkspaceRuntime
-  name: string
-  icon: Component
-  ready: boolean
-  message: string
-}
-
-const COMPOSER_RUNTIME_ORDER: WorkspaceRuntime[] = ['codex', 'claude', 'grok', 'gemini', 'opencode']
-const COMPOSER_RUNTIME_FALLBACK_NAMES: Record<WorkspaceRuntime, string> = {
-  codex: 'Codex',
-  claude: 'Claude',
-  grok: 'Grok',
-  gemini: 'Gemini',
-  opencode: 'OpenCode',
-}
-const COMPOSER_RUNTIME_ICONS: Record<WorkspaceRuntime, Component> = {
-  codex: OpenAIIcon,
-  claude: ClaudeIcon,
-  grok: GrokIcon,
-  gemini: GeminiIcon,
-  opencode: OpenCodeIcon,
-}
-const composerRuntimeOptions = computed<ComposerRuntimeOption[]>(() =>
-  COMPOSER_RUNTIME_ORDER.map((kind) => {
-    const provider = appStore.agentProviders.find((item) => item.kind === kind)
-    return {
-      kind,
-      name: provider?.name || COMPOSER_RUNTIME_FALLBACK_NAMES[kind],
-      icon: COMPOSER_RUNTIME_ICONS[kind],
-      ready: Boolean(provider?.runtimeReady),
-      message: provider?.message || '',
-    }
-  }),
-)
-const composerRuntimeLabel = computed(() =>
-  composerRuntimeOptions.value.find((item) => item.kind === paneRuntime.value)?.name
-    || COMPOSER_RUNTIME_FALLBACK_NAMES[paneRuntime.value],
-)
-const composerRuntimeIcon = computed(() => COMPOSER_RUNTIME_ICONS[paneRuntime.value])
-
 function relatedQueueRows<T extends { id: string }>(
   record: Record<string, T[]>,
   sessionId: string,
@@ -1071,29 +1025,6 @@ const activeRuntimeSending = computed(() => {
   }
   return codexStore.isThreadSubmitting(composerSessionId.value)
 })
-const composerRuntimeInteractionDisabled = computed(() => Boolean(
-  composerRuntimeSwitching.value
-  || activeRuntimeTurnRunning.value
-  || activeRuntimeSending.value
-  || sendAdmissionPending.value,
-))
-
-async function selectComposerRuntime(runtime: WorkspaceRuntime): Promise<void> {
-  if (composerRuntimeInteractionDisabled.value || runtime === paneRuntime.value) return
-  composerRuntimeSwitching.value = true
-  try {
-    if (isArenaPane.value && paneId.value) {
-      arenaStore.setPaneRuntime(paneId.value, runtime)
-      return
-    }
-    const switched = await appStore.setActiveRuntime(runtime)
-    if (!switched) notify('error', t('sidebar.runtimeSwitchFailed'))
-  } catch (error) {
-    notify('error', t('sidebar.runtimeSwitchFailed'), error instanceof Error ? error.message : String(error))
-  } finally {
-    composerRuntimeSwitching.value = false
-  }
-}
 const branchInteractionDisabled = computed(() => Boolean(
   composerWorkspaceSwitching.value
   || workspaceStore.switchingWorkspace
@@ -2299,19 +2230,15 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       @drop="onDrop"
     >
       <div class="composer-context-row flex min-w-0 items-center gap-1.5 overflow-x-auto px-0.5 pb-0.5">
-        <DropdownMenu v-if="!isArenaPane">
+        <DropdownMenu>
           <DropdownMenuTrigger as-child>
             <button
               type="button"
               class="composer-context-chip composer-context-chip-button"
-              :title="`${t('settings.modelProvider')}: ${composerRuntimeLabel}`"
-              :aria-label="`${t('settings.modelProvider')}: ${composerRuntimeLabel}`"
-              :aria-busy="composerRuntimeSwitching"
-              :disabled="composerRuntimeInteractionDisabled"
+              :aria-label="`${t('chat.executionEnvironment')}: ${t('chat.executionLocal')}`"
             >
-              <LoaderCircle v-if="composerRuntimeSwitching" :size="12" class="shrink-0 animate-spin" />
-              <component :is="composerRuntimeIcon" v-else :size="12" class="shrink-0" />
-              <span>{{ composerRuntimeLabel }}</span>
+              <Laptop :size="12" class="shrink-0" />
+              <span>{{ t('chat.executionLocal') }}</span>
               <ChevronDown :size="11" class="shrink-0 opacity-55" />
             </button>
           </DropdownMenuTrigger>
@@ -2322,31 +2249,19 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             class="w-64 rounded-xl p-1.5 shadow-xl"
           >
             <div class="px-2.5 pb-2 pt-1.5">
-              <p class="text-xs font-medium">{{ t('settings.modelProvider') }}</p>
-              <p class="mt-0.5 text-[10px] leading-4 text-muted-foreground">{{ t('chat.providerSelectorHint') }}</p>
+              <p class="text-xs font-medium">{{ t('chat.executionEnvironment') }}</p>
+              <p class="mt-0.5 text-[10px] leading-4 text-muted-foreground">{{ t('chat.executionEnvironmentHint') }}</p>
             </div>
             <DropdownMenuSeparator />
-            <DropdownMenuItem
-              v-for="runtime in composerRuntimeOptions"
-              :key="runtime.kind"
-              class="gap-2.5 rounded-lg px-2.5 py-2"
-              :title="runtime.message || runtime.name"
-              :disabled="composerRuntimeInteractionDisabled"
-              @click="selectComposerRuntime(runtime.kind)"
-            >
-              <component :is="runtime.icon" :size="14" class="shrink-0 text-muted-foreground" />
-              <span class="min-w-0 flex-1 truncate text-xs">{{ runtime.name }}</span>
-              <span
-                class="text-[10px]"
-                :class="runtime.ready ? 'text-muted-foreground' : 'text-destructive'"
-              >
-                {{ runtime.ready ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
-              </span>
-              <Check
-                :size="14"
-                class="shrink-0"
-                :class="runtime.kind === paneRuntime ? 'opacity-100' : 'opacity-0'"
-              />
+            <DropdownMenuItem class="gap-2.5 rounded-lg px-2.5 py-2">
+              <Laptop :size="14" class="shrink-0 text-muted-foreground" />
+              <span class="min-w-0 flex-1 truncate text-xs">{{ t('chat.executionLocal') }}</span>
+              <Check :size="14" class="shrink-0" />
+            </DropdownMenuItem>
+            <DropdownMenuItem class="gap-2.5 rounded-lg px-2.5 py-2" disabled>
+              <Command :size="14" class="shrink-0 text-muted-foreground" />
+              <span class="min-w-0 flex-1 truncate text-xs">WSL</span>
+              <span class="text-[10px] text-muted-foreground">{{ t('chat.executionUnavailable') }}</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -2355,14 +2270,15 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             <button
               type="button"
               class="composer-context-chip composer-context-chip-button max-w-64"
-              :title="composerWorkspacePath || t('sidebar.chooseFolder')"
               :aria-label="`${t('sidebar.workspace')}: ${composerWorkspaceName}`"
               :aria-busy="composerWorkspaceSwitching"
               :disabled="composerWorkspaceSwitching"
             >
               <LoaderCircle v-if="composerWorkspaceSwitching" :size="12" class="shrink-0 animate-spin" />
               <Folder v-else :size="12" class="shrink-0" />
-              <span class="max-w-52 truncate">{{ composerWorkspaceName }}</span>
+              <SimpleTooltip :content="composerWorkspacePath || t('sidebar.chooseFolder')" side="bottom">
+                <span class="max-w-52 truncate">{{ composerWorkspaceName }}</span>
+              </SimpleTooltip>
               <ChevronDown :size="11" class="shrink-0 opacity-55" />
             </button>
           </DropdownMenuTrigger>
@@ -2386,13 +2302,12 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
               :key="path"
               class="gap-2.5 rounded-lg px-2.5 py-2"
               :disabled="composerWorkspaceSwitching"
-              :title="path"
               @click="switchComposerWorkspace(path)"
             >
               <Folder :size="14" class="shrink-0 text-muted-foreground" />
-              <span class="min-w-0 flex-1 truncate text-xs">
-                {{ workspaceDisplayName(path) }}
-              </span>
+              <SimpleTooltip :content="path" side="right">
+                <span class="min-w-0 flex-1 truncate text-xs">{{ workspaceDisplayName(path) }}</span>
+              </SimpleTooltip>
               <Check
                 v-if="sameWorkspacePath(path, composerWorkspacePath)"
                 :size="14"
@@ -2410,7 +2325,6 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             <button
               type="button"
               class="composer-context-chip composer-context-chip-button max-w-52"
-              :title="composerBranch"
               :aria-label="`${t('settings.gitBranch')}: ${composerBranch}`"
               :aria-expanded="branchMenuOpen"
               :aria-busy="workspaceStore.gitBranchesLoading || workspaceStore.branchSwitching"
@@ -2422,7 +2336,9 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                 class="shrink-0 animate-spin"
               />
               <GitBranch v-else :size="12" class="shrink-0" />
-              <span class="max-w-36 truncate">{{ composerBranch }}</span>
+              <SimpleTooltip :content="composerBranch" side="bottom">
+                <span class="max-w-36 truncate">{{ composerBranch }}</span>
+              </SimpleTooltip>
               <ChevronDown :size="11" class="shrink-0 opacity-55" />
             </button>
           </PopoverTrigger>
@@ -2448,11 +2364,12 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                   type="button"
                   class="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs outline-none transition-colors hover:bg-accent focus-visible:bg-accent"
                   :disabled="workspaceStore.branchSwitching"
-                  :title="branch"
                   @click="selectGitBranch(branch)"
                 >
                   <GitBranch :size="13" class="shrink-0 text-muted-foreground" />
-                  <span class="min-w-0 flex-1 truncate">{{ branch }}</span>
+                  <SimpleTooltip :content="branch" side="right">
+                    <span class="min-w-0 flex-1 truncate">{{ branch }}</span>
+                  </SimpleTooltip>
                   <Check
                     :size="14"
                     class="shrink-0"
@@ -2912,10 +2829,11 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                 variant="ghost"
                 size="sm"
                 class="order-1 hidden h-8 gap-1.5 rounded-lg px-2 text-[12px] font-normal text-foreground shadow-none hover:bg-muted/70 md:inline-flex"
-                :title="permissionDetail ? `${permissionLabel} (${permissionDetail})` : permissionLabel"
               >
                 <Shield :size="12" />
-                {{ permissionLabel }}
+                <SimpleTooltip :content="permissionDetail ? `${permissionLabel} (${permissionDetail})` : permissionLabel">
+                  <span>{{ permissionLabel }}</span>
+                </SimpleTooltip>
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" class="w-64">

@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
+import { SimpleTooltip } from '@/components/ui/tooltip'
 import { useCodexStore } from '@/stores'
 import { notify } from '@/utils/notify'
 
@@ -96,7 +97,9 @@ async function openFolder(): Promise<void> {
       <div class="space-y-3 px-4 py-3">
         <div class="rounded-lg border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
           <p>{{ overview?.enabled ? t('memories.featureOn') : t('memories.featureOff') }}</p>
-          <p v-if="overview?.root" class="mt-1 truncate font-mono text-[10px]" :title="overview.root">{{ overview.root }}</p>
+          <SimpleTooltip v-if="overview?.root" :content="overview.root">
+            <p class="mt-1 truncate font-mono text-[10px]">{{ overview.root }}</p>
+          </SimpleTooltip>
         </div>
 
         <div class="divide-y rounded-lg border">

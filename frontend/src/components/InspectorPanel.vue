@@ -189,9 +189,9 @@ function statusClass(status: string): string {
             <CardContent>
               <div class="mb-2 flex items-center justify-between text-xs">
                 <span class="text-muted-foreground">{{ t('inspector.contextUsage') }}</span>
-                <span class="tabular-nums" :title="contextUsage.estimated ? t('inspector.contextEstimated') : undefined">
-                  {{ contextUsage.estimated ? '≈' : '' }}{{ contextUsedPercent.toFixed(1) }}%
-                </span>
+                <SimpleTooltip :content="contextUsage.estimated ? t('inspector.contextEstimated') : ''">
+                  <span class="tabular-nums">{{ contextUsage.estimated ? '≈' : '' }}{{ contextUsedPercent.toFixed(1) }}%</span>
+                </SimpleTooltip>
               </div>
               <Progress :model-value="contextUsedPercent" class="h-1.5" />
               <div class="mt-3 grid grid-cols-3 gap-2 text-center text-[10px]">

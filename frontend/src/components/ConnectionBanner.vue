@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, FolderOpen, Loader2, RefreshCw } from '@lucide/vue'
+import { AlertCircle, FolderOpen, RefreshCw } from '@lucide/vue'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
@@ -19,9 +19,10 @@ const needsWorkspace = computed(() => isIdleDisconnected.value && !appStore.sett
 const canConnect = computed(() => isIdleDisconnected.value && Boolean(appStore.settings.workspace) && appStore.codexAvailable)
 const missingCli = computed(() => isIdleDisconnected.value && !appStore.codexAvailable)
 
-// Codex connection banner only — Claude / Grok use their own CLI readiness paths.
+// A normal launch initializes the local app-server silently. Reserve the banner
+// for states where the user can actually take action.
 const visible = computed(() =>
-  appStore.isCodexMode && state.value !== 'ready',
+  appStore.isCodexMode && !isConnecting.value && state.value !== 'ready',
 )
 
 const title = computed(() => {
@@ -58,8 +59,7 @@ const description = computed(() => {
       class="pointer-events-auto w-full max-w-lg rounded-md border bg-card/95 py-2 shadow-lg backdrop-blur"
       :variant="isError || missingCli ? 'destructive' : 'default'"
     >
-      <Loader2 v-if="isConnecting" class="size-4 animate-spin" />
-      <AlertCircle v-else class="size-4" />
+      <AlertCircle class="size-4" />
       <AlertTitle class="text-xs">
         {{ title }}
       </AlertTitle>
