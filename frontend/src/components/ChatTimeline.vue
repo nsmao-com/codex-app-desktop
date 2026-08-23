@@ -1,10 +1,17 @@
 <script setup lang="ts">
-import { AlertCircle, ArrowDown, LoaderCircle, RefreshCw } from '@lucide/vue'
+import { AlertCircle, ArrowDown, ChevronsDown, ChevronsUp, LoaderCircle, RefreshCw } from '@lucide/vue'
 import { computed, nextTick, onMounted, onUnmounted, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
+import {
+  SimpleTooltip,
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { useClaudeStore, useCodexStore, useGrokStore } from '@/stores'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import type { TimelineItem } from '@/types/codex'
@@ -342,6 +349,57 @@ const turnOrder = computed(() => {
 const turnIndexById = computed(() => new Map(
   turnOrder.value.map((turnId, index) => [turnId, index]),
 ))
+
+const userMarkers = computed(() => {
+  const markers: Array<{
+    groupIndex: number
+    index: number
+    preview: string
+    failed: boolean
+  }> = []
+  groups.value.forEach((group, groupIndex) => {
+    if (group.kind !== 'user') return
+    const text = group.items.map((item) => item.text).join(' ').replace(/\s+/g, ' ').trim()
+    const preview = text
+      ? (text.length > 80 ? `${text.slice(0, 80)}…` : text)
+      : t('chat.userMessageFallback', { index: markers.length + 1 })
+    markers.push({
+      groupIndex,
+      index: markers.length + 1,
+      preview,
+      failed: group.items.some((item) => item.failed),
+    })
+  })
+  return markers
+})
+
+/** Keep long conversations readable without mounting hundreds of navigation ticks. */
+const visibleUserMarkers = computed(() => {
+  const all = userMarkers.value
+  if (all.length <= 36) return all
+  const last = all.length - 1
+  const picked = new Set<number>([0, last])
+  for (let index = 1; index <= 34; index += 1) {
+    picked.add(Math.round((index / 35) * last))
+  }
+  return [...picked]
+    .sort((left, right) => left - right)
+    .flatMap((index) => all[index] ? [all[index]] : [])
+})
+
+const userNavRailStyle = computed(() => {
+  const count = visibleUserMarkers.value.length
+  if (count <= 0) return undefined
+  if (count === 1) return { height: '16px' }
+  const idealHeight = Math.round((count - 1) * 17 + 14)
+  return { height: `min(${idealHeight}px, 48vh, 440px)` }
+})
+
+function markerTopPercent(index: number): string {
+  const count = visibleUserMarkers.value.length
+  if (count <= 1) return '50%'
+  return `${(index / (count - 1)) * 100}%`
+}
 
 /** Item ownership reconciliation can temporarily split one turn into multiple agent groups. */
 const lastAgentGroupIndexByTurnId = computed(() => {
@@ -739,15 +797,60 @@ async function shiftRenderWindow(nextStart: number, nextEnd: number, anchorIndex
   updateJumpBottom()
 }
 
+async function ensureGroupRendered(groupIndex: number): Promise<void> {
+  if (groupIndex >= renderWindowStart.value && groupIndex < renderWindowEnd.value) return
+  const total = groups.value.length
+  let start = Math.max(0, groupIndex - Math.floor(RENDER_PAGE_GROUPS / 2))
+  let end = Math.min(total, start + MAX_RENDER_GROUPS)
+  start = Math.max(0, end - MAX_RENDER_GROUPS)
+  renderWindowStart.value = start
+  renderWindowEnd.value = end
+  await nextTick()
+  await waitFrame()
+}
+
+async function jumpToUserMessage(groupIndex: number): Promise<void> {
+  unlockFromBottom()
+  await ensureGroupRendered(groupIndex)
+  const container = scrollAreaRef.value
+  const target = contentRef.value?.querySelector(`[data-group-index="${groupIndex}"]`) as HTMLElement | null
+  if (!container || !target) return
+  const top = container.scrollTop
+    + target.getBoundingClientRect().top
+    - container.getBoundingClientRect().top
+    - 24
+  markProgrammaticScroll(700)
+  container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
+  showJumpBottom.value = true
+}
+
+async function scrollToTop(): Promise<void> {
+  unlockFromBottom()
+  const container = scrollAreaRef.value
+  if (!container) return
+  renderWindowStart.value = 0
+  renderWindowEnd.value = Math.min(groups.value.length, MAX_RENDER_GROUPS)
+  await nextTick()
+  await waitFrame()
+  // Reaching the top can emit a final scroll event after Chromium's long smooth jump.
+  // Keep it programmatic long enough to avoid accidentally loading an older history page.
+  markProgrammaticScroll(1500)
+  container.scrollTo({ top: 0, behavior: 'smooth' })
+  showJumpBottom.value = groups.value.length > 0
+}
+
 /** User-clicked “scroll to bottom” stays smooth while automatic pinning remains instant. */
 async function jumpToLatest(): Promise<void> {
   stickToBottom.value = true
   const container = scrollAreaRef.value
   if (!container) return
+  // Changing the virtual window can emit a scroll event before the smooth jump starts.
+  markProgrammaticScroll(1200)
   resetRenderWindowToLatest()
   await nextTick()
   await waitFrame()
-  markProgrammaticScroll()
+  // Keep the smooth-scroll events from being mistaken for manual navigation.
+  markProgrammaticScroll(800)
   container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
   showJumpBottom.value = false
   // After the smooth scroll, re-pin once in case layout grew mid-animation.
@@ -1187,6 +1290,66 @@ onUnmounted(() => {
         {{ $t('chat.jumpLatest', 'Latest') }}
       </button>
     </Transition>
+
+    <nav
+      v-if="!showLoadingPlaceholder && groups.length > 0"
+      class="pointer-events-none absolute right-1.5 top-1/2 z-40 flex max-h-[calc(100%-1rem)] -translate-y-1/2 flex-col items-center gap-2.5 sm:right-2"
+      :aria-label="$t('chat.userNavigation')"
+    >
+      <SimpleTooltip :content="$t('chat.scrollToTop')">
+        <button
+          type="button"
+          class="pointer-events-auto relative z-[1] grid size-8 shrink-0 place-items-center rounded-full border border-border bg-card/95 text-foreground/80 shadow-md backdrop-blur transition-[color,border-color,box-shadow] hover:border-primary/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          :aria-label="$t('chat.scrollToTop')"
+          @click="scrollToTop"
+        >
+          <ChevronsUp :size="15" />
+        </button>
+      </SimpleTooltip>
+
+      <div
+        v-if="userMarkers.length > 0"
+        class="user-nav-rail pointer-events-auto relative z-[1] min-h-4 w-4 shrink overflow-visible"
+        :style="userNavRailStyle"
+      >
+        <TooltipProvider :delay-duration="160" :disable-hoverable-content="true">
+          <Tooltip v-for="(marker, markerIndex) in visibleUserMarkers" :key="`${marker.groupIndex}:${marker.index}`">
+            <TooltipTrigger as-child>
+              <button
+                type="button"
+                class="user-nav-tick absolute left-1/2"
+                :class="marker.failed ? 'is-failed' : ''"
+                :style="{ top: markerTopPercent(markerIndex), zIndex: markerIndex + 1 }"
+                :aria-label="$t('chat.jumpUserMessage', { index: marker.index, preview: marker.preview })"
+                @click="jumpToUserMessage(marker.groupIndex)"
+              />
+            </TooltipTrigger>
+            <TooltipContent
+              side="left"
+              :side-offset="10"
+              class="max-w-[240px] border-0 bg-card px-2.5 py-1.5 text-left text-foreground shadow-lg"
+              arrow-class="!translate-y-0 border-0 bg-card fill-card shadow-none"
+            >
+              <p class="text-[10px] font-medium text-muted-foreground">
+                {{ $t('chat.userMessageLabel', { index: marker.index }) }}
+              </p>
+              <p class="mt-0.5 text-[11px] leading-4 text-foreground/90">{{ marker.preview }}</p>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
+
+      <SimpleTooltip :content="$t('chat.scrollToBottom')">
+        <button
+          type="button"
+          class="pointer-events-auto relative z-[1] grid size-8 shrink-0 place-items-center rounded-full border border-border bg-card/95 text-foreground/80 shadow-md backdrop-blur transition-[color,border-color,box-shadow] hover:border-primary/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+          :aria-label="$t('chat.scrollToBottom')"
+          @click="jumpToLatest"
+        >
+          <ChevronsDown :size="15" />
+        </button>
+      </SimpleTooltip>
+    </nav>
   </div>
 </template>
 
