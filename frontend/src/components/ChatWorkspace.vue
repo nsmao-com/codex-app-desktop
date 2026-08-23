@@ -221,6 +221,14 @@ function onComposerPendingChange(payload: { requestId: string; draftKey: string;
   if (payload.pending) next[payload.requestId] = payload.draftKey
   else delete next[payload.requestId]
   composerPendingDraftByRequest.value = next
+  if (
+    payload.pending
+    && resolveDraftKey(payload.draftKey) === resolveDraftKey(activeComposerContext.value.key)
+  ) {
+    // Re-pin on admission so Composing is visible in the first painted frame,
+    // including when the user sends while reading an older message.
+    messageSentEpoch.value += 1
+  }
 }
 
 function restoreComposerDraft(payload: { draftKey: string; text: string; images: string[] }): void {
@@ -361,6 +369,9 @@ function useSuggestion(prompt: string): void {
 
 function onMessageSent(payload: { draftKey: string }): void {
   if (resolveDraftKey(payload.draftKey) !== resolveDraftKey(activeComposerContext.value.key)) return
+  const alreadyPinned = Object.values(composerPendingDraftByRequest.value)
+    .some((key) => resolveDraftKey(key) === resolveDraftKey(payload.draftKey))
+  if (alreadyPinned) return
   messageSentEpoch.value += 1
 }
 

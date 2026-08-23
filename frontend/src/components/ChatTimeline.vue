@@ -526,7 +526,12 @@ const showThinking = computed(() => {
   if (streamingAgentGroupIndex.value >= 0) return false
   if (isGrokMode.value) {
     // Mirror Codex: show footer shimmer until the first live agent activity lands.
-    return props.optimisticPending || timelineSending.value || timelineTurnRunning.value
+    const feedback = timelineTurnFeedback.value
+    return props.optimisticPending
+      || timelineSending.value
+      || timelineTurnRunning.value
+      || feedback?.state === 'submitting'
+      || feedback?.state === 'running'
   }
   if (isClaudeMode.value) {
     return props.optimisticPending || timelineSending.value || timelineTurnRunning.value

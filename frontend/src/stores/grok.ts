@@ -1956,7 +1956,14 @@ export const useGrokStore = defineStore('grok', () => {
           intentional: wasInterrupting,
         })
       } else {
-        clearTurnFeedback(targetSession)
+        // Grok Build writes the authoritative final answer shortly after the
+        // terminal event. Keep a non-locking visual pending state until that
+        // history reload finishes so the timeline never goes blank in between.
+        setTurnFeedback(targetSession, {
+          state: 'submitting',
+          message: translate('chat.thinking'),
+          turnId,
+        })
       }
       // Reload sidebar usage after local usage.json is updated by the backend.
       void appStore.loadLocalUsage()
@@ -1973,6 +1980,12 @@ export const useGrokStore = defineStore('grok', () => {
             // openSession already notifies; still try to drain.
           }
         }
+        const feedback = turnFeedback(targetSession)
+        if (
+          terminalStatus === 'completed'
+          && feedback?.state === 'submitting'
+          && feedback.turnId === turnId
+        ) clearTurnFeedback(targetSession)
         await drainQueue(targetSession)
       })()
     }

@@ -215,23 +215,24 @@
 }
 
 .effort-scale-labels {
-  position: relative;
-  height: 1.7rem;
+  display: grid;
+  min-height: 2rem;
   margin: 0.25rem var(--effort-edge, 0.625rem) 0;
+  align-items: start;
 }
 
 .effort-scale-label {
-  position: absolute;
-  top: 0;
-  max-width: 4.25rem;
-  transform: translateX(-50%);
+  min-width: 0;
+  max-width: 100%;
+  justify-self: center;
   border-radius: 0.35rem;
   padding: 0.24rem 0.3rem;
   color: var(--muted-foreground);
   font-size: 0.64rem;
   font-weight: 500;
-  line-height: 1;
-  white-space: nowrap;
+  line-height: 1.15;
+  text-align: center;
+  white-space: normal;
   transition: color 140ms ease, font-weight 140ms ease;
 }
 
@@ -245,11 +246,13 @@
 }
 
 .effort-scale-label.is-first {
-  transform: none;
+  justify-self: start;
+  text-align: left;
 }
 
 .effort-scale-label.is-last {
-  transform: translateX(-100%);
+  justify-self: end;
+  text-align: right;
 }
 
 .policy-slider {

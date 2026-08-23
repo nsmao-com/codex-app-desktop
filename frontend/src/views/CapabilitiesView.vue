@@ -152,7 +152,11 @@ const providerThresholdLabel = computed(() => {
   return t('providerConfig.compactThreshold')
 })
 const providerThresholdSliderValue = computed(() => {
-  if (!providerCompactThreshold.value.trim()) return providerContextPolicy.value?.thresholdMinimum || 0
+  if (!providerCompactThreshold.value.trim()) {
+    return providerContextPolicy.value?.autoCompactThreshold
+      || providerContextPolicy.value?.thresholdMinimum
+      || 0
+  }
   const value = Number(providerCompactThreshold.value)
   if (Number.isFinite(value)) return value
   return providerContextPolicy.value?.thresholdMinimum || 0
@@ -483,10 +487,9 @@ function hydrateProviderContext(configuration: ProviderConfigurationView): void 
     ? String(configuration.context.configuredTokens)
     : ''
   const threshold = Number(configuration.context.autoCompactThreshold)
-  providerCompactThreshold.value = Number.isFinite(threshold) && (
-    configuration.context.thresholdConfigured
-    || (threshold > 0 && threshold >= configuration.context.thresholdMinimum)
-  ) ? String(threshold) : ''
+  providerCompactThreshold.value = Number.isFinite(threshold) && configuration.context.thresholdConfigured
+    ? String(threshold)
+    : ''
   providerAutoCompactEnabled.value = configuration.context.autoCompactEnabled
   providerPruneEnabled.value = configuration.context.pruneEnabled
   providerThresholdScope.value = configuration.context.thresholdScopeConfigured && configuration.context.thresholdScope
@@ -542,7 +545,7 @@ async function saveProviderContextPolicy(): Promise<void> {
     const result = await backend.UpdateProviderContextPolicy(
       providerID,
       Number(providerContextTokens.value) || 0,
-      Number(providerCompactThreshold.value) || 0,
+      providerCompactThreshold.value.trim() ? Number(providerCompactThreshold.value) : -1,
       providerAutoCompactEnabled.value,
       providerPruneEnabled.value,
       providerThresholdScope.value === 'native' ? '' : providerThresholdScope.value,

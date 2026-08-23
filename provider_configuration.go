@@ -155,6 +155,7 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 		policy.AutoCompactThreshold = threshold
 		policy.ThresholdMinimum = 8_192
 		policy.ThresholdMaximum = 2_000_000
+		policy.ThresholdStep = 1
 		policy.ThresholdScopeSupported = true
 		policy.ThresholdScopeOptions = []string{"total", "body_after_prefix"}
 		if validCodexAutoCompactScope(thresholdScope) && thresholdScope != "" {
@@ -299,6 +300,7 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 		policy.ThresholdUnit = "reserved-tokens"
 		policy.ThresholdMinimum = 0
 		policy.ThresholdMaximum = 1_000_000
+		policy.ThresholdStep = 1
 		policy.PruneSupported = true
 		policy.PruneEnabled = prune
 		selected := strings.TrimSpace(selectedProviderModel(settings, "opencode"))
@@ -485,6 +487,12 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 	if !current.Context.Writable {
 		tokens = 0
 	}
+	// The UI uses -1 to distinguish an empty override from an explicit zero,
+	// which is a valid Grok percentage and OpenCode reserved-token value.
+	thresholdUnset := threshold == -1
+	if thresholdUnset {
+		threshold = 0
+	}
 	if tokens < 0 || threshold < 0 {
 		return ProviderApplyResult{}, errors.New("context values cannot be negative")
 	}
@@ -551,7 +559,11 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 		if err != nil {
 			return ProviderApplyResult{}, err
 		}
-		text = upsertTOMLScalar(text, "session", "auto_compact_threshold_percent", strconv.FormatInt(threshold, 10))
+		thresholdLiteral := strconv.FormatInt(threshold, 10)
+		if thresholdUnset {
+			thresholdLiteral = ""
+		}
+		text = upsertTOMLScalar(text, "session", "auto_compact_threshold_percent", thresholdLiteral)
 		if current.Context.Writable {
 			section := findGrokModelSection(text, selectedProviderModel(s.Settings(), "grok"))
 			if section == "" {
@@ -566,12 +578,16 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 			return ProviderApplyResult{}, err
 		}
 	case "gemini":
-		if threshold < 1 || threshold > 100 {
+		if !thresholdUnset && (threshold < 1 || threshold > 100) {
 			return ProviderApplyResult{}, errors.New("Gemini compression percentage must be between 1 and 100")
 		}
 		config := readProviderJSONMap(path)
 		model := ensureMap(config, "model")
-		model["compressionThreshold"] = float64(threshold) / 100
+		if thresholdUnset {
+			delete(model, "compressionThreshold")
+		} else {
+			model["compressionThreshold"] = float64(threshold) / 100
+		}
 		if err := writeProviderJSONMap(path, config); err != nil {
 			return ProviderApplyResult{}, err
 		}

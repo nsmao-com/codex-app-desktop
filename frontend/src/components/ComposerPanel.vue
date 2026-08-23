@@ -3075,7 +3075,10 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                   @blur="cancelEffortPreview"
                 >
               </div>
-              <div class="effort-scale-labels">
+              <div
+                class="effort-scale-labels"
+                :style="{ gridTemplateColumns: `repeat(${effortOptions.length}, minmax(0, 1fr))` }"
+              >
                 <button
                   v-for="(option, index) in effortOptions"
                   :key="`effort-choice-${option.value}`"
@@ -3086,7 +3089,6 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                     'is-first': index === 0,
                     'is-last': index === effortOptions.length - 1,
                   }"
-                  :style="{ left: effortMarkerPosition(index) }"
                   @click="chooseEffort(index)"
                 >
                   {{ option.label }}

@@ -1245,6 +1245,13 @@ export const useClaudeStore = defineStore('claude', () => {
     if (!id) return
     const snapshot = snapshotTurnId.trim()
     if (snapshot) {
+      // Session list/detail reads can complete just after turn.completed with a
+      // stale activeTurnId. A finalized id is never live again, regardless of
+      // which background refresh delivered the snapshot.
+      if (finalizedTurnIds.has(snapshot)) {
+        clearClaudeTurnState(id, snapshot)
+        return
+      }
       const key = sessionStateKey(activeTurnBySession.value, id)
       const current = key ? activeTurnBySession.value[key] : undefined
       if (current?.turnId !== snapshot || key !== id) {
@@ -1372,7 +1379,12 @@ export const useClaudeStore = defineStore('claude', () => {
     if (activate) activeSessionId.value = requestedId
     rememberLoadedClaudeSession(requestedId)
     const known = sessions.value.find((item) => sameClaudeSession(item.id, requestedId))
-    if (known?.activeTurnId) reconcileSnapshotTurn(requestedId, known.activeTurnId)
+    // A terminal-event reload is authoritative. The sidebar summary can still
+    // carry the just-finished activeTurnId for one native write cycle; restoring
+    // it here briefly resurrects Composing and schedules an unnecessary watchdog.
+    if (known?.activeTurnId && !options?.terminalStatus) {
+      reconcileSnapshotTurn(requestedId, known.activeTurnId)
+    }
     const sequence = (sessionOpenSequence.get(requestedId) || 0) + 1
     sessionOpenSequence.set(requestedId, sequence)
     loadingSequenceBySession.set(requestedId, sequence)
@@ -1424,7 +1436,9 @@ export const useClaudeStore = defineStore('claude', () => {
       const observedTurnId = activeTurnBySession.value[sessionStateKey(activeTurnBySession.value, requestedId)]?.turnId || ''
       const detail = await readClaudeSession(requestedId)
       if (sessionOpenSequence.get(requestedId) !== sequence) return
-      reconcileSnapshotTurn(requestedId, detail.activeTurnId || detail.summary?.activeTurnId || '', observedTurnId)
+      if (!options?.terminalStatus) {
+        reconcileSnapshotTurn(requestedId, detail.activeTurnId || detail.summary?.activeTurnId || '', observedTurnId)
+      }
       const messages = detail.messages || []
       const fromDisk = buildTimelineFromMessages(requestedId, messages, detail.historyTurnOffset || 0)
 
