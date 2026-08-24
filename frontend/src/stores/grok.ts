@@ -49,6 +49,8 @@ const emptyTurnMetrics = (): TurnMetrics => ({
 
 const GROK_TURN_WATCHDOG_MS = 2500
 const GROK_TURN_WATCHDOG_CONFIRM_MS = 450
+const GROK_INTERRUPT_INITIAL_RECHECK_MS = 250
+const GROK_INTERRUPT_RECHECK_MS = 500
 
 function errorMessage(error: unknown): string {
   return friendlyErrorMessage(error)
@@ -2897,8 +2899,10 @@ export const useGrokStore = defineStore('grok', () => {
 
     if (isSessionBusy(sessionId)) {
       await interruptTurn(sessionId)
-      // turn.interrupted / completed will drain the queue.
-      return
+      // The event path normally drains. If loading left a stale busy flag without
+      // a turn owner, release it here so "send now" cannot become a no-op.
+      if (isSessionBusy(sessionId) && turnForSession(sessionId)) return
+      if (isSessionBusy(sessionId)) clearTurnState(sessionId)
     }
     if (message.blockedByTurnId && !finalizedTurnIds.has(message.blockedByTurnId)) {
       // No live owner remains, so an explicit "send now" may release an orphaned blocker.
@@ -3026,7 +3030,8 @@ export const useGrokStore = defineStore('grok', () => {
   }
 
   async function reconcileInterruptedTurn(ref: GrokTurnRef, attempt = 0): Promise<void> {
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 1500))
+    const delay = attempt === 0 ? GROK_INTERRUPT_INITIAL_RECHECK_MS : GROK_INTERRUPT_RECHECK_MS
+    await new Promise<void>((resolve) => window.setTimeout(resolve, delay))
     const current = turnForSession(ref.sessionId)
     if (!current || current.turnId !== ref.turnId) return
     try {

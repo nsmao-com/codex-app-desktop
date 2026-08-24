@@ -125,6 +125,8 @@ export const useCodexStore = defineStore('codex', () => {
     workspace: '',
   })
   const lastTransportMessage = shallowRef('')
+  let transportReconnectTimer = 0
+  let lastAutomaticTransportRestartAt = 0
 
   const threads = shallowRef<ThreadSummary[]>([])
   const archivedThreads = shallowRef<ThreadSummary[]>([])
@@ -562,6 +564,8 @@ export const useCodexStore = defineStore('codex', () => {
         throw new Error(connection.value.message || translate('notifications.connectionFailed'))
       }
       lastTransportMessage.value = ''
+      if (transportReconnectTimer) clearTrackedTimeout(transportReconnectTimer)
+      transportReconnectTimer = 0
       // Only a newly started process invalidates the app-server thread cache.
       // Switching cwd while reusing a healthy server must keep every project's
       // local timeline available, including turns running in the background.
@@ -2659,7 +2663,8 @@ export const useCodexStore = defineStore('codex', () => {
         lastTransportMessage.value = asString(asRecord(event.data).message)
         break
       case 'transport-error': {
-        const message = asString(asRecord(event.data).message, translate('app.connectionError'))
+        const data = asRecord(event.data)
+        const message = errorMessage(asString(data.message, translate('app.connectionError')))
         const duplicate = connection.value.state === 'error' && lastTransportMessage.value === message
         lastTransportMessage.value = message
         connection.value = {
@@ -2674,6 +2679,19 @@ export const useCodexStore = defineStore('codex', () => {
             label: translate('common.reconnect'),
             onClick: () => connect(),
           })
+        }
+        if (
+          data.restartable === true
+          && appStore.currentWorkspacePath
+          && !transportReconnectTimer
+          && Date.now() - lastAutomaticTransportRestartAt > 30_000
+        ) {
+          lastAutomaticTransportRestartAt = Date.now()
+          transportReconnectTimer = trackedTimeout(() => {
+            transportReconnectTimer = 0
+            if (connection.value.state !== 'error' || busy.value) return
+            void connect(appStore.currentWorkspacePath, { forceRestart: true })
+          }, 300)
         }
         break
       }

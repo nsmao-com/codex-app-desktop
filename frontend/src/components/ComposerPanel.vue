@@ -1660,6 +1660,27 @@ function waitForOptimisticThinkingPaint(): Promise<void> {
   })
 }
 
+function canAdmitSubmissionSynchronously(submission: ComposerSubmission): boolean {
+  if (submission.arena && !submission.targetSessionId) return false
+  const sessionId = submission.targetSessionId
+  if (!sessionId) return true
+  if (submission.targetRuntime === 'grok') {
+    return sessionId.startsWith('pending-grok-')
+      || grokStore.sessions.some((item) => grokStore.sameSession(item.id, sessionId))
+  }
+  if (submission.targetRuntime === 'claude') {
+    return sessionId.startsWith('pending-claude-')
+      || claudeStore.sessions.some((item) => claudeStore.sameSession(item.id, sessionId))
+  }
+  return sessionId.startsWith('pending-thread-')
+    || Boolean(
+      (codexStore.activeThread && codexStore.sameThread(codexStore.activeThread.id, sessionId))
+      || codexStore.threads.some((thread) => codexStore.sameThread(thread.id, sessionId))
+      || Object.values(codexStore.projectThreads).flat()
+        .some((thread) => codexStore.sameThread(thread.id, sessionId)),
+    )
+}
+
 async function send(): Promise<void> {
   const draftKey = props.draftKey
   if (sendAdmissionPending.value) return
@@ -1679,20 +1700,23 @@ async function send(): Promise<void> {
     targetWorkspace: composerTargetWorkspace(targetRuntime, targetSessionId),
   }
   if (!submission.message && !submission.images.length) return
-  const showOptimisticThinking = !willQueueOnSend.value
+  const showOptimisticThinking = !willQueueOnSend.value && canAdmitSubmissionSynchronously(submission)
   sendAdmissionPendingByDraft.value = {
     ...sendAdmissionPendingByDraft.value,
     [draftKey]: true,
   }
   const requestId = `composer-send-${Date.now()}-${++sendAdmissionSequence}`
   try {
+    // Start admission first: provider stores synchronously append the user row
+    // before their first RPC await, so the first painted order is user -> thinking.
+    const sendPromise = performSend(submission)
     if (showOptimisticThinking) {
       emit('send-pending-change', { requestId, draftKey, pending: true })
       await nextTick()
-      // Let the optimistic Composing row paint before session creation or RPC work starts.
+      // Keep the pending bridge alive for the first paint without delaying the RPC.
       await waitForOptimisticThinkingPaint()
     }
-    await performSend(submission)
+    await sendPromise
   } finally {
     const nextPending = { ...sendAdmissionPendingByDraft.value }
     delete nextPending[draftKey]

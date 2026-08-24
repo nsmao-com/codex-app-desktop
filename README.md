@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>The v1.4.17 workbench: workspace-aware composer, Git context, provider controls, and local usage analytics.</sub></p>
+<p align="center"><sub>v1.4.18 stability update: immediate send ordering, queue recovery, and unbounded Codex protocol reads.</sub></p>
 
 ## Why Nice Codex
 

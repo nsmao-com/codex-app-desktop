@@ -59,6 +59,8 @@ const emptyTurnMetrics = (): TurnMetrics => ({
 
 const CLAUDE_TURN_WATCHDOG_MS = 2500
 const CLAUDE_TURN_WATCHDOG_CONFIRM_MS = 450
+const CLAUDE_IMMEDIATE_QUEUE_RECHECK_MS = 250
+const CLAUDE_IMMEDIATE_QUEUE_MAX_RECHECKS = 80
 
 function errorMessage(error: unknown): string {
   return friendlyErrorMessage(error)
@@ -285,6 +287,7 @@ export const useClaudeStore = defineStore('claude', () => {
   const finalizedTurnIds = new Set<string>()
   const latestStartedTurnBySession = new Map<string, string>()
   const turnWatchdogTimers = new Map<string, number>()
+  const immediateQueueTimers = new Map<string, number>()
   const discardedSessionIds = new Set<string>()
   const loadedSessionIds = new Set<string>()
   let eventUnsub: (() => void) | null = null
@@ -806,6 +809,8 @@ export const useClaudeStore = defineStore('claude', () => {
     if (streamFlushTimer) window.clearTimeout(streamFlushTimer)
     streamFlushTimer = 0
     cancelAllClaudeTurnWatchdogs()
+    for (const timer of immediateQueueTimers.values()) window.clearTimeout(timer)
+    immediateQueueTimers.clear()
     pendingStreamPatches.clear()
   }
 
@@ -2463,6 +2468,60 @@ export const useClaudeStore = defineStore('claude', () => {
     return true
   }
 
+  function cancelImmediateQueueRetry(messageId: string): void {
+    const timer = immediateQueueTimers.get(messageId)
+    if (timer) window.clearTimeout(timer)
+    immediateQueueTimers.delete(messageId)
+  }
+
+  function scheduleImmediateQueueRetry(messageId: string, attempt = 0): void {
+    cancelImmediateQueueRetry(messageId)
+    let timer = 0
+    timer = window.setTimeout(() => {
+      if (immediateQueueTimers.get(messageId) !== timer) return
+      immediateQueueTimers.delete(messageId)
+      void reconcileImmediateQueuedMessage(messageId, attempt)
+    }, CLAUDE_IMMEDIATE_QUEUE_RECHECK_MS)
+    immediateQueueTimers.set(messageId, timer)
+  }
+
+  async function reconcileImmediateQueuedMessage(messageId: string, attempt: number): Promise<void> {
+    let found = findQueuedMessage(messageId)
+    if (!found || found.item.state === 'sending') {
+      cancelImmediateQueueRetry(messageId)
+      return
+    }
+    const activeRef = turnRefForSession(found.sessionId)
+    if (activeRef && attempt > 0) {
+      try {
+        const liveness = await readClaudeTurnLiveness(activeRef)
+        if (!liveness.running) {
+          await recoverMissingClaudeTurn(activeRef, new Error('Claude turn is not running'))
+          return
+        }
+      } catch {
+        // The regular turn watchdog remains authoritative when probing fails.
+      }
+    }
+    found = findQueuedMessage(messageId)
+    if (!found || found.item.state === 'sending') return
+    if (isSessionLoading(found.sessionId) || isSessionTurnBusy(found.sessionId)) {
+      if (attempt < CLAUDE_IMMEDIATE_QUEUE_MAX_RECHECKS) {
+        scheduleImmediateQueueRetry(messageId, attempt + 1)
+      }
+      return
+    }
+    if (found.item.blockedByTurnId && !finalizedTurnIds.has(found.item.blockedByTurnId)) {
+      queueBySession.value = {
+        ...queueBySession.value,
+        [found.sessionId]: found.list.map((row) =>
+          row.id === messageId ? { ...row, blockedByTurnId: undefined } : row,
+        ),
+      }
+    }
+    await dispatchQueuedMessage(messageId, false)
+  }
+
   async function dispatchQueuedMessage(messageId: string, forceNow: boolean): Promise<void> {
     let found = findQueuedMessage(messageId)
     if (!found) return
@@ -2486,19 +2545,28 @@ export const useClaudeStore = defineStore('claude', () => {
     found = findQueuedMessage(messageId)
     if (!found) return
 
-    if (isSessionLoading(found.sessionId)) return
+    if (isSessionLoading(found.sessionId)) {
+      if (forceNow) scheduleImmediateQueueRetry(messageId)
+      return
+    }
     const activeRef = turnRefForSession(found.sessionId)
     if (forceNow && activeRef) {
+      markInterrupting(activeRef.sessionId, true)
       try {
         await interruptClaudeTurnApi(activeRef)
+        scheduleImmediateQueueRetry(messageId)
       } catch (error) {
         if (!await recoverMissingClaudeTurn(activeRef, error)) {
+          markInterrupting(activeRef.sessionId, false)
           notify('error', translate('notifications.interruptFailed'), errorMessage(error))
         }
       }
       return
     }
-    if (isSessionTurnBusy(found.sessionId)) return
+    if (isSessionTurnBusy(found.sessionId)) {
+      if (forceNow) scheduleImmediateQueueRetry(messageId)
+      return
+    }
     if (found.item.blockedByTurnId && !finalizedTurnIds.has(found.item.blockedByTurnId)) {
       if (!forceNow) return
       queueBySession.value = {
@@ -2527,6 +2595,7 @@ export const useClaudeStore = defineStore('claude', () => {
       rows.some((row) => row.id === messageId),
     )
     if (!currentEntry) return
+    cancelImmediateQueueRetry(messageId)
     const [currentSessionId, currentList] = currentEntry
     const remaining = currentList.filter((row) => row.id !== messageId)
     if (outcome === 'deferred') {

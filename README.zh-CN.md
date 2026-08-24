@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.4.17 真实工作台：项目感知输入框、Git 上下文、模型商控制与本机用量分析。</sub></p>
+<p align="center"><sub>v1.4.18 稳定性更新：即时发送顺序、队列恢复与无固定上限的 Codex 协议读取。</sub></p>
 
 ## 为什么是 Nice Codex
 

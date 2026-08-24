@@ -16,8 +16,6 @@ import (
 	"time"
 )
 
-const maxMessageSize = 64 * 1024 * 1024
-
 // ClientInfo is sent in app-server initialize and becomes the upstream
 // User-Agent / originator (e.g. "codex_desktop/0.144.6 ... (codex_desktop; 0.1.0)").
 // Some reverse-proxy Codex channels only allow official client names.
@@ -41,6 +39,7 @@ type Client struct {
 	onEvent        func(Event)
 	// processCleanup tears down the OS process tree (Windows Job Object / process group).
 	processCleanup func()
+	transportErr   error
 }
 
 func NewClient(onEvent func(Event)) *Client {
@@ -133,6 +132,7 @@ func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) e
 	c.stdin = stdin
 	c.done = done
 	c.processCleanup = cleanup
+	c.transportErr = nil
 	c.status = Status{
 		State:     "initializing",
 		Running:   true,
@@ -331,35 +331,61 @@ func (c *Client) write(message any) error {
 }
 
 func (c *Client) readLoop(command *exec.Cmd, stdout io.Reader) {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64*1024), maxMessageSize)
-	for scanner.Scan() {
-		line := append([]byte(nil), scanner.Bytes()...)
-		c.handleLine(line)
+	// JSON Decoder grows with the current JSON-RPC value and has no Scanner token
+	// ceiling, so large histories and tool results cannot kill the stdout reader.
+	decoder := json.NewDecoder(stdout)
+	for {
+		var message wireMessage
+		if err := decoder.Decode(&message); err != nil {
+			if !errors.Is(err, io.EOF) {
+				c.failTransport(command, fmt.Errorf("decode app-server message: %w", err))
+			}
+			return
+		}
+		c.handleMessage(message)
 	}
-	if err := scanner.Err(); err != nil && c.isCurrentCommand(command) {
-		c.emit(Event{Type: "transport-error", Data: map[string]any{"message": err.Error()}})
+}
+
+func (c *Client) failTransport(command *exec.Cmd, err error) {
+	c.mu.Lock()
+	if c.command != command || !c.status.Running {
+		c.mu.Unlock()
+		return
+	}
+	message := "Codex app-server output stream failed: " + err.Error()
+	c.transportErr = errors.New(message)
+	process := command.Process
+	c.mu.Unlock()
+
+	c.emit(Event{Type: "transport-error", Data: map[string]any{
+		"message":     message,
+		"restartable": true,
+	}})
+	// A dead stdout reader with a live process leaves every RPC pending forever.
+	// Terminate this app-server so waitLoop releases callers and reconnect can start cleanly.
+	if process != nil {
+		_ = process.Kill()
 	}
 }
 
 func (c *Client) stderrLoop(stderr io.Reader) {
-	scanner := bufio.NewScanner(stderr)
-	scanner.Buffer(make([]byte, 32*1024), 2*1024*1024)
-	for scanner.Scan() {
-		message := strings.TrimSpace(scanner.Text())
+	reader := bufio.NewReader(stderr)
+	for {
+		line, err := reader.ReadString('\n')
+		message := strings.TrimSpace(line)
 		if message != "" {
 			c.emit(Event{Type: "stderr", Data: map[string]any{"message": message}})
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				c.emit(Event{Type: "stderr", Data: map[string]any{"message": "stderr stream failed: " + err.Error()}})
+			}
+			return
 		}
 	}
 }
 
-func (c *Client) handleLine(line []byte) {
-	var message wireMessage
-	if err := json.Unmarshal(line, &message); err != nil {
-		c.emit(Event{Type: "transport-error", Data: map[string]any{"message": "Invalid app-server message"}})
-		return
-	}
-
+func (c *Client) handleMessage(message wireMessage) {
 	if message.Method == "" && len(message.ID) > 0 {
 		id, err := strconv.ParseInt(string(message.ID), 10, 64)
 		if err != nil {
@@ -436,6 +462,8 @@ func (c *Client) waitLoop(command *exec.Cmd, done chan struct{}) {
 	c.pending = make(map[int64]chan rpcResult)
 	c.inboundRequest = make(map[string]json.RawMessage)
 	cleanup := c.processCleanup
+	transportErr := c.transportErr
+	c.transportErr = nil
 	c.processCleanup = nil
 	c.command = nil
 	c.stdin = nil
@@ -447,7 +475,9 @@ func (c *Client) waitLoop(command *exec.Cmd, done chan struct{}) {
 		c.status.Message = "Codex is stopped"
 	} else {
 		c.status.State = "error"
-		if err != nil {
+		if transportErr != nil {
+			c.status.Message = transportErr.Error()
+		} else if err != nil {
 			c.status.Message = err.Error()
 		} else {
 			c.status.Message = "Codex app-server exited unexpectedly"
@@ -468,15 +498,12 @@ func (c *Client) waitLoop(command *exec.Cmd, done chan struct{}) {
 		channel <- rpcResult{err: errors.New("Codex app-server stopped")}
 	}
 	if !stopping {
-		c.emit(Event{Type: "transport-error", Data: map[string]any{"message": status.Message}})
+		c.emit(Event{Type: "transport-error", Data: map[string]any{
+			"message":     status.Message,
+			"restartable": transportErr != nil,
+		}})
 	}
 	c.emit(Event{Type: "status", Data: status})
-}
-
-func (c *Client) isCurrentCommand(command *exec.Cmd) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.command == command && c.status.Running
 }
 
 func (c *Client) failStart(err error, workspace string) {
