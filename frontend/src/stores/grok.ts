@@ -230,9 +230,10 @@ function finalizeGrokMessages(messages: GrokMessage[], status: string): GrokMess
 
 function mergeGrokActivitySnapshot(current: GrokMessage[], incoming: GrokMessage[]): GrokMessage[] {
   const result = [...incoming]
-  const incomingById = new Map(
-    incoming.filter((message) => message.id).map((message, index) => [message.id, index]),
-  )
+  const incomingById = new Map<string, number>()
+  incoming.forEach((message, index) => {
+    if (message.id) incomingById.set(message.id, index)
+  })
   for (const message of current) {
     const index = message.id ? incomingById.get(message.id) : undefined
     if (index !== undefined) {
@@ -252,6 +253,15 @@ function mergeGrokActivitySnapshot(current: GrokMessage[], incoming: GrokMessage
       continue
     }
     if ((message.role || '').toLowerCase() === 'tool' || message.toolName) {
+      // Live tool rows can describe the same call the snapshot persisted under a
+      // different id. Terminal rows with equal content are the same call — keep
+      // one copy instead of rendering both.
+      if (
+        !isActiveGrokStatus(message.status)
+        && incoming.some((row) => sameGrokLiveContent(row, message))
+      ) {
+        continue
+      }
       result.push(message)
     }
   }
@@ -311,7 +321,16 @@ function mergeGrokDiskWithCurrent(
       lastAnchor = message
       continue
     }
-    if (preserveLiveMessages && (isActiveGrokStatus(message.status) || (Number(message.createdAt) || 0) >= latestDiskTime)) {
+    if (
+      preserveLiveMessages
+      && (
+        isActiveGrokStatus(message.status)
+        || (
+          (Number(message.createdAt) || 0) >= latestDiskTime
+          && !disk.some((row) => sameGrokLiveContent(row, message))
+        )
+      )
+    ) {
       const anchorIndex = lastAnchor ? result.indexOf(lastAnchor) : -1
       const insertionIndex = anchorIndex >= 0 ? anchorIndex + 1 : result.length
       result.splice(insertionIndex, 0, message)
@@ -359,6 +378,18 @@ function splitGrokHistoryPrefix(
 
 function normalizeGrokUserText(text = ''): string {
   return text.trim().replace(/\r\n/g, '\n')
+}
+
+/** Terminal rows from different id namespaces describing the same content. */
+function sameGrokLiveContent(left: GrokMessage, right: GrokMessage): boolean {
+  const leftTool = (left.role || '').toLowerCase() === 'tool' || Boolean(left.toolName)
+  const rightTool = (right.role || '').toLowerCase() === 'tool' || Boolean(right.toolName)
+  if (leftTool !== rightTool) return false
+  const aText = (left.text || '').trim()
+  const bText = (right.text || '').trim()
+  if (!aText || !bText || aText !== bText) return false
+  if (leftTool) return (left.toolName || '').trim() === (right.toolName || '').trim()
+  return (left.role || '').toLowerCase() === (right.role || '').toLowerCase()
 }
 
 function sameGrokUserText(left = '', right = ''): boolean {
@@ -1638,8 +1669,15 @@ export const useGrokStore = defineStore('grok', () => {
       if (index !== undefined) {
         next[index] = { ...next[index], ...message }
       } else {
-        next.push(message)
-        if (message.id) byId.set(message.id, next.length - 1)
+        const duplicateIndex = next.findIndex((row) =>
+          !isActiveGrokStatus(message.status) && row !== tool && sameGrokLiveContent(row, message),
+        )
+        if (duplicateIndex >= 0) {
+          next[duplicateIndex] = { ...next[duplicateIndex], ...message }
+        } else {
+          next.push(message)
+          if (message.id) byId.set(message.id, next.length - 1)
+        }
       }
     }
     replaceSessionMessages(key, next)

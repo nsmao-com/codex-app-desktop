@@ -458,7 +458,7 @@ export function normalizeTimelineItem(value: unknown, turnId = ''): TimelineItem
   const record = asRecord(value)
   const rawType = asString(record.type, asString(record.role, asString(record.kind)))
   const id = asString(record.id, asString(record.itemId, asString(record.messageId, asString(record.callId))))
-    || `${turnId || 'item'}:${rawType || 'message'}:${stableTextHash(formatJSON(record))}`
+    || `${turnId || 'item'}:${rawType || 'message'}:${stableTextHash(stableItemFingerprint(record))}`
   if (!rawType) return null
 
   const type = supportedItemType(rawType)
@@ -804,6 +804,28 @@ function stableTextHash(value: string): string {
     hash = Math.imul(hash, 16777619)
   }
   return (hash >>> 0).toString(36)
+}
+
+/**
+ * Fallback item ids must stay equal across item/started and item/completed for
+ * the same payload. Hashing the whole record breaks that (status/timestamps
+ * differ), which appended duplicate timeline rows — so only content-bearing
+ * fields feed the fingerprint.
+ */
+const itemFingerprintKeys = [
+  'type', 'role', 'kind',
+  'text', 'content', 'message', 'summary', 'rawContent',
+  'command', 'arguments', 'aggregatedOutput', 'output', 'result',
+  'title', 'detail', 'tool', 'server', 'namespace', 'query', 'prompt', 'plan',
+  'changes', 'callId', 'itemId',
+] as const
+
+function stableItemFingerprint(record: Record<string, unknown>): string {
+  return itemFingerprintKeys.map((key) => {
+    const value = record[key]
+    if (value === undefined || value === null) return ''
+    return typeof value === 'string' ? value : formatJSON(value)
+  }).join('\u0001')
 }
 
 function humanize(value: string): string {

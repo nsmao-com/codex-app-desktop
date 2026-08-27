@@ -2255,6 +2255,9 @@ export const useCodexStore = defineStore('codex', () => {
       }
       if (turnID) {
         removeQueuedMessageFromThread(resolvedThreadID, queuedMessage.id)
+        if (resolvedThreadID !== threadID) {
+          removeQueuedMessageFromThread(threadID, queuedMessage.id)
+        }
       } else {
         // A successful RPC without a turn id is accepted but not yet bound. Keep
         // the sending row and dispatch lock until turn/started supplies ownership.
@@ -5266,16 +5269,42 @@ export const useCodexStore = defineStore('codex', () => {
         attachments: item.attachments.length ? item.attachments : current.attachments,
       }
     } else if (item.type === 'userMessage') {
+      const incomingText = (item.text || '').trim()
       let localIndex = -1
       for (let index = items.length - 1; index >= 0; index -= 1) {
         const existing = items[index]
-        if (existing?.local && existing.text === item.text) {
+        if (!existing?.local) continue
+        if (existing.turnId && item.turnId && existing.turnId !== item.turnId) continue
+        if ((existing.text || '').trim() === incomingText) {
           localIndex = index
           break
         }
       }
-      if (localIndex >= 0) items[localIndex] = item
-      else items.push(item)
+      if (localIndex >= 0) {
+        items[localIndex] = {
+          ...item,
+          attachments: item.attachments.length ? item.attachments : items[localIndex]!.attachments,
+        }
+      } else {
+        // Replayed / re-hydrated user events can carry a fresh id while an equal
+        // row for the same turn is already on the timeline. Replace instead of
+        // appending a second copy.
+        const duplicateIndex = items.findIndex((existing) =>
+          existing.type === 'userMessage'
+          && Boolean(item.turnId)
+          && existing.turnId === item.turnId
+          && (existing.text || '').trim() === incomingText,
+        )
+        if (duplicateIndex < 0) items.push(item)
+        else {
+          const existing = items[duplicateIndex]!
+          items[duplicateIndex] = {
+            ...existing,
+            ...item,
+            attachments: item.attachments.length ? item.attachments : existing.attachments,
+          }
+        }
+      }
     } else {
       items.push(item)
     }
@@ -5716,12 +5745,13 @@ function mergeThreadSnapshotWithLive(
       || isActiveStatus(item.status)
     let index = item.id ? result.findIndex((candidate) => candidate.id === item.id) : -1
     if (index < 0 && item.type === 'userMessage' && item.text && item.turnId) {
+      const text = (item.text || '').trim()
       for (let cursor = result.length - 1; cursor >= 0; cursor -= 1) {
         const candidate = result[cursor]
         if (
           candidate?.type === 'userMessage'
           && candidate.turnId === item.turnId
-          && candidate.text === item.text
+          && (candidate.text || '').trim() === text
         ) {
           index = cursor
           break
@@ -5731,21 +5761,31 @@ function mergeThreadSnapshotWithLive(
     // ReadThread can expose the accepted server user row before item/started has
     // replaced its optimistic local counterpart. Match only rows absent from cache.
     if (index < 0 && item.local && item.type === 'userMessage' && item.text) {
-      for (let cursor = result.length - 1; cursor >= 0; cursor -= 1) {
-        const candidate = result[cursor]
-        if (
-          candidate?.type === 'userMessage'
-          && candidate.text === item.text
-          && (
-            !cachedServerItemIDs.has(candidate.id)
-            || Boolean(liveTurnID && candidate.turnId === liveTurnID)
-          )
-          && (!liveTurnID || !candidate.turnId || candidate.turnId === liveTurnID)
-        ) {
-          index = cursor
-          break
+      const text = (item.text || '').trim()
+      const findLocalCounterpart = (flexibleTurn: boolean) => {
+        for (let cursor = result.length - 1; cursor >= 0; cursor -= 1) {
+          const candidate = result[cursor]
+          if (!candidate || candidate.type !== 'userMessage') continue
+          if ((candidate.text || '').trim() !== text) continue
+          const notHeldInCache = !cachedServerItemIDs.has(candidate.id)
+          const isLiveTurnRow = Boolean(liveTurnID && candidate.turnId === liveTurnID)
+          if (!notHeldInCache && !isLiveTurnRow) continue
+          if (
+            !flexibleTurn
+            && liveTurnID
+            && candidate.turnId
+            && candidate.turnId !== liveTurnID
+          ) continue
+          return cursor
         }
+        return -1
       }
+      index = findLocalCounterpart(false)
+      // External runtimes (Gemini/OpenCode) never emit a user item event, so an
+      // older turn's optimistic row can still be local while a newer turn runs.
+      // Its server counterpart is not in cache, so bind to it instead of letting
+      // the local row append as a duplicate of the previous turn.
+      if (index < 0) index = findLocalCounterpart(true)
     }
     if (index < 0 && item.turnId && item.turnId === liveTurnID) {
       index = result.findIndex((candidate) =>

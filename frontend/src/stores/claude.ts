@@ -1757,6 +1757,18 @@ export const useClaudeStore = defineStore('claude', () => {
         if (out.some((row) => sameClaudeUserRow(row, item))) {
           continue
         }
+      } else {
+        // Live rows keep synthesized ids ("claude-turn-*") that never match the
+        // native uuids on disk, so completed turns replay as duplicates whenever
+        // history reloads while another send is in flight. Collapse them by
+        // content; the running turn keeps its live copy as memory-authoritative.
+        const duplicateIndex = out.findIndex((row) => sameClaudeTerminalContent(row, item))
+        if (duplicateIndex >= 0) {
+          if (liveTurnId && item.turnId === liveTurnId && isActiveItemStatus(item.status)) {
+            out[duplicateIndex] = item
+          }
+          continue
+        }
       }
       out.push(item)
     }
