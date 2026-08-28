@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.4.18 stability update: immediate send ordering, queue recovery, and unbounded Codex protocol reads.</sub></p>
+<p align="center"><sub>v1.5.0: native provider context controls, project-first tasks, resilient multi-provider conversations, and production-grade usage analytics.</sub></p>
 
 ## Why Nice Codex
 

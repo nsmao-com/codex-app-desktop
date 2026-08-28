@@ -58,6 +58,7 @@ export type {
     GrokSessionSummary,
     GrokSkillView,
     GrokTurnRef,
+    MCPServerInput,
     MCPServerWriteRequest,
     MCPServersImportRequest,
     MemoriesOverview,

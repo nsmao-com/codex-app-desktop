@@ -592,6 +592,30 @@ export interface GrokTurnRef {
     "turnId": string;
 }
 
+/**
+ * MCPServerInput is the provider-agnostic MCP server definition used by the
+ * capability center add/edit dialog. Command holds the stdio launch command or
+ * the remote URL depending on Transport; JSON, when set, overrides the derived
+ * object entirely (advanced mode).
+ */
+export interface MCPServerInput {
+    "name": string;
+
+    /**
+     * "stdio" (default) | "http" | "sse"
+     */
+    "transport": string;
+
+    /**
+     * stdio command or remote URL
+     */
+    "command": string;
+    "args": string[] | null;
+    "env": { [_ in string]?: string } | null;
+    "headers": { [_ in string]?: string } | null;
+    "json": string;
+}
+
 export interface MCPServerWriteRequest {
     "name": string;
     "enabled": boolean;

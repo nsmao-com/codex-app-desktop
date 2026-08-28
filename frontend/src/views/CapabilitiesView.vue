@@ -885,6 +885,102 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
   })
   if (confirmed) await capabilitiesStore.deleteMCPServer(server.name)
 }
+
+type RuntimeMcpProvider = 'claude' | 'grok' | 'gemini' | 'opencode'
+
+const runtimeMcpOpen = shallowRef(false)
+const runtimeMcpSaving = shallowRef(false)
+const runtimeMcpProvider = shallowRef<RuntimeMcpProvider>('claude')
+const runtimeMcpForm = ref({
+  name: '',
+  transport: 'stdio' as 'stdio' | 'http' | 'sse',
+  command: '',
+  args: '',
+  env: '',
+})
+
+const runtimeMcpFormValid = computed(() => {
+  const form = runtimeMcpForm.value
+  const name = form.name.trim()
+  if (!name || /\s/.test(name)) return false
+  const command = form.command.trim()
+  if (!command) return false
+  if (form.transport !== 'stdio' && !/^https?:\/\//i.test(command)) return false
+  return true
+})
+
+function openRuntimeMcpDialog(provider: RuntimeMcpProvider): void {
+  runtimeMcpProvider.value = provider
+  runtimeMcpForm.value = { name: '', transport: 'stdio', command: '', args: '', env: '' }
+  runtimeMcpOpen.value = true
+}
+
+function parseRuntimeMcpEnv(raw: string): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const line of raw.split(/\r?\n/)) {
+    const entry = line.trim()
+    if (!entry || entry.startsWith('#')) continue
+    const separator = entry.indexOf('=')
+    if (separator <= 0) continue
+    env[entry.slice(0, separator).trim()] = entry.slice(separator + 1).trim()
+  }
+  return env
+}
+
+async function reloadRuntimeMcpCatalog(provider: RuntimeMcpProvider): Promise<void> {
+  if (provider === 'claude') await loadClaudeCatalog()
+  else if (provider === 'grok') await loadGrokCatalog()
+  else await loadExternalCatalog()
+}
+
+async function submitRuntimeMcp(): Promise<void> {
+  if (!runtimeMcpFormValid.value || runtimeMcpSaving.value) return
+  runtimeMcpSaving.value = true
+  const form = runtimeMcpForm.value
+  const input = {
+    name: form.name.trim(),
+    transport: form.transport,
+    command: form.command.trim(),
+    args: form.transport === 'stdio'
+      ? form.args.split(/\s+/).map((part) => part.trim()).filter(Boolean)
+      : [],
+    env: form.transport === 'stdio' ? parseRuntimeMcpEnv(form.env) : {},
+    headers: {} as Record<string, string>,
+    json: '',
+  }
+  const provider = runtimeMcpProvider.value
+  try {
+    if (provider === 'claude') await backend.UpsertClaudeMCPServer(input)
+    else if (provider === 'grok') await backend.UpsertGrokMCPServer(input)
+    else await backend.UpsertExternalMCPServer(provider, 'global', input)
+    notify('success', t('capabilities.mcpSaved'), input.name)
+    runtimeMcpOpen.value = false
+    await reloadRuntimeMcpCatalog(provider)
+  } catch (error) {
+    notify('error', t('capabilities.mcpSaveFailed'), error instanceof Error ? error.message : String(error))
+  } finally {
+    runtimeMcpSaving.value = false
+  }
+}
+
+async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string): Promise<void> {
+  const confirmed = await dialogStore.confirm({
+    title: t('capabilities.deleteMcp'),
+    description: t('capabilities.deleteMcpConfirm', { name }),
+    confirmLabel: t('common.delete'),
+    destructive: true,
+  })
+  if (!confirmed) return
+  try {
+    if (provider === 'claude') await backend.RemoveClaudeMCPServer(name)
+    else if (provider === 'grok') await backend.RemoveGrokMCPServer(name)
+    else await backend.RemoveExternalMCPServer(provider, 'global', name)
+    notify('success', t('capabilities.mcpDeleted'), name)
+    await reloadRuntimeMcpCatalog(provider)
+  } catch (error) {
+    notify('error', t('capabilities.mcpDeleteFailed'), error instanceof Error ? error.message : String(error))
+  }
+}
 </script>
 
 <template>
@@ -1089,7 +1185,7 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
       <nav
         v-else-if="isGrokMode"
         class="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
-        :aria-label="externalRuntimeName"
+        :aria-label="t('capabilities.grokTitle')"
       >
         <button
           v-for="tab in grokTabs"
@@ -1112,7 +1208,7 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
       <nav
         v-else-if="isGeminiMode || isOpenCodeMode"
         class="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-3"
-        :aria-label="t('capabilities.grokTitle')"
+        :aria-label="externalRuntimeName"
       >
         <button
           v-for="tab in externalTabs"
@@ -1413,6 +1509,12 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                 </template>
 
                 <template v-else-if="claudeTab === 'mcp'">
+                  <div class="flex items-center justify-between gap-3">
+                    <p class="text-[11px] text-muted-foreground">{{ t('capabilities.runtimeMcpHint') }}</p>
+                    <Button size="sm" class="h-8 shrink-0" @click="openRuntimeMcpDialog('claude')">
+                      <Plus :size="13" class="mr-1.5" />{{ t('capabilities.addMcp') }}
+                    </Button>
+                  </div>
                   <Card v-for="server in (claudeCatalog?.mcp || [])" :key="`${server.scope}:${server.name}`" class="p-4">
                     <div class="flex items-start justify-between gap-3">
                       <div class="min-w-0">
@@ -1423,9 +1525,20 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                         <p v-if="server.args" class="mt-0.5 line-clamp-2 font-mono text-[10px] text-muted-foreground/80">{{ server.args }}</p>
                         <p class="mt-1 text-[10px] text-muted-foreground">{{ server.transport || 'stdio' }} · {{ claudeScopeLabel(server.scope) }}</p>
                       </div>
-                      <Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">
-                        {{ server.enabled ? t('capabilities.ready') : t('capabilities.disabled') }}
-                      </Badge>
+                      <div class="flex shrink-0 items-center gap-2">
+                        <Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">
+                          {{ server.enabled ? t('capabilities.ready') : t('capabilities.disabled') }}
+                        </Badge>
+                        <Button
+                          v-if="server.scope === 'user'"
+                          size="icon-sm"
+                          variant="ghost"
+                          :aria-label="t('capabilities.deleteMcp')"
+                          @click="void removeRuntimeMcpServer('claude', server.name)"
+                        >
+                          <Trash2 :size="13" />
+                        </Button>
+                      </div>
                     </div>
                   </Card>
                   <div
@@ -1433,7 +1546,12 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                     class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
                   >
                     <p>{{ t('capabilities.claudeMcpEmpty') }}</p>
-                    <Button class="mt-3" size="sm" variant="outline" @click="void openClaudeConfigFile()">{{ t('capabilities.claudeOpenConfig') }}</Button>
+                    <div class="mt-3 flex justify-center gap-2">
+                      <Button size="sm" @click="openRuntimeMcpDialog('claude')">
+                        <Plus :size="13" class="mr-1.5" />{{ t('capabilities.addMcp') }}
+                      </Button>
+                      <Button size="sm" variant="outline" @click="void openClaudeConfigFile()">{{ t('capabilities.claudeOpenConfig') }}</Button>
+                    </div>
                   </div>
                 </template>
 
@@ -1635,6 +1753,12 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
               </template>
 
               <template v-else-if="grokTab === 'mcp'">
+                <div class="flex items-center justify-between gap-3">
+                  <p class="text-[11px] text-muted-foreground">{{ t('capabilities.runtimeMcpHint') }}</p>
+                  <Button size="sm" class="h-8 shrink-0" @click="openRuntimeMcpDialog('grok')">
+                    <Plus :size="13" class="mr-1.5" />{{ t('capabilities.addMcp') }}
+                  </Button>
+                </div>
                 <Card v-for="server in (grokCatalog?.mcp || [])" :key="server.name" class="p-4">
                   <div class="flex items-start justify-between gap-3">
                     <div class="min-w-0">
@@ -1644,9 +1768,19 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                       </p>
                       <p v-if="server.args" class="mt-0.5 line-clamp-2 font-mono text-[10px] text-muted-foreground/80">{{ server.args }}</p>
                     </div>
-                    <Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">
-                      {{ server.enabled ? t('capabilities.ready') : t('capabilities.disabled') }}
-                    </Badge>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">
+                        {{ server.enabled ? t('capabilities.ready') : t('capabilities.disabled') }}
+                      </Badge>
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        :aria-label="t('capabilities.deleteMcp')"
+                        @click="void removeRuntimeMcpServer('grok', server.name)"
+                      >
+                        <Trash2 :size="13" />
+                      </Button>
+                    </div>
                   </div>
                 </Card>
                 <div
@@ -1654,7 +1788,12 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                   class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
                 >
                   <p>{{ t('capabilities.grokMcpEmpty') }}</p>
-                  <Button class="mt-3" size="sm" variant="outline" @click="void openConfig()">{{ t('capabilities.grokOpenConfig') }}</Button>
+                  <div class="mt-3 flex justify-center gap-2">
+                    <Button size="sm" @click="openRuntimeMcpDialog('grok')">
+                      <Plus :size="13" class="mr-1.5" />{{ t('capabilities.addMcp') }}
+                    </Button>
+                    <Button size="sm" variant="outline" @click="void openConfig()">{{ t('capabilities.grokOpenConfig') }}</Button>
+                  </div>
                 </div>
               </template>
 
@@ -1802,9 +1941,10 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
                     </div>
                     <p class="truncate font-mono text-[10px] text-muted-foreground">{{ externalMcpScope === 'global' ? externalCatalog?.configPath : (externalCatalog?.mcp?.find((item) => item.configPath !== externalCatalog?.configPath)?.configPath || t('capabilities.projectConfig')) }}</p>
                     <div v-if="externalCatalog?.mcp?.filter((item) => externalMcpScope === 'global' ? item.configPath === externalCatalog?.configPath : item.configPath !== externalCatalog?.configPath).length" class="space-y-1">
-                      <div v-for="server in (externalCatalog?.mcp || []).filter((item) => externalMcpScope === 'global' ? item.configPath === externalCatalog?.configPath : item.configPath !== externalCatalog?.configPath)" :key="server.name" class="flex items-center gap-3 rounded-md border px-3 py-2 text-[11px]"><span class="min-w-0 flex-1 truncate font-medium">{{ server.name }}</span><span class="max-w-[45%] truncate font-mono text-[10px] text-muted-foreground">{{ server.command || server.url || '—' }}</span><Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">{{ server.enabled ? t('capabilities.enabled') : t('capabilities.disabled') }}</Badge></div>
+                      <div v-for="server in (externalCatalog?.mcp || []).filter((item) => externalMcpScope === 'global' ? item.configPath === externalCatalog?.configPath : item.configPath !== externalCatalog?.configPath)" :key="server.name" class="flex items-center gap-3 rounded-md border px-3 py-2 text-[11px]"><span class="min-w-0 flex-1 truncate font-medium">{{ server.name }}</span><span class="max-w-[45%] truncate font-mono text-[10px] text-muted-foreground">{{ server.command || server.url || '—' }}</span><Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">{{ server.enabled ? t('capabilities.enabled') : t('capabilities.disabled') }}</Badge><Button v-if="externalMcpScope === 'global'" size="icon-sm" variant="ghost" :aria-label="t('capabilities.deleteMcp')" @click="void removeRuntimeMcpServer(externalRuntimeID(), server.name)"><Trash2 :size="13" /></Button></div>
                     </div>
                      <p v-else class="rounded-md border border-dashed px-3 py-5 text-center text-[11px] text-muted-foreground">{{ t('capabilities.externalMcpEmpty', { runtime: externalRuntimeName }) }}</p>
+                     <div v-if="externalMcpScope === 'global'" class="flex justify-start"><Button size="sm" variant="outline" @click="openRuntimeMcpDialog(externalRuntimeID())"><Plus :size="13" class="mr-1.5" />{{ t('capabilities.addMcp') }}</Button></div>
                     <Textarea v-model="externalMcpJSON" class="min-h-52 font-mono text-[11px] leading-5" spellcheck="false" :placeholder="isGeminiMode ? '{ &quot;mcpServers&quot;: {} }' : '{ &quot;mcp&quot;: {} }'" />
                      <div class="flex justify-end"><Button size="sm" :disabled="externalMcpSaving || !externalMcpJSON.trim()" @click="void saveExternalMCP()"><LoaderCircle v-if="externalMcpSaving" :size="13" class="mr-1.5 animate-spin" />{{ t('capabilities.saveNativeMcp') }}</Button></div>
                   </CardContent>
@@ -2169,5 +2309,66 @@ async function deleteMcpServer(server: MCPServerView): Promise<void> {
         </template>
       </section>
     </div>
+
+    <Dialog v-model:open="runtimeMcpOpen">
+      <DialogContent class="gap-0 overflow-hidden p-0 sm:max-w-lg">
+        <DialogHeader class="border-b px-5 py-4 text-left">
+          <DialogTitle class="flex items-center gap-2 text-[14px]">
+            <Plus :size="15" class="text-primary" />
+            {{ t('capabilities.addMcp') }}
+          </DialogTitle>
+          <DialogDescription class="text-[11px] leading-5">
+            {{ t('capabilities.runtimeMcpHint') }}
+          </DialogDescription>
+        </DialogHeader>
+        <div class="max-h-[60vh] space-y-3 overflow-y-auto px-5 py-4">
+          <div class="grid gap-2 sm:grid-cols-2">
+            <div class="space-y-1">
+              <Label class="text-[11px]">{{ t('capabilities.mcpName') }}</Label>
+              <Input v-model="runtimeMcpForm.name" class="h-8 text-xs" maxlength="120" placeholder="server-name" />
+            </div>
+            <div class="space-y-1">
+              <Label class="text-[11px]">{{ t('capabilities.mcpTransport') }}</Label>
+              <Select v-model="runtimeMcpForm.transport">
+                <SelectTrigger class="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="stdio">stdio</SelectItem>
+                  <SelectItem value="http">http</SelectItem>
+                  <SelectItem value="sse">sse</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <div class="space-y-1">
+            <Label class="text-[11px]">
+              {{ runtimeMcpForm.transport === 'stdio' ? t('capabilities.mcpCommand') : t('capabilities.mcpUrl') }}
+            </Label>
+            <Input
+              v-model="runtimeMcpForm.command"
+              class="h-8 font-mono text-xs"
+              maxlength="2048"
+              :placeholder="runtimeMcpForm.transport === 'stdio' ? 'npx' : 'https://example.com/mcp'"
+            />
+          </div>
+          <div v-if="runtimeMcpForm.transport === 'stdio'" class="space-y-1">
+            <Label class="text-[11px]">{{ t('capabilities.mcpArgs') }}</Label>
+            <Input v-model="runtimeMcpForm.args" class="h-8 font-mono text-xs" maxlength="4096" placeholder="-y @modelcontextprotocol/server-everything" />
+          </div>
+          <div v-if="runtimeMcpForm.transport === 'stdio'" class="space-y-1">
+            <Label class="text-[11px]">{{ t('capabilities.runtimeMcpEnv') }}</Label>
+            <Textarea v-model="runtimeMcpForm.env" class="min-h-20 font-mono text-[11px] leading-5" spellcheck="false" placeholder="KEY=value" />
+          </div>
+        </div>
+        <DialogFooter class="border-t px-5 py-3">
+          <Button variant="outline" size="sm" @click="runtimeMcpOpen = false">{{ t('common.cancel') }}</Button>
+          <Button size="sm" :disabled="!runtimeMcpFormValid || runtimeMcpSaving" @click="void submitRuntimeMcp()">
+            <LoaderCircle v-if="runtimeMcpSaving" :size="13" class="mr-1.5 animate-spin" />
+            {{ t('capabilities.saveMcp') }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

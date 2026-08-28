@@ -2,6 +2,7 @@
 import {
   Archive,
   Blocks,
+  ChevronDown,
   ChevronRight,
   Coins,
   Columns2,
@@ -28,7 +29,7 @@ import {
 } from '@lucide/vue'
 import { Motion } from 'motion-v'
 import { useRouter } from 'vue-router'
-import { computed, nextTick, onBeforeUnmount, onMounted, shallowRef, watch, type Component } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
@@ -245,6 +246,22 @@ function sidebarRuntimeRecentWorkspacePaths(runtime: WorkspaceRuntime): string[]
   return appStore.settings.recentWorkspaces ?? []
 }
 
+const sidebarNewTaskWorkspacePaths = computed(() => {
+  const runtime = sidebarActionRuntime.value
+  const current = sidebarRuntimeWorkspacePath(runtime)
+  const recent = sidebarRuntimeRecentWorkspacePaths(runtime)
+  return appStore.orderWorkspacePaths(runtime, [current, ...recent], recent)
+    .filter((path, index, paths) =>
+      Boolean(path && path !== '(unknown)')
+      && paths.findIndex((candidate) => sameWorkspacePath(candidate, path)) === index,
+    )
+})
+
+function sidebarWorkspaceName(path: string): string {
+  const clean = path.replace(/[\\/]+$/, '')
+  return clean.split(/[\\/]/).filter(Boolean).at(-1) || path
+}
+
 const sidebarThreadGroups = computed<ThreadGroup[]>(() => {
   if (!arenaStore.isArenaMode) return codexStore.filteredThreadGroups
   const runtime = sidebarActionRuntime.value
@@ -272,18 +289,43 @@ const sidebarThreadGroups = computed<ThreadGroup[]>(() => {
     .filter((group): group is ThreadGroup => Boolean(group && (!query || group.threads.length > 0)))
 })
 
+function visibleCodexDraft(thread: ThreadSummary): boolean {
+  if (!thread.id.startsWith('pending-thread-')) return true
+  return Boolean(
+    (codexStore.itemsByThread[thread.id] ?? []).length
+    || (codexStore.queuedMessagesByThread[thread.id] ?? []).length
+    || codexStore.threadHasActiveWork(thread.id),
+  )
+}
+
+function visibleClaudeDraft(sessionId: string): boolean {
+  if (!sessionId.startsWith('pending-claude-')) return true
+  return Boolean(
+    (claudeStore.itemsBySession[sessionId] ?? []).length
+    || (claudeStore.queueBySession[sessionId] ?? []).length
+    || claudeStore.isSessionBusy(sessionId),
+  )
+}
+
+const groups = computed<ThreadGroup[]>(() => sidebarThreadGroups.value.map((group) => ({
+  ...group,
+  threads: group.threads.filter(visibleCodexDraft),
+})))
+const grokGroups = computed(() => grokStore.sessionGroups)
+const claudeGroups = computed(() => claudeStore.sessionGroups.map((group) => ({
+  ...group,
+  sessions: group.sessions.filter((session) => visibleClaudeDraft(session.id)),
+})))
+
 const threadCount = computed(() => {
   if (sidebarIsGrokMode.value) {
-    return grokStore.sessionGroups.reduce((total, group) => total + group.sessions.length, 0)
+    return grokGroups.value.reduce((total, group) => total + group.sessions.length, 0)
   }
   if (sidebarIsClaudeMode.value) {
-    return claudeStore.sessionGroups.reduce((total, group) => total + group.sessions.length, 0)
+    return claudeGroups.value.reduce((total, group) => total + group.sessions.length, 0)
   }
-  return sidebarThreadGroups.value.reduce((total, group) => total + group.threads.length, 0)
+  return groups.value.reduce((total, group) => total + group.threads.length, 0)
 })
-const groups = sidebarThreadGroups
-const grokGroups = computed(() => grokStore.sessionGroups)
-const claudeGroups = computed(() => claudeStore.sessionGroups)
 const usesCodexTimeline = computed(() => sidebarIsCodexMode.value || sidebarIsGeminiMode.value || sidebarIsOpenCodeMode.value)
 const sidebarNewSessionDisabled = computed(() => {
   if (workspaceStore.switchingWorkspace || codexStore.creatingThread) return true
@@ -302,6 +344,13 @@ const activeSidebarSessionId = computed(() => {
   if (sidebarIsGrokMode.value) return grokStore.activeSessionId
   if (sidebarIsClaudeMode.value) return claudeStore.activeSessionId
   return codexStore.activeThreadId
+})
+const sidebarNewSessionActive = computed(() => {
+  const sessionId = activeSidebarSessionId.value
+  if (!sessionId) return true
+  if (sidebarIsGrokMode.value) return sessionId.startsWith('pending-grok-')
+  if (sidebarIsClaudeMode.value) return sessionId.startsWith('pending-claude-')
+  return sessionId.startsWith('pending-thread-')
 })
 
 function isActiveSidebarSession(runtime: WorkspaceRuntime, sessionId: string): boolean {
@@ -497,17 +546,21 @@ async function openGrokSession(group: { path: string; active: boolean }, session
   await grokStore.openSession(sessionId)
 }
 
-async function createSidebarSession(): Promise<void> {
+async function createSidebarSession(requestedWorkspace = ''): Promise<void> {
   const runtime = sidebarActionRuntime.value
   const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
   const previousSessionId = paneId ? arenaStore.sessionForPane(paneId) : ''
-  let workspacePath = appStore.currentWorkspacePath
-  if (!workspacePath) {
+  let workspacePath = requestedWorkspace.trim()
+  if (workspacePath) {
+    if (usesCodexTimeline.value) await codexStore.switchProject(workspacePath)
+    else if (!await workspaceStore.useWorkspace(workspacePath)) return
+  } else {
     workspacePath = usesCodexTimeline.value
       ? await codexStore.selectProject()
       : await workspaceStore.selectWorkspace()
-    if (!workspacePath) return
   }
+  if (!workspacePath || !sameWorkspacePath(workspacePath, appStore.currentWorkspacePath)) return
+  if (!arenaTargetIsCurrent(paneId, runtime, previousSessionId)) return
   if (runtime === 'codex' && !codexStore.isRuntimeReady(runtime)) {
     await codexStore.connect(workspacePath)
     if (!codexStore.isRuntimeReady(runtime)) return
@@ -523,8 +576,8 @@ async function createSidebarSession(): Promise<void> {
     return
   }
   const thread = arenaStore.isArenaMode
-    ? await codexStore.newRuntimeThread(runtime, true)
-    : await codexStore.newThread()
+    ? await codexStore.newRuntimeThread(runtime, true, workspacePath)
+    : await codexStore.newRuntimeThread(runtime, false, workspacePath)
   if (thread?.id && arenaTargetIsCurrent(paneId, runtime, previousSessionId)) {
     bindFocusedArenaSession(runtime, thread.id, paneId)
   }
@@ -732,7 +785,7 @@ async function newInProject(group: ThreadGroup, event?: Event): Promise<void> {
   if (creatingInProject.value || codexStore.creatingThread) return
   creatingInProject.value = group.path
   try {
-    // Expand the project so the new draft is visible.
+    // Keep the chosen project expanded; the draft itself appears only after send.
     setGroupCollapsed(group, false)
     const runtime = sidebarActionRuntime.value
     const paneId = arenaStore.isArenaMode ? (arenaStore.focusedPane?.id || '') : ''
@@ -752,15 +805,6 @@ function togglePin(thread: ThreadSummary, event?: Event): void {
   event?.stopPropagation()
   event?.preventDefault()
   codexStore.toggleThreadPin(thread.id)
-}
-
-function providerIcon(thread: ThreadSummary): Component {
-  const provider = `${thread.modelProvider} ${thread.model}`.toLocaleLowerCase()
-  if (provider.includes('opencode')) return OpenCodeIcon
-  if (provider.includes('google') || provider.includes('gemini')) return GeminiIcon
-  if (provider.includes('anthropic') || provider.includes('claude')) return ClaudeIcon
-  if (provider.includes('xai') || provider.includes('grok')) return GrokIcon
-  return OpenAIIcon
 }
 
 function providerLabel(thread: ThreadSummary): string {
@@ -1097,16 +1141,46 @@ function formatGrokUpdated(value?: number | null): string {
         </Button>
       </div>
 
-      <Button
-        variant="ghost"
-        class="h-9 w-full justify-start rounded-lg bg-sidebar-accent/70 px-2.5 text-[13px] font-medium text-sidebar-foreground shadow-none ring-1 ring-foreground/[0.035] hover:bg-sidebar-accent disabled:opacity-60"
-        :disabled="sidebarNewSessionDisabled"
-        @click="void createSidebarSession()"
-      >
-        <LoaderCircle v-if="workspaceStore.switchingWorkspace || (usesCodexTimeline && codexStore.creatingThread)" :size="15" class="mr-2 animate-spin" />
-        <Plus v-else :size="15" class="mr-2" stroke-width="1.8" />
-        {{ workspaceStore.switchingWorkspace || (usesCodexTimeline && codexStore.creatingThread) ? t('common.loading') : t('sidebar.newTask') }}
-      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger as-child>
+          <Button
+            variant="ghost"
+            class="h-9 w-full justify-start rounded-lg px-2.5 text-[13px] font-medium text-sidebar-foreground shadow-none hover:bg-sidebar-accent/60 disabled:opacity-60"
+            :class="sidebarNewSessionActive ? 'bg-sidebar-accent/80 ring-1 ring-foreground/[0.035]' : ''"
+            :disabled="sidebarNewSessionDisabled"
+            :aria-label="t('sidebar.newTask')"
+          >
+            <LoaderCircle v-if="workspaceStore.switchingWorkspace || (usesCodexTimeline && codexStore.creatingThread)" :size="15" class="mr-2 animate-spin" />
+            <Plus v-else :size="15" class="mr-2" stroke-width="1.8" />
+            <span class="min-w-0 flex-1 truncate text-left">
+              {{ workspaceStore.switchingWorkspace || (usesCodexTimeline && codexStore.creatingThread) ? t('common.loading') : t('sidebar.newTask') }}
+            </span>
+            <ChevronDown :size="13" class="ml-2 shrink-0 opacity-50" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" side="bottom" :side-offset="6" class="w-72 rounded-xl p-1.5 shadow-xl">
+          <div class="px-2 pb-1.5 pt-1 text-[10px] font-medium uppercase tracking-[0.06em] text-muted-foreground">
+            {{ t('sidebar.chooseFolder') }}
+          </div>
+          <DropdownMenuItem
+            v-for="path in sidebarNewTaskWorkspacePaths"
+            :key="path"
+            class="gap-2 rounded-lg py-2"
+            @select="void createSidebarSession(path)"
+          >
+            <Folder :size="14" class="shrink-0 text-muted-foreground" />
+            <span class="min-w-0 flex-1">
+              <span class="block truncate text-xs font-medium">{{ sidebarWorkspaceName(path) }}</span>
+              <span class="block truncate text-[10px] text-muted-foreground">{{ path }}</span>
+            </span>
+          </DropdownMenuItem>
+          <DropdownMenuSeparator v-if="sidebarNewTaskWorkspacePaths.length" />
+          <DropdownMenuItem class="gap-2 rounded-lg py-2" @select="void createSidebarSession()">
+            <FolderOpen :size="14" class="shrink-0 text-muted-foreground" />
+            <span class="text-xs font-medium">{{ t('sidebar.chooseFolder') }}</span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
 
       <Button
         variant="ghost"
@@ -1147,9 +1221,9 @@ function formatGrokUpdated(value?: number | null): string {
           >
             <div class="sticky top-0 z-20 bg-sidebar">
               <div
-                class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
+                class="group/project relative flex items-center gap-0.5 rounded-lg px-1 transition-colors"
                 :class="[
-                  group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
+                  group.active ? 'text-foreground' : 'hover:bg-sidebar-accent/25',
                   projectDropClass(group.path),
                 ]"
                 @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
@@ -1173,7 +1247,7 @@ function formatGrokUpdated(value?: number | null): string {
                       variant="ghost"
                       size="icon-xs"
                       draggable="true"
-                      class="size-6 shrink-0 cursor-grab rounded-md text-muted-foreground/70 opacity-50 hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing"
+                      class="absolute right-8 z-10 size-6 shrink-0 cursor-grab rounded-md text-muted-foreground/70 opacity-0 transition-opacity group-hover/project:opacity-60 hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing"
                       :aria-label="t('sidebar.reorderProject', { name: group.name })"
                       @click.stop.prevent
                       @dragstart="(event: DragEvent) => startProjectDrag(event, group.path)"
@@ -1197,16 +1271,11 @@ function formatGrokUpdated(value?: number | null): string {
                     class="shrink-0 opacity-50 transition-transform duration-200"
                     :class="{ 'rotate-90': !isGroupCollapsed(group) }"
                   />
-                  <FolderOpen v-if="group.active" :size="13" class="shrink-0 text-foreground/70" />
-                  <Folder v-else :size="13" class="shrink-0 opacity-60" />
                   <SimpleTooltip :content="group.path">
                     <span class="min-w-0 truncate" :class="group.active ? 'text-foreground' : ''">{{ group.name }}</span>
                   </SimpleTooltip>
                 </button>
               </CollapsibleTrigger>
-              <span class="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/80">
-                {{ group.sessions.length }}
-              </span>
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger as-child>
@@ -1227,7 +1296,7 @@ function formatGrokUpdated(value?: number | null): string {
             </div>
 
             <CollapsibleContent>
-              <div class="ml-2 space-y-0.5 border-l border-sidebar-border/60 py-0.5 pl-2">
+              <div class="space-y-0.5 py-0.5 pl-2">
                 <div
                   v-for="session in visibleGrokSessions(group)"
                   :key="session.id"
@@ -1236,9 +1305,9 @@ function formatGrokUpdated(value?: number | null): string {
                   <div
                     role="button"
                     tabindex="0"
-                    class="flex h-auto min-h-11 w-full cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors"
+                    class="flex h-8 w-full cursor-pointer items-center gap-2 rounded-lg px-2 text-left text-xs transition-colors"
                     :class="isActiveSidebarSession('grok', session.id)
-                      ? 'bg-accent text-accent-foreground shadow-sm'
+                      ? 'bg-sidebar-accent/80 text-accent-foreground'
                       : 'hover:bg-sidebar-accent/50'"
                     @click="renamingThreadId === session.id ? undefined : openGrokSession(group, session.id)"
                     @dblclick.stop="beginRename(session)"
@@ -1249,20 +1318,15 @@ function formatGrokUpdated(value?: number | null): string {
                         ? t('sidebar.runningInBackground')
                         : (session.model || 'Grok')"
                     >
-                      <span
-                        class="relative mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg border border-border/60 bg-panel/80 text-muted-foreground"
-                      >
-                        <GrokIcon :size="15" />
+                      <span class="relative grid size-3 shrink-0 place-items-center">
                         <span
-                          v-if="isGrokSessionRunning(session.id)"
-                          class="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-sidebar bg-emerald-500 shadow-[0_0_0_1px_rgba(16,185,129,0.35)]"
-                        >
-                          <span class="absolute inset-0 animate-ping rounded-full bg-emerald-400/70" />
-                        </span>
+                          class="size-2 rounded-full border border-muted-foreground/45"
+                          :class="isGrokSessionRunning(session.id) ? 'border-emerald-500 bg-emerald-500' : ''"
+                        />
+                        <span v-if="isGrokSessionRunning(session.id)" class="absolute inset-0 animate-ping rounded-full bg-emerald-400/35" />
                       </span>
                     </SimpleTooltip>
-                    <span class="min-w-0 flex-1">
-                      <span class="flex min-w-0 items-center gap-1 pr-1">
+                    <span class="flex min-w-0 flex-1 items-center gap-1 pr-1">
                         <Input
                           v-if="renamingThreadId === session.id"
                           data-thread-rename-input
@@ -1276,22 +1340,14 @@ function formatGrokUpdated(value?: number | null): string {
                           @blur="commitRename(session)"
                         />
                         <SimpleTooltip v-else :content="t('sidebar.renameHint')">
-                          <span class="min-w-0 flex-1 truncate font-medium leading-5 text-foreground/90">
+                          <span class="min-w-0 flex-1 truncate leading-5 text-foreground/90">
                             {{ session.name || session.id }}
                           </span>
                         </SimpleTooltip>
-                      </span>
-                      <span
-                        v-if="renamingThreadId !== session.id"
-                        class="mt-0.5 block truncate text-[10px] leading-4 text-muted-foreground"
-                        :class="{ 'text-accent-foreground/70': isActiveSidebarSession('grok', session.id) }"
-                      >
-                        {{ session.preview || session.model || session.backend || t('sidebar.noPreview') }}
-                      </span>
                     </span>
                     <span
                       v-if="renamingThreadId !== session.id"
-                      class="relative mt-0.5 flex h-5 w-10 shrink-0 items-center justify-end"
+                      class="relative flex h-5 w-10 shrink-0 items-center justify-end"
                       :class="{ 'text-accent-foreground/70': isActiveSidebarSession('grok', session.id) }"
                     >
                       <span
@@ -1311,7 +1367,7 @@ function formatGrokUpdated(value?: number | null): string {
                       <Button
                         variant="ghost"
                         size="icon-xs"
-                        class="absolute right-1.5 top-1.5 size-6 rounded-md text-muted-foreground opacity-0 transition-opacity group-hover/thread:opacity-100 group-focus-within/thread:opacity-100 data-[state=open]:opacity-100 focus-visible:opacity-100"
+                        class="absolute right-1 top-1 size-6 rounded-md text-muted-foreground opacity-0 transition-opacity group-hover/thread:opacity-100 group-focus-within/thread:opacity-100 data-[state=open]:opacity-100 focus-visible:opacity-100"
                         :aria-label="t('threadActions.title')"
                         :disabled="Boolean(grokStore.sessionMutationForSession(session.id))
                           || renamingThreadId === session.id
@@ -1386,9 +1442,9 @@ function formatGrokUpdated(value?: number | null): string {
         >
           <div class="sticky top-0 z-20 bg-sidebar">
             <div
-              class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
+              class="group/project relative flex items-center gap-0.5 rounded-lg px-1 transition-colors"
               :class="[
-                group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
+                group.active ? 'text-foreground' : 'hover:bg-sidebar-accent/25',
                 projectDropClass(group.path),
               ]"
               @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
@@ -1412,7 +1468,7 @@ function formatGrokUpdated(value?: number | null): string {
                     variant="ghost"
                     size="icon-xs"
                     draggable="true"
-                    class="size-6 shrink-0 cursor-grab rounded-md text-muted-foreground/70 opacity-50 hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing"
+                    class="absolute right-8 z-10 size-6 shrink-0 cursor-grab rounded-md text-muted-foreground/70 opacity-0 transition-opacity group-hover/project:opacity-60 hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing"
                     :aria-label="t('sidebar.reorderProject', { name: group.name })"
                     @click.stop.prevent
                     @dragstart="(event: DragEvent) => startProjectDrag(event, group.path)"
@@ -1436,18 +1492,13 @@ function formatGrokUpdated(value?: number | null): string {
                   class="shrink-0 opacity-50 transition-transform duration-200"
                   :class="{ 'rotate-90': !isGroupCollapsed(group) }"
                 />
-                <FolderOpen v-if="group.active" :size="13" class="shrink-0 text-foreground/70" />
-                <Folder v-else :size="13" class="shrink-0 opacity-60" />
                 <SimpleTooltip :content="group.path">
                   <span class="min-w-0 truncate" :class="group.active ? 'text-foreground' : ''">{{ group.name }}</span>
                 </SimpleTooltip>
               </button>
             </CollapsibleTrigger>
 
-            <span class="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/80">
-              <span v-if="group.loading" class="inline-block size-3 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
-              <span v-else>{{ group.threads.length }}</span>
-            </span>
+            <span v-if="group.loading" class="mr-1 inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
 
             <TooltipProvider>
               <Tooltip>
@@ -1472,7 +1523,7 @@ function formatGrokUpdated(value?: number | null): string {
           </div>
 
           <CollapsibleContent>
-            <div class="ml-2 space-y-0.5 border-l border-sidebar-border/60 py-0.5 pl-2">
+            <div class="space-y-0.5 py-0.5 pl-2">
               <div v-if="group.error" class="rounded-lg bg-destructive/10 p-2 text-[10px] text-destructive">
                 {{ group.error }}
                 <Button size="xs" variant="ghost" class="mt-1 h-6" @click="codexStore.reloadProject(group.path)">
@@ -1490,11 +1541,10 @@ function formatGrokUpdated(value?: number | null): string {
                   as="div"
                   role="button"
                   tabindex="0"
-                  class="flex h-auto min-h-11 w-full cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors"
+                  class="flex h-8 w-full cursor-pointer items-center gap-2 rounded-lg px-2 text-left text-xs transition-colors"
                   :class="isActiveSidebarSession(codexStore.runtimeIDForThread(thread.id), thread.id)
-                    ? 'bg-accent text-accent-foreground shadow-sm'
+                    ? 'bg-sidebar-accent/80 text-accent-foreground'
                     : 'hover:bg-sidebar-accent/50'"
-                  :whileHover="{ x: 2 }"
                   :whilePress="{ scale: 0.985 }"
                   :transition="springSnappy"
                   @click="renamingThreadId === thread.id ? undefined : openThread(group, thread)"
@@ -1506,21 +1556,16 @@ function formatGrokUpdated(value?: number | null): string {
                       ? t('sidebar.runningInBackground')
                       : providerLabel(thread)"
                   >
-                    <span
-                      class="relative mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg border border-border/60 bg-panel/80 text-muted-foreground"
-                    >
-                      <component :is="providerIcon(thread)" :size="15" />
+                    <span class="relative grid size-3 shrink-0 place-items-center">
                       <span
-                        v-if="isCodexThreadRunning(thread.id)"
-                        class="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-sidebar bg-emerald-500 shadow-[0_0_0_1px_rgba(16,185,129,0.35)]"
-                      >
-                        <span class="absolute inset-0 animate-ping rounded-full bg-emerald-400/70" />
-                      </span>
+                        class="size-2 rounded-full border border-muted-foreground/45"
+                        :class="isCodexThreadRunning(thread.id) ? 'border-emerald-500 bg-emerald-500' : ''"
+                      />
+                      <span v-if="isCodexThreadRunning(thread.id)" class="absolute inset-0 animate-ping rounded-full bg-emerald-400/35" />
                     </span>
                   </SimpleTooltip>
 
-                  <span class="min-w-0 flex-1">
-                    <span class="flex min-w-0 items-center gap-1 pr-1">
+                  <span class="flex min-w-0 flex-1 items-center gap-1 pr-1">
                       <Pin
                         v-if="codexStore.pinnedThreadIds.includes(thread.id)"
                         :size="10"
@@ -1539,21 +1584,13 @@ function formatGrokUpdated(value?: number | null): string {
                         @blur="commitRename(thread)"
                       />
                       <SimpleTooltip v-else :content="t('sidebar.renameHint')">
-                        <span class="min-w-0 flex-1 truncate font-medium leading-5">{{ thread.name }}</span>
+                        <span class="min-w-0 flex-1 truncate leading-5">{{ thread.name }}</span>
                       </SimpleTooltip>
-                    </span>
-                    <span
-                      v-if="renamingThreadId !== thread.id"
-                      class="mt-0.5 block truncate text-[10px] leading-4 text-muted-foreground"
-                      :class="{ 'text-accent-foreground/70': isActiveSidebarSession(codexStore.runtimeIDForThread(thread.id), thread.id) }"
-                    >
-                      {{ thread.model || thread.preview || t('sidebar.noPreview') }}
-                    </span>
                   </span>
 
                   <span
                     v-if="renamingThreadId !== thread.id"
-                    class="relative mt-0.5 flex h-5 w-10 shrink-0 items-center justify-end"
+                    class="relative flex h-5 w-10 shrink-0 items-center justify-end"
                     :class="{ 'text-accent-foreground/70': isActiveSidebarSession(codexStore.runtimeIDForThread(thread.id), thread.id) }"
                   >
                     <span
@@ -1574,7 +1611,7 @@ function formatGrokUpdated(value?: number | null): string {
                     <Button
                       variant="ghost"
                       size="icon-xs"
-                      class="absolute right-1.5 top-1.5 size-6 rounded-md text-muted-foreground opacity-0 transition-opacity group-hover/thread:opacity-100 group-focus-within/thread:opacity-100 data-[state=open]:opacity-100 focus-visible:opacity-100"
+                      class="absolute right-1 top-1 size-6 rounded-md text-muted-foreground opacity-0 transition-opacity group-hover/thread:opacity-100 group-focus-within/thread:opacity-100 data-[state=open]:opacity-100 focus-visible:opacity-100"
                       :aria-label="t('threadActions.title')"
                       :disabled="Boolean(codexStore.threadMutationForThread(thread.id)) || renamingThreadId === thread.id"
                       @click.stop
@@ -1645,9 +1682,9 @@ function formatGrokUpdated(value?: number | null): string {
           >
             <div class="sticky top-0 z-20 bg-sidebar">
               <div
-                class="group/project relative flex items-center gap-0.5 rounded-lg px-0.5 transition-colors"
+                class="group/project relative flex items-center gap-0.5 rounded-lg px-1 transition-colors"
                 :class="[
-                  group.active ? 'bg-sidebar-accent/40' : 'hover:bg-sidebar-accent/25',
+                  group.active ? 'text-foreground' : 'hover:bg-sidebar-accent/25',
                   projectDropClass(group.path),
                 ]"
                 @dragover="(event: DragEvent) => updateProjectDropTarget(event, group.path)"
@@ -1671,7 +1708,7 @@ function formatGrokUpdated(value?: number | null): string {
                       variant="ghost"
                       size="icon-xs"
                       draggable="true"
-                      class="size-6 shrink-0 cursor-grab rounded-md text-muted-foreground/70 opacity-50 hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing"
+                      class="absolute right-8 z-10 size-6 shrink-0 cursor-grab rounded-md text-muted-foreground/70 opacity-0 transition-opacity group-hover/project:opacity-60 hover:opacity-100 focus-visible:opacity-100 active:cursor-grabbing"
                       :aria-label="t('sidebar.reorderProject', { name: group.name })"
                       @click.stop.prevent
                       @dragstart="(event: DragEvent) => startProjectDrag(event, group.path)"
@@ -1695,16 +1732,11 @@ function formatGrokUpdated(value?: number | null): string {
                     class="shrink-0 opacity-50 transition-transform duration-200"
                     :class="{ 'rotate-90': !isGroupCollapsed(group) }"
                   />
-                  <FolderOpen v-if="group.active" :size="13" class="shrink-0 text-foreground/70" />
-                  <Folder v-else :size="13" class="shrink-0 opacity-60" />
                   <SimpleTooltip :content="group.path">
                     <span class="min-w-0 truncate" :class="group.active ? 'text-foreground' : ''">{{ group.name }}</span>
                   </SimpleTooltip>
                 </button>
               </CollapsibleTrigger>
-              <span class="shrink-0 px-1 text-[10px] tabular-nums text-muted-foreground/80">
-                {{ group.sessions.length }}
-              </span>
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger as-child>
@@ -1725,7 +1757,7 @@ function formatGrokUpdated(value?: number | null): string {
             </div>
 
             <CollapsibleContent>
-              <div class="ml-2 space-y-0.5 border-l border-sidebar-border/60 py-0.5 pl-2">
+              <div class="space-y-0.5 py-0.5 pl-2">
                 <div
                   v-for="session in visibleClaudeSessions(group)"
                   :key="session.id"
@@ -1734,9 +1766,9 @@ function formatGrokUpdated(value?: number | null): string {
                   <div
                     role="button"
                     tabindex="0"
-                    class="flex h-auto min-h-11 w-full cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors"
+                    class="flex h-8 w-full cursor-pointer items-center gap-2 rounded-lg px-2 text-left text-xs transition-colors"
                     :class="isActiveSidebarSession('claude', session.id)
-                      ? 'bg-accent text-accent-foreground shadow-sm'
+                      ? 'bg-sidebar-accent/80 text-accent-foreground'
                       : 'hover:bg-sidebar-accent/50'"
                     @click="renamingThreadId === session.id ? undefined : openClaudeSession(group, session.id)"
                     @dblclick.stop="beginRename(session)"
@@ -1747,20 +1779,15 @@ function formatGrokUpdated(value?: number | null): string {
                         ? t('sidebar.runningInBackground')
                         : (session.model || 'Claude')"
                     >
-                      <span
-                        class="relative mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg border border-border/60 bg-panel/80 text-muted-foreground"
-                      >
-                        <ClaudeIcon :size="15" />
+                      <span class="relative grid size-3 shrink-0 place-items-center">
                         <span
-                          v-if="isClaudeSessionRunning(session.id)"
-                          class="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full border-2 border-sidebar bg-emerald-500 shadow-[0_0_0_1px_rgba(16,185,129,0.35)]"
-                        >
-                          <span class="absolute inset-0 animate-ping rounded-full bg-emerald-400/70" />
-                        </span>
+                          class="size-2 rounded-full border border-muted-foreground/45"
+                          :class="isClaudeSessionRunning(session.id) ? 'border-emerald-500 bg-emerald-500' : ''"
+                        />
+                        <span v-if="isClaudeSessionRunning(session.id)" class="absolute inset-0 animate-ping rounded-full bg-emerald-400/35" />
                       </span>
                     </SimpleTooltip>
-                    <span class="min-w-0 flex-1">
-                      <span class="flex min-w-0 items-center gap-1 pr-1">
+                    <span class="flex min-w-0 flex-1 items-center gap-1 pr-1">
                         <Input
                           v-if="renamingThreadId === session.id"
                           data-thread-rename-input
@@ -1774,22 +1801,14 @@ function formatGrokUpdated(value?: number | null): string {
                           @blur="commitRename(session)"
                         />
                         <SimpleTooltip v-else :content="t('sidebar.renameHint')">
-                          <span class="min-w-0 flex-1 truncate font-medium leading-5 text-foreground/90">
+                          <span class="min-w-0 flex-1 truncate leading-5 text-foreground/90">
                             {{ session.name || session.id }}
                           </span>
                         </SimpleTooltip>
-                      </span>
-                      <span
-                        v-if="renamingThreadId !== session.id"
-                        class="mt-0.5 block truncate text-[10px] leading-4 text-muted-foreground"
-                        :class="{ 'text-accent-foreground/70': isActiveSidebarSession('claude', session.id) }"
-                      >
-                        {{ session.preview || session.model || t('sidebar.noPreview') }}
-                      </span>
                     </span>
                     <span
                       v-if="renamingThreadId !== session.id"
-                      class="relative mt-0.5 flex h-5 w-10 shrink-0 items-center justify-end"
+                      class="relative flex h-5 w-10 shrink-0 items-center justify-end"
                       :class="{ 'text-accent-foreground/70': isActiveSidebarSession('claude', session.id) }"
                     >
                       <span
@@ -1809,7 +1828,7 @@ function formatGrokUpdated(value?: number | null): string {
                       <Button
                         variant="ghost"
                         size="icon-xs"
-                        class="absolute right-1.5 top-1.5 size-6 rounded-md text-muted-foreground opacity-0 transition-opacity group-hover/thread:opacity-100 group-focus-within/thread:opacity-100 data-[state=open]:opacity-100 focus-visible:opacity-100"
+                        class="absolute right-1 top-1 size-6 rounded-md text-muted-foreground opacity-0 transition-opacity group-hover/thread:opacity-100 group-focus-within/thread:opacity-100 data-[state=open]:opacity-100 focus-visible:opacity-100"
                         :aria-label="t('threadActions.title')"
                         :disabled="Boolean(claudeStore.sessionMutationForSession(session.id)) || renamingThreadId === session.id"
                         @click.stop

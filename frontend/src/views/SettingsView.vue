@@ -3005,12 +3005,6 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
 
             <!-- Personalization -->
             <template v-else-if="activePanel === 'personalization'">
-              <section v-if="isGrokSettings" class="overflow-hidden rounded-xl border bg-card">
-                <div class="border-b px-4 py-3">
-                  <h2 class="text-[13px] font-semibold">{{ t('settings.grokInstructionsTitle') }}</h2>
-                  <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.grokInstructionsHint') }}</p>
-                </div>
-              </section>
               <section v-if="isCodexSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="divide-y">
                   <div class="flex items-center justify-between gap-4 px-4 py-3">

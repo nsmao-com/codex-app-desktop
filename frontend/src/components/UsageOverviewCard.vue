@@ -395,12 +395,23 @@ const modelStats = computed(() => {
   if (props.runtime === 'grok') {
     grokStore.sessions.forEach((session) => add(session.model))
   } else if (props.runtime === 'claude') {
-    claudeStore.sessions.forEach((session) => add(session.model))
+    claudeStore.sessions.forEach((session) => {
+      const emptyDraft = session.id.startsWith('pending-claude-')
+        && !(claudeStore.itemsBySession[session.id] ?? []).length
+        && !(claudeStore.queueBySession[session.id] ?? []).length
+        && !claudeStore.isSessionBusy(session.id)
+      if (!emptyDraft) add(session.model)
+    })
   } else {
     const seen = new Set<string>()
     for (const group of codexStore.threadGroups) {
       for (const thread of group.threads) {
         if (seen.has(thread.id) || codexStore.runtimeIDForThread(thread.id) !== props.runtime) continue
+        const emptyDraft = thread.id.startsWith('pending-thread-')
+          && !(codexStore.itemsByThread[thread.id] ?? []).length
+          && !(codexStore.queuedMessagesByThread[thread.id] ?? []).length
+          && !codexStore.threadHasActiveWork(thread.id)
+        if (emptyDraft) continue
         seen.add(thread.id)
         add(thread.model)
       }
@@ -613,7 +624,7 @@ watch(
           :class="activeTrendPoint.x > chartGeometry.width * 0.68 ? 'is-left' : 'is-right'"
           :style="{
             left: `${(activeTrendPoint.x / chartGeometry.width) * 100}%`,
-            top: `${Math.max(8, (activeTrendPoint.y / chartGeometry.height) * 100)}%`,
+            top: `${Math.min(50, Math.max(30, (activeTrendPoint.y / chartGeometry.height) * 100))}%`,
           }"
           role="status"
         >

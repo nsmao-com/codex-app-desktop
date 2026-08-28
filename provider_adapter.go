@@ -13,8 +13,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"nice_codex_desktop/internal/codex"
@@ -558,6 +560,14 @@ func externalTurnMap(turn externalTurn) map[string]any {
 	if len(items) == 1 {
 		items = append(items, map[string]any{"id": turn.ID + ":agent", "type": "agentMessage", "status": turn.Status, "text": turn.AgentText})
 	}
+	if turn.Error != "" {
+		// Keep a terminal provider failure in the transcript. A queued follower can
+		// replace the global feedback immediately, but the failed turn still needs
+		// to explain why it stopped after the session is switched or reopened.
+		items = append(items, map[string]any{
+			"id": turn.ID + ":error", "type": "agentMessage", "status": "failed", "text": turn.Error,
+		})
+	}
 	result := map[string]any{
 		"id": turn.ID, "status": turn.Status, "items": items,
 		"startedAt": turn.StartedAt, "completedAt": turn.CompletedAt, "durationMs": turn.DurationMS,
@@ -626,6 +636,21 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	s.emitExternalNotification("turn/started", map[string]any{
 		"threadId": threadID,
 		"turn":     map[string]any{"id": turnID, "status": "inProgress", "startedAt": started.Unix()},
+	})
+	// Publish the accepted user row with the provider turn id. The frontend
+	// replaces its optimistic local row by matching the text, which also repairs
+	// a queue-admission race where a temporary "provider already running" retry
+	// could remove that local row before the accepted retry began streaming.
+	userContent := []any{map[string]any{"type": "text", "text": strings.TrimSpace(text)}}
+	for _, path := range images {
+		userContent = append(userContent, map[string]any{"type": "localImage", "path": path})
+	}
+	s.emitExternalNotification("item/completed", map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+		"item": map[string]any{
+			"id": turnID + ":user", "type": "userMessage", "status": "completed", "content": userContent,
+		},
 	})
 
 	// External CLIs can interleave assistant text, reasoning and tools. Keep a
@@ -983,6 +1008,61 @@ func decodeExternalToolTimelineItem(encoded string) (map[string]any, bool) {
 	return item, true
 }
 
+// sanitizedExternalProcessEnv drops MSYS-style variables for the Grok CLI on
+// Windows. When HOME is inherited (e.g. the app was launched from Git Bash),
+// grok.exe picks its bash/login-shell backend for run_terminal_command and
+// deadlocks during ConPTY bootstrap in a console-less child process. Removing
+// those variables keeps it on the plain PowerShell pipeline, which works.
+// Other providers and platforms keep the inherited environment untouched.
+func sanitizedExternalProcessEnv(provider string) []string {
+	if provider != "grok" || runtime.GOOS != "windows" {
+		return nil
+	}
+	env := os.Environ()
+	filtered := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(name)
+		if upper == "HOME" || upper == "MSYSTEM" || strings.HasPrefix(upper, "MSYS") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
+}
+
+// grokTurnInactivityLimit bounds how long a Grok turn may stay silent on both
+// the stdout stream and its own events file before the watchdog kills it.
+const grokTurnInactivityLimit = 10 * time.Minute
+
+func watchGrokTurnInactivity(stop <-chan struct{}, command *exec.Cmd, eventsPath string, lastOutputTime *atomic.Int64) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			idle := time.Since(time.Unix(0, lastOutputTime.Load()))
+			if idle < grokTurnInactivityLimit {
+				continue
+			}
+			if eventsPath != "" {
+				if info, err := os.Stat(eventsPath); err == nil && time.Since(info.ModTime()) < grokTurnInactivityLimit {
+					// The CLI is still writing lifecycle events even though the
+					// stdout stream is quiet — treat it as alive.
+					lastOutputTime.Store(info.ModTime().UnixNano())
+					continue
+				}
+			}
+			if command.Process != nil {
+				_ = command.Process.Kill()
+			}
+			return
+		}
+	}
+}
+
 func (s *AppService) executeExternalTurn(
 	ctx context.Context,
 	provider, sessionID, workspace string,
@@ -1006,6 +1086,7 @@ func (s *AppService) executeExternalTurn(
 	}
 	command := exec.CommandContext(ctx, commandPath, commandArgs...)
 	command.Dir = workspace
+	command.Env = sanitizedExternalProcessEnv(provider)
 	grokEventsPath, grokEventsOffset := grokTurnEventsCursor(provider, sessionID)
 	grokTurnStartedAt := time.Now().UTC().Add(-2 * time.Second)
 	stdout, err := command.StdoutPipe()
@@ -1021,6 +1102,18 @@ func (s *AppService) executeExternalTurn(
 		return "", sessionID, nil, err
 	}
 	defer cleanup()
+	// Grok's run_terminal_command can deadlock during its Windows shell bootstrap
+	// (no console + MSYS-style env), leaving the CLI silent forever while the
+	// turn stays "running". Kill the process after prolonged silence on both the
+	// stdout stream and the CLI's own events file so the turn can fail visibly
+	// instead of hanging until a manual interrupt.
+	var lastOutputTime atomic.Int64
+	lastOutputTime.Store(time.Now().UnixNano())
+	stopGrokWatchdog := make(chan struct{})
+	defer close(stopGrokWatchdog)
+	if provider == "grok" {
+		go watchGrokTurnInactivity(stopGrokWatchdog, command, grokEventsPath, &lastOutputTime)
+	}
 	var grokTerminalOutcome <-chan string
 	if provider == "grok" {
 		grokTerminalOutcome = monitorGrokTurnEnd(
@@ -1055,6 +1148,7 @@ func (s *AppService) executeExternalTurn(
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
+		lastOutputTime.Store(time.Now().UnixNano())
 		line := scanner.Bytes()
 		var event map[string]any
 		if err := json.Unmarshal(line, &event); err != nil || event == nil {

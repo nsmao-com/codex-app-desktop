@@ -83,6 +83,13 @@ export function CheckProviderConfiguration(providerID: string, force: boolean): 
     return $Call.ByID(1084288519, providerID, force);
 }
 
+/**
+ * ClearGrokMemory wipes Grok's persisted memory (`grok memory clear`).
+ */
+export function ClearGrokMemory(): $CancellablePromise<void> {
+    return $Call.ByID(2633097791);
+}
+
 export function CodexStatus(): $CancellablePromise<codex$0.Status> {
     return $Call.ByID(3760924599);
 }
@@ -549,6 +556,28 @@ export function ReloadProviderConfiguration(providerID: string): $CancellablePro
     return $Call.ByID(1515072116, providerID);
 }
 
+/**
+ * RemoveClaudeMCPServer removes a user-scope MCP server.
+ */
+export function RemoveClaudeMCPServer(name: string): $CancellablePromise<void> {
+    return $Call.ByID(2851080571, name);
+}
+
+/**
+ * RemoveExternalMCPServer deletes one MCP server from the Gemini / OpenCode
+ * JSON config.
+ */
+export function RemoveExternalMCPServer(runtime: string, scope: string, name: string): $CancellablePromise<void> {
+    return $Call.ByID(4247289240, runtime, scope, name);
+}
+
+/**
+ * RemoveGrokMCPServer removes a user-scope MCP server.
+ */
+export function RemoveGrokMCPServer(name: string): $CancellablePromise<void> {
+    return $Call.ByID(3470221360, name);
+}
+
 export function RenameClaudeSession(sessionID: string, name: string): $CancellablePromise<void> {
     return $Call.ByID(2613138530, sessionID, name);
 }
@@ -794,6 +823,31 @@ export function UpdateSessionPreferences(request: $models.SessionPreferencesRequ
 
 export function UpdateStatus(): $CancellablePromise<$models.UpdateProgress> {
     return $Call.ByID(3590124437);
+}
+
+/**
+ * UpsertClaudeMCPServer adds or updates a user-scope MCP server via
+ * `claude mcp add-json` so the CLI owns the exact settings format.
+ */
+export function UpsertClaudeMCPServer(input: $models.MCPServerInput): $CancellablePromise<void> {
+    return $Call.ByID(1256922634, input);
+}
+
+/**
+ * UpsertExternalMCPServer adds or updates one MCP server in the Gemini /
+ * OpenCode JSON config, preserving every unrelated key.
+ */
+export function UpsertExternalMCPServer(runtime: string, scope: string, input: $models.MCPServerInput): $CancellablePromise<void> {
+    return $Call.ByID(2226446489, runtime, scope, input);
+}
+
+/**
+ * UpsertGrokMCPServer adds or updates a user-scope MCP server via
+ * `grok mcp add`. The CLI writes ~/.grok/config.toml itself, which avoids
+ * hand-editing TOML.
+ */
+export function UpsertGrokMCPServer(input: $models.MCPServerInput): $CancellablePromise<void> {
+    return $Call.ByID(3836990317, input);
 }
 
 export function UpsertMCPServer(request: $models.MCPServerWriteRequest): $CancellablePromise<void> {

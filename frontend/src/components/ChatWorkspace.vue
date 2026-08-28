@@ -310,18 +310,18 @@ const hasConversation = computed(() => {
   if (!id) return composerSendPending.value
   if (isClaudeMode.value) {
     if (claudeStore.sameSession(id, claudeStore.activeSessionId)) {
-      return claudeStore.activeItems.length > 0 || Boolean(id)
+      return claudeStore.activeItems.length > 0 || composerSendPending.value
     }
-    return Boolean((claudeStore.itemsBySession?.[id] || []).length || id)
+    return Boolean((claudeStore.itemsBySession?.[id] || []).length || composerSendPending.value)
   }
   if (isGrokMode.value) {
     if (grokStore.sameSession(id, grokStore.activeSessionId)) {
-      return grokStore.activeItems.length > 0 || Boolean(id)
+      return grokStore.activeItems.length > 0 || composerSendPending.value
     }
-    return Boolean(id)
+    return Boolean(grokStore.itemsForSession(id).length || composerSendPending.value)
   }
   const key = matchingCodexThreadKey(codexStore.itemsByThread, id)
-  return Boolean((key && codexStore.itemsByThread[key]?.length) || id)
+  return Boolean((key && codexStore.itemsByThread[key]?.length) || composerSendPending.value)
 })
 
 watch(

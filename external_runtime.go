@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -1652,37 +1653,38 @@ func readGeminiNativeHistoryPage(record *SessionRecord, before int) (externalNat
 }
 
 func loadGeminiNativeTurns(path string) ([]externalTurn, error) {
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	// A single JSONL session can be large, but keep an upper bound so a corrupt
-	// file cannot exhaust the desktop process while opening a conversation.
-	if len(payload) > 64*1024*1024 {
-		return nil, errors.New("Gemini native session is too large to open")
-	}
-	lines := strings.Split(string(payload), "\n")
 	incremental := make([]map[string]any, 0, 64)
 	var snapshotMessages []any
 	hasIncrementalUser := false
-	for _, line := range lines {
+	err := visitJSONLLines(path, func(line []byte) bool {
+		// Once incremental records are available they are authoritative. Gemini
+		// writes a full $set snapshot after nearly every message; decoding those
+		// ever-growing copies made long conversations slow and memory hungry.
+		if hasIncrementalUser && bytes.Contains(line, []byte(`"$set"`)) {
+			return false
+		}
 		var value map[string]any
-		if json.Unmarshal([]byte(line), &value) != nil || value == nil {
-			continue
+		if json.Unmarshal(line, &value) != nil || value == nil {
+			return false
 		}
 		if snapshot, ok := value["$set"].(map[string]any); ok {
 			if messages, exists := snapshot["messages"].([]any); exists {
 				snapshotMessages = messages
 			}
-			continue
+			return false
 		}
 		kind := strings.ToLower(strings.TrimSpace(stringFromAny(value["type"])))
 		if kind == "user" || kind == "gemini" || kind == "assistant" {
 			incremental = append(incremental, value)
 			if kind == "user" {
 				hasIncrementalUser = true
+				snapshotMessages = nil
 			}
 		}
+		return false
+	})
+	if err != nil {
+		return nil, err
 	}
 	if !hasIncrementalUser {
 		incremental = make([]map[string]any, 0, len(snapshotMessages))
@@ -1736,6 +1738,10 @@ func geminiTurnsFromMessages(messages []map[string]any) []externalTurn {
 				turn.Items = append(turn.Items, map[string]any{"id": turn.ID + ":reasoning:" + strconv.Itoa(thoughtIndex), "type": "reasoning", "status": "completed", "summary": text, "content": text})
 			}
 		}
+		if text, ok := message["content"].(string); ok && strings.TrimSpace(text) != "" {
+			turn.AgentText += text
+			turn.Items = append(turn.Items, map[string]any{"id": turn.ID + ":agent:0", "type": "agentMessage", "status": "completed", "text": text})
+		}
 		for contentIndex, raw := range nativeAnySlice(message["content"]) {
 			content := asStringKeyMap(raw)
 			if text := stringFromAny(content["text"]); text != "" {
@@ -1776,6 +1782,40 @@ func geminiTurnsFromMessages(messages []map[string]any) []externalTurn {
 				}
 			}
 		}
+		for toolIndex, raw := range nativeAnySlice(message["toolCalls"]) {
+			tool := asStringKeyMap(raw)
+			name := firstMapString(tool, "displayName", "name")
+			if name == "" {
+				name = "Gemini tool"
+			}
+			callID := firstMapString(tool, "id", "callId", "callID")
+			if callID == "" {
+				callID = name + ":" + strconv.Itoa(toolIndex)
+			}
+			if _, exists := toolIndexes[callID]; exists {
+				continue
+			}
+			status := strings.ToLower(strings.TrimSpace(stringFromAny(tool["status"])))
+			success := status != "error" && status != "failed" && status != "cancelled"
+			itemStatus := "completed"
+			if !success {
+				itemStatus = "failed"
+			}
+			result := tool["result"]
+			if result == nil {
+				result = tool["resultDisplay"]
+			}
+			turn.Items = append(turn.Items, map[string]any{
+				"id":           turn.ID + ":tool:" + callID,
+				"type":         "dynamicToolCall",
+				"tool":         name,
+				"status":       itemStatus,
+				"arguments":    tool["args"],
+				"contentItems": externalToolContentItems(result),
+				"success":      success,
+			})
+			toolIndexes[callID] = len(turn.Items) - 1
+		}
 	}
 	for index := range turns {
 		turn := &turns[index]
@@ -1811,6 +1851,31 @@ func nativeAnySlice(value any) []any {
 		return values
 	}
 	return []any{}
+}
+
+// visitJSONLLines reads one record at a time without Scanner's token ceiling or
+// a total-file size cap. Gemini snapshots can make one healthy conversation
+// much larger than the old fixed limits even though only a page reaches the UI.
+func visitJSONLLines(path string, visit func(line []byte) bool) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	reader := bufio.NewReaderSize(file, 64*1024)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 && visit(line) {
+			return nil
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 func findGeminiNativeSessionFile(home, sessionID string) string {
@@ -2052,24 +2117,55 @@ func listGeminiNativeSessions(home, workspace string) []ExternalSessionView {
 }
 
 func parseGeminiSessionFile(path, workspace string) (ExternalSessionView, bool) {
-	payload, err := os.ReadFile(path)
-	if err != nil || len(payload) > 16*1024*1024 {
-		return ExternalSessionView{}, false
-	}
-	lines := strings.Split(string(payload), "\n")
 	var meta map[string]any
-	var document map[string]any
-	for _, line := range lines {
+	var snapshotMessages []any
+	view := ExternalSessionView{Workspace: workspace, Provider: "gemini", Native: true}
+	foundIncrementalUser := false
+	err := visitJSONLLines(path, func(line []byte) bool {
+		if foundIncrementalUser && bytes.Contains(line, []byte(`"$set"`)) {
+			return false
+		}
 		var value map[string]any
-		if json.Unmarshal([]byte(line), &value) != nil {
-			continue
+		if json.Unmarshal(line, &value) != nil {
+			return false
 		}
 		if meta == nil && value["sessionId"] != nil {
 			meta = value
 		}
-		if document == nil && value["$set"] != nil {
-			document = value
+		if snapshot, ok := value["$set"].(map[string]any); ok {
+			if messages, exists := snapshot["messages"].([]any); exists {
+				snapshotMessages = messages
+			}
+			return false
 		}
+		kind := strings.ToLower(strings.TrimSpace(stringFromAny(value["type"])))
+		if kind == "assistant" {
+			kind = "gemini"
+		}
+		if kind != "user" && kind != "gemini" {
+			return false
+		}
+		text := geminiMessageText(value["content"])
+		if text == "" || isGeminiContextMessage(text) {
+			return false
+		}
+		if view.Model == "" {
+			view.Model = firstMapString(value, "model", "modelVersion")
+		}
+		if kind == "user" {
+			foundIncrementalUser = true
+			snapshotMessages = nil
+			if view.Title == "" {
+				view.Title = truncateRunes(text, 80)
+			}
+		}
+		if view.Preview == "" {
+			view.Preview = truncateRunes(text, 160)
+		}
+		return false
+	})
+	if err != nil {
+		return ExternalSessionView{}, false
 	}
 	if meta == nil {
 		return ExternalSessionView{}, false
@@ -2078,34 +2174,25 @@ func parseGeminiSessionFile(path, workspace string) (ExternalSessionView, bool) 
 	if id == "" {
 		return ExternalSessionView{}, false
 	}
-	view := ExternalSessionView{ID: id, Workspace: workspace, Provider: "gemini", Native: true}
+	view.ID = id
 	view.CreatedAt = parseTimeSeconds(stringFromAny(meta["startTime"]))
 	view.UpdatedAt = parseTimeSeconds(stringFromAny(meta["lastUpdated"]))
-	if document != nil {
-		if root, ok := document["$set"].(map[string]any); ok {
-			if messages, ok := root["messages"].([]any); ok {
-				for _, raw := range messages {
-					msg, _ := raw.(map[string]any)
-					role := stringFromAny(msg["type"])
-					text := firstMessageText(msg["content"])
-					if text == "" {
-						continue
-					}
-					if view.Model == "" {
-						view.Model = firstMapString(msg, "model", "modelVersion")
-					}
-					// Gemini writes a synthetic context message before the user's
-					// first prompt. It is useful to the CLI, but not a history title.
-					if isGeminiContextMessage(text) {
-						continue
-					}
-					if role == "user" && view.Title == "" {
-						view.Title = truncateRunes(text, 80)
-					}
-					if view.Preview == "" {
-						view.Preview = truncateRunes(text, 160)
-					}
-				}
+	if !foundIncrementalUser {
+		for _, raw := range snapshotMessages {
+			msg, _ := raw.(map[string]any)
+			role := strings.ToLower(strings.TrimSpace(stringFromAny(msg["type"])))
+			text := geminiMessageText(msg["content"])
+			if text == "" || isGeminiContextMessage(text) {
+				continue
+			}
+			if view.Model == "" {
+				view.Model = firstMapString(msg, "model", "modelVersion")
+			}
+			if role == "user" && view.Title == "" {
+				view.Title = truncateRunes(text, 80)
+			}
+			if view.Preview == "" {
+				view.Preview = truncateRunes(text, 160)
 			}
 		}
 	}

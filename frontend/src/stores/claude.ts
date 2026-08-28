@@ -1335,22 +1335,27 @@ export const useClaudeStore = defineStore('claude', () => {
         || !sameWorkspacePath(requestedWorkspace, workspacePath.value)
         || requestedSearch !== search.value
       ) return
-      const pending = sessions.value.filter((item) =>
-        item.id.startsWith('pending-claude-')
-        && (
-          sameClaudeSession(activeSessionId.value, item.id)
-          || isSessionBusy(item.id)
-          || (queueBySession.value[item.id] || []).length > 0
-          || Object.prototype.hasOwnProperty.call(itemsBySession.value, item.id)
-        ),
-      )
-      const pendingIds = new Set(pending.map((item) => item.id))
-      for (const item of list || []) {
+      const incoming = list || []
+      // Claude announces a real session id before the native project index is
+      // guaranteed to contain it. Preserve any live/queued promoted summary so
+      // a refresh from another conversation cannot make the running task vanish
+      // from the sidebar during that short persistence window.
+      const retained = sessions.value.filter((item) => {
+        if (incoming.some((candidate) => sameClaudeSession(candidate.id, item.id))) return false
+        if (isSessionBusy(item.id) || (queueBySession.value[item.id] || []).length > 0) return true
+        return item.id.startsWith('pending-claude-')
+          && (
+            sameClaudeSession(activeSessionId.value, item.id)
+            || Object.prototype.hasOwnProperty.call(itemsBySession.value, item.id)
+          )
+      })
+      const retainedIds = new Set(retained.map((item) => resolveSessionId(item.id) || item.id))
+      for (const item of incoming) {
         if (item.activeTurnId) reconcileSnapshotTurn(item.id, item.activeTurnId)
       }
       sessions.value = [
-        ...pending,
-        ...(list || []).filter((item) => !pendingIds.has(item.id)),
+        ...retained,
+        ...incoming.filter((item) => !retainedIds.has(resolveSessionId(item.id) || item.id)),
       ]
     } catch (error) {
       if (
