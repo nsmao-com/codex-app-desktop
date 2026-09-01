@@ -548,6 +548,10 @@ export function RefreshMCPServers(): $CancellablePromise<void> {
     return $Call.ByID(2777201397);
 }
 
+export function RefreshTerminalProfiles(): $CancellablePromise<$models.TerminalProfile[] | null> {
+    return $Call.ByID(3551080407);
+}
+
 export function RefreshWorkspace(): $CancellablePromise<$models.WorkspaceInfo> {
     return $Call.ByID(2632368162);
 }
@@ -742,7 +746,7 @@ export function SetPreventSleepActive(active: boolean): $CancellablePromise<void
     return $Call.ByID(3145083505, active);
 }
 
-export function SetSkillEnabled(request: $models.SkillConfigRequest): $CancellablePromise<void> {
+export function SetSkillEnabled(request: $models.SkillConfigRequest): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(1157345440, request);
 }
 

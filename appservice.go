@@ -2537,24 +2537,19 @@ func (s *AppService) ListSkills() (map[string]any, error) {
 	return s.call("skills/list", map[string]any{"cwds": []string{workspace}, "forceReload": true})
 }
 
-func (s *AppService) SetSkillEnabled(request SkillConfigRequest) error {
+func (s *AppService) SetSkillEnabled(request SkillConfigRequest) (map[string]any, error) {
 	name := strings.TrimSpace(request.Name)
 	path := strings.TrimSpace(request.Path)
 	if name == "" && path == "" {
-		return errors.New("skill name or path is required")
+		return nil, errors.New("skill name or path is required")
 	}
-	// Official examples use { path|name, enabled }. Some docs also mention absolutePath/config.
 	params := map[string]any{"enabled": request.Enabled}
-	if name != "" {
-		params["name"] = name
-	}
 	if path != "" {
 		params["path"] = path
-		params["absolutePath"] = path
+	} else {
+		params["name"] = name
 	}
-	params["config"] = map[string]any{"enabled": request.Enabled}
-	_, err := s.call("skills/config/write", params)
-	return err
+	return s.call("skills/config/write", params)
 }
 
 func (s *AppService) ListApps() (map[string]any, error) {
@@ -2562,19 +2557,10 @@ func (s *AppService) ListApps() (map[string]any, error) {
 }
 
 func (s *AppService) ListMCPServers() (map[string]any, error) {
-	workspace, err := validateWorkspace(s.Settings().Workspace)
+	servers, err := s.readMCPServerConfigs()
 	if err != nil {
 		return nil, err
 	}
-	response, err := s.call("config/read", map[string]any{
-		"cwd":           workspace,
-		"includeLayers": false,
-	})
-	if err != nil {
-		return nil, err
-	}
-	config, _ := response["config"].(map[string]any)
-	servers, _ := config["mcp_servers"].(map[string]any)
 	names := make([]string, 0, len(servers))
 	for name := range servers {
 		names = append(names, name)
@@ -2619,6 +2605,26 @@ func (s *AppService) ListMCPServers() (map[string]any, error) {
 	return map[string]any{"data": data}, nil
 }
 
+func (s *AppService) readMCPServerConfigs() (map[string]any, error) {
+	workspace, err := validateWorkspace(s.Settings().Workspace)
+	if err != nil {
+		return nil, err
+	}
+	response, err := s.call("config/read", map[string]any{
+		"cwd":           workspace,
+		"includeLayers": false,
+	})
+	if err != nil {
+		return nil, err
+	}
+	config, _ := response["config"].(map[string]any)
+	servers, _ := config["mcp_servers"].(map[string]any)
+	if servers == nil {
+		servers = map[string]any{}
+	}
+	return servers, nil
+}
+
 type MCPServerWriteRequest struct {
 	Name      string            `json:"name"`
 	Enabled   bool              `json:"enabled"`
@@ -2638,9 +2644,20 @@ func (s *AppService) UpsertMCPServer(request MCPServerWriteRequest) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.call("config/value/write", map[string]any{
-		"key":   "mcp_servers." + name,
-		"value": value,
+	servers, err := s.readMCPServerConfigs()
+	if err != nil {
+		return err
+	}
+	existing, _ := servers[name].(map[string]any)
+	_, err = s.call("config/batchWrite", map[string]any{
+		"edits": []any{
+			map[string]any{
+				"keyPath":       mcpServerConfigKeyPath(name),
+				"value":         mcpServerConfigReplacement(existing, value),
+				"mergeStrategy": "replace",
+			},
+		},
+		"reloadUserConfig": true,
 	})
 	if err != nil {
 		return err
@@ -2656,7 +2673,11 @@ func (s *AppService) ImportMCPServers(request MCPServersImportRequest) error {
 	if len(request.Servers) > 100 {
 		return errors.New("import up to 100 MCP servers at a time")
 	}
-	values := make(map[string]any, len(request.Servers))
+	servers, err := s.readMCPServerConfigs()
+	if err != nil {
+		return err
+	}
+	edits := make([]any, 0, len(request.Servers))
 	seenNames := make(map[string]struct{}, len(request.Servers))
 	for _, server := range request.Servers {
 		name, value, err := mcpServerConfigValue(server)
@@ -2668,16 +2689,15 @@ func (s *AppService) ImportMCPServers(request MCPServersImportRequest) error {
 			return fmt.Errorf("duplicate MCP server name: %s", name)
 		}
 		seenNames[nameKey] = struct{}{}
-		values[name] = value
+		existing, _ := servers[name].(map[string]any)
+		edits = append(edits, map[string]any{
+			"keyPath":       mcpServerConfigKeyPath(name),
+			"value":         mcpServerConfigReplacement(existing, value),
+			"mergeStrategy": "replace",
+		})
 	}
-	_, err := s.call("config/batchWrite", map[string]any{
-		"edits": []any{
-			map[string]any{
-				"keyPath":       "mcp_servers",
-				"value":         values,
-				"mergeStrategy": "upsert",
-			},
-		},
+	_, err = s.call("config/batchWrite", map[string]any{
+		"edits":            edits,
 		"reloadUserConfig": true,
 	})
 	if err != nil {
@@ -2752,14 +2772,40 @@ func mcpServerConfigValue(request MCPServerWriteRequest) (string, map[string]any
 	return name, value, nil
 }
 
+func mcpServerConfigKeyPath(name string) string {
+	return "mcp_servers." + strconv.Quote(name)
+}
+
+func mcpServerConfigReplacement(existing, value map[string]any) map[string]any {
+	replacement := make(map[string]any, len(existing)+len(value))
+	for key, current := range existing {
+		replacement[key] = current
+	}
+	// Preserve Codex's advanced options but remove fields owned by this editor
+	// before switching between STDIO and HTTP configurations.
+	for _, key := range []string{"command", "args", "url", "type", "transport", "env", "enabled"} {
+		delete(replacement, key)
+	}
+	for key, current := range value {
+		replacement[key] = current
+	}
+	return replacement
+}
+
 func (s *AppService) DeleteMCPServer(name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 120 {
 		return errors.New("a valid MCP server name is required")
 	}
-	_, err := s.call("config/value/write", map[string]any{
-		"key":   "mcp_servers." + name,
-		"value": nil,
+	_, err := s.call("config/batchWrite", map[string]any{
+		"edits": []any{
+			map[string]any{
+				"keyPath":       mcpServerConfigKeyPath(name),
+				"value":         nil,
+				"mergeStrategy": "replace",
+			},
+		},
+		"reloadUserConfig": true,
 	})
 	if err != nil {
 		return err

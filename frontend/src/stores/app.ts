@@ -261,9 +261,14 @@ export const useAppStore = defineStore('app', () => {
       codexAvailable.value = data.codex.available
       codexVersion.value = data.codex.version
       agentProviders.value = data.agentProviders ?? []
+      terminalProfiles.value = data.terminalProfiles ?? terminalProfiles.value
     } catch {
       // best-effort
     }
+  }
+
+  async function refreshTerminalProfiles(): Promise<void> {
+    terminalProfiles.value = await backend.RefreshTerminalProfiles() ?? []
   }
 
   function applyBootstrap(data: BootstrapData): void {
@@ -918,6 +923,7 @@ export const useAppStore = defineStore('app', () => {
     setWorkspaceOrder,
     bootstrap,
     refreshRuntimes,
+    refreshTerminalProfiles,
     setActiveRuntime,
     ensureActiveRuntimeSynced,
     savePreferences,

@@ -17,6 +17,7 @@ type TerminalProfile struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Available   bool   `json:"available"`
+	Status      string `json:"status,omitempty"`
 }
 
 type terminalSession struct {
@@ -39,6 +40,11 @@ func (session *terminalSession) closePty() {
 
 func listTerminalProfiles() []TerminalProfile {
 	return platformTerminalProfiles()
+}
+
+func (s *AppService) RefreshTerminalProfiles() []TerminalProfile {
+	invalidateTerminalProfileCache()
+	return listTerminalProfiles()
 }
 
 func (s *AppService) OpenTerminal() error {

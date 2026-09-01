@@ -79,6 +79,8 @@ const zhRoutingSettings = {
 
 const enRoutingSettings = {
   navMcp: 'MCP servers',
+  terminalWSLRuntimeUnavailable: 'WSL is installed, but its default Linux distribution cannot start. Run wsl in Windows Terminal to inspect or repair the distribution, then check again.',
+  terminalRuntimeUnavailable: 'Distribution unavailable',
   navRouting: 'Routing & providers',
   routingTitle: 'Local provider router',
   routingHint: 'Listens only on 127.0.0.1 and forwards OpenAI Responses requests in provider order. Repeated failures open the circuit and fail over automatically. Responses are streamed without caching or background polling.',
@@ -929,7 +931,9 @@ const messages = {
       terminalPowerShellHint: '优先使用 PowerShell 7，未安装时自动使用 Windows PowerShell。',
       terminalGitBashHint: '使用 Git for Windows 自带的 Bash 环境。',
       terminalWSLHint: '使用默认 WSL Linux 发行版，并进入当前工作区。',
-      terminalUnavailable: '当前选择在这台电脑上不可用，请安装后重新打开应用。',
+      terminalWSLRuntimeUnavailable: '检测到 WSL，但默认 Linux 发行版无法启动。请在 Windows 终端运行 wsl 检查或修复发行版后重新检测。',
+      terminalRuntimeUnavailable: '发行版不可用',
+      terminalUnavailable: '当前选择在这台电脑上不可用，请安装或修复后重新检测。',
       save: '保存设置',
     },
     timeline: {

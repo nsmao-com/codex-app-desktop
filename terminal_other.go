@@ -31,6 +31,8 @@ func platformTerminalProfiles() []TerminalProfile {
 	return profiles
 }
 
+func invalidateTerminalProfileCache() {}
+
 func launchTerminal(profile string, workspace string) error {
 	switch profile {
 	case "terminal":

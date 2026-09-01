@@ -868,6 +868,7 @@ export interface TerminalProfile {
     "name": string;
     "description": string;
     "available": boolean;
+    "status"?: string;
 }
 
 /**

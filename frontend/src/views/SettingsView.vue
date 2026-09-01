@@ -22,6 +22,7 @@ import {
   Search,
   Settings2,
   Smile,
+  Sparkles,
   Keyboard,
   LoaderCircle,
   Trash2,
@@ -94,6 +95,7 @@ type SettingsPanel =
   | 'account'
   | 'archived'
   | 'plugins'
+  | 'skills'
   | 'browser'
   | 'hooks'
   | 'environment'
@@ -186,6 +188,7 @@ const reduceMotion = shallowRef(Boolean(appStore.settings.reduceMotion))
 const uiFontSize = shallowRef(appStore.settings.uiFontSize === 'sm' || appStore.settings.uiFontSize === 'lg' ? appStore.settings.uiFontSize : 'md')
 const codeFontSize = shallowRef(appStore.settings.codeFontSize === 'sm' || appStore.settings.codeFontSize === 'lg' ? appStore.settings.codeFontSize : 'md')
 const terminalProfile = shallowRef(appStore.settings.terminalProfile)
+const terminalProfilesRefreshing = shallowRef(false)
 const language = shallowRef(appStore.settings.language)
 const autoConnect = shallowRef(appStore.settings.autoConnect)
 const sendWithModifier = shallowRef(Boolean(appStore.settings.sendWithModifier))
@@ -760,14 +763,23 @@ const terminalOptions = computed<SelectOption[]>(() => appStore.terminalProfiles
   value: option.id,
   label: option.name,
   description: terminalProfileDescription(option.id, option.description),
-  badge: option.available ? '' : t('common.unavailable'),
+  badge: option.available
+    ? ''
+    : option.id === 'wsl' && option.status === 'runtime-unavailable'
+      ? t('settings.terminalRuntimeUnavailable')
+      : t('common.unavailable'),
   disabled: !option.available,
 })))
 
 const selectedTerminal = computed(() => appStore.terminalProfiles.find((option) => option.id === terminalProfile.value))
-const selectedTerminalHint = computed(() => selectedTerminal.value?.available
-  ? terminalProfileDescription(selectedTerminal.value.id, selectedTerminal.value.description)
-  : t('settings.terminalUnavailable'))
+const selectedTerminalHint = computed(() => {
+  const selected = selectedTerminal.value
+  if (selected?.available) return terminalProfileDescription(selected.id, selected.description)
+  if (selected?.id === 'wsl' && selected.status === 'runtime-unavailable') {
+    return t('settings.terminalWSLRuntimeUnavailable')
+  }
+  return t('settings.terminalUnavailable')
+})
 
 const accentLabelKey: Record<AppAccent, string> = {
   codex: 'settings.accentCodex',
@@ -809,7 +821,8 @@ const navGroups = computed<NavGroup[]>(() => [
     id: 'integration',
     label: t('settings.navIntegration'),
     items: [
-      { id: 'plugins', label: t('settings.navPlugins'), icon: Blocks, keywords: 'plugins mcp skills 插件', action: 'capabilities', capabilityTab: 'plugins' },
+      { id: 'plugins', label: t('settings.navPlugins'), icon: Blocks, keywords: 'plugins 插件', action: 'capabilities', capabilityTab: 'plugins' },
+      { id: 'skills', label: t('capabilities.skills'), icon: Sparkles, keywords: 'skills skill 技能', action: 'capabilities', capabilityTab: 'skills' },
       { id: 'mcp', label: t('settings.navMcp'), icon: PlugZap, keywords: 'mcp import json server tool 导入 服务', action: 'capabilities', capabilityTab: 'mcp' },
       { id: 'routing', label: t('settings.navRouting'), icon: Route, keywords: 'provider route failover circuit breaker proxy 服务商 路由 熔断 故障切换 代理' },
       { id: 'browser', label: t('settings.navBrowser'), icon: Compass, keywords: 'browser cdp allowlist 浏览器' },
@@ -830,6 +843,7 @@ const navGroups = computed<NavGroup[]>(() => [
 /** Codex-only product surfaces — hide when editing other runtimes. */
 const codexOnlyPanels = new Set<SettingsPanel>([
   'plugins',
+  'skills',
   'mcp',
   'routing',
   'hooks',
@@ -1644,6 +1658,18 @@ function terminalProfileDescription(id: string, fallback: string): string {
   return keys[id] ? t(keys[id]) : fallback
 }
 
+async function recheckTerminalProfiles(): Promise<void> {
+  if (terminalProfilesRefreshing.value) return
+  terminalProfilesRefreshing.value = true
+  try {
+    await appStore.refreshTerminalProfiles()
+  } catch (error) {
+    notify('error', t('settings.terminalProfile'), error instanceof Error ? error.message : String(error))
+  } finally {
+    terminalProfilesRefreshing.value = false
+  }
+}
+
 function selectedOptionLabel(options: SelectOption[], value: string): string {
   return options.find((option) => option.value === value)?.label ?? value
 }
@@ -2137,16 +2163,31 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                       <p class="text-[13px]">{{ t('settings.terminalProfile') }}</p>
                       <p class="text-[11px] text-muted-foreground">{{ selectedTerminalHint }}</p>
                     </div>
-                    <Select v-model="terminalProfile">
-                      <SelectTrigger class="h-8 w-[180px] text-xs" :aria-label="t('settings.terminalProfile')">
-                        <SelectValue>{{ selectedOptionLabel(terminalOptions, terminalProfile) }}</SelectValue>
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem v-for="option in terminalOptions" :key="option.value" :value="option.value" :disabled="option.disabled">
-                          {{ option.label }}
-                        </SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <div class="flex shrink-0 items-center gap-1.5">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        :aria-label="t('common.refresh')"
+                        :disabled="terminalProfilesRefreshing"
+                        @click="recheckTerminalProfiles"
+                      >
+                        <RefreshCw :size="12" :class="terminalProfilesRefreshing ? 'animate-spin' : ''" />
+                      </Button>
+                      <Select v-model="terminalProfile">
+                        <SelectTrigger class="h-8 w-[180px] text-xs" :aria-label="t('settings.terminalProfile')">
+                          <SelectValue>{{ selectedOptionLabel(terminalOptions, terminalProfile) }}</SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="option in terminalOptions" :key="option.value" :value="option.value" :disabled="option.disabled">
+                            <span class="flex min-w-0 items-center gap-2">
+                              <span class="truncate">{{ option.label }}</span>
+                              <span v-if="option.badge" class="text-[10px] text-muted-foreground">{{ option.badge }}</span>
+                            </span>
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">

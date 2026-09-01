@@ -98,6 +98,12 @@ const dialogStore = useDialogStore()
 // claudeStore used for Claude Code runtime composer path
 const router = useRouter()
 const { t } = useI18n()
+const wslTerminalProfile = computed(() => appStore.terminalProfiles.find((profile) => profile.id === 'wsl'))
+const wslStatusLabel = computed(() => {
+  if (wslTerminalProfile.value?.available) return t('settings.terminalProfile')
+  if (wslTerminalProfile.value?.status === 'runtime-unavailable') return t('settings.terminalRuntimeUnavailable')
+  return t('common.unavailable')
+})
 
 const props = defineProps<{
   draftKey: string
@@ -2403,7 +2409,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             <DropdownMenuItem class="gap-2.5 rounded-lg px-2.5 py-2" disabled>
               <Command :size="14" class="shrink-0 text-muted-foreground" />
               <span class="min-w-0 flex-1 truncate text-xs">WSL</span>
-              <span class="text-[10px] text-muted-foreground">{{ t('chat.executionUnavailable') }}</span>
+              <span class="text-[10px] text-muted-foreground">{{ wslStatusLabel }}</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

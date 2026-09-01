@@ -3,20 +3,29 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
+	"time"
 )
 
 const createNewConsole = 0x00000010
+
+var wslTerminalProfileCache struct {
+	sync.Mutex
+	profile TerminalProfile
+	checked time.Time
+}
 
 func platformTerminalProfiles() []TerminalProfile {
 	return []TerminalProfile{
 		{ID: "powershell", Name: "PowerShell", Description: "PowerShell 7, with Windows PowerShell as fallback.", Available: findPowerShell() != ""},
 		{ID: "git-bash", Name: "Git Bash", Description: "Git for Windows Bash terminal.", Available: findGitBash() != ""},
-		{ID: "wsl", Name: "WSL", Description: "Default Windows Subsystem for Linux distribution.", Available: findExecutable("wsl.exe") != ""},
+		detectWSLTerminalProfile(),
 	}
 }
 
@@ -36,9 +45,12 @@ func launchTerminal(profile string, workspace string) error {
 		}
 		command = exec.Command(binary)
 	case "wsl":
-		binary := findExecutable("wsl.exe")
+		binary := findWSLExecutable()
 		if binary == "" {
 			return errors.New("WSL is not installed")
+		}
+		if !detectWSLTerminalProfile().Available {
+			return errors.New("the default WSL distribution is not available")
 		}
 		command = exec.Command(binary, "--cd", workspace)
 	default:
@@ -70,9 +82,12 @@ func terminalCommand(profile string, workspace string) ([]string, error) {
 		}
 		return []string{bash, "--login", "-i"}, nil
 	case "wsl":
-		binary := findExecutable("wsl.exe")
+		binary := findWSLExecutable()
 		if binary == "" {
 			return nil, errors.New("WSL is not installed")
+		}
+		if !detectWSLTerminalProfile().Available {
+			return nil, errors.New("the default WSL distribution is not available")
 		}
 		return []string{binary, "--cd", workspace}, nil
 	default:
@@ -102,6 +117,64 @@ func findGitBash() string {
 		}
 	}
 	return ""
+}
+
+func detectWSLTerminalProfile() TerminalProfile {
+	wslTerminalProfileCache.Lock()
+	defer wslTerminalProfileCache.Unlock()
+	if !wslTerminalProfileCache.checked.IsZero() && time.Since(wslTerminalProfileCache.checked) < 5*time.Minute {
+		return wslTerminalProfileCache.profile
+	}
+
+	profile := TerminalProfile{
+		ID:          "wsl",
+		Name:        "WSL",
+		Description: "Default Windows Subsystem for Linux distribution.",
+		Status:      "not-installed",
+	}
+	binary := findWSLExecutable()
+	if binary != "" {
+		profile.Status = "runtime-unavailable"
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		command := exec.CommandContext(ctx, binary, "--exec", "/bin/sh", "-lc", "exit 0")
+		configureBackgroundProcess(command)
+		err := command.Run()
+		ctxErr := ctx.Err()
+		cancel()
+		if err == nil && ctxErr == nil {
+			profile.Available = true
+			profile.Status = "ready"
+		}
+	}
+	wslTerminalProfileCache.profile = profile
+	wslTerminalProfileCache.checked = time.Now()
+	return profile
+}
+
+func invalidateTerminalProfileCache() {
+	wslTerminalProfileCache.Lock()
+	wslTerminalProfileCache.profile = TerminalProfile{}
+	wslTerminalProfileCache.checked = time.Time{}
+	wslTerminalProfileCache.Unlock()
+}
+
+func findWSLExecutable() string {
+	if path := findExecutable("wsl.exe"); path != "" {
+		return path
+	}
+	windowsRoot := os.Getenv("SystemRoot")
+	if windowsRoot == "" {
+		windowsRoot = os.Getenv("windir")
+	}
+	for _, relative := range []string{
+		filepath.Join("System32", "wsl.exe"),
+		filepath.Join("Sysnative", "wsl.exe"),
+	} {
+		if path := existingFile(filepath.Join(windowsRoot, relative)); path != "" {
+			return path
+		}
+	}
+	return existingFile(filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "WindowsApps", "wsl.exe"))
 }
 
 func findExecutable(name string) string {

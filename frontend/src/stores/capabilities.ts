@@ -15,7 +15,7 @@ import {
   normalizeSkills,
 } from '../utils/capabilities'
 import { parseMCPImportJSON, type ImportedMCPServer } from '../utils/mcpImport'
-import { asRecord, asString } from '../utils/protocol'
+import { asArray, asRecord, asString } from '../utils/protocol'
 import { useAppStore } from './app'
 
 function emptyCapabilities(): CapabilityCatalog {
@@ -88,10 +88,13 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
     normalize: (value: unknown) => CapabilityCatalog[K],
   ): Promise<void> {
     try {
-      const items = normalize(await loader())
+      const response = await loader()
+      const items = normalize(response)
       capabilities.value = { ...capabilities.value, [key]: items }
       capabilityLoaded.value = { ...capabilityLoaded.value, [errorKey]: true }
-      clearCapabilityError(errorKey)
+      const responseError = errorKey === 'skills' ? skillResponseError(response) : ''
+      if (responseError) setCapabilityError(errorKey, responseError)
+      else clearCapabilityError(errorKey)
     } catch (error) {
       capabilityLoaded.value = { ...capabilityLoaded.value, [errorKey]: false }
       setCapabilityError(errorKey, errorMessage(error))
@@ -177,10 +180,15 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
     if (capabilityMutation.value) return
     capabilityMutation.value = `skill:${path}`
     try {
-      await backend.SetSkillEnabled({ name, path, enabled })
+      const response = asRecord(await backend.SetSkillEnabled({ name, path, enabled }))
+      const effectiveEnabled = typeof response.effectiveEnabled === 'boolean'
+        ? response.effectiveEnabled
+        : enabled
       capabilities.value = {
         ...capabilities.value,
-        skills: capabilities.value.skills.map((skill) => skill.path === path ? { ...skill, enabled } : skill),
+        skills: capabilities.value.skills.map((skill) => skill.path === path
+          ? { ...skill, enabled: effectiveEnabled }
+          : skill),
       }
     } catch (error) {
       notify('error', translate('capabilities.skillUpdateFailed'), errorMessage(error))
@@ -418,6 +426,14 @@ function mergeMCPServers(configured: MCPServerView[], status: MCPServerView[]): 
 
 function errorMessage(error: unknown): string {
   return friendlyErrorMessage(error)
+}
+
+function skillResponseError(value: unknown): string {
+  const messages = asArray(asRecord(value).data)
+    .flatMap((entry) => asArray(asRecord(entry).errors))
+    .map((error) => asString(asRecord(error).message).trim())
+    .filter(Boolean)
+  return [...new Set(messages)].slice(0, 8).join(' · ')
 }
 
 async function mapWithConcurrency<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
