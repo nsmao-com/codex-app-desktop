@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // ClientInfo is sent in app-server initialize and becomes the upstream
@@ -40,12 +41,26 @@ type Client struct {
 	// processCleanup tears down the OS process tree (Windows Job Object / process group).
 	processCleanup func()
 	transportErr   error
+	// streamStates accumulates Codex delta notifications into cumulative
+	// snapshots. Wails dispatches each emitted event from its own goroutine,
+	// so individual deltas can reach the WebView out of order. A per-stream
+	// sequence and snapshot lets the frontend accept the newest complete value
+	// without relying on bridge delivery order.
+	streamStates map[string]streamState
 }
+
+type streamState struct {
+	sequence uint64
+	text     string
+}
+
+const maxStreamSnapshotBytes = 1_000_000
 
 func NewClient(onEvent func(Event)) *Client {
 	return &Client{
 		pending:        make(map[int64]chan rpcResult),
 		inboundRequest: make(map[string]json.RawMessage),
+		streamStates:   make(map[string]streamState),
 		onEvent:        onEvent,
 		status:         Status{State: "disconnected"},
 	}
@@ -133,6 +148,7 @@ func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) e
 	c.done = done
 	c.processCleanup = cleanup
 	c.transportErr = nil
+	c.streamStates = make(map[string]streamState)
 	c.status = Status{
 		State:     "initializing",
 		Running:   true,
@@ -432,7 +448,139 @@ func (c *Client) handleMessage(message wireMessage) {
 		c.emit(Event{Type: "request", Method: message.Method, RequestKey: requestKey, Data: data})
 		return
 	}
+	data = c.decorateStreamNotification(message.Method, data)
+	c.cleanupStreamNotification(message.Method, data)
 	c.emit(Event{Type: "notification", Method: message.Method, Data: data})
+}
+
+// decorateStreamNotification adds a cumulative snapshot to true delta events.
+// The Wails event processor fans each event out through a separate goroutine;
+// sequence numbers therefore need to travel with the payload rather than rely
+// on arrival order in the WebView.
+func (c *Client) decorateStreamNotification(method string, value any) any {
+	field := streamFieldForMethod(method)
+	if field == "" {
+		return value
+	}
+	payload, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	threadID := stringValue(payload["threadId"])
+	itemID := stringValue(payload["itemId"])
+	turnID := stringValue(payload["turnId"])
+	delta := stringValue(payload["delta"])
+	if threadID == "" || itemID == "" || delta == "" {
+		return value
+	}
+	key := threadID + "\x00" + turnID + "\x00" + itemID + "\x00" + field
+	c.mu.Lock()
+	state := c.streamStates[key]
+	state.sequence++
+	if len(state.text) < maxStreamSnapshotBytes {
+		remaining := maxStreamSnapshotBytes - len(state.text)
+		if len(delta) > remaining {
+			delta = utf8Prefix(delta, remaining)
+		}
+		state.text += delta
+	}
+	sequence := state.sequence
+	snapshot := state.text
+	c.streamStates[key] = state
+	c.mu.Unlock()
+
+	// decodeJSON returns a fresh map for each notification, so adding metadata
+	// in place cannot mutate a caller-owned payload.
+	payload["streamSequence"] = sequence
+	payload["streamText"] = snapshot
+	payload["streamMode"] = "replace"
+	return payload
+}
+
+func utf8Prefix(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	end := maxBytes
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end]
+}
+
+func (c *Client) cleanupStreamNotification(method string, value any) {
+	scope := ""
+	switch method {
+	case "item/completed":
+		scope = "item"
+	case "turn/completed", "turn/failed", "turn/aborted", "turn/cancelled", "turn/interrupted":
+		scope = "turn"
+	case "thread/archived", "thread/deleted", "thread/closed":
+		scope = "thread"
+	default:
+		return
+	}
+	payload, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	threadID := stringValue(payload["threadId"])
+	turnID := stringValue(payload["turnId"])
+	itemID := stringValue(payload["itemId"])
+	if turn, ok := payload["turn"].(map[string]any); ok && turnID == "" {
+		turnID = stringValue(turn["id"])
+	}
+	if item, ok := payload["item"].(map[string]any); ok && itemID == "" {
+		itemID = stringValue(item["id"])
+	}
+	if threadID == "" {
+		return
+	}
+	if scope == "item" && itemID == "" {
+		return
+	}
+	c.mu.Lock()
+	for key := range c.streamStates {
+		parts := strings.SplitN(key, "\x00", 4)
+		if len(parts) != 4 || parts[0] != threadID {
+			continue
+		}
+		turnMatches := turnID == "" || parts[1] == turnID
+		itemMatches := itemID == "" || parts[2] == itemID
+		if scope == "thread" || (scope == "turn" && turnMatches) || (scope == "item" && turnMatches && itemMatches) {
+			delete(c.streamStates, key)
+		}
+	}
+	c.mu.Unlock()
+}
+
+func streamFieldForMethod(method string) string {
+	switch method {
+	case "item/agentMessage/delta", "item/plan/delta":
+		return "text"
+	case "item/commandExecution/outputDelta", "item/fileChange/outputDelta":
+		return "output"
+	case "item/reasoning/summaryTextDelta", "item/reasoning/delta":
+		return "reasoningSummary"
+	case "item/reasoning/textDelta":
+		return "reasoningContent"
+	default:
+		return ""
+	}
+}
+
+func stringValue(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case json.Number:
+		return typed.String()
+	default:
+		return ""
+	}
 }
 
 func isSupportedServerRequest(method string) bool {

@@ -235,6 +235,108 @@ function runUsageCommand(range?: UsageCommandRange): void {
   window.dispatchEvent(new CustomEvent('nice-codex:open-usage', { detail: { range } }))
 }
 
+async function runGoalCommand(argument = ''): Promise<void> {
+  const sessionId = composerSessionId.value
+  if (!sessionId) {
+    notify('warning', t('slash.goalNeedThread'), t('slash.goalNeedThreadHint'))
+    return
+  }
+
+  const raw = argument.trim()
+  const lower = raw.toLocaleLowerCase()
+  const thread = composerCodexThread.value
+  const currentGoal = thread?.goal?.trim() || ''
+
+  const showGoal = () => {
+    if (currentGoal) {
+      const status = thread?.goalStatus || 'active'
+      const budget = thread?.goalTokenBudget
+      const used = thread?.goalTokensUsed || 0
+      const statusLabel = t(`slash.goalStatus_${status}`)
+      const budgetLabel = budget && budget > 0
+        ? t('slash.goalProgress', { used: used.toLocaleString(), budget: budget.toLocaleString() })
+        : t('slash.goalBudgetUnlimited')
+      notify('info', t('slash.goalCurrentTitle'), `${currentGoal}\n\n${statusLabel} · ${budgetLabel}`)
+      return true
+    }
+    notify('info', t('slash.goalCurrentTitle'), t('slash.goalEmpty'))
+    return false
+  }
+
+  const promptGoal = async (defaultValue = '') => {
+    const prompted = await dialogStore.prompt({
+      title: defaultValue ? t('slash.goalEditTitle') : t('slash.goalPromptTitle'),
+      description: t('slash.goalPromptHint'),
+      defaultValue,
+      placeholder: t('slash.goalPlaceholder'),
+      confirmLabel: t('common.save'),
+      maxlength: 4_000,
+    })
+    return prompted
+  }
+
+  if (!raw || ['show', 'status', 'view'].includes(lower)) {
+    if (currentGoal) {
+      showGoal()
+      return
+    }
+    const prompted = await promptGoal()
+    if (prompted !== null && prompted !== undefined) await codexStore.setThreadGoal(sessionId, prompted)
+    return
+  }
+  if (['clear', 'reset', 'off', 'none'].includes(lower)) {
+    await codexStore.setThreadGoal(sessionId, '')
+    return
+  }
+  if (lower === 'set' || lower === 'edit' || lower.startsWith('edit ')) {
+    const inline = lower.startsWith('edit ') ? raw.slice(5).trim() : ''
+    const prompted = inline || await promptGoal(lower === 'edit' ? currentGoal : '')
+    if (prompted === null || prompted === undefined) return
+    await codexStore.setThreadGoal(sessionId, prompted, { preserveStatus: lower.startsWith('edit') })
+    return
+  }
+  if (lower === 'pause' || lower === 'paused') {
+    await codexStore.setThreadGoalStatus(sessionId, 'paused')
+    return
+  }
+  if (lower === 'resume' || lower === 'start' || lower === 'active') {
+    await codexStore.setThreadGoalStatus(sessionId, 'active')
+    return
+  }
+  if (lower === 'complete' || lower === 'done') {
+    await codexStore.setThreadGoalStatus(sessionId, 'complete')
+    return
+  }
+  if (lower === 'budget' || lower.startsWith('budget ')) {
+    let budgetText = lower === 'budget' ? '' : raw.slice(7).trim()
+    if (!budgetText) {
+      const prompted = await dialogStore.prompt({
+        title: t('slash.goalBudgetTitle'),
+        description: t('slash.goalBudgetHint'),
+        defaultValue: thread?.goalTokenBudget ? String(thread.goalTokenBudget) : '',
+        placeholder: t('slash.goalBudgetPlaceholder'),
+        confirmLabel: t('common.save'),
+        maxlength: 12,
+      })
+      if (prompted === null || prompted === undefined) return
+      budgetText = prompted.trim()
+    }
+    if (['off', 'none', 'unlimited', 'clear', '0'].includes(budgetText.toLocaleLowerCase())) {
+      await codexStore.setThreadGoalBudget(sessionId, null)
+      return
+    }
+    const budget = Number(budgetText.replace(/[,_\s]/g, ''))
+    if (!Number.isInteger(budget) || budget <= 0 || budget > 1_000_000_000) {
+      notify('warning', t('slash.goalBudgetTitle'), t('slash.goalBudgetInvalid'))
+      return
+    }
+    await codexStore.setThreadGoalBudget(sessionId, budget)
+    return
+  }
+  const goal = lower.startsWith('set ') ? raw.slice(4).trim() : raw
+  await codexStore.setThreadGoal(sessionId, goal)
+}
+
 async function runAddCommand(): Promise<void> {
   // Native Codex calls this flow /mention. Nice Codex already has a validated
   // attachment picker, so /add and /mention share it and keep the files on the
@@ -355,6 +457,12 @@ const slashCommands = computed<SlashCommand[]>(() => {
         description: t('slash.mcp'),
         run: () => { void router.push({ name: 'capabilities', query: { tab: 'mcp' } }) },
       },
+      {
+        id: 'goal',
+        label: '/goal',
+        description: t('slash.goal'),
+        run: () => runGoalCommand(),
+      },
     ]
   }
   return [
@@ -417,6 +525,12 @@ const slashCommands = computed<SlashCommand[]>(() => {
     label: '/mcp',
     description: t('slash.mcp'),
     run: () => { void router.push({ name: 'capabilities', query: { tab: 'mcp' } }) },
+  },
+  {
+    id: 'goal',
+    label: '/goal',
+    description: t('slash.goal'),
+    run: () => runGoalCommand(),
   },
   {
     id: 'memories',
@@ -1353,6 +1467,10 @@ async function runSlashCommand(command?: SlashCommand): Promise<void> {
   if (!command) return
   const args = modelValue.value.trim().split(/\s+/).slice(1)
   modelValue.value = ''
+  if (command.id === 'goal') {
+    await runGoalCommand(args.join(' '))
+    return
+  }
   if (command.id === 'usage' && args.length) {
     const range = args[0].toLocaleLowerCase()
     if (args.length > 1 || !['daily', 'today', 'weekly', 'week', 'cumulative', 'lifetime', 'all'].includes(range)) {

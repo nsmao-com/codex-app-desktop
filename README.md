@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.0: native provider context controls, project-first tasks, resilient multi-provider conversations, and production-grade usage analytics.</sub></p>
+<p align="center"><sub>v1.5.1: ordered streaming, session goals, and cross-provider sub-agent activity visibility.</sub></p>
 
 ## Why Nice Codex
 

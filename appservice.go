@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -55,6 +56,7 @@ type AppService struct {
 	codexThreadStartMu     sync.Mutex
 	codexActiveTurns       map[string]string
 	codexPendingDispatches map[string]bool
+	codexGoalEventSequence uint64
 	// pendingCodexSessions maps a workspace to the NiceCodex session that is
 	// mid-first-allocation (thread/start sent, response or thread/started event
 	// not yet bound). A map keeps concurrent allocations in different workspaces
@@ -281,6 +283,12 @@ type SessionPreferencesRequest struct {
 	Model             string `json:"model"`
 	Effort            string `json:"effort"`
 	CollaborationMode string `json:"collaborationMode"`
+	// Goal is a pointer so ordinary model/mode updates preserve an existing
+	// session objective; an explicit empty value clears it.
+	Goal               *string `json:"goal,omitempty"`
+	GoalStatus         *string `json:"goalStatus,omitempty"`
+	GoalTokenBudget    *int64  `json:"goalTokenBudget,omitempty"`
+	GoalTokenBudgetSet bool    `json:"goalTokenBudgetSet,omitempty"`
 }
 
 type SteerTurnRequest struct {
@@ -350,6 +358,7 @@ func NewAppService(app *application.App, pluginAssets *pluginAssetServer) *AppSe
 	_ = service.scheduledTasks.load()
 	service.client = codex.NewClient(func(event codex.Event) {
 		service.remapCodexEvent(&event)
+		service.trackCodexGoal(event)
 		service.trackCodexActivity(event)
 		service.maybeRecordLocalUsage(event)
 		app.Event.Emit("codex:event", event)
@@ -921,11 +930,41 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 	if len(model) > 160 || len(effort) > 64 {
 		return errors.New("session preferences are too long")
 	}
+	goal := ""
+	if request.Goal != nil {
+		goal = normalizeSessionGoal(*request.Goal)
+		if utf8.RuneCountInString(goal) > 4_000 {
+			return errors.New("session goal is too long")
+		}
+	}
+	goalStatus := ""
+	if request.GoalStatus != nil {
+		goalStatus = normalizeSessionGoalStatus(*request.GoalStatus)
+		if goalStatus == "" {
+			return errors.New("invalid session goal status")
+		}
+	}
+	if request.GoalTokenBudgetSet && request.GoalTokenBudget != nil {
+		if *request.GoalTokenBudget <= 0 || *request.GoalTokenBudget > 1_000_000_000 {
+			return errors.New("session goal token budget is out of range")
+		}
+	}
+	goalChanged := request.Goal != nil || request.GoalStatus != nil || request.GoalTokenBudgetSet
+	now := time.Now().Unix()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	record := s.sessions[sessionID]
 	if record == nil || record.Archived {
+		s.mu.Unlock()
 		return errors.New("session not found")
+	}
+	previousGoalSession := cloneSession(record)
+	effectiveGoal := normalizeSessionGoal(record.Goal)
+	if request.Goal != nil {
+		effectiveGoal = goal
+	}
+	if effectiveGoal == "" && (request.GoalStatus != nil || request.GoalTokenBudgetSet) {
+		s.mu.Unlock()
+		return errors.New("set a session goal before changing its status or budget")
 	}
 	if model != "" {
 		record.Model = model
@@ -951,8 +990,63 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 			}
 		}
 	}
-	record.UpdatedAt = time.Now().Unix()
+	if request.Goal != nil {
+		previousGoal := normalizeSessionGoal(record.Goal)
+		if goal != previousGoal && goal != "" {
+			record.GoalSynced = false
+			record.GoalTokensUsed = 0
+			record.GoalTimeUsedSeconds = 0
+			record.GoalCreatedAt = now
+			if request.GoalStatus == nil {
+				record.GoalStatus = "active"
+			}
+		}
+		record.Goal = goal
+		if goal == "" {
+			// Keep GoalSynced until thread/goal/clear succeeds; it records that the
+			// native thread may still need its old objective removed.
+			record.GoalStatus = ""
+			record.GoalTokenBudget = nil
+			record.GoalTokensUsed = 0
+			record.GoalTimeUsedSeconds = 0
+			record.GoalCreatedAt = 0
+			record.GoalUpdatedAt = 0
+		}
+	}
+	if record.Goal != "" {
+		if request.GoalStatus != nil {
+			record.GoalStatus = goalStatus
+		}
+		if normalizeSessionGoalStatus(record.GoalStatus) == "" {
+			record.GoalStatus = "active"
+		}
+		if request.GoalTokenBudgetSet {
+			if request.GoalTokenBudget == nil {
+				record.GoalTokenBudget = nil
+			} else {
+				budget := *request.GoalTokenBudget
+				record.GoalTokenBudget = &budget
+			}
+		}
+		if goalChanged {
+			record.GoalUpdatedAt = now
+		}
+	}
+	record.UpdatedAt = now
 	s.persistSessionsLocked()
+	goalSession := cloneSession(record)
+	s.mu.Unlock()
+	if goalChanged && !isExternalSession(goalSession) && strings.TrimSpace(goalSession.BackendRef) != "" {
+		needsSync := goalSession.Goal != "" || goalSession.GoalSynced
+		if needsSync {
+			if nativeGoal, ok := s.syncNativeCodexGoal(goalSession, goalSession.BackendRef); ok {
+				s.applyNativeGoalForSession(goalSession.ID, nativeGoal)
+			} else if previousGoalSession.GoalSynced {
+				s.restoreSessionGoal(previousGoalSession)
+				return errors.New("Codex could not update the native session goal")
+			}
+		}
+	}
 	return nil
 }
 
@@ -1056,6 +1150,9 @@ func (s *AppService) ResumeThread(threadID string) (map[string]any, error) {
 		}
 		return nil, err
 	}
+	if session != nil && (session.GoalSynced || normalizeSessionGoal(session.Goal) == "") {
+		session = s.refreshNativeCodexGoal(session, backendID)
+	}
 	s.rememberThread(threadID, workspace)
 	s.attachSessionIdentity(result, session, threadID)
 	return result, nil
@@ -1106,6 +1203,14 @@ func (s *AppService) ForkThread(threadID string) (map[string]any, error) {
 		record.ProviderID = source.ProviderID
 		record.Effort = source.Effort
 		record.CollaborationMode = source.CollaborationMode
+		record.Goal = source.Goal
+		record.GoalStatus = source.GoalStatus
+		if source.GoalTokenBudget != nil {
+			budget := *source.GoalTokenBudget
+			record.GoalTokenBudget = &budget
+		}
+		record.GoalCreatedAt = now
+		record.GoalUpdatedAt = now
 		record.WorkMode = source.WorkMode
 		record.Name = source.Name + " (fork)"
 	}
@@ -1458,6 +1563,9 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 			return paginateCodexThreadResponse(s.sessionResponse(session), -1), nil
 		}
 		return nil, err
+	}
+	if session != nil && (session.GoalSynced || normalizeSessionGoal(session.Goal) == "") {
+		session = s.refreshNativeCodexGoal(session, backendID)
 	}
 	s.attachSessionIdentity(result, session, threadID)
 	s.rememberThread(threadID, workspace)
@@ -1952,7 +2060,20 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 			return nil, fmt.Errorf("load thread for send: %w", err)
 		}
 	}
-
+	if session != nil && (session.GoalSynced || normalizeSessionGoal(session.Goal) == "") {
+		session = s.refreshNativeCodexGoal(session, backendID)
+	}
+	goalManagedByCodex := session != nil && session.GoalSynced && normalizeSessionGoal(session.Goal) != ""
+	if session != nil {
+		goalNeedsSync := (session.Goal != "" && !session.GoalSynced) || (session.Goal == "" && session.GoalSynced)
+		if goalNeedsSync {
+			if nativeGoal, ok := s.syncNativeCodexGoal(session, backendID); ok {
+				s.applyNativeGoalForSession(session.ID, nativeGoal)
+				session = s.sessionForIDAny(session.ID)
+				goalManagedByCodex = session != nil && session.GoalSynced && normalizeSessionGoal(session.Goal) != ""
+			}
+		}
+	}
 	input, err := s.buildUserInput(request.Text, request.Images)
 	if err != nil {
 		return nil, err
@@ -2036,10 +2157,22 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 		resetNonce = session.CollabResetNonce
 	}
 	developerInstructions := collaborationModeDeveloperInstructions(collaborationMode, resetNonce)
+	guidanceParts := make([]string, 0, 2)
+	if !goalManagedByCodex {
+		if guidance := sessionGoalGuidance(session); guidance != "" {
+			guidanceParts = append(guidanceParts, guidance)
+		}
+	}
 	if guidance := sessionMemoryGuidance(session); guidance != "" {
+		guidanceParts = append(guidanceParts, guidance)
+	}
+	if len(guidanceParts) > 0 {
+		guidance := strings.Join(guidanceParts, "\n\n")
 		if text, ok := developerInstructions.(string); ok && strings.TrimSpace(text) != "" {
 			developerInstructions = strings.TrimSpace(text) + "\n\n" + guidance
 		} else {
+			// A goal still needs to reach Plan turns, where Codex normally uses
+			// its built-in instructions represented by a null developer value.
 			developerInstructions = guidance
 		}
 	}
@@ -4383,6 +4516,219 @@ func normalizeCollaborationMode(value string) string {
 	}
 }
 
+func normalizeSessionGoal(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return strings.TrimSpace(value)
+}
+
+func normalizeSessionGoalStatus(value string) string {
+	status := strings.ToLower(strings.TrimSpace(value))
+	status = strings.ReplaceAll(status, "_", "")
+	status = strings.ReplaceAll(status, "-", "")
+	switch status {
+	case "active":
+		return "active"
+	case "paused", "pause":
+		return "paused"
+	case "blocked":
+		return "blocked"
+	case "usagelimited":
+		return "usageLimited"
+	case "budgetlimited":
+		return "budgetLimited"
+	case "complete", "completed", "done":
+		return "complete"
+	default:
+		return ""
+	}
+}
+
+func sessionGoalStatus(session *SessionRecord) string {
+	if session == nil || normalizeSessionGoal(session.Goal) == "" {
+		return ""
+	}
+	if status := normalizeSessionGoalStatus(session.GoalStatus); status != "" {
+		return status
+	}
+	return "active"
+}
+
+func (s *AppService) syncNativeCodexGoal(session *SessionRecord, backendID string) (map[string]any, bool) {
+	if session == nil || isExternalSession(session) || strings.TrimSpace(backendID) == "" {
+		return nil, false
+	}
+	goal := normalizeSessionGoal(session.Goal)
+	method := "thread/goal/clear"
+	params := map[string]any{"threadId": strings.TrimSpace(backendID)}
+	if goal != "" {
+		method = "thread/goal/set"
+		params["objective"] = goal
+		params["status"] = sessionGoalStatus(session)
+		if session.GoalTokenBudget == nil {
+			params["tokenBudget"] = nil
+		} else {
+			params["tokenBudget"] = *session.GoalTokenBudget
+		}
+	}
+	result, err := s.call(method, params)
+	if err != nil {
+		return nil, false
+	}
+	if goal == "" {
+		return nil, true
+	}
+	if nativeGoal, ok := result["goal"].(map[string]any); ok {
+		return nativeGoal, true
+	}
+	// Older experimental builds returned an empty success body. Treat the local
+	// values as synced so the compatibility prompt is not injected twice.
+	fallback := map[string]any{
+		"objective":       goal,
+		"status":          sessionGoalStatus(session),
+		"tokensUsed":      session.GoalTokensUsed,
+		"timeUsedSeconds": session.GoalTimeUsedSeconds,
+		"createdAt":       session.GoalCreatedAt,
+		"updatedAt":       session.GoalUpdatedAt,
+	}
+	if session.GoalTokenBudget == nil {
+		fallback["tokenBudget"] = nil
+	} else {
+		fallback["tokenBudget"] = *session.GoalTokenBudget
+	}
+	return fallback, true
+}
+
+func applyNativeGoalLocked(record *SessionRecord, goal map[string]any) {
+	if record == nil {
+		return
+	}
+	if goal == nil {
+		record.Goal = ""
+		record.GoalStatus = ""
+		record.GoalTokenBudget = nil
+		record.GoalTokensUsed = 0
+		record.GoalTimeUsedSeconds = 0
+		record.GoalCreatedAt = 0
+		record.GoalUpdatedAt = 0
+		record.GoalSynced = false
+		return
+	}
+	objective := normalizeSessionGoal(stringFromAny(goal["objective"]))
+	if objective == "" {
+		return
+	}
+	record.Goal = objective
+	record.GoalStatus = normalizeSessionGoalStatus(stringFromAny(goal["status"]))
+	if record.GoalStatus == "" {
+		record.GoalStatus = "active"
+	}
+	if rawBudget, exists := goal["tokenBudget"]; exists {
+		if rawBudget == nil {
+			record.GoalTokenBudget = nil
+		} else if budget := int64(numericMapValue(goal, "tokenBudget")); budget > 0 {
+			record.GoalTokenBudget = &budget
+		}
+	}
+	record.GoalTokensUsed = int64(numericMapValue(goal, "tokensUsed"))
+	record.GoalTimeUsedSeconds = int64(numericMapValue(goal, "timeUsedSeconds"))
+	record.GoalCreatedAt = int64(numericMapValue(goal, "createdAt"))
+	record.GoalUpdatedAt = int64(numericMapValue(goal, "updatedAt"))
+	record.GoalSynced = true
+}
+
+func (s *AppService) applyNativeGoalForSession(sessionID string, goal map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.sessions[sessionID]
+	if record == nil {
+		return
+	}
+	applyNativeGoalLocked(record, goal)
+	s.persistSessionsLocked()
+}
+
+func (s *AppService) restoreSessionGoal(previous *SessionRecord) {
+	if previous == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.sessions[previous.ID]
+	if record == nil {
+		return
+	}
+	record.Goal = previous.Goal
+	record.GoalStatus = previous.GoalStatus
+	record.GoalTokenBudget = nil
+	if previous.GoalTokenBudget != nil {
+		budget := *previous.GoalTokenBudget
+		record.GoalTokenBudget = &budget
+	}
+	record.GoalTokensUsed = previous.GoalTokensUsed
+	record.GoalTimeUsedSeconds = previous.GoalTimeUsedSeconds
+	record.GoalCreatedAt = previous.GoalCreatedAt
+	record.GoalUpdatedAt = previous.GoalUpdatedAt
+	record.GoalSynced = previous.GoalSynced
+	s.persistSessionsLocked()
+}
+
+func (s *AppService) refreshNativeCodexGoal(session *SessionRecord, backendID string) *SessionRecord {
+	if session == nil || isExternalSession(session) || strings.TrimSpace(backendID) == "" {
+		return session
+	}
+	result, err := s.call("thread/goal/get", map[string]any{"threadId": strings.TrimSpace(backendID)})
+	if err != nil {
+		return session
+	}
+	rawGoal, exists := result["goal"]
+	if !exists {
+		return session
+	}
+	if rawGoal == nil {
+		// An unsynced local objective is a compatibility fallback, not stale data.
+		if session.GoalSynced {
+			s.applyNativeGoalForSession(session.ID, nil)
+		}
+	} else if goal, ok := rawGoal.(map[string]any); ok {
+		s.applyNativeGoalForSession(session.ID, goal)
+	}
+	if refreshed := s.sessionForIDAny(session.ID); refreshed != nil {
+		return refreshed
+	}
+	return session
+}
+
+func (s *AppService) trackCodexGoal(event codex.Event) {
+	if event.Type != "notification" || event.Data == nil {
+		return
+	}
+	if event.Method != "thread/goal/updated" && event.Method != "thread/goal/cleared" {
+		return
+	}
+	data, ok := event.Data.(map[string]any)
+	if !ok {
+		return
+	}
+	sessionID := strings.TrimSpace(stringFromAny(data["threadId"]))
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	record := s.sessions[sessionID]
+	if record != nil {
+		if event.Method == "thread/goal/cleared" {
+			applyNativeGoalLocked(record, nil)
+		} else if goal, ok := data["goal"].(map[string]any); ok {
+			applyNativeGoalLocked(record, goal)
+		}
+		s.persistSessionsLocked()
+	}
+	s.codexGoalEventSequence++
+	data["goalSequence"] = s.codexGoalEventSequence
+	s.mu.Unlock()
+}
+
 // Plan: null → official built-in plan.md (proposed_plan rules).
 // Default: non-empty exit text is required — Codex skips the mode update when
 // developer_instructions is null/empty, leaving stale Plan rules in context
@@ -4652,6 +4998,9 @@ func (s *AppService) attachSessionIdentity(result map[string]any, session *Sessi
 	collaborationMode := ""
 	workMode := "code"
 	if session != nil {
+		if current := s.sessionForIDAny(session.ID); current != nil {
+			session = current
+		}
 		id = session.ID
 		model = session.Model
 		providerID = session.ProviderID
@@ -4693,6 +5042,7 @@ func (s *AppService) attachSessionIdentity(result map[string]any, session *Sessi
 		}
 		thread["modelProvider"] = providerID
 		thread["workMode"] = workMode
+		applySessionGoalView(thread, session)
 	}
 }
 
@@ -4891,6 +5241,11 @@ func (s *AppService) remapCodexEvent(event *codex.Event) {
 	if thread, ok := data["thread"].(map[string]any); ok {
 		if value, _ := thread["id"].(string); value == threadID {
 			thread["id"] = mapped
+		}
+	}
+	if goal, ok := data["goal"].(map[string]any); ok {
+		if value, _ := goal["threadId"].(string); value == threadID {
+			goal["threadId"] = mapped
 		}
 	}
 }

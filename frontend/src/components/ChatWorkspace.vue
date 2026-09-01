@@ -6,9 +6,14 @@ import {
   GitBranch,
   MoreHorizontal,
   LoaderCircle,
+  Pause,
   Pencil,
+  Play,
   ScanSearch,
+  Settings2,
+  Target,
   Trash2,
+  X,
 } from '@lucide/vue'
 import { computed, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -19,6 +24,7 @@ import ComposerPanel from './ComposerPanel.vue'
 import WorkspaceWelcome from './WorkspaceWelcome.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Progress } from '@/components/ui/progress'
 import { SimpleTooltip } from '@/components/ui/tooltip'
 import {
   DropdownMenu,
@@ -550,6 +556,92 @@ const activeSessionTitle = computed(() => {
     || id
 })
 
+const activeGoalThread = computed(() => {
+  const id = paneSessionId.value
+  if (!id || isGrokMode.value || isClaudeMode.value) return null
+  return codexStore.activeThread && codexStore.sameThread(codexStore.activeThread.id, id)
+    ? codexStore.activeThread
+    : codexStore.threads.find((item) => codexStore.sameThread(item.id, id))
+      || Object.values(codexStore.projectThreads || {}).flat()
+        .find((item) => codexStore.sameThread(item.id, id))
+})
+const activeSessionGoal = computed(() => activeGoalThread.value?.goal?.trim() || '')
+const activeGoalStatus = computed(() => activeGoalThread.value?.goalStatus || 'active')
+const activeGoalCanResume = computed(() => activeGoalStatus.value !== 'active')
+const activeGoalBudget = computed(() => activeGoalThread.value?.goalTokenBudget || 0)
+const activeGoalTokensUsed = computed(() => activeGoalThread.value?.goalTokensUsed || 0)
+const activeGoalProgress = computed(() => activeGoalBudget.value > 0
+  ? Math.min(100, (activeGoalTokensUsed.value / activeGoalBudget.value) * 100)
+  : 0)
+const activeGoalStatusLabel = computed(() => t(`slash.goalStatus_${activeGoalStatus.value}`))
+
+function goalStatusClass(): string {
+  if (activeGoalStatus.value === 'complete') return 'border-positive/30 bg-positive/10 text-positive'
+  if (activeGoalStatus.value === 'paused') return 'border-warning/30 bg-warning/10 text-warning'
+  if (activeGoalStatus.value === 'blocked' || activeGoalStatus.value === 'budgetLimited' || activeGoalStatus.value === 'usageLimited') {
+    return 'border-destructive/25 bg-destructive/5 text-destructive'
+  }
+  return 'border-primary/25 bg-primary/5 text-primary'
+}
+
+function formatGoalNumber(value: number): string {
+  return new Intl.NumberFormat(appStore.settings.language || undefined, { notation: value >= 100_000 ? 'compact' : 'standard' }).format(value)
+}
+
+function formatGoalDuration(seconds: number): string {
+  if (!seconds) return ''
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remaining = seconds % 60
+  return remaining ? `${minutes}m ${remaining}s` : `${minutes}m`
+}
+
+async function editSessionGoal(): Promise<void> {
+  const thread = activeGoalThread.value
+  if (!thread?.id) return
+  const value = await dialogStore.prompt({
+    title: t('slash.goalEditTitle'),
+    description: t('slash.goalPromptHint'),
+    defaultValue: thread.goal || '',
+    placeholder: t('slash.goalPlaceholder'),
+    confirmLabel: t('common.save'),
+    maxlength: 4_000,
+  })
+  if (value === null || value === undefined) return
+  await codexStore.setThreadGoal(thread.id, value, { preserveStatus: true })
+}
+
+async function toggleSessionGoal(): Promise<void> {
+  const thread = activeGoalThread.value
+  if (!thread?.id) return
+  await codexStore.setThreadGoalStatus(thread.id, activeGoalCanResume.value ? 'active' : 'paused')
+}
+
+async function editSessionGoalBudget(): Promise<void> {
+  const thread = activeGoalThread.value
+  if (!thread?.id) return
+  const value = await dialogStore.prompt({
+    title: t('slash.goalBudgetTitle'),
+    description: t('slash.goalBudgetHint'),
+    defaultValue: thread.goalTokenBudget ? String(thread.goalTokenBudget) : '',
+    placeholder: t('slash.goalBudgetPlaceholder'),
+    confirmLabel: t('common.save'),
+    maxlength: 12,
+  })
+  if (value === null || value === undefined) return
+  const clean = value.trim()
+  if (!clean || ['off', 'none', 'unlimited', 'clear', '0'].includes(clean.toLocaleLowerCase())) {
+    await codexStore.setThreadGoalBudget(thread.id, null)
+    return
+  }
+  const budget = Number(clean.replace(/[,_\s]/g, ''))
+  await codexStore.setThreadGoalBudget(thread.id, budget)
+}
+
+async function clearSessionGoal(): Promise<void> {
+  if (activeGoalThread.value?.id) await codexStore.setThreadGoal(activeGoalThread.value.id, '')
+}
+
 const paneOwnsActiveCodexThread = computed(() => Boolean(
   paneSessionId.value
   && codexStore.activeThreadId
@@ -706,6 +798,55 @@ function commitFromBar(): void {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+    </div>
+
+    <div
+      v-if="activeSessionGoal"
+      class="flex shrink-0 items-start gap-2 border-b border-primary/15 bg-primary/[0.035] px-4 py-2.5"
+      :title="activeSessionGoal"
+    >
+      <Target :size="14" class="mt-0.5 shrink-0 text-primary" aria-hidden="true" />
+      <div class="min-w-0 flex-1">
+        <div class="flex flex-wrap items-center gap-1.5">
+          <p class="text-[10px] font-medium uppercase tracking-wide text-primary/80">{{ t('slash.goalTitle') }}</p>
+          <Badge variant="outline" class="h-4 rounded px-1.5 text-[9px] font-normal" :class="goalStatusClass()">
+            {{ activeGoalStatusLabel }}
+          </Badge>
+          <span class="text-[9px] tabular-nums text-muted-foreground">
+            {{ activeGoalBudget > 0
+              ? t('slash.goalProgress', { used: formatGoalNumber(activeGoalTokensUsed), budget: formatGoalNumber(activeGoalBudget) })
+              : t('slash.goalBudgetUnlimited') }}
+            <template v-if="activeGoalThread?.goalTimeUsedSeconds">
+              · {{ formatGoalDuration(activeGoalThread.goalTimeUsedSeconds) }}
+            </template>
+          </span>
+        </div>
+        <p class="line-clamp-2 break-words text-[12px] leading-5 text-foreground/85">{{ activeSessionGoal }}</p>
+        <Progress v-if="activeGoalBudget > 0" :model-value="activeGoalProgress" class="mt-1 h-1 max-w-64" />
+      </div>
+      <div class="flex shrink-0 items-center gap-0.5">
+        <SimpleTooltip :content="t('slash.goalEditTitle')">
+          <Button variant="ghost" size="icon-xs" :aria-label="t('slash.goalEditTitle')" @click="editSessionGoal">
+            <Pencil :size="12" />
+          </Button>
+        </SimpleTooltip>
+        <SimpleTooltip :content="activeGoalCanResume ? t('slash.goalResume') : t('slash.goalPause')">
+          <Button variant="ghost" size="icon-xs" :aria-label="activeGoalCanResume ? t('slash.goalResume') : t('slash.goalPause')" @click="toggleSessionGoal">
+            <Play v-if="activeGoalCanResume" :size="12" />
+            <Pause v-else :size="12" />
+          </Button>
+        </SimpleTooltip>
+        <SimpleTooltip :content="t('slash.goalBudgetTitle')">
+          <Button variant="ghost" size="icon-xs" :aria-label="t('slash.goalBudgetTitle')" @click="editSessionGoalBudget">
+            <Settings2 :size="12" />
+          </Button>
+        </SimpleTooltip>
+        <SimpleTooltip :content="t('slash.goalClearAction')">
+          <Button variant="ghost" size="icon-xs" class="text-muted-foreground hover:text-destructive" :aria-label="t('slash.goalClearAction')" @click="clearSessionGoal">
+            <X :size="12" />
+          </Button>
+        </SimpleTooltip>
+      </div>
     </div>
 
     <div class="min-h-0 flex-1 overflow-hidden">

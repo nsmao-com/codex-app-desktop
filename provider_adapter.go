@@ -734,7 +734,10 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		}
 	}
 
-	output, sessionID, usage, runErr := s.executeExternalTurn(ctx, provider, record.BackendRef, workspace, turnSettings, text, images, func(kind, delta string) {
+	// Keep the visible user turn unchanged while giving native CLIs the same
+	// session objective that Codex receives through developer instructions.
+	providerText := sessionGoalPrompt(record, text)
+	output, sessionID, usage, runErr := s.executeExternalTurn(ctx, provider, record.BackendRef, workspace, turnSettings, providerText, images, func(kind, delta string) {
 		if kind == "tool" || kind == "compact" {
 			completeSegments("completed")
 			if kind == "compact" {
@@ -747,7 +750,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 			}
 			if item, ok := decodeExternalToolTimelineItem(delta); ok {
 				recordTimelineItem(item)
-				s.emitExternalToolNotification(threadID, turnID, delta)
+				s.emitExternalToolNotification(threadID, turnID, provider, delta)
 			}
 			return
 		}
@@ -835,7 +838,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		closed["success"] = status == "completed"
 		timelineItems[index] = closed
 		encoded, _ := json.Marshal(closed)
-		s.emitExternalToolNotification(threadID, turnID, string(encoded))
+		s.emitExternalToolNotification(threadID, turnID, provider, string(encoded))
 	}
 	// A provider may only send a final full snapshot (or omit text events
 	// entirely). Reconcile it into the current segment before closing items.
@@ -969,7 +972,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 // app-server item protocol already consumed by the Codex timeline store. The
 // same item id is reused for running/completed updates, so a long tool call is
 // updated in place instead of being appended again at the end of the turn.
-func (s *AppService) emitExternalToolNotification(threadID, turnID, encoded string) {
+func (s *AppService) emitExternalToolNotification(threadID, turnID, provider, encoded string) {
 	tool, ok := decodeExternalToolTimelineItem(encoded)
 	if !ok {
 		return
@@ -994,6 +997,7 @@ func (s *AppService) emitExternalToolNotification(threadID, turnID, encoded stri
 		"threadId": threadID,
 		"turnId":   turnID,
 		"item":     item,
+		"runtime":  normalizeExternalRuntime(provider),
 	})
 }
 

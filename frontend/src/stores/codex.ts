@@ -33,6 +33,7 @@ import type {
   PendingServerRequest,
   QueuedMessage,
   ThreadGroup,
+  ThreadGoalStatus,
   ThreadSummary,
   TimelineItem,
   TimelineItemType,
@@ -42,6 +43,7 @@ import type {
 } from '../types/codex'
 import {
   asArray,
+  asNumber,
   asRecord,
   asString,
   isActiveStatus,
@@ -52,6 +54,7 @@ import {
   normalizeAccountRateLimits,
   normalizeStatus,
   normalizeThread,
+  normalizeThreadGoalStatus,
   normalizeThreadStatus,
   normalizeThreadTokenUsage,
   normalizeTimelineItem,
@@ -70,6 +73,10 @@ interface DeltaBuffer {
   field: 'text' | 'output' | 'reasoningSummary' | 'reasoningContent'
   type: TimelineItemType
   delta: string
+  /** Cumulative snapshot metadata added by the Codex transport. */
+  streamSequence?: number
+  streamText?: string
+  replace?: boolean
 }
 
 interface PendingThreadSubmission {
@@ -205,6 +212,10 @@ export const useCodexStore = defineStore('codex', () => {
   let tokenUsageTimer = 0
   let queuedMessageSequence = 0
   const deltaBuffers = new Map<string, DeltaBuffer>()
+  /** Last accepted transport sequence for each item/field stream. */
+  const streamSequenceByDelta = new Map<string, number>()
+  /** Goal notifications also cross Wails' concurrent event bridge. */
+  const goalSequenceByThread = new Map<string, number>()
   const pendingDiffs = new Map<string, { threadId: string; turnId: string; diff: string }>()
   /** turnId → threadId for complete eviction of diffsByTurn. */
   const diffTurnOwners = new Map<string, string>()
@@ -497,6 +508,8 @@ export const useCodexStore = defineStore('codex', () => {
     diffTimer = 0
     tokenUsageTimer = 0
     deltaBuffers.clear()
+    streamSequenceByDelta.clear()
+    goalSequenceByThread.clear()
     pendingDiffs.clear()
     pendingTokenUsage.clear()
     idleReconcileTimers.clear()
@@ -1152,6 +1165,7 @@ export const useCodexStore = defineStore('codex', () => {
           modelProvider: latestPreferences.modelProvider || thread.modelProvider,
           effort: latestPreferences.effort || thread.effort,
           collaborationMode: latestPreferences.collaborationMode || thread.collaborationMode,
+          ...(latestPreferences.goal !== undefined ? threadGoalState(latestPreferences) : {}),
         }
       }
       let runningTurnID = ''
@@ -2019,9 +2033,17 @@ export const useCodexStore = defineStore('codex', () => {
         : findThreadSummary(threadID)
       if (threadID.startsWith('pending-thread-')) {
         const pendingThreadID = threadID
-        const draft = thread
+        const initialDraft = thread
         thread = await createThread(false, queuedMessage.runtime, queuedMessage.workspace)
         if (!submissionStillOwnsThread(pendingThreadID)) return
+        // The goal can be edited while the first allocation is in flight. Read
+        // the latest pending summary before migrating it instead of using the
+        // stale object captured before the await above.
+        const draft = (
+          activeThread.value && sameThreadSession(activeThread.value.id, pendingThreadID)
+            ? activeThread.value
+            : findThreadSummary(pendingThreadID)
+        ) || initialDraft
         resolvedThreadID = thread.id
         migratePendingThread(pendingThreadID, thread.id, queuedMessage.workspace)
         if (!submissionStillOwnsThread(resolvedThreadID)) return
@@ -2037,6 +2059,14 @@ export const useCodexStore = defineStore('codex', () => {
               model: draftModel,
               effort: draftEffort,
               collaborationMode: draftCollaborationMode,
+              ...(draft.goal !== undefined ? {
+                goal: draft.goal,
+                ...(draft.goal && draft.goalStatus ? { goalStatus: draft.goalStatus } : {}),
+                ...(draft.goal && draft.goalTokenBudget !== undefined ? {
+                  goalTokenBudget: draft.goalTokenBudget,
+                  goalTokenBudgetSet: true,
+                } : {}),
+              } : {}),
             })
             thread = {
               ...thread,
@@ -2044,6 +2074,7 @@ export const useCodexStore = defineStore('codex', () => {
               modelProvider: draft.modelProvider || thread.modelProvider,
               effort: draftEffort || thread.effort,
               collaborationMode: draftCollaborationMode,
+              ...(draft.goal !== undefined ? threadGoalState(draft) : {}),
             }
           } catch {
             // Continue with CreateThread defaults if session patch fails.
@@ -2057,6 +2088,7 @@ export const useCodexStore = defineStore('codex', () => {
             modelProvider: activeThread.value?.modelProvider || thread.modelProvider,
             effort: activeThread.value?.effort || thread.effort,
             collaborationMode: activeThread.value?.collaborationMode || thread.collaborationMode,
+            ...(activeThread.value?.goal !== undefined ? threadGoalState(activeThread.value) : {}),
           }
           activeThread.value = thread
         }
@@ -2086,6 +2118,7 @@ export const useCodexStore = defineStore('codex', () => {
               modelProvider: latestPreferences.modelProvider || resumed.modelProvider,
               effort: latestPreferences.effort || resumed.effort,
               collaborationMode: latestPreferences.collaborationMode || resumed.collaborationMode,
+              ...(latestPreferences.goal !== undefined ? threadGoalState(latestPreferences) : {}),
             }
             if (sameThreadSession(activeThreadId.value, resumed.id)) activeThread.value = thread
             addOrUpdateThread(thread)
@@ -2116,6 +2149,7 @@ export const useCodexStore = defineStore('codex', () => {
           modelProvider: latestPreferences.modelProvider || thread.modelProvider,
           effort: latestPreferences.effort || thread.effort,
           collaborationMode: latestPreferences.collaborationMode || thread.collaborationMode,
+          ...(latestPreferences.goal !== undefined ? threadGoalState(latestPreferences) : {}),
         }
       }
       // Another turn may have started while we were creating/resuming the thread.
@@ -2753,6 +2787,30 @@ export const useCodexStore = defineStore('codex', () => {
         }
         break
       }
+      case 'thread/goal/updated': {
+        const threadID = asString(payload.threadId)
+        if (!acceptGoalSequence(threadID, payload.goalSequence)) break
+        const goal = asRecord(payload.goal)
+        const objective = asString(goal.objective)
+        if (!objective) break
+        const hasBudget = Object.prototype.hasOwnProperty.call(goal, 'tokenBudget')
+        patchThreadGoalState(threadID, {
+          goal: objective,
+          goalStatus: normalizeThreadGoalStatus(goal.status) || 'active',
+          goalTokenBudget: hasBudget ? (goal.tokenBudget === null ? null : asNumber(goal.tokenBudget)) : undefined,
+          goalTokensUsed: asNumber(goal.tokensUsed),
+          goalTimeUsedSeconds: asNumber(goal.timeUsedSeconds),
+          goalCreatedAt: asNumber(goal.createdAt),
+          goalUpdatedAt: asNumber(goal.updatedAt),
+        })
+        break
+      }
+      case 'thread/goal/cleared': {
+        const threadID = asString(payload.threadId)
+        if (!acceptGoalSequence(threadID, payload.goalSequence)) break
+        patchThreadGoalState(threadID, emptyThreadGoalState())
+        break
+      }
       case 'thread/status/changed': {
         const threadID = asString(payload.threadId)
         const status = normalizeThreadStatus(payload.status)
@@ -2993,6 +3051,7 @@ export const useCodexStore = defineStore('codex', () => {
           field: 'text',
           type: 'agentMessage',
           delta: notificationTextDelta(payload),
+          ...streamDeltaOptions(payload),
         })
         break
       case 'item/commandExecution/outputDelta':
@@ -3003,6 +3062,7 @@ export const useCodexStore = defineStore('codex', () => {
           field: 'output',
           type: 'commandExecution',
           delta: notificationTextDelta(payload),
+          ...streamDeltaOptions(payload),
         })
         break
       case 'item/reasoning/summaryTextDelta':
@@ -3014,6 +3074,7 @@ export const useCodexStore = defineStore('codex', () => {
           field: 'reasoningSummary',
           type: 'reasoning',
           delta: notificationTextDelta(payload),
+          ...streamDeltaOptions(payload),
         })
         break
       case 'item/reasoning/textDelta':
@@ -3024,6 +3085,7 @@ export const useCodexStore = defineStore('codex', () => {
           field: 'reasoningContent',
           type: 'reasoning',
           delta: notificationTextDelta(payload),
+          ...streamDeltaOptions(payload),
         })
         break
       case 'item/reasoning/summaryTextDone': {
@@ -3086,6 +3148,7 @@ export const useCodexStore = defineStore('codex', () => {
           field: 'text',
           type: 'plan',
           delta: notificationTextDelta(payload),
+          ...streamDeltaOptions(payload),
         })
         break
       case 'item/fileChange/outputDelta':
@@ -3096,6 +3159,7 @@ export const useCodexStore = defineStore('codex', () => {
           field: 'output',
           type: 'fileChange',
           delta: notificationTextDelta(payload),
+          ...streamDeltaOptions(payload),
         })
         break
       case 'item/fileChange/patchUpdated': {
@@ -3420,11 +3484,39 @@ export const useCodexStore = defineStore('codex', () => {
     )
   }
 
+  function streamDeltaOptions(payload: Record<string, unknown>): Pick<DeltaBuffer, 'streamSequence' | 'streamText' | 'replace'> {
+    const sequence = Number(payload.streamSequence)
+    const streamText = payload.streamText
+    if (!Number.isFinite(sequence) || sequence <= 0 || typeof streamText !== 'string') return {}
+    return { streamSequence: sequence, streamText, replace: true }
+  }
+
   function queueDelta(delta: DeltaBuffer): void {
     if (!delta.threadId || !delta.itemId || !delta.delta) return
+    // Keep the historical buffer key shape so summary-part barriers can inspect
+    // a pending item. Sequence ownership still includes the turn id below.
     const key = `${delta.threadId}:${delta.itemId}:${delta.field}`
-    const previous = deltaBuffers.get(key)
-    deltaBuffers.set(key, previous ? { ...delta, delta: previous.delta + delta.delta } : delta)
+    const sequenceKey = `${key}:${delta.turnId}`
+    if (delta.streamSequence && delta.streamSequence > 0) {
+      const previousSequence = streamSequenceByDelta.get(sequenceKey) || 0
+      if (delta.streamSequence <= previousSequence) return
+      streamSequenceByDelta.set(sequenceKey, delta.streamSequence)
+      while (streamSequenceByDelta.size > 4096) {
+        const oldest = streamSequenceByDelta.keys().next().value
+        if (!oldest) break
+        streamSequenceByDelta.delete(oldest)
+      }
+      const previous = deltaBuffers.get(key)
+      // A newer cumulative snapshot supersedes any older buffered delta. This
+      // is what makes bridge reordering harmless when the newest event arrives
+      // before an earlier event's dispatch goroutine runs.
+      if (!previous || (previous.streamSequence || 0) <= delta.streamSequence) {
+        deltaBuffers.set(key, { ...delta })
+      }
+    } else {
+      const previous = deltaBuffers.get(key)
+      deltaBuffers.set(key, previous ? { ...delta, delta: previous.delta + delta.delta } : delta)
+    }
     if (!deltaTimer) deltaTimer = trackedTimeout(flushDeltas, 48)
   }
 
@@ -3467,12 +3559,20 @@ export const useCodexStore = defineStore('codex', () => {
         }
         const item = nextItems[index]
         if (!item) continue
+        const streamSnapshot = delta.replace && delta.streamText !== undefined
+          ? delta.streamText
+          : undefined
         if (delta.field === 'reasoningSummary' || delta.field === 'reasoningContent') {
+          const limit = 250_000
           const reasoningSummary = delta.field === 'reasoningSummary'
-            ? appendBoundedDelta(item.reasoningSummary ?? '', delta.delta, 250_000)
+            ? streamSnapshot !== undefined
+              ? mergeStreamSnapshot(item.reasoningSummary ?? '', streamSnapshot, limit)
+              : appendBoundedDelta(item.reasoningSummary ?? '', delta.delta, limit)
             : item.reasoningSummary ?? ''
           const reasoningContent = delta.field === 'reasoningContent'
-            ? appendBoundedDelta(item.reasoningContent ?? '', delta.delta, 250_000)
+            ? streamSnapshot !== undefined
+              ? mergeStreamSnapshot(item.reasoningContent ?? '', streamSnapshot, limit)
+              : appendBoundedDelta(item.reasoningContent ?? '', delta.delta, limit)
             : item.reasoningContent ?? ''
           nextItems[index] = {
             ...item,
@@ -3482,7 +3582,12 @@ export const useCodexStore = defineStore('codex', () => {
           }
         } else {
           const limit = delta.field === 'output' ? 300_000 : 1_000_000
-          nextItems[index] = { ...item, [delta.field]: appendBoundedDelta(item[delta.field], delta.delta, limit) }
+          nextItems[index] = {
+            ...item,
+            [delta.field]: streamSnapshot !== undefined
+              ? mergeStreamSnapshot(item[delta.field], streamSnapshot, limit)
+              : appendBoundedDelta(item[delta.field], delta.delta, limit),
+          }
         }
         const updated = nextItems[index]
         if (completedStatus && updated && isActiveStatus(updated.status)) {
@@ -3537,8 +3642,9 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   function setActiveThread(thread: ThreadSummary, items: TimelineItem[]): void {
-    activeThread.value = thread
-    activeThreadId.value = thread.id
+    const nextThread = preserveLocalThreadGoal(thread)
+    activeThread.value = nextThread
+    activeThreadId.value = nextThread.id
     itemsByThread.value = { ...itemsByThread.value, [thread.id]: items }
     workspaceStore.clearDiff()
   }
@@ -3642,6 +3748,222 @@ export const useCodexStore = defineStore('codex', () => {
     }
     activeThread.value = next
     addOrUpdateThread(next)
+  }
+
+  function emptyThreadGoalState(): Partial<ThreadSummary> {
+    return {
+      goal: '',
+      goalStatus: undefined,
+      goalTokenBudget: undefined,
+      goalTokensUsed: undefined,
+      goalTimeUsedSeconds: undefined,
+      goalCreatedAt: undefined,
+      goalUpdatedAt: undefined,
+    }
+  }
+
+  function threadGoalState(thread: ThreadSummary): Partial<ThreadSummary> {
+    return {
+      goal: thread.goal,
+      goalStatus: thread.goalStatus,
+      goalTokenBudget: thread.goalTokenBudget,
+      goalTokensUsed: thread.goalTokensUsed,
+      goalTimeUsedSeconds: thread.goalTimeUsedSeconds,
+      goalCreatedAt: thread.goalCreatedAt,
+      goalUpdatedAt: thread.goalUpdatedAt,
+    }
+  }
+
+  function acceptGoalSequence(threadID: string, value: unknown): boolean {
+    if (!threadID) return false
+    const sequence = asNumber(value)
+    if (!sequence) return true
+    const key = resolveThreadID(threadID) || threadID
+    const previous = goalSequenceByThread.get(key) || 0
+    if (sequence <= previous) return false
+    goalSequenceByThread.set(key, sequence)
+    while (goalSequenceByThread.size > 2048) {
+      const oldest = goalSequenceByThread.keys().next().value
+      if (!oldest) break
+      goalSequenceByThread.delete(oldest)
+    }
+    return true
+  }
+
+  function patchThreadGoalState(threadID: string, state: Partial<ThreadSummary>): ThreadSummary | null {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const thread = findThreadSummary(id)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
+    if (!thread) return null
+    const next: ThreadSummary = {
+      ...thread,
+      ...state,
+      updatedAt: Math.floor(Date.now() / 1000),
+    }
+    if (sameThreadSession(activeThreadId.value, id)) activeThread.value = next
+    addOrUpdateThread(next)
+    return next
+  }
+
+  function patchThreadGoal(threadID: string, goal: string): ThreadSummary | null {
+    const current = findThreadSummary(resolveThreadID(threadID) || threadID.trim())
+      || (activeThread.value && sameThreadSession(activeThread.value.id, threadID) ? activeThread.value : null)
+    if (!goal) return patchThreadGoalState(threadID, emptyThreadGoalState())
+    return patchThreadGoalState(threadID, {
+      ...(current ? threadGoalState(current) : {}),
+      goal,
+      goalStatus: current?.goalStatus || 'active',
+    })
+  }
+
+  function goalForThread(threadID = activeThreadId.value): string {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    if (!id) return ''
+    const thread = findThreadSummary(id)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
+    return thread?.goal?.trim() || ''
+  }
+
+  async function setThreadGoal(
+    threadID: string,
+    value: string,
+    options: { preserveStatus?: boolean } = {},
+  ): Promise<boolean> {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const current = findThreadSummary(id)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
+    if (!id || !current) {
+      notify('warning', translate('slash.goalNeedThread'), translate('slash.goalNeedThreadHint'))
+      return false
+    }
+    const goal = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+    if (goal.length > 4_000) {
+      notify('warning', translate('slash.goalTitle'), translate('slash.goalTooLong'))
+      return false
+    }
+    const previousGoal = current.goal || ''
+    if (previousGoal === goal) {
+      notify('info', goal ? translate('slash.goalCurrent', { goal }) : translate('slash.goalEmpty'))
+      return true
+    }
+    const previousState = threadGoalState(current)
+    const now = Math.floor(Date.now() / 1000)
+    const nextStatus: ThreadGoalStatus = options.preserveStatus && current.goalStatus
+      ? current.goalStatus
+      : 'active'
+    patchThreadGoalState(id, goal ? {
+      ...previousState,
+      goal,
+      goalStatus: nextStatus,
+      goalTokensUsed: 0,
+      goalTimeUsedSeconds: 0,
+      goalCreatedAt: now,
+      goalUpdatedAt: now,
+    } : emptyThreadGoalState())
+    if (id.startsWith('pending-thread-')) {
+      notify('success', goal ? translate('slash.goalSaved') : translate('slash.goalCleared'))
+      return true
+    }
+    try {
+      await updateSessionPreferences({
+        sessionId: id,
+        model: current.model || appStore.settings.model,
+        effort: current.effort || appStore.settings.effort,
+        collaborationMode: current.collaborationMode || appStore.settings.collaborationMode,
+        goal,
+        ...(goal ? { goalStatus: nextStatus } : {}),
+      })
+      notify('success', goal ? translate('slash.goalSaved') : translate('slash.goalCleared'))
+      return true
+    } catch (error) {
+      patchThreadGoalState(id, previousState)
+      notify('error', translate('slash.goalSaveFailed'), errorMessage(error))
+      return false
+    }
+  }
+
+  async function setThreadGoalStatus(threadID: string, status: ThreadGoalStatus): Promise<boolean> {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const current = findThreadSummary(id)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
+    const normalized = normalizeThreadGoalStatus(status)
+    if (!id || !current?.goal || !normalized) {
+      notify('warning', translate('slash.goalNeedGoal'), translate('slash.goalNeedGoalHint'))
+      return false
+    }
+    if ((current.goalStatus || 'active') === normalized) {
+      notify('info', translate('slash.goalCurrentTitle'), translate(`slash.goalStatus_${normalized}`))
+      return true
+    }
+    const previousState = threadGoalState(current)
+    patchThreadGoalState(id, {
+      ...previousState,
+      goalStatus: normalized,
+      goalUpdatedAt: Math.floor(Date.now() / 1000),
+    })
+    if (id.startsWith('pending-thread-')) {
+      notify('success', translate('slash.goalStatusUpdated'), translate(`slash.goalStatus_${normalized}`))
+      return true
+    }
+    try {
+      await updateSessionPreferences({
+        sessionId: id,
+        model: current.model || appStore.settings.model,
+        effort: current.effort || appStore.settings.effort,
+        collaborationMode: current.collaborationMode || appStore.settings.collaborationMode,
+        goalStatus: normalized,
+      })
+      notify('success', translate('slash.goalStatusUpdated'), translate(`slash.goalStatus_${normalized}`))
+      return true
+    } catch (error) {
+      patchThreadGoalState(id, previousState)
+      notify('error', translate('slash.goalSaveFailed'), errorMessage(error))
+      return false
+    }
+  }
+
+  async function setThreadGoalBudget(threadID: string, value: number | null): Promise<boolean> {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const current = findThreadSummary(id)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
+    if (!id || !current?.goal) {
+      notify('warning', translate('slash.goalNeedGoal'), translate('slash.goalNeedGoalHint'))
+      return false
+    }
+    if (value !== null && (!Number.isInteger(value) || value <= 0 || value > 1_000_000_000)) {
+      notify('warning', translate('slash.goalBudgetTitle'), translate('slash.goalBudgetInvalid'))
+      return false
+    }
+    const previousState = threadGoalState(current)
+    patchThreadGoalState(id, {
+      ...previousState,
+      goalTokenBudget: value,
+      goalUpdatedAt: Math.floor(Date.now() / 1000),
+    })
+    if (id.startsWith('pending-thread-')) {
+      notify('success', translate('slash.goalBudgetTitle'), value === null
+        ? translate('slash.goalBudgetUnlimited')
+        : translate('slash.goalBudgetSaved', { count: value }))
+      return true
+    }
+    try {
+      await updateSessionPreferences({
+        sessionId: id,
+        model: current.model || appStore.settings.model,
+        effort: current.effort || appStore.settings.effort,
+        collaborationMode: current.collaborationMode || appStore.settings.collaborationMode,
+        goalTokenBudget: value,
+        goalTokenBudgetSet: true,
+      })
+      notify('success', translate('slash.goalBudgetTitle'), value === null
+        ? translate('slash.goalBudgetUnlimited')
+        : translate('slash.goalBudgetSaved', { count: value }))
+      return true
+    } catch (error) {
+      patchThreadGoalState(id, previousState)
+      notify('error', translate('slash.goalSaveFailed'), errorMessage(error))
+      return false
+    }
   }
 
   async function setCollaborationMode(
@@ -3833,7 +4155,9 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   function normalizeThreadList(value: unknown): ThreadSummary[] {
-    return normalizeThreads(value).map(withKnownThreadModel)
+    return normalizeThreads(value)
+      .map(withKnownThreadModel)
+      .map(preserveLocalThreadGoal)
   }
 
   function normalizeRuntimeThread(threadValue: unknown, responseValue: unknown): ThreadSummary | null {
@@ -3846,7 +4170,26 @@ export const useCodexStore = defineStore('codex', () => {
     const thread = normalizeThread(source)
     if (!thread) return null
     rememberThreadModelIdentity(thread.id, thread.model, thread.modelProvider)
-    return withKnownThreadModel(thread)
+    return preserveLocalThreadGoal(withKnownThreadModel(thread))
+  }
+
+  function preserveLocalThreadGoal(thread: ThreadSummary): ThreadSummary {
+    // Native Codex snapshots may omit NiceCodex-only metadata. Keep a goal
+    // edited locally while that snapshot is in flight instead of clearing it.
+    const candidates = [
+      activeThread.value && sameThreadSession(activeThread.value.id, thread.id)
+        ? activeThread.value
+        : null,
+      findThreadSummary(thread.id),
+      archivedThreads.value.find((item) => sameThreadSession(item.id, thread.id)),
+    ]
+    const local = candidates.find((item): item is ThreadSummary => item?.goal !== undefined)
+    if (!local) return thread
+    if (thread.goal === undefined) return { ...thread, ...threadGoalState(local) }
+    if (thread.goal && thread.goal === local.goal && !thread.goalStatus) {
+      return { ...thread, ...threadGoalState(local), goal: thread.goal }
+    }
+    return thread
   }
 
   function withKnownThreadModel(thread: ThreadSummary): ThreadSummary {
@@ -4129,7 +4472,7 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   function addOrUpdateThread(thread: ThreadSummary): void {
-    const nextThread = preserveLocalLiveThreadStatus(thread)
+    const nextThread = preserveLocalLiveThreadStatus(preserveLocalThreadGoal(thread))
     const path = nextThread.cwd || appStore.currentWorkspacePath
     const currentItems = projectThreadsForPath(path)
       ?? (sameWorkspace(path, appStore.currentWorkspacePath)
@@ -4144,7 +4487,9 @@ export const useCodexStore = defineStore('codex', () => {
   function setProjectThreads(path: string, nextThreads: ThreadSummary[]): void {
     const existingPath = Object.keys(projectThreads.value).find((projectPath) => sameWorkspace(projectPath, path))
     const key = existingPath ?? path
-    const normalized = nextThreads.map(preserveLocalLiveThreadStatus)
+    const normalized = nextThreads
+      .map(preserveLocalThreadGoal)
+      .map(preserveLocalLiveThreadStatus)
     projectThreads.value = {
       ...projectThreads.value,
       [key]: normalized,
@@ -5393,6 +5738,8 @@ export const useCodexStore = defineStore('codex', () => {
     diffTurnOwners.clear()
     loadedThreadIDs.clear()
     deltaBuffers.clear()
+    streamSequenceByDelta.clear()
+    goalSequenceByThread.clear()
     pendingDiffs.clear()
     pendingTokenUsage.clear()
     completedTurns.clear()
@@ -5507,6 +5854,11 @@ export const useCodexStore = defineStore('codex', () => {
     patchSessionPreferences,
     patchActiveSessionPreferences,
     patchActiveThreadMemories,
+    patchThreadGoal,
+    goalForThread,
+    setThreadGoal,
+    setThreadGoalStatus,
+    setThreadGoalBudget,
     setCollaborationMode,
     dismissPlanImplementation,
     acceptPlanImplementation,
@@ -5713,6 +6065,17 @@ function appendBoundedDelta(current: string, delta: string, limit: number): stri
   if (current.endsWith(marker)) return current
   if (current.length + delta.length <= limit) return current + delta
   return `${(current + delta).slice(0, limit)}${marker}`
+}
+
+/** Apply a cumulative stream snapshot without allowing a stale final row to shrink it. */
+function mergeStreamSnapshot(current: string | undefined, incoming: string, limit: number): string {
+  const previous = current ?? ''
+  if (!incoming) return previous
+  // Sequence checks guarantee that incoming is the newest stream revision, but
+  // item snapshots can still race with a longer live value. Never let a shorter
+  // snapshot shrink text that is already known to be a prefix of the stream.
+  if (previous.length >= incoming.length) return previous
+  return appendBoundedDelta('', incoming, limit)
 }
 
 /** Prefer the longer/complete stream when a snapshot would otherwise truncate. */

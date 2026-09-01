@@ -8,6 +8,7 @@ import type {
   ModelOption,
   ModelProviderOption,
   RateLimitWindow,
+  ThreadGoalStatus,
   ThreadSummary,
   ThreadTokenUsage,
   TurnMetrics,
@@ -140,10 +141,33 @@ export function normalizeThread(value: unknown): ThreadSummary | null {
     effort: asString(record.effort),
     collaborationMode: asString(record.collaborationMode, 'default') || 'default',
     workMode: asString(record.workMode, 'code') || 'code',
+    // Keep `undefined` when older/native providers omit the optional goal.
+    // This lets the store distinguish an absent field from an explicit clear
+    // and preserve a locally edited goal while a stale snapshot is arriving.
+    goal: typeof record.goal === 'string' ? record.goal : undefined,
+    goalStatus: normalizeThreadGoalStatus(record.goalStatus),
+    goalTokenBudget: Object.prototype.hasOwnProperty.call(record, 'goalTokenBudget')
+      ? (record.goalTokenBudget === null ? null : asNumber(record.goalTokenBudget))
+      : undefined,
+    goalTokensUsed: Object.prototype.hasOwnProperty.call(record, 'goalTokensUsed') ? asNumber(record.goalTokensUsed) : undefined,
+    goalTimeUsedSeconds: Object.prototype.hasOwnProperty.call(record, 'goalTimeUsedSeconds') ? asNumber(record.goalTimeUsedSeconds) : undefined,
+    goalCreatedAt: Object.prototype.hasOwnProperty.call(record, 'goalCreatedAt') ? asNumber(record.goalCreatedAt) : undefined,
+    goalUpdatedAt: Object.prototype.hasOwnProperty.call(record, 'goalUpdatedAt') ? asNumber(record.goalUpdatedAt) : undefined,
     useMemories: typeof record.useMemories === 'boolean' ? record.useMemories : undefined,
     generateMemories: typeof record.generateMemories === 'boolean' ? record.generateMemories : undefined,
     turns: asArray(record.turns),
   }
+}
+
+export function normalizeThreadGoalStatus(value: unknown): ThreadGoalStatus | undefined {
+  const raw = asString(value).trim().toLowerCase().replace(/[_-]+/g, '')
+  if (raw === 'active') return 'active'
+  if (raw === 'paused' || raw === 'pause') return 'paused'
+  if (raw === 'blocked') return 'blocked'
+  if (raw === 'usagelimited') return 'usageLimited'
+  if (raw === 'budgetlimited') return 'budgetLimited'
+  if (raw === 'complete' || raw === 'completed' || raw === 'done') return 'complete'
+  return undefined
 }
 
 export function normalizeThreads(value: unknown): ThreadSummary[] {

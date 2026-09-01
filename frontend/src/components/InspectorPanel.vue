@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, Coins, FileDiff, Gauge, GitBranch, PanelRightClose, RefreshCw, ShieldCheck } from '@lucide/vue'
+import { Activity, Bot, Coins, FileDiff, Gauge, GitBranch, PanelRightClose, RefreshCw, ShieldCheck } from '@lucide/vue'
 import { Motion } from 'motion-v'
 import { computed, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -11,14 +11,17 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { SimpleTooltip, Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { panelFromRight } from '@/lib/motion'
-import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useClaudeStore, useCodexStore, useGrokStore, useSubagentsStore, useWorkspaceStore } from '@/stores'
 import { buildContextUsageView, CODEX_CONTEXT_BASELINE_TOKENS, resolveProviderModelContextWindow } from '@/utils/accountUsage'
 import { compactDisplayPath, fullDisplayPath } from '@/utils/workspacePath'
+import type { SubagentRuntime } from '@/types/subagents'
+import SubagentActivityPanel from './SubagentActivityPanel.vue'
 
 const appStore = useAppStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
+const subagentsStore = useSubagentsStore()
 const workspaceStore = useWorkspaceStore()
 const { locale, t } = useI18n()
 
@@ -26,7 +29,24 @@ const emit = defineEmits<{
   collapse: []
 }>()
 
-const activeTab = shallowRef<'changes' | 'runtime'>('changes')
+const activeTab = shallowRef<'changes' | 'runtime' | 'agents'>('changes')
+
+const subagentTabLabel = computed(() => locale.value.toLowerCase().startsWith('zh') ? '子代理' : 'Agents')
+const subagentRuntime = computed<SubagentRuntime>(() => {
+  const runtime = appStore.activeRuntime
+  return runtime === 'claude' || runtime === 'gemini' || runtime === 'grok' || runtime === 'opencode'
+    ? runtime
+    : 'codex'
+})
+const subagentSessionId = computed(() => {
+  if (subagentRuntime.value === 'claude') return claudeStore.activeSessionId
+  if (subagentRuntime.value === 'grok') return grokStore.activeSessionId
+  return codexStore.activeThreadId
+})
+const activeSubagentCount = computed(() => subagentsStore
+  .activitiesFor(subagentRuntime.value, subagentSessionId.value)
+  .filter((activity) => activity.status === 'running' || activity.status === 'pending')
+  .length)
 
 const changes = computed(() => workspaceStore.changes)
 const activeTokenUsage = computed(() => {
@@ -105,6 +125,27 @@ function statusClass(status: string): string {
               </TooltipTrigger>
               <TooltipContent side="bottom">{{ t('inspector.runtime') }}</TooltipContent>
             </Tooltip>
+            <Tooltip>
+              <TooltipTrigger as-child>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  :aria-label="activeSubagentCount ? `${subagentTabLabel} (${activeSubagentCount})` : subagentTabLabel"
+                  :class="['relative', activeTab === 'agents' ? 'bg-background text-foreground shadow-xs hover:bg-background' : 'text-muted-foreground']"
+                  @click="activeTab = 'agents'"
+                >
+                  <Bot :size="13" />
+                  <span
+                    v-if="activeSubagentCount"
+                    class="absolute right-0.5 top-0.5 size-1.5 animate-pulse rounded-full bg-primary ring-2 ring-background motion-reduce:animate-none"
+                    aria-hidden="true"
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                {{ activeSubagentCount ? `${subagentTabLabel} · ${activeSubagentCount}` : subagentTabLabel }}
+              </TooltipContent>
+            </Tooltip>
           </div>
         </TooltipProvider>
         <Button variant="ghost" size="icon-xs" :aria-label="t('inspector.details')" @click="emit('collapse')">
@@ -159,6 +200,10 @@ function statusClass(status: string): string {
             <p>{{ t('inspector.clean') }}</p>
           </div>
         </ScrollArea>
+      </TabsContent>
+
+      <TabsContent value="agents" class="mt-0 flex-1 overflow-hidden">
+        <SubagentActivityPanel :runtime="subagentRuntime" :session-id="subagentSessionId" />
       </TabsContent>
 
       <TabsContent value="runtime" class="mt-0 flex-1 overflow-hidden">

@@ -1,5 +1,7 @@
 export type ConnectionState = 'disconnected' | 'starting' | 'initializing' | 'ready' | 'stopping' | 'error'
 
+export type ThreadGoalStatus = 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete'
+
 export interface ThreadSummary {
   id: string
   name: string
@@ -14,6 +16,13 @@ export interface ThreadSummary {
   effort?: string
   collaborationMode?: string
   workMode?: string
+  goal?: string
+  goalStatus?: ThreadGoalStatus
+  goalTokenBudget?: number | null
+  goalTokensUsed?: number
+  goalTimeUsedSeconds?: number
+  goalCreatedAt?: number
+  goalUpdatedAt?: number
   useMemories?: boolean
   generateMemories?: boolean
   turns?: unknown[]

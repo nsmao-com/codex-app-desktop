@@ -16,7 +16,7 @@ import WorkbenchView from '@/views/WorkbenchView.vue'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Toaster } from '@/components/ui/sonner'
 import { useNavigationHistory } from '@/composables/useNavigationHistory'
-import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useTerminalStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useSubagentsStore, useTerminalStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
 
 const appStore = useAppStore()
@@ -26,6 +26,7 @@ const arenaStore = useArenaStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
+const subagentsStore = useSubagentsStore()
 const workspaceStore = useWorkspaceStore()
 const terminalStore = useTerminalStore()
 const browserStore = useBrowserStore()
@@ -162,6 +163,8 @@ onMounted(() => {
   codexStore.bootstrapEvents()
   grokStore.bootstrapEvents()
   claudeStore.bootstrapEvents()
+  // Keep child-agent activity even while the inspector is collapsed.
+  subagentsStore.bootstrapEvents()
   void appStore.bootstrap().then(async () => {
     if (appStore.workspace) workspaceStore.hydrateWorkspace(appStore.workspace)
     bootstrapActivationRuntime = appStore.activeRuntime
@@ -200,6 +203,7 @@ onUnmounted(() => {
   codexStore.dispose()
   grokStore.dispose()
   claudeStore.dispose()
+  subagentsStore.dispose()
 })
 
 function matchShortcut(event: KeyboardEvent, binding: string): boolean {

@@ -22,13 +22,15 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { springSnappy } from '@/lib/motion'
-import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useGrokStore, useWorkspaceStore } from '@/stores'
+import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useGrokStore, useSubagentsStore, useWorkspaceStore } from '@/stores'
+import type { SubagentRuntime } from '@/types/subagents'
 
 const appStore = useAppStore()
 const arenaStore = useArenaStore()
 const codexStore = useCodexStore()
 const grokStore = useGrokStore()
 const claudeStore = useClaudeStore()
+const subagentsStore = useSubagentsStore()
 const workspaceStore = useWorkspaceStore()
 const { t } = useI18n()
 
@@ -49,6 +51,25 @@ const themeIcon = computed(() => {
     case 'light': return Sun
     default: return Monitor
   }
+})
+
+const subagentScope = computed(() => {
+  const pane = arenaStore.isArenaMode ? arenaStore.focusedPane : null
+  const runtime = (pane?.runtime || appStore.activeRuntime) as SubagentRuntime
+  const sessionId = pane
+    ? arenaStore.sessionForPane(pane.id)
+    : runtime === 'grok'
+      ? grokStore.activeSessionId
+      : runtime === 'claude'
+        ? claudeStore.activeSessionId
+        : codexStore.activeThreadId
+  return { runtime, sessionId }
+})
+const activeSubagentCount = computed(() => {
+  const { runtime, sessionId } = subagentScope.value
+  return subagentsStore.activitiesFor(runtime, sessionId)
+    .filter((activity) => activity.status === 'running' || activity.status === 'pending')
+    .length
 })
 
 const topbarContext = computed(() => {
@@ -170,9 +191,20 @@ const topbarTitle = computed(() =>
       </Motion>
 
       <Motion :whileHover="{ scale: 1.08 }" :whilePress="{ scale: 0.9 }" :transition="springSnappy">
-        <Button variant="ghost" size="icon-sm" class="rounded-lg" :aria-label="t('inspector.details')" @click="emit('toggle-inspector')">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="relative rounded-lg"
+          :aria-label="activeSubagentCount ? `${t('inspector.details')} (${activeSubagentCount})` : t('inspector.details')"
+          @click="emit('toggle-inspector')"
+        >
           <PanelRight v-if="inspectorCollapsed" :size="15" />
           <PanelRightClose v-else :size="15" />
+          <span
+            v-if="activeSubagentCount"
+            class="absolute right-1 top-1 size-1.5 animate-pulse rounded-full bg-primary ring-2 ring-background motion-reduce:animate-none"
+            aria-hidden="true"
+          />
         </Button>
       </Motion>
     </div>

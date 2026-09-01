@@ -828,6 +828,21 @@ export interface SessionPreferencesRequest {
     "model": string;
     "effort": string;
     "collaborationMode": string;
+
+    /**
+     * Optional per-session objective. Omit to preserve the current goal;
+     * provide an empty string to clear it.
+     */
+    "goal"?: string;
+
+    /** Native Codex goal lifecycle state. */
+    "goalStatus"?: string;
+
+    /** Goal token budget. Null clears a previously configured budget. */
+    "goalTokenBudget"?: number | null;
+
+    /** Distinguishes an omitted budget from an explicit null/unlimited budget. */
+    "goalTokenBudgetSet"?: boolean;
 }
 
 export interface SkillConfigRequest {

@@ -28,10 +28,22 @@ type SessionRecord struct {
 	CollabResetNonce int    `json:"collabResetNonce,omitempty"`
 	WorkMode         string `json:"workMode"` // code | cowork
 	Name             string `json:"name"`
-	Preview          string `json:"preview"`
-	CreatedAt        int64  `json:"createdAt"`
-	UpdatedAt        int64  `json:"updatedAt"`
-	Archived         bool   `json:"archived"`
+	// Goal mirrors Codex's native thread goal while preserving a prompt fallback
+	// for providers that do not expose the goal protocol.
+	Goal                string `json:"goal,omitempty"`
+	GoalStatus          string `json:"goalStatus,omitempty"`
+	GoalTokenBudget     *int64 `json:"goalTokenBudget,omitempty"`
+	GoalTokensUsed      int64  `json:"goalTokensUsed,omitempty"`
+	GoalTimeUsedSeconds int64  `json:"goalTimeUsedSeconds,omitempty"`
+	GoalCreatedAt       int64  `json:"goalCreatedAt,omitempty"`
+	GoalUpdatedAt       int64  `json:"goalUpdatedAt,omitempty"`
+	// GoalSynced marks an objective installed through Codex's native thread goal
+	// API. External providers keep this false and receive the local prompt fallback.
+	GoalSynced bool   `json:"goalSynced,omitempty"`
+	Preview    string `json:"preview"`
+	CreatedAt  int64  `json:"createdAt"`
+	UpdatedAt  int64  `json:"updatedAt"`
+	Archived   bool   `json:"archived"`
 	// Native marks a session imported from the provider's own history store.
 	// Its turns are read lazily from that store and are never duplicated into sessions.json.
 	Native bool `json:"native,omitempty"`
@@ -120,6 +132,10 @@ func cloneSession(record *SessionRecord) *SessionRecord {
 		return nil
 	}
 	clone := *record
+	if record.GoalTokenBudget != nil {
+		budget := *record.GoalTokenBudget
+		clone.GoalTokenBudget = &budget
+	}
 	clone.Turns = append([]externalTurn(nil), record.Turns...)
 	for index := range clone.Turns {
 		clone.Turns[index].Images = append([]string(nil), clone.Turns[index].Images...)
@@ -260,6 +276,33 @@ func (s *AppService) sessionForAny(sessionID, workspace string) *SessionRecord {
 	return cloneSession(record)
 }
 
+func sessionGoalGuidance(record *SessionRecord) string {
+	if record == nil {
+		return ""
+	}
+	goal := normalizeSessionGoal(record.Goal)
+	if goal == "" {
+		return ""
+	}
+	status := normalizeSessionGoalStatus(record.GoalStatus)
+	if status != "" && status != "active" {
+		return ""
+	}
+	return "For this chat, keep the following user-defined goal in mind and use it to guide implementation decisions. Do not treat it as a request to ignore higher-priority safety or system instructions.\n\nSession goal:\n" + goal
+}
+
+func sessionGoalPrompt(record *SessionRecord, text string) string {
+	if record == nil || sessionGoalStatus(record) != "active" {
+		return text
+	}
+	goal := normalizeSessionGoal(record.Goal)
+	request := strings.TrimSpace(text)
+	if request == "" {
+		return "Session goal:\n" + goal
+	}
+	return "Session goal:\n" + goal + "\n\nUser request:\n" + request
+}
+
 func sessionMatchesSearch(record *SessionRecord, search string) bool {
 	query := strings.ToLower(strings.TrimSpace(search))
 	if query == "" {
@@ -320,6 +363,7 @@ func (s *AppService) sessionThreadMap(record *SessionRecord, includeTurns bool) 
 		"workMode":          normalizeWorkMode(record.WorkMode),
 		"backendRef":        record.BackendRef,
 	}
+	applySessionGoalView(thread, record)
 	if activeTurnID != "" && activeTurnID != "active" {
 		thread["activeTurnId"] = activeTurnID
 	}
@@ -337,6 +381,28 @@ func (s *AppService) sessionThreadMap(record *SessionRecord, includeTurns bool) 
 		thread["turns"] = turns
 	}
 	return thread
+}
+
+func applySessionGoalView(thread map[string]any, record *SessionRecord) {
+	if thread == nil || record == nil {
+		return
+	}
+	goal := normalizeSessionGoal(record.Goal)
+	if goal == "" {
+		thread["goal"] = ""
+		return
+	}
+	thread["goal"] = goal
+	thread["goalStatus"] = sessionGoalStatus(record)
+	thread["goalTokensUsed"] = record.GoalTokensUsed
+	thread["goalTimeUsedSeconds"] = record.GoalTimeUsedSeconds
+	thread["goalCreatedAt"] = record.GoalCreatedAt
+	thread["goalUpdatedAt"] = record.GoalUpdatedAt
+	if record.GoalTokenBudget == nil {
+		thread["goalTokenBudget"] = nil
+	} else {
+		thread["goalTokenBudget"] = *record.GoalTokenBudget
+	}
 }
 
 func (s *AppService) sessionResponse(record *SessionRecord) map[string]any {
