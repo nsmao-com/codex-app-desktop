@@ -98,6 +98,7 @@ interface ThreadHistoryState {
 
 type CollaborationMode = 'default' | 'plan'
 type LocalUsageRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
+export type ThreadGoalCommandResult = 'completed' | 'queued' | 'cancelled' | 'failed'
 
 const PENDING_SUBMISSION_ERROR_GRACE_MS = 750
 const TURN_LIVENESS_WATCHDOG_MS = 3000
@@ -1949,6 +1950,7 @@ export const useCodexStore = defineStore('codex', () => {
     const queuedMessage: QueuedMessage = {
       id: `queued-${now}-${sequence}`,
       threadId: threadID,
+      kind: 'message',
       runtime: runtime === 'gemini' || runtime === 'opencode' ? runtime : 'codex',
       workspace,
       text: message,
@@ -1972,17 +1974,96 @@ export const useCodexStore = defineStore('codex', () => {
     return true
   }
 
+  function enqueueGoalCommand(threadID: string, argument: string): boolean {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const thread = findThreadSummary(id)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
+    if (!id || !thread) {
+      notify('warning', translate('slash.goalNeedThread'), translate('slash.goalNeedThreadHint'))
+      return false
+    }
+    const runtime = runtimeIDForThread(id)
+    if (!isRuntimeReady(runtime)) {
+      notify('warning', translate('notifications.connectionFailed'), translate('app.connecting'))
+      return false
+    }
+
+    const now = Date.now()
+    const sequence = ++queuedMessageSequence
+    const feedback = threadFeedback(id)
+    const pendingSubmission = pendingThreadSubmission(id)?.submission
+    const blockingTurnId = threadTurnID(id)
+      || pendingSubmission?.turnId
+      || pendingSubmission?.blockerId
+      || liveFeedbackTurnID(feedback)
+    const commandText = argument.trim() ? `/goal ${argument.trim()}` : '/goal'
+    const queuedCommand: QueuedMessage = {
+      id: `queued-goal-${now}-${sequence}`,
+      threadId: id,
+      kind: 'goal',
+      runtime,
+      workspace: thread.cwd?.trim() || appStore.currentWorkspacePath,
+      text: commandText,
+      images: [],
+      createdAt: now,
+      localItemId: '',
+      retryItemId: '',
+      blockedByTurnId: blockingTurnId && !completedTurns.has(blockingTurnId) ? blockingTurnId : undefined,
+      state: 'queued',
+      error: '',
+    }
+    const queueID = queueThreadKey(id)
+    queuedMessagesByThread.value = {
+      ...queuedMessagesByThread.value,
+      [queueID]: [...(queuedMessagesByThread.value[queueID] ?? []), queuedCommand],
+    }
+    scheduleThreadQueueDrain(queueID)
+    notify('info', translate('slash.goalQueued'), translate('slash.goalQueuedHint'))
+    return true
+  }
+
   async function drainThreadQueue(threadID: string): Promise<void> {
     if (!threadID || threadIsBusy(threadID)) return
     // Failed rows remain visible/retryable, but they did not reach the provider
     // and must not permanently block later messages after a 403/429/500 or a
-    // broken stream. A sending row is still protected by threadIsBusy above.
-    const queuedMessage = queuedMessagesByThread.value[threadID]
-      ?.find((message) => message.state === 'queued')
+    // broken stream. A sending row remains an explicit dispatch barrier below.
+    const queue = queuedMessagesByThread.value[threadID]
+    if (queue?.some((message) => message.state === 'sending')) return
+    const queuedMessage = queue?.find((message) => message.state === 'queued')
     if (!queuedMessage || !isRuntimeReady(queuedMessage.runtime)) return
     // A transient status/alias update must not release a follow-up before the
     // exact turn that accepted it as queued has reached a terminal event.
     if (queuedMessage.blockedByTurnId && !completedTurns.has(queuedMessage.blockedByTurnId)) return
+    if (queuedMessage.kind === 'goal') {
+      const command = queuedMessage.text.match(/^\/goal(?:\s+([\s\S]*))?$/i)
+      if (!command) {
+        patchQueuedMessage(threadID, queuedMessage.id, {
+          state: 'failed',
+          error: translate('chat.queuedGoalEditFormat'),
+        })
+        scheduleThreadQueueDrain(threadID)
+        return
+      }
+      patchQueuedMessage(threadID, queuedMessage.id, { state: 'sending', error: '' })
+      try {
+        const result = await executeThreadGoalCommand(threadID, command[1] || '')
+        if (result === 'failed') {
+          patchQueuedMessage(threadID, queuedMessage.id, {
+            state: 'failed',
+            error: translate('chat.queuedGoalFailed'),
+          })
+        } else {
+          removeQueuedMessageFromThread(threadID, queuedMessage.id)
+        }
+      } catch (error) {
+        const message = errorMessage(error)
+        patchQueuedMessage(threadID, queuedMessage.id, { state: 'failed', error: message })
+        notify('error', translate('slash.goalSaveFailed'), message)
+      } finally {
+        scheduleThreadQueueDrain(threadID)
+      }
+      return
+    }
     const submission = beginPendingThreadSubmission(threadID, queuedMessage.id)
     if (!submission) return
     const submissionStillOwnsThread = (ownerID: string): boolean => {
@@ -2401,6 +2482,7 @@ export const useCodexStore = defineStore('codex', () => {
     if (!message || message.state === 'sending') return false
     const nextText = text.trim()
     if (!nextText && message.images.length === 0) return false
+    if (message.kind === 'goal' && !/^\/goal(?:\s|$)/i.test(nextText)) return false
     patchQueuedMessage(queueID, messageID, { text: nextText })
     return true
   }
@@ -3822,6 +3904,112 @@ export const useCodexStore = defineStore('codex', () => {
     const thread = findThreadSummary(id)
       || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
     return thread?.goal?.trim() || ''
+  }
+
+  async function runThreadGoalCommand(
+    threadID: string,
+    argument = '',
+    options: { queueIfBusy?: boolean } = {},
+  ): Promise<ThreadGoalCommandResult> {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    if (!id) {
+      notify('warning', translate('slash.goalNeedThread'), translate('slash.goalNeedThreadHint'))
+      return 'failed'
+    }
+    const queueID = queueThreadKey(id)
+    const hasWaitingCommand = (queuedMessagesByThread.value[queueID] ?? [])
+      .some((message) => message.state === 'queued' || message.state === 'sending')
+    if (options.queueIfBusy !== false && (threadIsBusy(id) || hasWaitingCommand)) {
+      return enqueueGoalCommand(id, argument) ? 'queued' : 'failed'
+    }
+    return executeThreadGoalCommand(id, argument)
+  }
+
+  async function executeThreadGoalCommand(
+    threadID: string,
+    argument: string,
+  ): Promise<Exclude<ThreadGoalCommandResult, 'queued'>> {
+    const id = resolveThreadID(threadID) || threadID.trim()
+    const thread = findThreadSummary(id)
+      || (activeThread.value && sameThreadSession(activeThread.value.id, id) ? activeThread.value : null)
+    if (!id || !thread) {
+      notify('warning', translate('slash.goalNeedThread'), translate('slash.goalNeedThreadHint'))
+      return 'failed'
+    }
+
+    const raw = argument.trim()
+    const lower = raw.toLocaleLowerCase()
+    const currentGoal = thread.goal?.trim() || ''
+    const promptGoal = (defaultValue = '') => dialogStore.prompt({
+      title: defaultValue ? translate('slash.goalEditTitle') : translate('slash.goalPromptTitle'),
+      description: translate('slash.goalPromptHint'),
+      defaultValue,
+      placeholder: translate('slash.goalPlaceholder'),
+      confirmLabel: translate('common.save'),
+      maxlength: 4_000,
+    })
+    const saveGoal = async (goal: string, preserveStatus = false) => (
+      await setThreadGoal(id, goal, { preserveStatus }) ? 'completed' as const : 'failed' as const
+    )
+
+    if (!raw || ['show', 'status', 'view'].includes(lower)) {
+      if (currentGoal) {
+        const status = thread.goalStatus || 'active'
+        const budget = thread.goalTokenBudget
+        const used = thread.goalTokensUsed || 0
+        const statusLabel = translate(`slash.goalStatus_${status}`)
+        const budgetLabel = budget && budget > 0
+          ? translate('slash.goalProgress', { used: used.toLocaleString(), budget: budget.toLocaleString() })
+          : translate('slash.goalBudgetUnlimited')
+        notify('info', translate('slash.goalCurrentTitle'), `${currentGoal}\n\n${statusLabel} · ${budgetLabel}`)
+        return 'completed'
+      }
+      const prompted = await promptGoal()
+      if (prompted === null || prompted === undefined) return 'cancelled'
+      return saveGoal(prompted)
+    }
+    if (['clear', 'reset', 'off', 'none'].includes(lower)) return saveGoal('')
+    if (lower === 'set' || lower === 'edit' || lower.startsWith('edit ')) {
+      const inline = lower.startsWith('edit ') ? raw.slice(5).trim() : ''
+      const prompted = inline || await promptGoal(lower === 'edit' ? currentGoal : '')
+      if (prompted === null || prompted === undefined) return 'cancelled'
+      return saveGoal(prompted, lower.startsWith('edit'))
+    }
+    if (lower === 'pause' || lower === 'paused') {
+      return await setThreadGoalStatus(id, 'paused') ? 'completed' : 'failed'
+    }
+    if (lower === 'resume' || lower === 'start' || lower === 'active') {
+      return await setThreadGoalStatus(id, 'active') ? 'completed' : 'failed'
+    }
+    if (lower === 'complete' || lower === 'done') {
+      return await setThreadGoalStatus(id, 'complete') ? 'completed' : 'failed'
+    }
+    if (lower === 'budget' || lower.startsWith('budget ')) {
+      let budgetText = lower === 'budget' ? '' : raw.slice(7).trim()
+      if (!budgetText) {
+        const prompted = await dialogStore.prompt({
+          title: translate('slash.goalBudgetTitle'),
+          description: translate('slash.goalBudgetHint'),
+          defaultValue: thread.goalTokenBudget ? String(thread.goalTokenBudget) : '',
+          placeholder: translate('slash.goalBudgetPlaceholder'),
+          confirmLabel: translate('common.save'),
+          maxlength: 12,
+        })
+        if (prompted === null || prompted === undefined) return 'cancelled'
+        budgetText = prompted.trim()
+      }
+      if (['off', 'none', 'unlimited', 'clear', '0'].includes(budgetText.toLocaleLowerCase())) {
+        return await setThreadGoalBudget(id, null) ? 'completed' : 'failed'
+      }
+      const budget = Number(budgetText.replace(/[,_\s]/g, ''))
+      if (!Number.isInteger(budget) || budget <= 0 || budget > 1_000_000_000) {
+        notify('warning', translate('slash.goalBudgetTitle'), translate('slash.goalBudgetInvalid'))
+        return 'failed'
+      }
+      return await setThreadGoalBudget(id, budget) ? 'completed' : 'failed'
+    }
+    const goal = lower.startsWith('set ') ? raw.slice(4).trim() : raw
+    return saveGoal(goal)
   }
 
   async function setThreadGoal(
@@ -5856,6 +6044,7 @@ export const useCodexStore = defineStore('codex', () => {
     patchActiveThreadMemories,
     patchThreadGoal,
     goalForThread,
+    runThreadGoalCommand,
     setThreadGoal,
     setThreadGoalStatus,
     setThreadGoalBudget,

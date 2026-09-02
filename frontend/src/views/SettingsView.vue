@@ -5,8 +5,10 @@ import {
   BarChart3,
   Blocks,
   Check,
+  CircleAlert,
   Clock3,
   Compass,
+  Copy,
   Download,
   FolderOpen,
   GitBranch,
@@ -189,6 +191,8 @@ const uiFontSize = shallowRef(appStore.settings.uiFontSize === 'sm' || appStore.
 const codeFontSize = shallowRef(appStore.settings.codeFontSize === 'sm' || appStore.settings.codeFontSize === 'lg' ? appStore.settings.codeFontSize : 'md')
 const terminalProfile = shallowRef(appStore.settings.terminalProfile)
 const terminalProfilesRefreshing = shallowRef(false)
+const wslCommandsCopied = shallowRef(false)
+let wslCopyResetTimer = 0
 const language = shallowRef(appStore.settings.language)
 const autoConnect = shallowRef(appStore.settings.autoConnect)
 const sendWithModifier = shallowRef(Boolean(appStore.settings.sendWithModifier))
@@ -771,6 +775,14 @@ const terminalOptions = computed<SelectOption[]>(() => appStore.terminalProfiles
   disabled: !option.available,
 })))
 
+const wslTerminalProfile = computed(() => appStore.terminalProfiles.find((option) => option.id === 'wsl'))
+const wslNeedsAttention = computed(() => Boolean(wslTerminalProfile.value && !wslTerminalProfile.value.available))
+const wslNotInstalled = computed(() => wslTerminalProfile.value?.status === 'not-installed')
+const wslSafeCommands = computed(() => wslNotInstalled.value
+  ? 'wsl --install'
+  : 'wsl --status\nwsl -l -v\nwsl --shutdown\nwsl --update')
+const wslReinstallCommands = 'wsl --unregister <DistroName>\nwsl --install -d <DistroName>'
+
 const selectedTerminal = computed(() => appStore.terminalProfiles.find((option) => option.id === terminalProfile.value))
 const selectedTerminalHint = computed(() => {
   const selected = selectedTerminal.value
@@ -1061,6 +1073,7 @@ async function switchSettingsRuntime(runtime: WorkspaceRuntime): Promise<void> {
 }
 
 onUnmounted(() => {
+  window.clearTimeout(wslCopyResetTimer)
   if (!saved.value) appStore.restoreAppearance()
 })
 
@@ -1670,6 +1683,17 @@ async function recheckTerminalProfiles(): Promise<void> {
   }
 }
 
+async function copyWSLSafeCommands(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(wslSafeCommands.value)
+    wslCommandsCopied.value = true
+    window.clearTimeout(wslCopyResetTimer)
+    wslCopyResetTimer = window.setTimeout(() => { wslCommandsCopied.value = false }, 1_600)
+  } catch (error) {
+    notify('error', t('settings.wslRepairTitle'), error instanceof Error ? error.message : String(error))
+  }
+}
+
 function selectedOptionLabel(options: SelectOption[], value: string): string {
   return options.find((option) => option.value === value)?.label ?? value
 }
@@ -2187,6 +2211,75 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                           </SelectItem>
                         </SelectContent>
                       </Select>
+                    </div>
+                  </div>
+                  <div
+                    v-if="wslNeedsAttention"
+                    class="flex items-start gap-3 bg-warning/[0.045] px-4 py-3.5"
+                  >
+                    <CircleAlert :size="16" class="mt-0.5 shrink-0 text-warning" aria-hidden="true" />
+                    <div class="min-w-0 flex-1">
+                      <p class="text-[12px] font-medium text-foreground">
+                        {{ wslNotInstalled ? t('settings.wslInstallTitle') : t('settings.wslRepairTitle') }}
+                      </p>
+                      <p class="mt-1 text-[11px] leading-5 text-muted-foreground">
+                        {{ wslNotInstalled ? t('settings.wslInstallHint') : t('settings.wslRepairHint') }}
+                      </p>
+
+                      <details class="group mt-2.5 rounded-lg border border-border/70 bg-background/70 px-3 py-2">
+                        <summary class="cursor-pointer select-none text-[11px] font-medium text-foreground/85 outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                          {{ t('settings.wslRepairSteps') }}
+                        </summary>
+                        <div class="mt-3 space-y-3 text-[11px] leading-5 text-muted-foreground">
+                          <template v-if="wslNotInstalled">
+                            <p>{{ t('settings.wslInstallStep') }}</p>
+                            <pre class="overflow-x-auto rounded-md border bg-muted/45 px-3 py-2 font-mono text-[10px] text-foreground"><code>wsl --install</code></pre>
+                            <p>{{ t('settings.wslInstallRestart') }}</p>
+                          </template>
+                          <template v-else>
+                            <div>
+                              <p class="font-medium text-foreground/85">1. {{ t('settings.wslDiagnoseStep') }}</p>
+                              <pre class="mt-1.5 overflow-x-auto whitespace-pre-wrap rounded-md border bg-muted/45 px-3 py-2 font-mono text-[10px] text-foreground"><code>wsl --status
+wsl -l -v</code></pre>
+                            </div>
+                            <div>
+                              <p class="font-medium text-foreground/85">2. {{ t('settings.wslSafeRepairStep') }}</p>
+                              <pre class="mt-1.5 overflow-x-auto whitespace-pre-wrap rounded-md border bg-muted/45 px-3 py-2 font-mono text-[10px] text-foreground"><code>wsl --shutdown
+wsl --update</code></pre>
+                              <p class="mt-1.5">{{ t('settings.wslSafeRepairHint') }}</p>
+                            </div>
+                            <div class="rounded-md border border-destructive/25 bg-destructive/5 p-2.5 text-destructive">
+                              <p class="font-semibold">3. {{ t('settings.wslReinstallTitle') }}</p>
+                              <p class="mt-1">{{ t('settings.wslUnregisterWarning') }}</p>
+                              <pre class="mt-2 overflow-x-auto whitespace-pre-wrap rounded border border-destructive/20 bg-background/80 px-3 py-2 font-mono text-[10px] text-foreground"><code>{{ wslReinstallCommands }}</code></pre>
+                              <p class="mt-1.5">{{ t('settings.wslReinstallHint') }}</p>
+                            </div>
+                          </template>
+                        </div>
+                      </details>
+
+                      <div class="mt-2.5 flex flex-wrap gap-2">
+                        <Button type="button" variant="outline" size="sm" class="h-7 text-[11px]" @click="copyWSLSafeCommands">
+                          <Check v-if="wslCommandsCopied" :size="12" class="mr-1.5 text-positive" />
+                          <Copy v-else :size="12" class="mr-1.5" />
+                          {{ wslCommandsCopied
+                            ? t('settings.wslCommandsCopied')
+                            : wslNotInstalled
+                              ? t('settings.wslCopyInstallCommand')
+                              : t('settings.wslCopySafeCommands') }}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          class="h-7 text-[11px]"
+                          :disabled="terminalProfilesRefreshing"
+                          @click="recheckTerminalProfiles"
+                        >
+                          <RefreshCw :size="12" class="mr-1.5" :class="terminalProfilesRefreshing ? 'animate-spin' : ''" />
+                          {{ t('settings.wslRecheck') }}
+                        </Button>
+                      </div>
                     </div>
                   </div>
                   <div class="flex items-center justify-between gap-4 px-4 py-3">

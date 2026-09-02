@@ -599,47 +599,23 @@ function formatGoalDuration(seconds: number): string {
 async function editSessionGoal(): Promise<void> {
   const thread = activeGoalThread.value
   if (!thread?.id) return
-  const value = await dialogStore.prompt({
-    title: t('slash.goalEditTitle'),
-    description: t('slash.goalPromptHint'),
-    defaultValue: thread.goal || '',
-    placeholder: t('slash.goalPlaceholder'),
-    confirmLabel: t('common.save'),
-    maxlength: 4_000,
-  })
-  if (value === null || value === undefined) return
-  await codexStore.setThreadGoal(thread.id, value, { preserveStatus: true })
+  await codexStore.runThreadGoalCommand(thread.id, 'edit')
 }
 
 async function toggleSessionGoal(): Promise<void> {
   const thread = activeGoalThread.value
   if (!thread?.id) return
-  await codexStore.setThreadGoalStatus(thread.id, activeGoalCanResume.value ? 'active' : 'paused')
+  await codexStore.runThreadGoalCommand(thread.id, activeGoalCanResume.value ? 'resume' : 'pause')
 }
 
 async function editSessionGoalBudget(): Promise<void> {
   const thread = activeGoalThread.value
   if (!thread?.id) return
-  const value = await dialogStore.prompt({
-    title: t('slash.goalBudgetTitle'),
-    description: t('slash.goalBudgetHint'),
-    defaultValue: thread.goalTokenBudget ? String(thread.goalTokenBudget) : '',
-    placeholder: t('slash.goalBudgetPlaceholder'),
-    confirmLabel: t('common.save'),
-    maxlength: 12,
-  })
-  if (value === null || value === undefined) return
-  const clean = value.trim()
-  if (!clean || ['off', 'none', 'unlimited', 'clear', '0'].includes(clean.toLocaleLowerCase())) {
-    await codexStore.setThreadGoalBudget(thread.id, null)
-    return
-  }
-  const budget = Number(clean.replace(/[,_\s]/g, ''))
-  await codexStore.setThreadGoalBudget(thread.id, budget)
+  await codexStore.runThreadGoalCommand(thread.id, 'budget')
 }
 
 async function clearSessionGoal(): Promise<void> {
-  if (activeGoalThread.value?.id) await codexStore.setThreadGoal(activeGoalThread.value.id, '')
+  if (activeGoalThread.value?.id) await codexStore.runThreadGoalCommand(activeGoalThread.value.id, 'clear')
 }
 
 const paneOwnsActiveCodexThread = computed(() => Boolean(

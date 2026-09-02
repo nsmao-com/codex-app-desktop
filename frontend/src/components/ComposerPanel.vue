@@ -111,9 +111,11 @@ const props = defineProps<{
 }>()
 type EditableQueuedMessage = {
   id: string
+  kind?: 'message' | 'goal'
   text: string
   images: string[]
   state: 'queued' | 'sending' | 'failed'
+  error?: string
 }
 type ComposerSubmission = {
   message: string
@@ -242,105 +244,7 @@ function runUsageCommand(range?: UsageCommandRange): void {
 }
 
 async function runGoalCommand(argument = ''): Promise<void> {
-  const sessionId = composerSessionId.value
-  if (!sessionId) {
-    notify('warning', t('slash.goalNeedThread'), t('slash.goalNeedThreadHint'))
-    return
-  }
-
-  const raw = argument.trim()
-  const lower = raw.toLocaleLowerCase()
-  const thread = composerCodexThread.value
-  const currentGoal = thread?.goal?.trim() || ''
-
-  const showGoal = () => {
-    if (currentGoal) {
-      const status = thread?.goalStatus || 'active'
-      const budget = thread?.goalTokenBudget
-      const used = thread?.goalTokensUsed || 0
-      const statusLabel = t(`slash.goalStatus_${status}`)
-      const budgetLabel = budget && budget > 0
-        ? t('slash.goalProgress', { used: used.toLocaleString(), budget: budget.toLocaleString() })
-        : t('slash.goalBudgetUnlimited')
-      notify('info', t('slash.goalCurrentTitle'), `${currentGoal}\n\n${statusLabel} · ${budgetLabel}`)
-      return true
-    }
-    notify('info', t('slash.goalCurrentTitle'), t('slash.goalEmpty'))
-    return false
-  }
-
-  const promptGoal = async (defaultValue = '') => {
-    const prompted = await dialogStore.prompt({
-      title: defaultValue ? t('slash.goalEditTitle') : t('slash.goalPromptTitle'),
-      description: t('slash.goalPromptHint'),
-      defaultValue,
-      placeholder: t('slash.goalPlaceholder'),
-      confirmLabel: t('common.save'),
-      maxlength: 4_000,
-    })
-    return prompted
-  }
-
-  if (!raw || ['show', 'status', 'view'].includes(lower)) {
-    if (currentGoal) {
-      showGoal()
-      return
-    }
-    const prompted = await promptGoal()
-    if (prompted !== null && prompted !== undefined) await codexStore.setThreadGoal(sessionId, prompted)
-    return
-  }
-  if (['clear', 'reset', 'off', 'none'].includes(lower)) {
-    await codexStore.setThreadGoal(sessionId, '')
-    return
-  }
-  if (lower === 'set' || lower === 'edit' || lower.startsWith('edit ')) {
-    const inline = lower.startsWith('edit ') ? raw.slice(5).trim() : ''
-    const prompted = inline || await promptGoal(lower === 'edit' ? currentGoal : '')
-    if (prompted === null || prompted === undefined) return
-    await codexStore.setThreadGoal(sessionId, prompted, { preserveStatus: lower.startsWith('edit') })
-    return
-  }
-  if (lower === 'pause' || lower === 'paused') {
-    await codexStore.setThreadGoalStatus(sessionId, 'paused')
-    return
-  }
-  if (lower === 'resume' || lower === 'start' || lower === 'active') {
-    await codexStore.setThreadGoalStatus(sessionId, 'active')
-    return
-  }
-  if (lower === 'complete' || lower === 'done') {
-    await codexStore.setThreadGoalStatus(sessionId, 'complete')
-    return
-  }
-  if (lower === 'budget' || lower.startsWith('budget ')) {
-    let budgetText = lower === 'budget' ? '' : raw.slice(7).trim()
-    if (!budgetText) {
-      const prompted = await dialogStore.prompt({
-        title: t('slash.goalBudgetTitle'),
-        description: t('slash.goalBudgetHint'),
-        defaultValue: thread?.goalTokenBudget ? String(thread.goalTokenBudget) : '',
-        placeholder: t('slash.goalBudgetPlaceholder'),
-        confirmLabel: t('common.save'),
-        maxlength: 12,
-      })
-      if (prompted === null || prompted === undefined) return
-      budgetText = prompted.trim()
-    }
-    if (['off', 'none', 'unlimited', 'clear', '0'].includes(budgetText.toLocaleLowerCase())) {
-      await codexStore.setThreadGoalBudget(sessionId, null)
-      return
-    }
-    const budget = Number(budgetText.replace(/[,_\s]/g, ''))
-    if (!Number.isInteger(budget) || budget <= 0 || budget > 1_000_000_000) {
-      notify('warning', t('slash.goalBudgetTitle'), t('slash.goalBudgetInvalid'))
-      return
-    }
-    await codexStore.setThreadGoalBudget(sessionId, budget)
-    return
-  }
-  const goal = lower.startsWith('set ') ? raw.slice(4).trim() : raw
-  await codexStore.setThreadGoal(sessionId, goal)
+  await codexStore.runThreadGoalCommand(composerSessionId.value, argument)
 }
 
 async function runAddCommand(): Promise<void> {
@@ -964,7 +868,7 @@ function relatedQueueRows<T extends { id: string }>(
   return [...new Map(rows.map((row) => [row.id, row])).values()]
 }
 
-const activeQueuedMessages = computed(() => {
+const activeQueuedMessages = computed<EditableQueuedMessage[]>(() => {
   const sessionId = composerSessionId.value
   if (!sessionId) return []
   if (isGrokMode.value) {
@@ -1085,6 +989,10 @@ function saveQueuedEdit(message: EditableQueuedMessage): void {
   const nextText = queuedEditDraft.value.trim()
   if (!nextText && message.images.length === 0) {
     queuedEditError.value = t('chat.queuedEditEmpty')
+    return
+  }
+  if (message.kind === 'goal' && !/^\/goal(?:\s|$)/i.test(nextText)) {
+    queuedEditError.value = t('chat.queuedGoalEditFormat')
     return
   }
   if (!updateQueued(message.id, nextText)) {
@@ -2668,6 +2576,10 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                 >{{ queueIndex + 1 }}</span>
 
                 <div class="min-w-0 flex-1">
+                  <span
+                    v-if="message.kind === 'goal'"
+                    class="mb-1 inline-flex rounded border border-primary/20 bg-primary/5 px-1.5 py-0.5 text-[9px] font-medium text-primary"
+                  >{{ t('chat.queuedGoalCommand') }}</span>
                   <Textarea
                     v-if="editingQueuedId === message.id"
                     v-model="queuedEditDraft"
@@ -2698,7 +2610,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                     v-else-if="editingQueuedId === message.id"
                     class="mt-1 text-[10px] leading-4 text-muted-foreground"
                   >
-                    {{ t('chat.queuedEditHint') }}
+                    {{ message.kind === 'goal' ? t('chat.queuedGoalEditHint') : t('chat.queuedEditHint') }}
                   </p>
                   <p v-else-if="message.error" class="mt-0.5 line-clamp-2 text-[10px] text-destructive/90">
                     {{ message.error }}

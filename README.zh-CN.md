@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.1：流式输出顺序保护、会话目标与多模型子代理活动可视化。</sub></p>
+<p align="center"><sub>v1.5.2：目标命令队列、可操作的 WSL 修复指引与更可靠的 MCP/Skill 设置。</sub></p>
 
 ## 为什么是 Nice Codex
 

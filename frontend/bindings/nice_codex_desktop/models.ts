@@ -830,18 +830,12 @@ export interface SessionPreferencesRequest {
     "collaborationMode": string;
 
     /**
-     * Optional per-session objective. Omit to preserve the current goal;
-     * provide an empty string to clear it.
+     * Goal is a pointer so ordinary model/mode updates preserve an existing
+     * session objective; an explicit empty value clears it.
      */
-    "goal"?: string;
-
-    /** Native Codex goal lifecycle state. */
-    "goalStatus"?: string;
-
-    /** Goal token budget. Null clears a previously configured budget. */
+    "goal"?: string | null;
+    "goalStatus"?: string | null;
     "goalTokenBudget"?: number | null;
-
-    /** Distinguishes an omitted budget from an explicit null/unlimited budget. */
     "goalTokenBudgetSet"?: boolean;
 }
 

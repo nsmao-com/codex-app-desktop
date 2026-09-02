@@ -2121,6 +2121,64 @@ Object.assign(messages['en-US'].chat, {
   openImagePreview: 'Enlarge {name}',
   imagePreview: 'Image preview',
 })
+Object.assign(messages['zh-CN'].slash, {
+  goalQueued: '目标命令已加入队列',
+  goalQueuedHint: '当前任务结束后会按队列顺序执行，不会打断正在进行的回合。',
+})
+Object.assign(messages['en-US'].slash, {
+  goalQueued: 'Goal command queued',
+  goalQueuedHint: 'It will run in queue order after the current turn finishes, without interrupting active work.',
+})
+Object.assign(messages['zh-CN'].chat, {
+  queuedGoalCommand: '目标命令',
+  queuedGoalEditHint: '命令必须以 /goal 开头；Ctrl/⌘ + Enter 保存，Esc 取消。',
+  queuedGoalEditFormat: '目标命令必须以 /goal 开头。',
+  queuedGoalFailed: '目标命令未能执行，请按提示修改后重试。',
+})
+Object.assign(messages['en-US'].chat, {
+  queuedGoalCommand: 'Goal command',
+  queuedGoalEditHint: 'Keep /goal at the start; Ctrl/⌘ + Enter saves and Esc cancels.',
+  queuedGoalEditFormat: 'A goal command must start with /goal.',
+  queuedGoalFailed: 'The goal command could not run. Review the message, edit it, and retry.',
+})
+Object.assign(messages['zh-CN'].settings, {
+  wslInstallTitle: '未检测到 WSL',
+  wslInstallHint: '当前电脑没有可用的 WSL 组件。安装并重启 Windows 后，再回到这里重新检测。',
+  wslRepairTitle: 'WSL 已安装，但 Linux 发行版无法启动',
+  wslRepairHint: '这通常是发行版未完成初始化、WSL 组件需要更新，或发行版虚拟磁盘丢失导致的。',
+  wslRepairSteps: '查看诊断与修复步骤',
+  wslInstallStep: '以管理员身份打开 Windows Terminal 或 PowerShell，然后执行：',
+  wslInstallRestart: '安装完成后按系统提示重启 Windows，首次打开 Linux 发行版完成初始化，再点击“重新检测”。',
+  wslDiagnoseStep: '先查看 WSL 状态，并记下需要修复的发行版名称。',
+  wslSafeRepairStep: '关闭 WSL 并更新组件；这些命令不会删除发行版数据。',
+  wslSafeRepairHint: '更新后重新打开对应发行版；如果可以正常进入 Linux，再点击“重新检测”。',
+  wslReinstallTitle: '仅在虚拟磁盘丢失时重装发行版',
+  wslUnregisterWarning: '警告：wsl --unregister 会永久删除该发行版及其中的全部文件，无法撤销。',
+  wslReinstallHint: '只有在确认出现 ERROR_FILE_NOT_FOUND、ext4.vhdx 已丢失且无法恢复，或已经备份数据后才执行。请把 DistroName 替换为 wsl -l -v 显示的发行版名称。',
+  wslCopyInstallCommand: '复制安装命令',
+  wslCopySafeCommands: '复制安全诊断命令',
+  wslCommandsCopied: '已复制',
+  wslRecheck: '重新检测',
+})
+Object.assign(messages['en-US'].settings, {
+  wslInstallTitle: 'WSL was not detected',
+  wslInstallHint: 'No usable WSL component was found. Install it, restart Windows, then return here and check again.',
+  wslRepairTitle: 'WSL is installed, but the Linux distribution cannot start',
+  wslRepairHint: 'The distribution may still need initialization, the WSL component may need an update, or its virtual disk may be missing.',
+  wslRepairSteps: 'View diagnosis and repair steps',
+  wslInstallStep: 'Open Windows Terminal or PowerShell as administrator, then run:',
+  wslInstallRestart: 'Restart Windows when prompted, open the Linux distribution once to finish setup, then select “Check again”.',
+  wslDiagnoseStep: 'Inspect WSL and note the name of the distribution that needs repair.',
+  wslSafeRepairStep: 'Shut down WSL and update its components. These commands do not delete distribution data.',
+  wslSafeRepairHint: 'Open the distribution again after the update. If Linux starts normally, select “Check again”.',
+  wslReinstallTitle: 'Reinstall only when the virtual disk is missing',
+  wslUnregisterWarning: 'Warning: wsl --unregister permanently deletes that distribution and every file inside it. This cannot be undone.',
+  wslReinstallHint: 'Use this only after confirming ERROR_FILE_NOT_FOUND, a missing ext4.vhdx that cannot be recovered, or a complete backup. Replace DistroName with the name shown by wsl -l -v.',
+  wslCopyInstallCommand: 'Copy install command',
+  wslCopySafeCommands: 'Copy safe commands',
+  wslCommandsCopied: 'Copied',
+  wslRecheck: 'Check again',
+})
 Object.assign(messages['zh-CN'], {
   providerConfig: {
     title: '模型商原生配置', detecting: '正在读取 CLI 与配置文件…',
