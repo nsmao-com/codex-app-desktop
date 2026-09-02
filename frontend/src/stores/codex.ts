@@ -73,7 +73,7 @@ interface DeltaBuffer {
   field: 'text' | 'output' | 'reasoningSummary' | 'reasoningContent'
   type: TimelineItemType
   delta: string
-  /** Cumulative snapshot metadata added by the Codex transport. */
+  /** Bounded cumulative snapshot metadata added by the Codex transport. */
   streamSequence?: number
   streamText?: string
   replace?: boolean
@@ -6264,7 +6264,9 @@ function mergeStreamSnapshot(current: string | undefined, incoming: string, limi
   // item snapshots can still race with a longer live value. Never let a shorter
   // snapshot shrink text that is already known to be a prefix of the stream.
   if (previous.length >= incoming.length) return previous
-  return appendBoundedDelta('', incoming, limit)
+  // The JSON decoder already owns an immutable string; avoid another full copy
+  // on every coalesced frame when the snapshot is within the display limit.
+  return incoming.length <= limit ? incoming : appendBoundedDelta('', incoming, limit)
 }
 
 /** Prefer the longer/complete stream when a snapshot would otherwise truncate. */

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,20 +42,34 @@ type Client struct {
 	// processCleanup tears down the OS process tree (Windows Job Object / process group).
 	processCleanup func()
 	transportErr   error
-	// streamStates accumulates Codex delta notifications into cumulative
-	// snapshots. Wails dispatches each emitted event from its own goroutine,
-	// so individual deltas can reach the WebView out of order. A per-stream
-	// sequence and snapshot lets the frontend accept the newest complete value
-	// without relying on bridge delivery order.
-	streamStates map[string]streamState
+	// streamStates accumulates Codex delta notifications into bounded snapshots.
+	// Wails dispatches each emitted event from its own goroutine, so individual
+	// deltas can reach the WebView out of order. A per-stream sequence and snapshot
+	// lets the frontend accept the newest complete value without relying on bridge
+	// delivery order. Pending deltas are coalesced before crossing the bridge.
+	streamStates     map[string]streamState
+	streamOrder      uint64
+	streamFlushTimer *time.Timer
 }
 
 type streamState struct {
-	sequence uint64
-	text     string
+	sequence     uint64
+	text         []byte
+	pending      []byte
+	method       string
+	payload      map[string]any
+	lastFlush    time.Time
+	pendingOrder uint64
 }
 
-const maxStreamSnapshotBytes = 1_000_000
+const (
+	maxStreamSnapshotBytes = 1_000_000
+	// Keep the UI responsive on slower WebView2 machines while preserving a
+	// visible streaming cadence. The frontend also batches updates at this scale.
+	streamFlushInterval   = 48 * time.Millisecond
+	streamFlushBytes      = 2 * 1024
+	maxStreamPendingBytes = 64 * 1024
+)
 
 func NewClient(onEvent func(Event)) *Client {
 	return &Client{
@@ -149,6 +164,11 @@ func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) e
 	c.processCleanup = cleanup
 	c.transportErr = nil
 	c.streamStates = make(map[string]streamState)
+	c.streamOrder = 0
+	if c.streamFlushTimer != nil {
+		c.streamFlushTimer.Stop()
+		c.streamFlushTimer = nil
+	}
 	c.status = Status{
 		State:     "initializing",
 		Running:   true,
@@ -347,6 +367,7 @@ func (c *Client) write(message any) error {
 }
 
 func (c *Client) readLoop(command *exec.Cmd, stdout io.Reader) {
+	defer c.flushPendingStreamsFor(command)
 	// JSON Decoder grows with the current JSON-RPC value and has no Scanner token
 	// ceiling, so large histories and tool results cannot kill the stdout reader.
 	decoder := json.NewDecoder(stdout)
@@ -363,6 +384,7 @@ func (c *Client) readLoop(command *exec.Cmd, stdout io.Reader) {
 }
 
 func (c *Client) failTransport(command *exec.Cmd, err error) {
+	c.flushPendingStreamsFor(command)
 	c.mu.Lock()
 	if c.command != command || !c.status.Running {
 		c.mu.Unlock()
@@ -427,6 +449,9 @@ func (c *Client) handleMessage(message wireMessage) {
 	}
 	data := decodeJSON(message.Params)
 	if len(message.ID) > 0 {
+		// Approval/user-input requests are a barrier for streamed text. Flush the
+		// visible prefix before showing the request so the timeline stays ordered.
+		c.flushPendingStreams()
 		requestKey := string(message.ID)
 		if !isSupportedServerRequest(message.Method) {
 			_ = c.write(map[string]any{
@@ -448,53 +473,205 @@ func (c *Client) handleMessage(message wireMessage) {
 		c.emit(Event{Type: "request", Method: message.Method, RequestKey: requestKey, Data: data})
 		return
 	}
-	data = c.decorateStreamNotification(message.Method, data)
+	if c.queueStreamNotification(message.Method, data) {
+		return
+	}
+	// Structured notifications (item/turn completion, status, usage, etc.) are
+	// barriers. Do not let a buffered text batch appear after its terminal row.
+	c.flushPendingStreams()
 	c.cleanupStreamNotification(message.Method, data)
 	c.emit(Event{Type: "notification", Method: message.Method, Data: data})
 }
 
-// decorateStreamNotification adds a cumulative snapshot to true delta events.
-// The Wails event processor fans each event out through a separate goroutine;
-// sequence numbers therefore need to travel with the payload rather than rely
-// on arrival order in the WebView.
-func (c *Client) decorateStreamNotification(method string, value any) any {
+// queueStreamNotification accumulates a stream delta and emits a bounded,
+// cumulative snapshot at a modest cadence. Wails creates a goroutine and a
+// synchronous WebView call for every Event.Emit; forwarding every token can
+// therefore exhaust memory on slower machines. The sequence/snapshot pair is
+// retained so the frontend remains safe if Wails still delivers two batches out
+// of order.
+func (c *Client) queueStreamNotification(method string, value any) bool {
 	field := streamFieldForMethod(method)
 	if field == "" {
-		return value
+		return false
 	}
 	payload, ok := value.(map[string]any)
 	if !ok {
-		return value
+		return false
 	}
 	threadID := stringValue(payload["threadId"])
 	itemID := stringValue(payload["itemId"])
 	turnID := stringValue(payload["turnId"])
 	delta := stringValue(payload["delta"])
-	if threadID == "" || itemID == "" || delta == "" {
-		return value
+	if threadID == "" || itemID == "" {
+		return false
+	}
+	// Keep empty/snapshot-only variants on the legacy path. Some older app-server
+	// builds put the complete text in `text` without a `delta`; forwarding it
+	// unchanged preserves that compatibility behavior.
+	if delta == "" {
+		return false
 	}
 	key := threadID + "\x00" + turnID + "\x00" + itemID + "\x00" + field
+	now := time.Now()
+	var events []Event
 	c.mu.Lock()
 	state := c.streamStates[key]
 	state.sequence++
-	if len(state.text) < maxStreamSnapshotBytes {
-		remaining := maxStreamSnapshotBytes - len(state.text)
-		if len(delta) > remaining {
-			delta = utf8Prefix(delta, remaining)
-		}
-		state.text += delta
+	if state.pendingOrder == 0 {
+		c.streamOrder++
+		state.pendingOrder = c.streamOrder
 	}
-	sequence := state.sequence
-	snapshot := state.text
+	accepted := boundedUTF8Bytes(delta, maxStreamSnapshotBytes-len(state.text))
+	if len(accepted) > 0 {
+		state.text = append(state.text, accepted...)
+		pending := boundedUTF8Bytes(string(accepted), maxStreamPendingBytes-len(state.pending))
+		state.pending = append(state.pending, pending...)
+	}
+	state.method = method
+	// decodeJSON creates a fresh map for each notification and the read loop is
+	// the only caller that can still observe it. Retain it until the coalesced
+	// flush instead of cloning a metadata map for every token.
+	state.payload = payload
+	shouldFlush := len(state.pending) >= streamFlushBytes
+	if !shouldFlush && !state.lastFlush.IsZero() {
+		shouldFlush = now.Sub(state.lastFlush) >= streamFlushInterval
+	}
+	if !shouldFlush && state.lastFlush.IsZero() {
+		// Deliver the first visible chunk immediately; subsequent chunks are
+		// coalesced by the interval/byte thresholds above.
+		shouldFlush = true
+	}
 	c.streamStates[key] = state
+	if shouldFlush {
+		events = c.takePendingStreamsLocked(now, []string{key})
+	} else {
+		c.scheduleStreamFlushLocked(streamFlushInterval - now.Sub(state.lastFlush))
+	}
 	c.mu.Unlock()
+	for _, event := range events {
+		c.emit(event)
+	}
+	return true
+}
 
-	// decodeJSON returns a fresh map for each notification, so adding metadata
-	// in place cannot mutate a caller-owned payload.
-	payload["streamSequence"] = sequence
-	payload["streamText"] = snapshot
-	payload["streamMode"] = "replace"
-	return payload
+func (c *Client) flushPendingStreams() {
+	c.mu.Lock()
+	c.stopStreamFlushTimerLocked()
+	events := c.takePendingStreamsLocked(time.Now(), nil)
+	c.mu.Unlock()
+	for _, event := range events {
+		c.emit(event)
+	}
+}
+
+func (c *Client) flushPendingStreamsFor(command *exec.Cmd) {
+	c.mu.Lock()
+	if command != nil && c.command != command {
+		c.mu.Unlock()
+		return
+	}
+	c.stopStreamFlushTimerLocked()
+	events := c.takePendingStreamsLocked(time.Now(), nil)
+	c.mu.Unlock()
+	for _, event := range events {
+		c.emit(event)
+	}
+}
+
+func (c *Client) scheduleStreamFlushLocked(delay time.Duration) {
+	if c.streamFlushTimer != nil {
+		return
+	}
+	if delay <= 0 {
+		delay = streamFlushInterval
+	}
+	c.streamFlushTimer = time.AfterFunc(delay, func() {
+		c.mu.Lock()
+		c.streamFlushTimer = nil
+		events := c.takePendingStreamsLocked(time.Now(), nil)
+		c.mu.Unlock()
+		for _, event := range events {
+			c.emit(event)
+		}
+	})
+}
+
+func (c *Client) stopStreamFlushTimerLocked() {
+	if c.streamFlushTimer == nil {
+		return
+	}
+	c.streamFlushTimer.Stop()
+	c.streamFlushTimer = nil
+}
+
+// takePendingStreamsLocked snapshots pending stream state in source order. The
+// caller must hold c.mu; returned payloads are detached before the lock is
+// released because Wails serializes them asynchronously.
+func (c *Client) takePendingStreamsLocked(now time.Time, keys []string) []Event {
+	if len(c.streamStates) == 0 {
+		return nil
+	}
+	if keys == nil {
+		keys = make([]string, 0, len(c.streamStates))
+		for key, state := range c.streamStates {
+			if len(state.pending) > 0 {
+				keys = append(keys, key)
+			}
+		}
+	} else {
+		filtered := keys[:0]
+		for _, key := range keys {
+			if state, ok := c.streamStates[key]; ok && len(state.pending) > 0 {
+				filtered = append(filtered, key)
+			}
+		}
+		keys = filtered
+	}
+	sort.SliceStable(keys, func(left, right int) bool {
+		return c.streamStates[keys[left]].pendingOrder < c.streamStates[keys[right]].pendingOrder
+	})
+	events := make([]Event, 0, len(keys))
+	for _, key := range keys {
+		state, ok := c.streamStates[key]
+		if !ok || len(state.pending) == 0 {
+			continue
+		}
+		payload := cloneStreamPayload(state.payload)
+		payload["delta"] = string(state.pending)
+		payload["streamSequence"] = state.sequence
+		payload["streamText"] = string(append([]byte(nil), state.text...))
+		payload["streamMode"] = "replace"
+		events = append(events, Event{Type: "notification", Method: state.method, Data: payload})
+		state.pending = nil
+		state.pendingOrder = 0
+		state.lastFlush = now
+		c.streamStates[key] = state
+	}
+	return events
+}
+
+func cloneStreamPayload(payload map[string]any) map[string]any {
+	clone := make(map[string]any, len(payload)+3)
+	for key, value := range payload {
+		switch key {
+		case "delta", "text", "streamSequence", "streamText", "streamMode":
+			// These fields are rebuilt from the bounded stream state below.
+			continue
+		default:
+			clone[key] = value
+		}
+	}
+	return clone
+}
+
+func boundedUTF8Bytes(value string, maxBytes int) []byte {
+	if maxBytes <= 0 || value == "" {
+		return nil
+	}
+	if len(value) <= maxBytes {
+		return []byte(value)
+	}
+	return []byte(utf8Prefix(value, maxBytes))
 }
 
 func utf8Prefix(value string, maxBytes int) string {
@@ -600,6 +777,10 @@ func isSupportedServerRequest(method string) bool {
 
 func (c *Client) waitLoop(command *exec.Cmd, done chan struct{}) {
 	err := command.Wait()
+	// The process can exit immediately after its final delta. Flush that last
+	// bounded batch before clearing the transport state so no visible suffix is
+	// lost when the terminal notification is absent or delayed.
+	c.flushPendingStreamsFor(command)
 
 	c.mu.Lock()
 	if c.command != command {
@@ -613,6 +794,9 @@ func (c *Client) waitLoop(command *exec.Cmd, done chan struct{}) {
 	transportErr := c.transportErr
 	c.transportErr = nil
 	c.processCleanup = nil
+	c.stopStreamFlushTimerLocked()
+	c.streamStates = make(map[string]streamState)
+	c.streamOrder = 0
 	c.command = nil
 	c.stdin = nil
 	c.done = nil

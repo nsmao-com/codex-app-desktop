@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.2: queued goal commands, actionable WSL recovery, and safer MCP/Skill settings.</sub></p>
+<p align="center"><sub>v1.5.3: queued goal commands, actionable WSL recovery, safer MCP/Skill settings, and smoother streaming on low-end PCs.</sub></p>
 
 ## Why Nice Codex
 

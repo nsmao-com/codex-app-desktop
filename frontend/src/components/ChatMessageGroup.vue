@@ -40,7 +40,7 @@ import { useAppStore } from '@/stores'
 import type { TimelineItem, TurnMetrics } from '@/types/codex'
 import { extractFileDiff, parseUnifiedDiff } from '@/utils/diff'
 import { formatToolPayload, renderToolPayloadHTML } from '@/utils/formatPayload'
-import { renderMarkdown, extractCandidateFilePaths } from '@/utils/markdown'
+import { renderMarkdown, renderMarkdownLite, extractCandidateFilePaths } from '@/utils/markdown'
 import { notify } from '@/utils/notify'
 import { compactDisplayPath, fullDisplayPath } from '@/utils/workspacePath'
 
@@ -88,6 +88,11 @@ function markdownHTML(source: string, _item?: { id?: string; status?: string } |
     t('timeline.copyMessage'),
     t('timeline.showMoreCode'),
   )
+}
+
+// Keep the live tail cheap; the full GFM renderer runs once the turn settles.
+function streamingHTML(source: string): string {
+  return renderMarkdownLite(source)
 }
 
 const turnId = computed(() => props.items[0]?.turnId ?? '')
@@ -1344,7 +1349,7 @@ function diffStats(diff: string): { add: number; del: number } {
               <div
                 class="streaming-markdown-caret prose max-w-none prose-headings:mb-2.5 prose-headings:mt-4 prose-headings:text-[1.05em] prose-headings:font-semibold prose-headings:tracking-tight prose-p:my-2.5 prose-p:leading-7 prose-li:my-1 prose-ul:my-2.5 prose-ol:my-2.5 prose-pre:my-3 prose-pre:rounded-xl prose-code:rounded-md prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.86em] prose-code:before:content-none prose-code:after:content-none prose-a:font-medium prose-strong:font-semibold"
                 @click="onMarkdownClick"
-                v-html="markdownHTML(plainStreamText(block.item), block.item)"
+                v-html="streamingHTML(plainStreamText(block.item))"
               />
             </template>
             <div
