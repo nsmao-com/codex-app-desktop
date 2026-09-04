@@ -28,6 +28,7 @@ import {
   RotateCcw,
   Search,
   Shield,
+  Target,
   X,
   Zap,
 } from '@lucide/vue'
@@ -107,8 +108,10 @@ const wslStatusLabel = computed(() => {
 
 const props = defineProps<{
   draftKey: string
+  focusEpoch?: number
   sendPending: boolean
 }>()
+type ComposerMode = 'message' | 'goal'
 type EditableQueuedMessage = {
   id: string
   kind?: 'message' | 'goal'
@@ -129,10 +132,12 @@ type ComposerSubmission = {
 }
 const modelValue = defineModel<string>({ required: true })
 const attachedImages = defineModel<string[]>('images', { required: true })
+const composerMode = defineModel<ComposerMode>('mode', { default: 'message' })
 const emit = defineEmits<{
   sent: [payload: { draftKey: string }]
   'send-pending-change': [payload: { requestId: string; draftKey: string; pending: boolean }]
   'consume-draft': [payload: { draftKey: string }]
+  'consume-goal-draft': [payload: { draftKey: string }]
   'restore-draft': [payload: { draftKey: string; text: string; images: string[] }]
   'append-draft-images': [payload: { draftKey: string; images: string[] }]
 }>()
@@ -153,9 +158,16 @@ const sentHistorySnapshot = shallowRef<string[]>([])
 const sentHistoryDraft = shallowRef('')
 const attachingImageTasks = shallowRef(0)
 const sendAdmissionPendingByDraft = shallowRef<Record<string, boolean>>({})
+const goalSubmissionPendingByDraft = shallowRef<Record<string, boolean>>({})
 const sendAdmissionPending = computed(() =>
   props.sendPending || Boolean(sendAdmissionPendingByDraft.value[props.draftKey]),
 )
+const goalSubmissionPending = computed(() => Boolean(goalSubmissionPendingByDraft.value[props.draftKey]))
+const isGoalComposer = computed(() => composerMode.value === 'goal')
+const GOAL_MAX_LENGTH = 4_000
+const goalDraftLength = computed(() => modelValue.value.trim().length)
+const goalDraftTooLong = computed(() => isGoalComposer.value && goalDraftLength.value > GOAL_MAX_LENGTH)
+const goalComposerHelpId = computed(() => `goal-composer-help-${(paneId.value || 'primary').replace(/[^a-z0-9_-]/gi, '-')}`)
 const effortPopoverOpen = shallowRef(false)
 const effortPreviewIndex = shallowRef(-1)
 const effortDragging = shallowRef(false)
@@ -243,8 +255,68 @@ function runUsageCommand(range?: UsageCommandRange): void {
   window.dispatchEvent(new CustomEvent('nice-codex:open-usage', { detail: { range } }))
 }
 
-async function runGoalCommand(argument = ''): Promise<void> {
-  await codexStore.runThreadGoalCommand(composerSessionId.value, argument)
+async function runGoalCommand(argument = '') {
+  return await codexStore.runThreadGoalCommand(composerSessionId.value, argument)
+}
+
+function enterGoalComposer(prefillExisting = true): void {
+  const sessionId = composerSessionId.value
+  if (!sessionId) {
+    modelValue.value = ''
+    notify('warning', t('slash.goalNeedThread'), t('slash.goalNeedThreadHint'))
+    return
+  }
+  const existingGoal = prefillExisting ? codexStore.goalForThread(sessionId) : ''
+  modelValue.value = ''
+  composerMode.value = 'goal'
+  dragDepth.value = 0
+  resetSentHistoryNavigation()
+  void nextTick(() => {
+    if (!modelValue.value.trim() && existingGoal) modelValue.value = existingGoal
+    focusComposerInput()
+    resize()
+  })
+}
+
+function exitGoalComposer(): void {
+  composerMode.value = 'message'
+  resetSentHistoryNavigation()
+  focusComposerInput()
+}
+
+async function submitGoal(): Promise<void> {
+  const draftKey = props.draftKey
+  if (goalSubmissionPending.value) return
+  const goal = modelValue.value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+  if (!goal) {
+    notify('warning', t('slash.goalTitle'), t('slash.goalInlineRequired'))
+    return
+  }
+  if (goal.length > GOAL_MAX_LENGTH) {
+    notify('warning', t('slash.goalTitle'), t('slash.goalTooLong'))
+    return
+  }
+  const sessionId = composerSessionId.value
+  if (!sessionId) {
+    notify('warning', t('slash.goalNeedThread'), t('slash.goalNeedThreadHint'))
+    return
+  }
+
+  goalSubmissionPendingByDraft.value = {
+    ...goalSubmissionPendingByDraft.value,
+    [draftKey]: true,
+  }
+  try {
+    const action = codexStore.goalForThread(sessionId) ? 'edit' : 'set'
+    const result = await codexStore.runThreadGoalCommand(sessionId, `${action} ${goal}`)
+    if (result === 'completed' || result === 'queued') {
+      emit('consume-goal-draft', { draftKey })
+    }
+  } finally {
+    const nextPending = { ...goalSubmissionPendingByDraft.value }
+    delete nextPending[draftKey]
+    goalSubmissionPendingByDraft.value = nextPending
+  }
 }
 
 async function runAddCommand(): Promise<void> {
@@ -371,7 +443,7 @@ const slashCommands = computed<SlashCommand[]>(() => {
         id: 'goal',
         label: '/goal',
         description: t('slash.goal'),
-        run: () => runGoalCommand(),
+        run: () => enterGoalComposer(),
       },
     ]
   }
@@ -440,7 +512,7 @@ const slashCommands = computed<SlashCommand[]>(() => {
     id: 'goal',
     label: '/goal',
     description: t('slash.goal'),
-    run: () => runGoalCommand(),
+    run: () => enterGoalComposer(),
   },
   {
     id: 'memories',
@@ -462,7 +534,7 @@ const slashQuery = computed(() => {
   if (!text.startsWith('/') || text.includes('\n')) return ''
   return text.slice(1).split(/\s+/, 1)[0].toLocaleLowerCase()
 })
-const slashOpen = computed(() => modelValue.value.startsWith('/') && !modelValue.value.includes('\n'))
+const slashOpen = computed(() => !isGoalComposer.value && modelValue.value.startsWith('/') && !modelValue.value.includes('\n'))
 const filteredSlashCommands = computed(() => {
   const query = slashQuery.value
   if (!query) return slashCommands.value
@@ -480,7 +552,7 @@ const skillQuery = computed(() => {
   const match = text.match(/(?:^|\s)\$([^\s]*)$/)
   return match ? (match[1] || '').toLocaleLowerCase() : ''
 })
-const skillOpen = computed(() => /(?:^|\s)\$[^\s]*$/.test(modelValue.value) && !modelValue.value.includes('\n'))
+const skillOpen = computed(() => !isGoalComposer.value && /(?:^|\s)\$[^\s]*$/.test(modelValue.value) && !modelValue.value.includes('\n'))
 const skillOptions = computed(() => {
   const skills = capabilitiesStore.skills.filter((skill) => skill.enabled && skill.name)
   const query = skillQuery.value
@@ -504,7 +576,7 @@ const pluginQuery = computed(() => {
   const match = text.match(/(?:^|\s)@([^\s]*)$/)
   return match ? (match[1] || '').toLocaleLowerCase() : ''
 })
-const pluginOpen = computed(() => /(?:^|\s)@[^\s]*$/.test(modelValue.value) && !modelValue.value.includes('\n') && !slashOpen.value && !skillOpen.value)
+const pluginOpen = computed(() => !isGoalComposer.value && /(?:^|\s)@[^\s]*$/.test(modelValue.value) && !modelValue.value.includes('\n') && !slashOpen.value && !skillOpen.value)
 const pluginOptions = computed(() => {
   const plugins = capabilitiesStore.plugins.filter((plugin) => plugin.installed && plugin.name)
   const query = pluginQuery.value
@@ -909,6 +981,7 @@ const canSendDuringWorkspaceSwitch = computed(() => Boolean(
  * store has a stable live owner; every uncertain state remains queue-first.
  */
 const canSend = computed(() => {
+  if (isGoalComposer.value) return false
   const hasContent = Boolean(modelValue.value.trim()) || attachedImages.value.length > 0
   if (sendAdmissionPending.value) return false
   if (attachingImages.value) return false
@@ -924,6 +997,14 @@ const canSend = computed(() => {
   }
   return hasContent && codexStore.isRuntimeReady(paneRuntime.value) && !codexStore.creatingThread
 })
+const canSubmitGoal = computed(() => Boolean(
+  isGoalComposer.value
+  && composerSessionId.value
+  && goalDraftLength.value > 0
+  && !goalDraftTooLong.value
+  && !goalSubmissionPending.value
+  && codexStore.isRuntimeReady(paneRuntime.value),
+))
 
 function canMoveQueued(index: number, direction: 'up' | 'down'): boolean {
   const messages = activeQueuedMessages.value
@@ -984,6 +1065,12 @@ function beginQueuedEdit(message: EditableQueuedMessage): void {
   })
 }
 
+function queuedGoalCommandIsComplete(value: string): boolean {
+  const match = value.match(/^\/goal(?:\s+([\s\S]*))?$/i)
+  const argument = match?.[1]?.trim() || ''
+  return Boolean(argument) && !['set', 'edit', 'budget'].includes(argument.toLocaleLowerCase())
+}
+
 function saveQueuedEdit(message: EditableQueuedMessage): void {
   if (message.id !== editingQueuedId.value || message.state === 'sending') {
     cancelQueuedEdit()
@@ -996,6 +1083,10 @@ function saveQueuedEdit(message: EditableQueuedMessage): void {
   }
   if (message.kind === 'goal' && !/^\/goal(?:\s|$)/i.test(nextText)) {
     queuedEditError.value = t('chat.queuedGoalEditFormat')
+    return
+  }
+  if (message.kind === 'goal' && !queuedGoalCommandIsComplete(nextText)) {
+    queuedEditError.value = t('chat.queuedGoalEditIncomplete')
     return
   }
   if (!updateQueued(message.id, nextText)) {
@@ -1043,6 +1134,11 @@ const willQueueOnSend = computed(() => {
     return loadingActiveSession || running || activeQueuedMessages.value.some((item) => item.state === 'sending') || showQueueStrip.value
   }
   return Boolean(sessionId && codexStore.threadHasActiveWork(sessionId)) || showQueueStrip.value
+})
+const willQueueGoal = computed(() => {
+  const sessionId = composerSessionId.value
+  return Boolean(sessionId && codexStore.threadIsBusy(sessionId))
+    || activeQueuedMessages.value.some((item) => item.state === 'queued' || item.state === 'sending')
 })
 const activeRuntimeTurnRunning = computed(() => {
   const sessionId = composerSessionId.value
@@ -1110,11 +1206,19 @@ const sendButtonLabel = computed(() => {
   if (willQueueOnSend.value) return t('chat.queueSend')
   return t('chat.send')
 })
+const goalActionLabel = computed(() => {
+  if (goalSubmissionPending.value) return t('common.saving')
+  return willQueueGoal.value ? t('slash.goalComposerQueue') : t('slash.goalComposerSave')
+})
+const goalActionHint = computed(() => willQueueGoal.value
+  ? t('slash.goalComposerQueueHint')
+  : t('slash.goalComposerSaveHint'))
 const primaryActionLabel = computed(() => {
   if (!activeRuntimeTurnRunning.value) return sendButtonLabel.value
   return stopDisabled.value ? t('chat.stopping') : t('chat.stop')
 })
 const composerPlaceholder = computed(() => {
+  if (isGoalComposer.value) return t('slash.goalComposerPlaceholder')
   if (isGrokMode.value && willQueueOnSend.value) return t('chat.queuePlaceholder')
   if (isGrokMode.value) return t('chat.grokPlaceholder')
   if (isClaudeMode.value && willQueueOnSend.value) return t('chat.queuePlaceholder')
@@ -1126,6 +1230,11 @@ const composerPlaceholder = computed(() => {
 })
 const composerShortcutHint = computed(() => {
   const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl'
+  if (isGoalComposer.value) {
+    return appStore.settings.sendWithModifier
+      ? t('slash.goalComposerShortcutModifier', { key: mod })
+      : t('slash.goalComposerShortcut')
+  }
   if (appStore.settings.sendWithModifier) {
     return t('chat.shortcutModifier', { key: mod })
   }
@@ -1138,6 +1247,16 @@ watch(modelValue, () => {
 }, { flush: 'post' })
 watch(composerExpanded, resize, { flush: 'post' })
 watch(() => props.draftKey, resetSentHistoryNavigation, { flush: 'sync' })
+watch(() => props.focusEpoch, focusComposerInput, { flush: 'post' })
+watch(isGoalComposer, (goalMode) => {
+  if (goalMode) {
+    addMenuOpen.value = false
+    effortPopoverOpen.value = false
+    dragDepth.value = 0
+    resetSentHistoryNavigation()
+  }
+  resize()
+}, { flush: 'post' })
 watch(
   [selectableModels, displayModel],
   () => {
@@ -1188,7 +1307,8 @@ function resetSentHistoryNavigation(): void {
 function canNavigateSentHistory(event: KeyboardEvent, direction: -1 | 1): event is KeyboardEvent & { target: HTMLTextAreaElement } {
   const target = event.target
   if (
-    !(target instanceof HTMLTextAreaElement)
+    isGoalComposer.value
+    || !(target instanceof HTMLTextAreaElement)
     || composing.value
     || event.isComposing
     || event.altKey
@@ -1253,6 +1373,23 @@ function navigateSentHistory(event: KeyboardEvent, direction: -1 | 1): boolean {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  if (isGoalComposer.value) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      exitGoalComposer()
+      return
+    }
+    if (event.key !== 'Enter' || composing.value || event.isComposing) return
+    const requireModifier = Boolean(appStore.settings.sendWithModifier)
+    if (requireModifier) {
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey) return
+    } else if (event.shiftKey) {
+      return
+    }
+    event.preventDefault()
+    void submitGoal()
+    return
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'u') {
     event.preventDefault()
     void selectComposerFiles()
@@ -1384,7 +1521,13 @@ async function runSlashCommand(command?: SlashCommand): Promise<void> {
   const args = modelValue.value.trim().split(/\s+/).slice(1)
   modelValue.value = ''
   if (command.id === 'goal') {
-    await runGoalCommand(args.join(' '))
+    const argument = args.join(' ')
+    const lower = argument.toLocaleLowerCase()
+    if (!argument || lower === 'set' || lower === 'edit') {
+      enterGoalComposer(lower !== 'set')
+      return
+    }
+    await runGoalCommand(argument)
     return
   }
   if (command.id === 'usage' && args.length) {
@@ -2027,6 +2170,7 @@ async function attachImageFiles(files: File[]): Promise<void> {
 }
 
 function onPaste(event: ClipboardEvent): void {
+  if (isGoalComposer.value) return
   const data = event.clipboardData
   if (!data) return
   const fromItems: File[] = []
@@ -2053,6 +2197,7 @@ function onPaste(event: ClipboardEvent): void {
 }
 
 function onDragEnter(event: DragEvent): void {
+  if (isGoalComposer.value) return
   if (!event.dataTransfer) return
   const hasFiles = Array.from(event.dataTransfer.types || []).includes('Files')
   if (!hasFiles) return
@@ -2061,6 +2206,7 @@ function onDragEnter(event: DragEvent): void {
 }
 
 function onDragOver(event: DragEvent): void {
+  if (isGoalComposer.value) return
   if (!event.dataTransfer) return
   const hasFiles = Array.from(event.dataTransfer.types || []).includes('Files')
   if (!hasFiles) return
@@ -2069,6 +2215,7 @@ function onDragOver(event: DragEvent): void {
 }
 
 function onDragLeave(event: DragEvent): void {
+  if (isGoalComposer.value) return
   if (!event.dataTransfer) return
   const hasFiles = Array.from(event.dataTransfer.types || []).includes('Files')
   if (!hasFiles) return
@@ -2076,6 +2223,7 @@ function onDragLeave(event: DragEvent): void {
 }
 
 function onDrop(event: DragEvent): void {
+  if (isGoalComposer.value) return
   dragDepth.value = 0
   const files = collectImageFiles(event.dataTransfer?.files)
   if (!files.length) return
@@ -2287,7 +2435,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       @dragleave="onDragLeave"
       @drop="onDrop"
     >
-      <div class="composer-context-row flex min-w-0 items-center gap-1.5 overflow-x-auto px-0.5 pb-0.5">
+      <div v-if="!isGoalComposer" class="composer-context-row flex min-w-0 items-center gap-1.5 overflow-x-auto px-0.5 pb-0.5">
         <DropdownMenu>
           <DropdownMenuTrigger as-child>
             <button
@@ -2463,19 +2611,21 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       <div
         class="composer-input-frame relative flex flex-col gap-1 rounded-2xl border bg-card px-3 pb-2 pt-2 shadow-sm transition-[border-color,box-shadow,background-color] duration-200"
         :class="[
-          isDraggingFiles
+          isGoalComposer
+            ? 'border-primary/35 bg-primary/[0.025] shadow-primary/5'
+            : isDraggingFiles
             ? 'border-primary border-dashed bg-primary/5'
             : ((activeRuntimeTurnRunning || activeRuntimeSending) ? 'is-active border-foreground/20' : 'border-border/90'),
         ]"
       >
       <div
-        v-if="isDraggingFiles"
+        v-if="!isGoalComposer && isDraggingFiles"
         class="pointer-events-none absolute inset-0 z-10 grid place-items-center rounded-2xl bg-primary/8 text-xs font-medium text-primary"
       >
         {{ t('chat.dropImages') }}
       </div>
 
-      <div class="absolute right-2 top-2 z-[2]">
+      <div class="absolute top-2 z-[2]" :class="isGoalComposer ? 'right-10' : 'right-2'">
         <SimpleTooltip :content="composerExpanded ? t('chat.collapseComposer') : t('chat.expandComposer')">
           <Button
             type="button"
@@ -2492,7 +2642,29 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         </SimpleTooltip>
       </div>
 
-      <div v-if="attachedImages.length" class="flex flex-wrap gap-1.5 px-1 pr-8">
+      <div v-if="isGoalComposer" class="flex items-start gap-2 px-1 pb-1 pr-16">
+        <span class="mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+          <Target :size="15" aria-hidden="true" />
+        </span>
+        <div class="min-w-0 flex-1">
+          <p class="text-[12px] font-semibold text-foreground">{{ t('slash.goalComposerTitle') }}</p>
+          <p class="mt-0.5 text-[10px] leading-4 text-muted-foreground">{{ t('slash.goalComposerHint') }}</p>
+        </div>
+        <SimpleTooltip :content="t('slash.goalComposerExit')">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            class="absolute right-2 top-2 size-6 text-muted-foreground"
+            :aria-label="t('slash.goalComposerExit')"
+            @click="exitGoalComposer"
+          >
+            <X :size="13" />
+          </Button>
+        </SimpleTooltip>
+      </div>
+
+      <div v-if="!isGoalComposer && attachedImages.length" class="flex flex-wrap gap-1.5 px-1 pr-8">
         <div
           v-for="path in attachedImages"
           :key="path"
@@ -2795,18 +2967,36 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       <Textarea
         ref="composerInput"
         v-model="modelValue"
-        rows="1"
+        :rows="isGoalComposer ? 4 : 1"
         :placeholder="composerPlaceholder"
-        :aria-description="composerShortcutHint"
-        class="min-h-12 resize-none border-0 bg-transparent px-1.5 py-2 pr-9 text-[15px] leading-6 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
-        :class="composerExpanded ? 'overflow-y-auto' : 'overflow-y-hidden'"
+        :aria-describedby="isGoalComposer ? goalComposerHelpId : undefined"
+        :aria-description="isGoalComposer ? undefined : composerShortcutHint"
+        class="resize-none border-0 bg-transparent px-1.5 py-2 text-[15px] leading-6 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
+        :class="[
+          isGoalComposer ? 'min-h-28 pr-1' : 'min-h-12 pr-9',
+          composerExpanded ? 'overflow-y-auto' : 'overflow-y-hidden',
+        ]"
         @compositionend="composing = false"
         @compositionstart="composing = true"
         @keydown="onKeydown"
         @paste="onPaste"
         @pointerdown="resetSentHistoryNavigation"
       />
+      <div
+        v-if="isGoalComposer"
+        :id="goalComposerHelpId"
+        class="flex items-start justify-between gap-3 px-1.5 pb-0.5 text-[10px] leading-4"
+      >
+        <span :class="goalDraftTooLong ? 'text-destructive' : 'text-muted-foreground'">
+          {{ goalDraftTooLong ? t('slash.goalTooLong') : composerShortcutHint }}
+        </span>
+        <span
+          class="shrink-0 tabular-nums"
+          :class="goalDraftTooLong ? 'font-medium text-destructive' : 'text-muted-foreground'"
+        >{{ goalDraftLength.toLocaleString() }} / {{ GOAL_MAX_LENGTH.toLocaleString() }}</span>
+      </div>
       <span
+        v-if="!isGoalComposer"
         class="pointer-events-none absolute bottom-3 right-4 grid size-5 place-items-center text-muted-foreground/55"
         aria-hidden="true"
       >
@@ -2814,7 +3004,35 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       </span>
       </div>
 
-      <div class="composer-toolbar flex min-h-8 flex-wrap items-center justify-between gap-x-2 gap-y-1 px-1">
+      <div v-if="isGoalComposer" class="flex min-h-9 flex-wrap items-center justify-between gap-2 px-1">
+        <span class="min-w-0 flex-1 text-[10px] leading-4 text-muted-foreground">{{ goalActionHint }}</span>
+        <div class="ml-auto flex shrink-0 items-center gap-1.5">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            class="h-8 px-3 text-[11px] text-muted-foreground"
+            :disabled="goalSubmissionPending"
+            @click="exitGoalComposer"
+          >
+            {{ t('slash.goalComposerExit') }}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            class="h-8 gap-1.5 px-3 text-[11px]"
+            :disabled="!canSubmitGoal"
+            :aria-busy="goalSubmissionPending"
+            @click="submitGoal"
+          >
+            <LoaderCircle v-if="goalSubmissionPending" :size="13" class="animate-spin" />
+            <Target v-else :size="13" />
+            {{ goalActionLabel }}
+          </Button>
+        </div>
+      </div>
+
+      <div v-else class="composer-toolbar flex min-h-8 flex-wrap items-center justify-between gap-x-2 gap-y-1 px-1">
         <div class="flex min-w-0 flex-1 items-center gap-0.5">
           <DropdownMenu :open="addMenuOpen" @update:open="onAddMenuOpenChange">
             <DropdownMenuTrigger as-child>

@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.4：Antigravity CLI 兼容、原生子代理活动、目标命令队列、可操作的 WSL 修复指引，以及低配电脑更流畅的流式输出。</sub></p>
+<p align="center"><sub>v1.5.5：输入区内多行目标编辑、目标更新安全排队且不再延迟弹窗，并分离普通消息与目标草稿。</sub></p>
 
 ## 为什么是 Nice Codex
 

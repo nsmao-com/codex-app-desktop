@@ -1977,6 +1977,12 @@ export const useCodexStore = defineStore('codex', () => {
     return true
   }
 
+  function goalCommandCanQueue(argument: string): boolean {
+    const raw = argument.trim()
+    if (!raw) return false
+    return !['show', 'status', 'view', 'set', 'edit', 'budget'].includes(raw.toLocaleLowerCase())
+  }
+
   function enqueueGoalCommand(threadID: string, argument: string): boolean {
     const id = resolveThreadID(threadID) || threadID.trim()
     const thread = findThreadSummary(id)
@@ -1985,6 +1991,7 @@ export const useCodexStore = defineStore('codex', () => {
       notify('warning', translate('slash.goalNeedThread'), translate('slash.goalNeedThreadHint'))
       return false
     }
+    if (!goalCommandCanQueue(argument)) return false
     const runtime = runtimeIDForThread(id)
     if (!isRuntimeReady(runtime)) {
       notify('warning', translate('notifications.connectionFailed'), translate('app.connecting'))
@@ -1999,7 +2006,7 @@ export const useCodexStore = defineStore('codex', () => {
       || pendingSubmission?.turnId
       || pendingSubmission?.blockerId
       || liveFeedbackTurnID(feedback)
-    const commandText = argument.trim() ? `/goal ${argument.trim()}` : '/goal'
+    const commandText = `/goal ${argument.trim()}`
     const queuedCommand: QueuedMessage = {
       id: `queued-goal-${now}-${sequence}`,
       threadId: id,
@@ -2485,7 +2492,10 @@ export const useCodexStore = defineStore('codex', () => {
     if (!message || message.state === 'sending') return false
     const nextText = text.trim()
     if (!nextText && message.images.length === 0) return false
-    if (message.kind === 'goal' && !/^\/goal(?:\s|$)/i.test(nextText)) return false
+    if (message.kind === 'goal') {
+      const command = nextText.match(/^\/goal(?:\s+([\s\S]*))?$/i)
+      if (!command || !goalCommandCanQueue(command[1] || '')) return false
+    }
     patchQueuedMessage(queueID, messageID, { text: nextText })
     return true
   }
@@ -3922,7 +3932,11 @@ export const useCodexStore = defineStore('codex', () => {
     const queueID = queueThreadKey(id)
     const hasWaitingCommand = (queuedMessagesByThread.value[queueID] ?? [])
       .some((message) => message.state === 'queued' || message.state === 'sending')
-    if (options.queueIfBusy !== false && (threadIsBusy(id) || hasWaitingCommand)) {
+    if (
+      goalCommandCanQueue(argument)
+      && options.queueIfBusy !== false
+      && (threadIsBusy(id) || hasWaitingCommand)
+    ) {
       return enqueueGoalCommand(id, argument) ? 'queued' : 'failed'
     }
     return executeThreadGoalCommand(id, argument)
@@ -3943,14 +3957,6 @@ export const useCodexStore = defineStore('codex', () => {
     const raw = argument.trim()
     const lower = raw.toLocaleLowerCase()
     const currentGoal = thread.goal?.trim() || ''
-    const promptGoal = (defaultValue = '') => dialogStore.prompt({
-      title: defaultValue ? translate('slash.goalEditTitle') : translate('slash.goalPromptTitle'),
-      description: translate('slash.goalPromptHint'),
-      defaultValue,
-      placeholder: translate('slash.goalPlaceholder'),
-      confirmLabel: translate('common.save'),
-      maxlength: 4_000,
-    })
     const saveGoal = async (goal: string, preserveStatus = false) => (
       await setThreadGoal(id, goal, { preserveStatus }) ? 'completed' as const : 'failed' as const
     )
@@ -3967,16 +3973,21 @@ export const useCodexStore = defineStore('codex', () => {
         notify('info', translate('slash.goalCurrentTitle'), `${currentGoal}\n\n${statusLabel} · ${budgetLabel}`)
         return 'completed'
       }
-      const prompted = await promptGoal()
-      if (prompted === null || prompted === undefined) return 'cancelled'
-      return saveGoal(prompted)
+      notify('info', translate('slash.goalCurrentTitle'), `${translate('slash.goalEmpty')}\n${translate('slash.goalInlineRequired')}`)
+      return 'cancelled'
     }
     if (['clear', 'reset', 'off', 'none'].includes(lower)) return saveGoal('')
-    if (lower === 'set' || lower === 'edit' || lower.startsWith('edit ')) {
-      const inline = lower.startsWith('edit ') ? raw.slice(5).trim() : ''
-      const prompted = inline || await promptGoal(lower === 'edit' ? currentGoal : '')
-      if (prompted === null || prompted === undefined) return 'cancelled'
-      return saveGoal(prompted, lower.startsWith('edit'))
+    if (lower === 'set' || lower === 'edit') {
+      notify('warning', translate('slash.goalTitle'), translate('slash.goalInlineRequired'))
+      return 'failed'
+    }
+    if (lower.startsWith('edit ')) {
+      const inline = raw.slice(5).trim()
+      if (!inline) {
+        notify('warning', translate('slash.goalTitle'), translate('slash.goalInlineRequired'))
+        return 'failed'
+      }
+      return saveGoal(inline, true)
     }
     if (lower === 'pause' || lower === 'paused') {
       return await setThreadGoalStatus(id, 'paused') ? 'completed' : 'failed'
@@ -3988,18 +3999,13 @@ export const useCodexStore = defineStore('codex', () => {
       return await setThreadGoalStatus(id, 'complete') ? 'completed' : 'failed'
     }
     if (lower === 'budget' || lower.startsWith('budget ')) {
-      let budgetText = lower === 'budget' ? '' : raw.slice(7).trim()
+      const budgetText = lower === 'budget' ? '' : raw.slice(7).trim()
       if (!budgetText) {
-        const prompted = await dialogStore.prompt({
-          title: translate('slash.goalBudgetTitle'),
-          description: translate('slash.goalBudgetHint'),
-          defaultValue: thread.goalTokenBudget ? String(thread.goalTokenBudget) : '',
-          placeholder: translate('slash.goalBudgetPlaceholder'),
-          confirmLabel: translate('common.save'),
-          maxlength: 12,
-        })
-        if (prompted === null || prompted === undefined) return 'cancelled'
-        budgetText = prompted.trim()
+        const currentBudget = thread.goalTokenBudget && thread.goalTokenBudget > 0
+          ? translate('slash.goalBudgetSaved', { count: thread.goalTokenBudget })
+          : translate('slash.goalBudgetUnlimited')
+        notify('info', translate('slash.goalBudgetTitle'), `${currentBudget}\n${translate('slash.goalBudgetInlineRequired')}`)
+        return 'cancelled'
       }
       if (['off', 'none', 'unlimited', 'clear', '0'].includes(budgetText.toLocaleLowerCase())) {
         return await setThreadGoalBudget(id, null) ? 'completed' : 'failed'

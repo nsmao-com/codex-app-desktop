@@ -73,7 +73,13 @@ const emit = defineEmits<{
 }>()
 
 type ComposerRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
-type ComposerDraft = { text: string; images: string[] }
+type ComposerDraftMode = 'message' | 'goal'
+type ComposerDraft = {
+  text: string
+  goalText: string
+  images: string[]
+  mode: ComposerDraftMode
+}
 type ComposerDraftContext = {
   key: string
   runtime: ComposerRuntime
@@ -85,10 +91,18 @@ const COMPOSER_DRAFTS_STORAGE_KEY = 'nice-codex.composer-drafts.v1'
 
 function loadComposerDrafts(): Record<string, ComposerDraft> {
   try {
-    const value = JSON.parse(localStorage.getItem(COMPOSER_DRAFTS_STORAGE_KEY) || '{}') as Record<string, ComposerDraft>
-    return Object.fromEntries(Object.entries(value).filter(([, draft]) =>
-      draft && typeof draft.text === 'string' && Array.isArray(draft.images),
-    ))
+    const value = JSON.parse(localStorage.getItem(COMPOSER_DRAFTS_STORAGE_KEY) || '{}') as Record<string, unknown>
+    return Object.fromEntries(Object.entries(value).flatMap(([key, raw]) => {
+      if (!raw || typeof raw !== 'object') return []
+      const draft = raw as Partial<ComposerDraft>
+      if (typeof draft.text !== 'string' || !Array.isArray(draft.images)) return []
+      return [[key, {
+        text: draft.text,
+        goalText: typeof draft.goalText === 'string' ? draft.goalText : '',
+        images: draft.images.filter((path): path is string => typeof path === 'string'),
+        mode: draft.mode === 'goal' ? 'goal' : 'message',
+      } satisfies ComposerDraft]]
+    }))
   } catch {
     return {}
   }
@@ -136,13 +150,15 @@ watch(composerDrafts, (drafts) => {
 })
 
 function setComposerDraft(key: string, patch: Partial<ComposerDraft>): void {
-  const current = composerDrafts.value[key] ?? { text: '', images: [] }
+  const current = composerDrafts.value[key] ?? { text: '', goalText: '', images: [], mode: 'message' }
   const nextDraft: ComposerDraft = {
     text: patch.text ?? current.text,
-    images: patch.images ? [...patch.images] : current.images,
+    goalText: patch.goalText ?? current.goalText,
+    images: patch.images !== undefined ? [...patch.images] : current.images,
+    mode: patch.mode ?? current.mode,
   }
   const next = { ...composerDrafts.value }
-  if (!nextDraft.text && !nextDraft.images.length) delete next[key]
+  if (!nextDraft.text && !nextDraft.goalText && !nextDraft.images.length && nextDraft.mode === 'message') delete next[key]
   else next[key] = nextDraft
   composerDrafts.value = next
 }
@@ -180,7 +196,9 @@ function migrateComposerDraft(fromKey: string, toKey: string): void {
   delete next[sourceKey]
   next[targetKey] = {
     text: mergeComposerDraftText(source.text, target?.text || ''),
+    goalText: mergeComposerDraftText(source.goalText, target?.goalText || ''),
     images: [...new Set([...source.images, ...(target?.images ?? [])])],
+    mode: target?.mode ?? source.mode,
   }
   composerDrafts.value = next
 }
@@ -209,9 +227,19 @@ watch(activeComposerContext, (current, previous) => {
   }
 }, { flush: 'sync' })
 
+const draftMode = computed<ComposerDraftMode>({
+  get: () => composerDrafts.value[activeComposerContext.value.key]?.mode ?? 'message',
+  set: (mode) => setComposerDraft(activeComposerContext.value.key, { mode }),
+})
 const draft = computed<string>({
-  get: () => composerDrafts.value[activeComposerContext.value.key]?.text ?? '',
-  set: (text) => setComposerDraft(activeComposerContext.value.key, { text }),
+  get: () => {
+    const current = composerDrafts.value[activeComposerContext.value.key]
+    return draftMode.value === 'goal' ? (current?.goalText ?? '') : (current?.text ?? '')
+  },
+  set: (text) => setComposerDraft(
+    activeComposerContext.value.key,
+    draftMode.value === 'goal' ? { goalText: text } : { text },
+  ),
 })
 const draftImages = computed<string[]>({
   get: () => composerDrafts.value[activeComposerContext.value.key]?.images ?? [],
@@ -241,7 +269,7 @@ function onComposerPendingChange(payload: { requestId: string; draftKey: string;
 
 function restoreComposerDraft(payload: { draftKey: string; text: string; images: string[] }): void {
   const key = resolveDraftKey(payload.draftKey)
-  const current = composerDrafts.value[key] ?? { text: '', images: [] }
+  const current = composerDrafts.value[key] ?? { text: '', goalText: '', images: [], mode: 'message' }
   setComposerDraft(key, {
     text: mergeComposerDraftText(payload.text, current.text),
     images: [...new Set([...current.images, ...payload.images])],
@@ -252,9 +280,13 @@ function consumeComposerDraft(payload: { draftKey: string }): void {
   setComposerDraft(resolveDraftKey(payload.draftKey), { text: '', images: [] })
 }
 
+function consumeGoalDraft(payload: { draftKey: string }): void {
+  setComposerDraft(resolveDraftKey(payload.draftKey), { goalText: '', mode: 'message' })
+}
+
 function appendComposerDraftImages(payload: { draftKey: string; images: string[] }): void {
   const key = resolveDraftKey(payload.draftKey)
-  const current = composerDrafts.value[key] ?? { text: '', images: [] }
+  const current = composerDrafts.value[key] ?? { text: '', goalText: '', images: [], mode: 'message' }
   setComposerDraft(key, {
     images: [...new Set([...current.images, ...payload.images])],
   })
@@ -262,6 +294,7 @@ function appendComposerDraftImages(payload: { draftKey: string; images: string[]
 
 const welcomeEpoch = shallowRef(0)
 const messageSentEpoch = shallowRef(0)
+const composerFocusEpoch = shallowRef(0)
 const paneSessionId = computed(() => {
   if (isArenaPane.value) return boundSessionId.value
   if (isGrokMode.value) return grokStore.activeSessionId
@@ -372,6 +405,7 @@ const changesCount = computed(() => paneWorkspaceIsCurrent.value ? workspaceStor
 const paneWorkspaceSwitching = computed(() => paneIsFocused.value && workspaceStore.switchingWorkspace)
 
 function useSuggestion(prompt: string): void {
+  draftMode.value = 'message'
   draft.value = prompt
 }
 
@@ -597,10 +631,15 @@ function formatGoalDuration(seconds: number): string {
   return remaining ? `${minutes}m ${remaining}s` : `${minutes}m`
 }
 
-async function editSessionGoal(): Promise<void> {
+function editSessionGoal(): void {
   const thread = activeGoalThread.value
   if (!thread?.id) return
-  await codexStore.runThreadGoalCommand(thread.id, 'edit')
+  const currentDraft = composerDrafts.value[activeComposerContext.value.key]
+  setComposerDraft(activeComposerContext.value.key, {
+    goalText: currentDraft?.goalText || thread.goal || '',
+    mode: 'goal',
+  })
+  composerFocusEpoch.value += 1
 }
 
 async function toggleSessionGoal(): Promise<void> {
@@ -612,7 +651,16 @@ async function toggleSessionGoal(): Promise<void> {
 async function editSessionGoalBudget(): Promise<void> {
   const thread = activeGoalThread.value
   if (!thread?.id) return
-  await codexStore.runThreadGoalCommand(thread.id, 'budget')
+  const prompted = await dialogStore.prompt({
+    title: t('slash.goalBudgetTitle'),
+    description: t('slash.goalBudgetHint'),
+    defaultValue: thread.goalTokenBudget ? String(thread.goalTokenBudget) : '',
+    placeholder: t('slash.goalBudgetPlaceholder'),
+    confirmLabel: t('common.save'),
+    maxlength: 12,
+  })
+  if (!prompted?.trim()) return
+  await codexStore.runThreadGoalCommand(thread.id, `budget ${prompted.trim()}`)
 }
 
 async function clearSessionGoal(): Promise<void> {
@@ -922,11 +970,14 @@ function commitFromBar(): void {
     <ComposerPanel
       v-model="draft"
       v-model:images="draftImages"
+      v-model:mode="draftMode"
       :draft-key="activeComposerContext.key"
+      :focus-epoch="composerFocusEpoch"
       :send-pending="composerSendPending"
       @sent="onMessageSent"
       @send-pending-change="onComposerPendingChange"
       @consume-draft="consumeComposerDraft"
+      @consume-goal-draft="consumeGoalDraft"
       @restore-draft="restoreComposerDraft"
       @append-draft-images="appendComposerDraftImages"
     />

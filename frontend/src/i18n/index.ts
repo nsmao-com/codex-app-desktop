@@ -2141,21 +2141,47 @@ Object.assign(messages['en-US'].chat, {
 Object.assign(messages['zh-CN'].slash, {
   goalQueued: '目标命令已加入队列',
   goalQueuedHint: '当前任务结束后会按队列顺序执行，不会打断正在进行的回合。',
+  goalInlineRequired: '请在下方目标编辑器中填写完整目标，或使用 /goal set <目标内容>。',
+  goalBudgetInlineRequired: '请使用目标栏的预算按钮，或输入 /goal budget <Token 数量|unlimited>。',
+  goalComposerTitle: '设置会话目标',
+  goalComposerHint: '在这里完整描述最终要达成的结果；保存后，后续回合会持续参考它。',
+  goalComposerPlaceholder: '描述完整目标、完成标准和重要约束…\n例如：完成登录流程，覆盖异常状态，并确保现有功能不回归。',
+  goalComposerSave: '保存目标',
+  goalComposerQueue: '排队保存',
+  goalComposerExit: '返回消息',
+  goalComposerShortcut: 'Enter 保存 · Shift + Enter 换行 · Esc 返回消息',
+  goalComposerShortcutModifier: '{key} + Enter 保存 · Enter 换行 · Esc 返回消息',
+  goalComposerSaveHint: '保存后立即作为本会话目标生效。',
+  goalComposerQueueHint: '当前任务仍在运行，完整目标会进入队列，任务结束后按顺序保存。',
 })
 Object.assign(messages['en-US'].slash, {
   goalQueued: 'Goal command queued',
   goalQueuedHint: 'It will run in queue order after the current turn finishes, without interrupting active work.',
+  goalInlineRequired: 'Write the complete goal in the goal editor below, or use /goal set <goal text>.',
+  goalBudgetInlineRequired: 'Use the budget button in the goal bar, or enter /goal budget <tokens|unlimited>.',
+  goalComposerTitle: 'Set session goal',
+  goalComposerHint: 'Describe the complete outcome here. Future turns will keep the saved goal in context.',
+  goalComposerPlaceholder: 'Describe the outcome, completion criteria, and important constraints…\ne.g. Finish the login flow, cover failure states, and prevent regressions.',
+  goalComposerSave: 'Save goal',
+  goalComposerQueue: 'Queue goal',
+  goalComposerExit: 'Back to message',
+  goalComposerShortcut: 'Enter to save · Shift + Enter for a new line · Esc to return',
+  goalComposerShortcutModifier: '{key} + Enter to save · Enter for a new line · Esc to return',
+  goalComposerSaveHint: 'The saved goal applies to this conversation immediately.',
+  goalComposerQueueHint: 'A task is running. The complete goal will enter the queue and save in order afterward.',
 })
 Object.assign(messages['zh-CN'].chat, {
   queuedGoalCommand: '目标命令',
   queuedGoalEditHint: '命令必须以 /goal 开头；Ctrl/⌘ + Enter 保存，Esc 取消。',
   queuedGoalEditFormat: '目标命令必须以 /goal 开头。',
+  queuedGoalEditIncomplete: '目标命令不完整，请补充目标内容或具体操作后再保存。',
   queuedGoalFailed: '目标命令未能执行，请按提示修改后重试。',
 })
 Object.assign(messages['en-US'].chat, {
   queuedGoalCommand: 'Goal command',
   queuedGoalEditHint: 'Keep /goal at the start; Ctrl/⌘ + Enter saves and Esc cancels.',
   queuedGoalEditFormat: 'A goal command must start with /goal.',
+  queuedGoalEditIncomplete: 'Complete the goal text or action before saving this queued command.',
   queuedGoalFailed: 'The goal command could not run. Review the message, edit it, and retry.',
 })
 Object.assign(messages['zh-CN'].settings, {

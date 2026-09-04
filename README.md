@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.4: Antigravity CLI compatibility, native sub-agent activity, queued goals, actionable WSL recovery, and smoother streaming on low-end PCs.</sub></p>
+<p align="center"><sub>v1.5.5: an inline multi-line goal editor, queue-safe goal updates without delayed dialogs, and separate message/goal drafts.</sub></p>
 
 ## Why Nice Codex
 
