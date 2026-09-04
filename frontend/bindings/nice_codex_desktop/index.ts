@@ -37,6 +37,7 @@ export type {
     ExternalProviderView,
     ExternalRuntimeCatalog,
     ExternalSessionView,
+    ExternalSkillView,
     ExternalUsageDailyBucket,
     ExternalUsageModelView,
     ExternalUsageSummary,

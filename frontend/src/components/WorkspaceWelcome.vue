@@ -36,8 +36,10 @@ const isClaude = computed(() => isClaudeMode.value)
 const isGemini = computed(() => isGeminiMode.value)
 const isOpenCode = computed(() => isOpenCodeMode.value)
 const isExternal = computed(() => isGemini.value || isOpenCode.value)
-const externalRuntimeName = computed(() => isGemini.value ? 'Gemini CLI' : 'OpenCode')
-const externalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === paneRuntime.value))
+const externalRuntimeName = computed(() => isGemini.value
+  ? appStore.runtimeDisplayName('gemini')
+  : appStore.runtimeDisplayName('opencode'))
+const externalProvider = computed(() => appStore.providerForRuntime(paneRuntime.value))
 const isCowork = computed(() => isCodexMode.value && appStore.settings.workMode === 'cowork')
 const titleText = computed(() => {
   if (isGrok.value) return t('chat.grokTitle')
@@ -63,8 +65,8 @@ const suggestions = computed(() => {
   }
   if (isGemini.value) {
     return [
-      { icon: FileSearch, title: t('chat.geminiTraceBug'), prompt: t('chat.geminiTraceBugPrompt') },
-      { icon: Braces, title: t('chat.geminiUnderstandCodebase'), prompt: t('chat.geminiUnderstandCodebasePrompt') },
+      { icon: FileSearch, title: t('chat.geminiTraceBug'), prompt: t('chat.geminiTraceBugPrompt', { runtime: externalRuntimeName.value }) },
+      { icon: Braces, title: t('chat.geminiUnderstandCodebase'), prompt: t('chat.geminiUnderstandCodebasePrompt', { runtime: externalRuntimeName.value }) },
       { icon: GitPullRequestArrow, title: t('chat.geminiReviewChanges'), prompt: t('chat.geminiReviewChangesPrompt') },
     ]
   }

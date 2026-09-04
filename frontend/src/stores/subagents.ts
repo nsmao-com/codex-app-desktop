@@ -47,7 +47,9 @@ function normalizeRuntime(value: unknown): SubagentRuntime | '' {
   const raw = asString(value).trim().toLowerCase().replace(/[_-]+/g, '')
   if (raw === 'codex' || raw === 'openai') return 'codex'
   if (raw === 'claude' || raw === 'anthropic' || raw === 'claudecode') return 'claude'
-  if (raw === 'gemini' || raw === 'google' || raw === 'geminicli') return 'gemini'
+  // Antigravity CLI is the Gemini-compatible runtime successor. Keep one
+  // activity bucket so historical Gemini sessions and new `agy` events merge.
+  if (raw === 'gemini' || raw === 'google' || raw === 'geminicli' || raw === 'antigravity' || raw === 'antigravitycli' || raw === 'agy') return 'gemini'
   if (raw === 'grok' || raw === 'xai' || raw === 'grokcli') return 'grok'
   if (raw === 'opencode' || raw === 'open') return 'opencode'
   return ''

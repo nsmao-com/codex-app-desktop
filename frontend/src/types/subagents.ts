@@ -68,10 +68,10 @@ export const SUBAGENT_RUNTIME_META: ReadonlyArray<{
   },
   {
     runtime: 'gemini',
-    label: 'Gemini CLI / Google',
+    label: 'Gemini / Antigravity CLI / Google',
     level: 'supported',
-    evidence: 'invoke_agent / agent tool events',
-    description: 'Native sub-agents are supported; event detail depends on the installed CLI version.',
+    evidence: 'invoke_agent / subagent_info events',
+    description: 'Gemini CLI and its Antigravity successor expose native sub-agents; event detail depends on the installed CLI version.',
   },
   {
     runtime: 'grok',

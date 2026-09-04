@@ -46,6 +46,22 @@ export interface CLIToolActionResult {
   tool: CLIToolStatus
 }
 
+/**
+ * Keep the Gemini-compatible tool understandable across the CLI transition.
+ * New probes return `Antigravity CLI` directly; older probes may only expose
+ * an `agy` executable or the legacy Gemini name.
+ */
+export function cliToolDisplayName(tool: Pick<CLIToolStatus, 'id' | 'name' | 'executable'>): string {
+  const name = String(tool.name || '').trim()
+  const id = String(tool.id || '').trim().toLowerCase()
+  const executable = String(tool.executable || '').trim().toLowerCase()
+  const geminiCompatible = id === 'gemini' || id === 'antigravity' || id === 'antigravity-cli' || id === 'agy'
+	if (geminiCompatible && /(?:^|[\\/])gemini(?:\.(?:exe|cmd|bat|ps1))?$/.test(executable)) return 'Gemini CLI'
+	if (geminiCompatible) return 'Antigravity CLI'
+  if (name) return name
+  return id || 'CLI'
+}
+
 function isBindingError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error || '')
   return /unknown bound method|binding call failed/i.test(message)

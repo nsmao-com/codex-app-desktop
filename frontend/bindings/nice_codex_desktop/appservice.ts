@@ -69,7 +69,7 @@ export function CancelUpdateDownload(): $CancellablePromise<void> {
 }
 
 /**
- * CheckCLITools detects every supported local CLI and queries npm for latest versions.
+ * CheckCLITools detects every supported local CLI and checks applicable latest versions.
  */
 export function CheckCLITools(): $CancellablePromise<$models.CLIToolsReport> {
     return $Call.ByID(4153243591);
@@ -168,8 +168,8 @@ export function ImportMCPServers(request: $models.MCPServersImportRequest): $Can
 
 /**
  * InstallCLITool installs or upgrades a CLI.
- * Codex / Claude / Gemini / OpenCode use pnpm global packages.
- * Grok Build uses the official x.ai installer / `grok update` (native binary).
+ * Codex / Claude / legacy Gemini / OpenCode use pnpm global packages.
+ * Antigravity and Grok Build use their official native installers/update paths.
  */
 export function InstallCLITool(toolID: string): $CancellablePromise<$models.CLIToolActionResult> {
     return $Call.ByID(1201058047, toolID);

@@ -67,16 +67,17 @@ const paneIdRef = toRef(props, 'paneId')
 provide(ArenaPaneRuntimeKey, computed(() => runtimeRef.value))
 provide(ArenaPaneIdKey, computed(() => paneIdRef.value))
 
-const runtimeOptions: Array<{ value: WorkspaceRuntime; label: string; icon: Component }> = [
-  { value: 'codex', label: 'Codex', icon: OpenAIIcon },
-  { value: 'claude', label: 'Claude', icon: ClaudeIcon },
-  { value: 'grok', label: 'Grok', icon: GrokIcon },
-  { value: 'gemini', label: 'Gemini', icon: GeminiIcon },
-  { value: 'opencode', label: 'OpenCode', icon: OpenCodeIcon },
-]
+const runtimeOptions = computed<Array<{ value: WorkspaceRuntime; label: string; icon: Component }>>(() => [
+  { value: 'codex', label: appStore.runtimeDisplayName('codex'), icon: OpenAIIcon },
+  { value: 'claude', label: appStore.runtimeDisplayName('claude'), icon: ClaudeIcon },
+  { value: 'grok', label: appStore.runtimeDisplayName('grok'), icon: GrokIcon },
+  // Keep the Gemini runtime id; show Antigravity when that CLI is detected.
+  { value: 'gemini', label: appStore.runtimeDisplayName('gemini'), icon: GeminiIcon },
+  { value: 'opencode', label: appStore.runtimeDisplayName('opencode'), icon: OpenCodeIcon },
+])
 
 const currentOption = computed(() =>
-  runtimeOptions.find((item) => item.value === props.runtime) || runtimeOptions[0]!,
+  runtimeOptions.value.find((item) => item.value === props.runtime) || runtimeOptions.value[0]!,
 )
 
 type SessionOption = {

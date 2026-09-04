@@ -359,12 +359,14 @@ export interface ExternalRuntimeCatalog {
     "workspace": string;
     "nativeHome": string;
     "configPath": string;
+    "mcpConfigPath": string;
     "activeProvider": string;
     "defaultModel": string;
     "providerSource": string;
     "providers": ExternalProviderView[] | null;
     "models": AgentProviderModel[] | null;
     "mcp": ExternalMCPServerView[] | null;
+    "skills": ExternalSkillView[] | null;
     "globalInstructions": GlobalInstructionsInfo;
     "projectInstructions": ProjectInstructionsInfo;
     "configInstructions"?: string;
@@ -383,6 +385,14 @@ export interface ExternalSessionView {
     "createdAt": number;
     "updatedAt": number;
     "native": boolean;
+}
+
+export interface ExternalSkillView {
+    "name": string;
+    "displayName": string;
+    "description": string;
+    "path": string;
+    "scope": string;
 }
 
 export interface ExternalUsageDailyBucket {

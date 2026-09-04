@@ -59,6 +59,7 @@ const browserStore = useBrowserStore()
 const dialogStore = useDialogStore()
 const { t } = useI18n()
 const usesCodexTimeline = paneUsesCodexTimeline
+const paneRuntimeName = computed(() => appStore.runtimeDisplayName(paneRuntime.value))
 
 const props = withDefaults(defineProps<{
   /** Arena panes render their own provider/session chrome. */
@@ -703,7 +704,7 @@ function commitFromBar(): void {
             variant="secondary"
             class="h-5 shrink-0 rounded-md px-1.5 text-[9px] font-normal"
           >
-            Gemini
+            {{ paneRuntimeName }}
           </Badge>
           <Badge
             v-else-if="isOpenCodeMode"

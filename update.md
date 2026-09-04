@@ -2,6 +2,27 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.5.4 - 2026-09-04
+
+### 新增
+
+- Gemini 兼容运行时接入 Antigravity CLI（`agy`/`antigravity`），保留内部 `gemini` 标识以兼容旧配置、会话和用量记录。
+- 能力中心新增 Gemini/Antigravity 与 OpenCode 的 Skills 原生目录读取；Antigravity 同时识别带 frontmatter 的普通 `.md`，并展示名称、说明、范围和实际路径。
+- 支持读取 Antigravity 原生 brain transcript 会话，并解析 `step_update` 中的工具、多个子代理及其日志/工作区信息。
+
+### 修改
+
+- Gemini CLI 可执行文件按 `agy` → `antigravity` → `gemini` 优先级探测，并补充官方 `%LOCALAPPDATA%\\agy\\bin`；Antigravity 使用官方 headless 参数与原生安装器，实际旧 Gemini CLI 仍检查 npm 更新。
+- Antigravity 工具事件在 ACTIVE/DONE 生命周期中使用稳定 ID，并按终态 usage 去重；缓存输入和思考输出从原始总项中拆分，避免侧栏重复工具和用量膨胀。
+- WSL 设置检测改为解析 UTF-16 输出并逐个探测已注册发行版；默认发行版损坏时自动选择首个可用发行版，启动终端显式绑定发行版。
+
+### 修复
+
+- 修复 WSL 已安装但发行版虚拟磁盘或实例无法启动时被误报为“未接入”的问题，并保留安全修复命令和不可逆操作提示。
+- 修复 Antigravity 多子代理事件、原生会话历史和 MCP/Skill 配置在不同安装路径下漏读或重复统计的问题，并校正全局/项目 Instructions 与认证状态的原生语义。
+- 修复 Antigravity 1.1.x 扁平 `PLANNER_RESPONSE`/`ERROR_MESSAGE` transcript 回读时助手正文缺失的问题。
+- 延续 1.5.3 的流式有界缓冲、终态刷新和低配设备保护，降低长回复卡顿、卡死和闪退风险。
+
 ## 1.5.3 - 2026-09-02
 
 ### 新增

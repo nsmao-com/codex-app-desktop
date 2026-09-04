@@ -81,6 +81,7 @@ import type { SelectOption } from '@/types/codex'
 import { notify } from '@/utils/notify'
 import {
   checkCLITools,
+  cliToolDisplayName,
   installCLITool,
   type CLIToolStatus,
   type CLIToolsReport,
@@ -222,18 +223,18 @@ const networkProxyPresets = [
   { label: 'v2rayN 10809', url: 'http://127.0.0.1:10809' },
 ] as const
 const runtimeSwitching = shallowRef(false)
-const runtimeTabs: Array<{
+const runtimeTabs = computed<Array<{
   id: WorkspaceRuntime
   label: string
   shortLabel: string
   icon: Component
-}> = [
-  { id: 'codex', label: 'Codex', shortLabel: 'Codex', icon: OpenAIIcon },
-  { id: 'claude', label: 'Claude Code', shortLabel: 'Claude', icon: ClaudeIcon },
-  { id: 'grok', label: 'Grok', shortLabel: 'Grok', icon: GrokIcon },
-  { id: 'gemini', label: 'Gemini CLI', shortLabel: 'Gemini', icon: GeminiIcon },
-  { id: 'opencode', label: 'OpenCode', shortLabel: 'OpenCode', icon: OpenCodeIcon },
-]
+}>>(() => [
+  { id: 'codex', label: appStore.runtimeDisplayName('codex'), shortLabel: 'Codex', icon: OpenAIIcon },
+  { id: 'claude', label: appStore.runtimeDisplayName('claude'), shortLabel: 'Claude', icon: ClaudeIcon },
+  { id: 'grok', label: appStore.runtimeDisplayName('grok'), shortLabel: 'Grok', icon: GrokIcon },
+	{ id: 'gemini', label: appStore.runtimeDisplayName('gemini'), shortLabel: appStore.runtimeDisplayName('gemini').startsWith('Antigravity') ? 'Antigravity' : 'Gemini', icon: GeminiIcon },
+  { id: 'opencode', label: appStore.runtimeDisplayName('opencode'), shortLabel: 'OpenCode', icon: OpenCodeIcon },
+])
 const browserAllowedHostsText = shallowRef((appStore.settings.browserAllowedHosts ?? []).join('\n'))
 const browserBlockedHostsText = shallowRef((appStore.settings.browserBlockedHosts ?? []).join('\n'))
 const browserDownloadDir = shallowRef(appStore.settings.browserDownloadDir ?? '')
@@ -294,7 +295,7 @@ const isClaudeSettings = computed(() => appStore.isClaudeMode)
 const isGeminiSettings = computed(() => appStore.isGeminiMode)
 const isOpenCodeSettings = computed(() => appStore.isOpenCodeMode)
 const isCodexSettings = computed(() => appStore.isCodexMode)
-const externalRuntimeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+const externalRuntimeProvider = computed(() => appStore.providerForRuntime(appStore.activeRuntime))
 const agentSettingsIcon = computed(() => {
   if (appStore.isClaudeMode) return ClaudeIcon
   if (appStore.isGrokMode) return GrokIcon
@@ -302,14 +303,11 @@ const agentSettingsIcon = computed(() => {
   if (appStore.isOpenCodeMode) return OpenCodeIcon
   return OpenAIIcon
 })
-const activeRuntimeName = computed(() => {
-  if (appStore.isClaudeMode) return 'Claude Code'
-  if (appStore.isGrokMode) return 'Grok'
-  if (appStore.isGeminiMode) return 'Gemini CLI'
-  if (appStore.isOpenCodeMode) return 'OpenCode'
-  return 'Codex'
-})
-const activeRuntimeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+const activeRuntimeName = computed(() => appStore.runtimeDisplayName(appStore.activeRuntime))
+const activeRuntimeProvider = computed(() => appStore.providerForRuntime(appStore.activeRuntime))
+const externalRuntimeName = computed(() => isGeminiSettings.value
+  ? appStore.runtimeDisplayName('gemini')
+  : appStore.runtimeDisplayName('opencode'))
 
 function syncExternalActiveSession(modelValue: string, effortValue: string): void {
   const thread = codexStore.activeThread
@@ -902,7 +900,7 @@ const activeNavItem = computed(() =>
 )
 
 const runtimeSlideIndex = computed(() => {
-  const index = runtimeTabs.findIndex((item) => item.id === appStore.activeRuntime)
+  const index = runtimeTabs.value.findIndex((item) => item.id === appStore.activeRuntime)
   return index >= 0 ? index : 0
 })
 
@@ -1881,7 +1879,7 @@ async function save(): Promise<void> {
       claudePermissionMode: isClaudeSettings.value ? (claudePermissionMode.value || 'acceptEdits') : appStore.settings.claudePermissionMode,
       claudeCustomModels: isClaudeSettings.value ? claudeCustomModels.value : (appStore.settings.claudeCustomModels ?? []),
       grokCustomModels: isGrokSettings.value ? grokCustomModels.value : (appStore.settings.grokCustomModels ?? []),
-      geminiModel: appStore.settings.geminiModel || 'gemini-2.5-pro',
+	      geminiModel: appStore.settings.geminiModel || '',
       geminiEffort: appStore.settings.geminiEffort || 'auto',
       geminiSandbox: isGeminiSettings.value ? (geminiSandbox.value || 'workspace-write') : appStore.settings.geminiSandbox,
       geminiApprovalPolicy: isGeminiSettings.value ? (geminiApprovalPolicy.value || 'on-request') : appStore.settings.geminiApprovalPolicy,
@@ -2947,9 +2945,9 @@ wsl --update</code></pre>
                     <OpenCodeIcon v-else :size="16" />
                   </div>
                   <div class="min-w-0 flex-1">
-                    <p class="text-[13px] font-medium">{{ isGeminiSettings ? 'Gemini CLI' : 'OpenCode' }}</p>
+                    <p class="text-[13px] font-medium">{{ externalRuntimeName }}</p>
                     <p class="truncate text-[11px] text-muted-foreground">
-                      {{ externalRuntimeProvider?.message || t('settings.externalRuntimeFallback', { runtime: isGeminiSettings ? 'Gemini CLI' : 'OpenCode' }) }}
+                      {{ externalRuntimeProvider?.message || t('settings.externalRuntimeFallback', { runtime: externalRuntimeName }) }}
                     </p>
                     <SimpleTooltip v-if="externalRuntimeProvider?.executable" :content="externalRuntimeProvider.executable">
                       <p class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80">{{ externalRuntimeProvider.executable }}</p>
@@ -3040,7 +3038,7 @@ wsl --update</code></pre>
                      </div>
                    </div>
                    <p class="rounded-lg border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">
-                     {{ isGeminiSettings ? t('settings.geminiNativeConfigHint') : t('settings.openCodeNativeConfigHint', { refreshing: externalCatalogLoading ? t('common.loading') : '' }) }}
+                     {{ isGeminiSettings ? t('settings.geminiNativeConfigHint', { runtime: externalRuntimeName }) : t('settings.openCodeNativeConfigHint', { refreshing: externalCatalogLoading ? t('common.loading') : '' }) }}
                   </p>
                 </div>
               </section>
@@ -3173,8 +3171,8 @@ wsl --update</code></pre>
               <section v-if="isGeminiSettings || isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
                   <div class="min-w-0">
-                   <h2 class="text-[13px] font-semibold">{{ isGeminiSettings ? t('settings.geminiNativeInstructions') : t('settings.openCodeNativeInstructions') }}</h2>
-                   <p class="mt-0.5 text-[11px] text-muted-foreground">{{ isGeminiSettings ? t('settings.geminiNativeInstructionsHint') : t('settings.openCodeNativeInstructionsHint') }}</p>
+                   <h2 class="text-[13px] font-semibold">{{ isGeminiSettings ? t('settings.geminiNativeInstructions', { runtime: externalRuntimeName }) : t('settings.openCodeNativeInstructions') }}</h2>
+                   <p class="mt-0.5 text-[11px] text-muted-foreground">{{ isGeminiSettings ? t('settings.geminiNativeInstructionsHint', { runtime: externalRuntimeName }) : t('settings.openCodeNativeInstructionsHint') }}</p>
                   </div>
                   <Badge v-if="externalCatalogLoading" variant="outline" class="text-[9px]">{{ t('common.loading') }}</Badge>
                 </div>
@@ -3594,7 +3592,7 @@ wsl --update</code></pre>
                   >
                     <div class="min-w-0 flex-1">
                       <div class="flex flex-wrap items-center gap-2">
-                        <p class="text-[13px] font-medium">{{ tool.name }}</p>
+                        <p class="text-[13px] font-medium">{{ cliToolDisplayName(tool) }}</p>
                         <Badge
                           :variant="tool.installed && !tool.updateAvailable ? 'default' : 'outline'"
                           class="text-[9px]"

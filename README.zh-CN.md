@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.3：目标命令队列、可操作的 WSL 修复指引、更可靠的 MCP/Skill 设置，以及低配电脑更流畅的流式输出。</sub></p>
+<p align="center"><sub>v1.5.4：Antigravity CLI 兼容、原生子代理活动、目标命令队列、可操作的 WSL 修复指引，以及低配电脑更流畅的流式输出。</sub></p>
 
 ## 为什么是 Nice Codex
 

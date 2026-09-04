@@ -23,6 +23,7 @@ import type { AppTheme } from '@/composables/useAppearance'
 import { notify } from '@/utils/notify'
 import {
   checkCLITools,
+  cliToolDisplayName,
   installCLITool,
   type CLIToolStatus,
   type CLIToolsReport,
@@ -124,17 +125,17 @@ async function installTool(tool: CLIToolStatus): Promise<void> {
       }
     }
     if (result.ok) {
-      notify('success', tool.name, result.message || t('onboarding.cliInstallOk'))
+      notify('success', cliToolDisplayName(tool), result.message || t('onboarding.cliInstallOk'))
       // Soft re-check so version / badges refresh without full app bootstrap.
       void refreshCLITools()
     } else {
-      notify('error', tool.name, result.message || t('onboarding.cliInstallFailed'))
+      notify('error', cliToolDisplayName(tool), result.message || t('onboarding.cliInstallFailed'))
       cliError.value = result.message || result.output || ''
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || 'install failed')
     cliError.value = message
-    notify('error', tool.name, message)
+    notify('error', cliToolDisplayName(tool), message)
   } finally {
     cliInstalling.value = { ...cliInstalling.value, [tool.id]: false }
   }
@@ -319,7 +320,7 @@ onMounted(() => {
                   <div class="min-w-0 flex-1">
                     <div class="flex flex-wrap items-center gap-2">
                       <Terminal :size="14" class="shrink-0 text-muted-foreground" />
-                      <p class="text-[13px] font-medium">{{ tool.name }}</p>
+                      <p class="text-[13px] font-medium">{{ cliToolDisplayName(tool) }}</p>
                       <Badge
                         :variant="tool.installed && !tool.updateAvailable ? 'default' : 'outline'"
                         class="text-[9px]"

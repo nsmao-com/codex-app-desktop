@@ -27,7 +27,7 @@ import { translate } from '../i18n'
 import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.5.3'
+const AppVersionFallback = '1.5.4'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -150,7 +150,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.5.3')
+  const appVersion = shallowRef('1.5.4')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -306,7 +306,7 @@ export const useAppStore = defineStore('app', () => {
       grokCustomModels: data.settings.grokCustomModels ?? [],
       geminiWorkspace: data.settings.geminiWorkspace ?? '',
       geminiRecentWorkspaces: data.settings.geminiRecentWorkspaces ?? [],
-      geminiModel: data.settings.geminiModel || 'gemini-2.5-pro',
+	      geminiModel: data.settings.geminiModel ?? '',
       geminiEffort: data.settings.geminiEffort || 'auto',
       geminiSandbox: data.settings.geminiSandbox || 'workspace-write',
       geminiApprovalPolicy: data.settings.geminiApprovalPolicy || 'on-request',
@@ -350,7 +350,7 @@ export const useAppStore = defineStore('app', () => {
       onboardingCompleted: Boolean(data.settings.onboardingCompleted) || Boolean(data.settings.workspace),
     }
     // Codex-only: ignore leftover Claude/Gemini/Grok model preferences until catalog loads.
-    if (/claude|gemini|grok|sonnet|opus|haiku|fable/i.test(settings.value.model) && !/^(gpt-|o[1-9]|codex)/i.test(settings.value.model)) {
+    if (/claude|gemini|antigravity|grok|sonnet|opus|haiku|fable/i.test(settings.value.model) && !/^(gpt-|o[1-9]|codex)/i.test(settings.value.model)) {
       settings.value = { ...settings.value, model: '' }
     }
     terminalProfiles.value = data.terminalProfiles ?? []
@@ -453,7 +453,7 @@ export const useAppStore = defineStore('app', () => {
       grokCustomModels: saved.grokCustomModels ?? next.grokCustomModels ?? [],
       geminiWorkspace: saved.geminiWorkspace ?? next.geminiWorkspace ?? '',
       geminiRecentWorkspaces: saved.geminiRecentWorkspaces ?? next.geminiRecentWorkspaces ?? [],
-      geminiModel: saved.geminiModel || next.geminiModel || 'gemini-2.5-pro',
+	      geminiModel: saved.geminiModel ?? next.geminiModel ?? '',
       geminiEffort: saved.geminiEffort || next.geminiEffort || 'auto',
       geminiSandbox: saved.geminiSandbox || next.geminiSandbox || 'workspace-write',
       geminiApprovalPolicy: saved.geminiApprovalPolicy || next.geminiApprovalPolicy || 'on-request',
@@ -883,6 +883,33 @@ export const useAppStore = defineStore('app', () => {
     patchSettings(partial)
   }
 
+  /**
+   * Resolve the provider's user-facing name while keeping the persisted runtime
+   * id stable. Antigravity CLI reports `kind: gemini` (or an alias on older
+   * builds), so the UI can show its native name without migrating settings.
+   */
+  function providerForRuntime(runtime: string | null | undefined): AgentProviderRuntime | undefined {
+    const normalized = normalizeRuntimeID(runtime)
+    return agentProviders.value.find((provider) =>
+      normalizeRuntimeID(provider.kind) === normalized
+      || normalizeRuntimeID(provider.id) === normalized,
+    )
+  }
+
+  function runtimeDisplayName(runtime: string | null | undefined = activeRuntime.value): string {
+    const normalized = normalizeRuntimeID(runtime)
+    const provider = providerForRuntime(normalized)
+	    if (normalized === 'gemini') {
+	      return isLegacyGeminiExecutablePath(provider?.executable) ? 'Gemini CLI' : 'Antigravity CLI'
+	    }
+    const providerName = provider?.name?.trim()
+    if (providerName) return providerName
+    if (normalized === 'claude') return 'Claude Code'
+    if (normalized === 'grok') return 'Grok'
+    if (normalized === 'opencode') return 'OpenCode'
+    return 'Codex'
+  }
+
   function applyLocale(value: string): void {
     const locale = supportedLocales.find((item) => item.value === value)?.value ?? 'zh-CN'
     setLocale(locale)
@@ -947,6 +974,8 @@ export const useAppStore = defineStore('app', () => {
     logout,
     updateAgentPreferences,
     updateGrokPreferences,
+    providerForRuntime,
+    runtimeDisplayName,
     patchSettings,
   }
 })
@@ -955,9 +984,17 @@ function normalizeRuntimeID(value: string | undefined | null): WorkspaceRuntime 
   const id = String(value || '').trim().toLowerCase()
   if (id === 'grok') return 'grok'
   if (id === 'claude') return 'claude'
-  if (id === 'gemini') return 'gemini'
+  // Keep Antigravity's aliases mapped to the legacy Gemini runtime id so
+  // existing settings, sessions, queues, and usage records remain compatible.
+  if (id === 'gemini' || id === 'gemini-cli' || id === 'gemini_cli' || id === '__gemini__' || id === 'antigravity' || id === 'antigravity-cli' || id === 'antigravity_cli' || id === 'antigravitycli' || id === '__antigravity__' || id === 'agy' || id === 'google') return 'gemini'
   if (id === 'opencode' || id === 'open-code') return 'opencode'
   return 'codex'
+}
+
+function isLegacyGeminiExecutablePath(value: string | undefined): boolean {
+  const normalized = String(value || '').trim().toLowerCase().replace(/\\/g, '/')
+  const base = normalized.split('/').pop() || normalized
+  return /^gemini(?:\.(?:exe|cmd|bat|ps1))?$/.test(base)
 }
 
 function loadWorkspaceOrder(): WorkspaceOrderByRuntime {

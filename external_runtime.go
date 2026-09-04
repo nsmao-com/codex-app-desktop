@@ -69,6 +69,14 @@ type ExternalMCPServerView struct {
 	Source     string `json:"source"`
 }
 
+type ExternalSkillView struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName"`
+	Description string `json:"description"`
+	Path        string `json:"path"`
+	Scope       string `json:"scope"`
+}
+
 type ExternalSessionView struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
@@ -122,12 +130,14 @@ type ExternalRuntimeCatalog struct {
 	Workspace           string                  `json:"workspace"`
 	NativeHome          string                  `json:"nativeHome"`
 	ConfigPath          string                  `json:"configPath"`
+	MCPConfigPath       string                  `json:"mcpConfigPath"`
 	ActiveProvider      string                  `json:"activeProvider"`
 	DefaultModel        string                  `json:"defaultModel"`
 	ProviderSource      string                  `json:"providerSource"`
 	Providers           []ExternalProviderView  `json:"providers"`
 	Models              []AgentProviderModel    `json:"models"`
 	MCP                 []ExternalMCPServerView `json:"mcp"`
+	Skills              []ExternalSkillView     `json:"skills"`
 	GlobalInstructions  GlobalInstructionsInfo  `json:"globalInstructions"`
 	ProjectInstructions ProjectInstructionsInfo `json:"projectInstructions"`
 	ConfigInstructions  string                  `json:"configInstructions,omitempty"`
@@ -145,6 +155,119 @@ func resolveGeminiHome() string {
 		return ""
 	}
 	return filepath.Join(home, ".gemini")
+}
+
+func antigravitySettingsPath(home string) string {
+	return filepath.Join(strings.TrimSpace(home), "antigravity-cli", "settings.json")
+}
+
+func antigravityMCPPath(home string) string {
+	paths := antigravityMCPPaths(home)
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Size() > 0 {
+			return path
+		}
+	}
+	for _, path := range paths {
+		if fileOrDirExists(path) {
+			return path
+		}
+	}
+	if len(paths) > 0 {
+		return paths[0]
+	}
+	return ""
+}
+
+func antigravityMCPPaths(home string) []string {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return nil
+	}
+	// Antigravity releases have used both locations. Prefer a non-empty file so
+	// an installer-created placeholder under `config/` does not hide the active
+	// `antigravity/mcp_config.json` store.
+	return []string{
+		filepath.Join(home, "config", "mcp_config.json"),
+		filepath.Join(home, "antigravity", "mcp_config.json"),
+		filepath.Join(home, "antigravity-cli", "mcp_config.json"),
+	}
+}
+
+func geminiLegacySettingsPath(home string) string {
+	return filepath.Join(strings.TrimSpace(home), "settings.json")
+}
+
+func fileOrDirExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func hasAntigravityArtifact(path string) bool {
+	info, err := os.Stat(strings.TrimSpace(path))
+	if err != nil {
+		return false
+	}
+	if !info.IsDir() {
+		return info.Size() > 0
+	}
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) > 0
+}
+
+func geminiUsesAntigravity(home string) bool {
+	if executable := findGeminiExecutable(); executable != "" {
+		return isAntigravityExecutable(executable)
+	}
+	// Do not treat the parent `antigravity-cli` directory as proof of an active
+	// installation: installers often leave that directory behind even when the
+	// user still runs the legacy Gemini CLI. Require a concrete config, MCP file,
+	// transcript root, or plugin directory instead.
+	paths := []string{antigravitySettingsPath(home)}
+	paths = append(paths, antigravityMCPPaths(home)...)
+	paths = append(paths,
+		filepath.Join(home, "antigravity-cli", "brain"),
+		filepath.Join(home, "antigravity", "brain"),
+		filepath.Join(home, "antigravity-cli", "plugins"),
+		filepath.Join(home, "antigravity", "plugins"),
+	)
+	for _, path := range paths {
+		if hasAntigravityArtifact(path) {
+			return true
+		}
+	}
+	return false
+}
+
+// geminiSettingsConfigPath returns the active settings file while retaining the
+// legacy path for users who still run Gemini CLI directly.
+func geminiSettingsConfigPath(home string) string {
+	if geminiUsesAntigravity(home) {
+		return antigravitySettingsPath(home)
+	}
+	return geminiLegacySettingsPath(home)
+}
+
+func geminiGlobalMCPConfigPath(home, fallback string) string {
+	if geminiUsesAntigravity(home) || fileOrDirExists(antigravityMCPPath(home)) {
+		return antigravityMCPPath(home)
+	}
+	return fallback
+}
+
+func geminiProjectMCPConfigPath(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return ""
+	}
+	anti := filepath.Join(workspace, ".agents", "mcp_config.json")
+	if geminiUsesAntigravity(resolveGeminiHome()) || fileOrDirExists(anti) {
+		return anti
+	}
+	return filepath.Join(workspace, ".gemini", "settings.json")
 }
 
 type ExternalInstructionsSaveRequest struct {
@@ -199,17 +322,24 @@ func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCu
 	catalog := ExternalRuntimeCatalog{
 		Runtime: runtime, Workspace: workspace,
 		Providers: []ExternalProviderView{}, Models: []AgentProviderModel{},
-		MCP: []ExternalMCPServerView{}, Sessions: []ExternalSessionView{},
+		MCP: []ExternalMCPServerView{}, Skills: []ExternalSkillView{}, Sessions: []ExternalSessionView{},
 		Usage: ExternalUsageSummary{RangeDays: 30, ByModel: []ExternalUsageModelView{}},
 	}
 	switch runtime {
 	case "gemini":
 		catalog.NativeHome = resolveGeminiHome()
-		catalog.ConfigPath = filepath.Join(catalog.NativeHome, "settings.json")
-		catalog.ProviderSource = "Gemini CLI settings.json / environment"
-		catalog.MCP = readExternalMCPByScope("gemini", catalog.ConfigPath, workspace)
-		catalog.GlobalInstructions = readInstructionFile(filepath.Join(catalog.NativeHome, "GEMINI.md"), "gemini-global", "Gemini CLI global GEMINI.md")
-		catalog.ProjectInstructions = readProjectInstruction(workspace, "GEMINI.md", "gemini-project", "Gemini CLI project GEMINI.md")
+		catalog.ConfigPath = geminiSettingsConfigPath(catalog.NativeHome)
+		catalog.MCPConfigPath = geminiGlobalMCPConfigPath(catalog.NativeHome, catalog.ConfigPath)
+		if isAntigravityConfigPath(catalog.ConfigPath) {
+			catalog.ProviderSource = "Antigravity CLI settings.json / environment"
+		} else {
+			catalog.ProviderSource = "Gemini CLI settings.json / environment"
+		}
+		catalog.MCP = readExternalMCPByScope("gemini", catalog.MCPConfigPath, workspace)
+		globalInstructionPath := geminiGlobalInstructionPath(catalog.NativeHome)
+		catalog.GlobalInstructions = readInstructionFile(globalInstructionPath, "gemini-global", "Gemini/Antigravity global instructions")
+		catalog.ProjectInstructions = readGeminiProjectInstructions(workspace)
+		catalog.Skills = listExternalSkills("gemini", catalog.NativeHome, workspace)
 		catalog.Models, _ = discoverProviderCatalog("gemini")
 		catalog.DefaultModel = firstGeminiModel(catalog.Models)
 		catalog.ActiveProvider = geminiActiveProvider(catalog.ConfigPath)
@@ -220,10 +350,15 @@ func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCu
 		}}
 		catalog.Sessions = listGeminiNativeSessions(catalog.NativeHome, workspace)
 		catalog.Usage = collectGeminiUsage(catalog.NativeHome, workspace)
-		catalog.ReadOnlyNotice = "模型、认证、MCP 和指令由 Gemini CLI 原生配置加载。"
+		if isAntigravityConfigPath(catalog.ConfigPath) {
+			catalog.ReadOnlyNotice = "模型、认证、MCP 和指令由 Antigravity CLI 原生配置加载；内部仍保留 Gemini 兼容标识。"
+		} else {
+			catalog.ReadOnlyNotice = "模型、认证、MCP 和指令由 Gemini CLI 原生配置加载。"
+		}
 	case "opencode":
 		catalog.NativeHome = openCodeConfigDir(home)
 		catalog.ConfigPath = openCodeConfigPath(home)
+		catalog.MCPConfigPath = catalog.ConfigPath
 		catalog.ProviderSource = "OpenCode providers/models CLI and opencode.json"
 		catalog.Models, _, catalog.Providers = discoverOpenCodeCatalog(home)
 		catalog.ActiveProvider, catalog.DefaultModel, catalog.ConfigInstructions = readOpenCodeConfig(catalog.ConfigPath)
@@ -241,6 +376,7 @@ func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCu
 		catalog.MCP = readExternalMCPByScope("opencode", catalog.ConfigPath, workspace)
 		catalog.GlobalInstructions = readInstructionFile(filepath.Join(catalog.NativeHome, "AGENTS.md"), "opencode-global", "OpenCode global AGENTS.md")
 		catalog.ProjectInstructions = readOpenCodeProjectInstructions(workspace)
+		catalog.Skills = listExternalSkills("opencode", home, workspace)
 		catalog.Sessions = listOpenCodeNativeSessions(workspace)
 		// The catalog and the usage panel both present native lifetime totals.
 		// Applying a 30-day filter here made the two screens disagree.
@@ -475,7 +611,7 @@ func (s *AppService) SaveExternalRuntimeInstructions(request ExternalInstruction
 	var path string
 	if scope == "global" {
 		if runtime == "gemini" {
-			path = filepath.Join(resolveGeminiHome(), "GEMINI.md")
+			path = geminiGlobalInstructionPath(resolveGeminiHome())
 		} else {
 			path = filepath.Join(openCodeConfigDir(home), "AGENTS.md")
 		}
@@ -517,6 +653,9 @@ func (s *AppService) SaveExternalRuntimeMCP(request ExternalMCPJSONSaveRequest) 
 			servers = root
 		}
 	}
+	if runtime == "gemini" && geminiUsesAntigravity(resolveGeminiHome()) {
+		servers = normalizeAntigravityMCPServers(servers)
+	}
 	if _, ok := servers.(map[string]any); !ok {
 		return errors.New("MCP JSON must be an object keyed by server name")
 	}
@@ -553,12 +692,169 @@ func instructionFileName(runtime string) string {
 	return "AGENTS.md"
 }
 
+// Antigravity always reads its global instructions from ~/.gemini/GEMINI.md.
+// Keep this separate from project selection so reads and writes cannot drift.
+func geminiGlobalInstructionPath(root string) string {
+	return filepath.Join(strings.TrimSpace(root), "GEMINI.md")
+}
+
+// Project instructions differ by runtime generation. Antigravity prefers an
+// existing AGENTS.md, then GEMINI.md, and creates AGENTS.md for new projects.
+// Legacy Gemini reverses that order and creates GEMINI.md.
+func geminiProjectInstructionPath(root string) string {
+	root = strings.TrimSpace(root)
+	agentsPath := filepath.Join(root, "AGENTS.md")
+	geminiPath := filepath.Join(root, "GEMINI.md")
+	if geminiPrefersAntigravityInstructions() {
+		if fileOrDirExists(agentsPath) {
+			return agentsPath
+		}
+		if fileOrDirExists(geminiPath) {
+			return geminiPath
+		}
+		return agentsPath
+	}
+	if fileOrDirExists(geminiPath) {
+		return geminiPath
+	}
+	if fileOrDirExists(agentsPath) {
+		return agentsPath
+	}
+	return geminiPath
+}
+
+func geminiPrefersAntigravityInstructions() bool {
+	executable := findGeminiExecutable()
+	if executable != "" {
+		return isAntigravityExecutable(executable)
+	}
+	// Antigravity is the current default when no executable can be identified.
+	// Existing artifacts still make that choice explicit for GUI-launched apps
+	// whose PATH has not refreshed after installation.
+	return true
+}
+
 func readInstructionFile(path, source, label string) GlobalInstructionsInfo {
 	payload, err := os.ReadFile(path)
 	if err != nil {
 		return GlobalInstructionsInfo{Path: path, Source: source, Available: true}
 	}
 	return GlobalInstructionsInfo{Content: string(payload), Path: path, Source: label, Exists: true, EmptyFile: len(strings.TrimSpace(string(payload))) == 0, Available: true}
+}
+
+func hasYAMLFrontMatter(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	reader := bufio.NewReader(io.LimitReader(file, 64*1024))
+	first, readErr := reader.ReadString('\n')
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return false
+	}
+	if strings.TrimSpace(strings.TrimPrefix(first, "\uFEFF")) != "---" {
+		return false
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if strings.TrimSpace(line) == "---" {
+			return true
+		}
+		if err != nil {
+			return false
+		}
+	}
+}
+
+func listExternalSkills(runtime, home, workspace string) []ExternalSkillView {
+	result := make([]ExternalSkillView, 0)
+	seen := make(map[string]struct{})
+	type skillRoot struct {
+		path        string
+		scope       string
+		allMarkdown bool
+	}
+	roots := make([]skillRoot, 0, 12)
+	addRoot := func(path, scope string, allMarkdown bool) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		roots = append(roots, skillRoot{path: path, scope: scope, allMarkdown: allMarkdown})
+	}
+	runtime = normalizeExternalRuntime(runtime)
+	if runtime == "gemini" {
+		geminiHome := strings.TrimSpace(home)
+		addRoot(filepath.Join(geminiHome, "skills"), "user", false)
+		addRoot(filepath.Join(geminiHome, "antigravity-cli", "skills"), "user", true)
+		addRoot(filepath.Join(geminiHome, "antigravity", "skills"), "user", true)
+		addRoot(filepath.Join(geminiHome, "antigravity-cli", "plugins"), "plugin", false)
+		addRoot(filepath.Join(geminiHome, "antigravity", "plugins"), "plugin", false)
+		if workspace != "" {
+			addRoot(filepath.Join(workspace, ".gemini", "skills"), "project", false)
+			addRoot(filepath.Join(workspace, ".agents", "skills"), "project", true)
+		}
+	} else if runtime == "opencode" {
+		addRoot(filepath.Join(home, ".config", "opencode", "skills"), "user", false)
+		addRoot(filepath.Join(home, ".local", "share", "opencode", "skills"), "user", false)
+		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+			addRoot(filepath.Join(appData, "opencode", "skills"), "user", false)
+		}
+		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+			addRoot(filepath.Join(localAppData, "opencode", "skills"), "user", false)
+		}
+		if workspace != "" {
+			addRoot(filepath.Join(workspace, ".opencode", "skills"), "project", false)
+		}
+	}
+	for _, root := range roots {
+		if len(result) >= 500 {
+			break
+		}
+		_ = filepath.WalkDir(root.path, func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return nil
+			}
+			isSkillFile := strings.EqualFold(entry.Name(), "SKILL.md")
+			if root.allMarkdown {
+				if !strings.EqualFold(filepath.Ext(entry.Name()), ".md") || !hasYAMLFrontMatter(path) {
+					return nil
+				}
+			} else if !isSkillFile {
+				return nil
+			}
+			key := strings.ToLower(filepath.Clean(path))
+			if _, exists := seen[key]; exists {
+				return nil
+			}
+			seen[key] = struct{}{}
+			name := filepath.Base(filepath.Dir(path))
+			if root.allMarkdown && !isSkillFile {
+				name = strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+			}
+			display, description := peekSkillMeta(path)
+			if display == "" {
+				display = name
+			}
+			result = append(result, ExternalSkillView{
+				Name: name, DisplayName: display, Description: description, Path: path, Scope: root.scope,
+			})
+			if len(result) >= 500 {
+				return filepath.SkipAll
+			}
+			return nil
+		})
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		left := strings.ToLower(result[i].DisplayName)
+		right := strings.ToLower(result[j].DisplayName)
+		if left == right {
+			return strings.ToLower(result[i].Path) < strings.ToLower(result[j].Path)
+		}
+		return left < right
+	})
+	return result
 }
 
 func readProjectInstruction(workspace, name, source, label string) ProjectInstructionsInfo {
@@ -570,6 +866,22 @@ func readProjectInstruction(workspace, name, source, label string) ProjectInstru
 	global := readInstructionFile(path, source, label)
 	info.Content, info.Path, info.Source = global.Content, global.Path, global.Source
 	info.Exists, info.EmptyFile, info.Available = global.Exists, global.EmptyFile, global.Available
+	return info
+}
+
+func readGeminiProjectInstructions(workspace string) ProjectInstructionsInfo {
+	info := ProjectInstructionsInfo{Workspace: workspace, WorkspaceName: filepath.Base(workspace), Source: "gemini-project", Available: strings.TrimSpace(workspace) != ""}
+	if strings.TrimSpace(workspace) == "" {
+		return info
+	}
+	path := geminiProjectInstructionPath(workspace)
+	label := "Gemini CLI project GEMINI.md"
+	if strings.EqualFold(filepath.Base(path), "AGENTS.md") {
+		label = "Antigravity/Gemini project AGENTS.md"
+	}
+	loaded := readInstructionFile(path, "gemini-project", label)
+	info.Content, info.Path, info.Source = loaded.Content, loaded.Path, loaded.Source
+	info.Exists, info.EmptyFile = loaded.Exists, loaded.EmptyFile
 	return info
 }
 
@@ -595,6 +907,9 @@ func externalProjectInstructionPath(runtime, workspace string) string {
 		}
 		return candidates[0]
 	}
+	if runtime == "gemini" {
+		return geminiProjectInstructionPath(workspace)
+	}
 	return filepath.Join(workspace, instructionFileName(runtime))
 }
 
@@ -602,6 +917,9 @@ func geminiActiveProvider(configPath string) string {
 	var config map[string]any
 	if !readLimitedJSON(configPath, &config) {
 		return "gemini"
+	}
+	if provider := strings.TrimSpace(stringFromAny(config["modelProvider"])); provider != "" {
+		return provider
 	}
 	if security, ok := config["security"].(map[string]any); ok {
 		if auth, ok := security["auth"].(map[string]any); ok {
@@ -614,7 +932,17 @@ func geminiActiveProvider(configPath string) string {
 }
 
 func geminiConfigured(configPath, geminiHome string) bool {
-	if readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_API_KEY") != "" || strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" {
+	if isAntigravityConfigPath(configPath) || geminiUsesAntigravity(geminiHome) {
+		var config map[string]any
+		if readLimitedJSON(configPath, &config) {
+			return true
+		}
+		return isAntigravityExecutable(findGeminiExecutable())
+	}
+	if readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_API_KEY") != "" ||
+		readEnvValue(filepath.Join(geminiHome, ".env"), "GOOGLE_API_KEY") != "" ||
+		strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" ||
+		strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")) != "" {
 		return true
 	}
 	var config map[string]any
@@ -630,7 +958,21 @@ func geminiConfigured(configPath, geminiHome string) bool {
 }
 
 func geminiAuthenticated(configPath, geminiHome string) bool {
-	if strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" || readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_API_KEY") != "" {
+	if isAntigravityConfigPath(configPath) || geminiUsesAntigravity(geminiHome) {
+		var config map[string]any
+		if !readLimitedJSON(configPath, &config) {
+			return false
+		}
+		// Antigravity only enables API-key mode when both pieces are present.
+		// OAuth credentials live in the OS keyring and cannot be inferred from the
+		// legacy Gemini account JSON without risking a false authenticated state.
+		return strings.EqualFold(strings.TrimSpace(stringFromAny(config["modelProvider"])), "gemini") &&
+			strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != ""
+	}
+	if strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" ||
+		strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")) != "" ||
+		readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_API_KEY") != "" ||
+		readEnvValue(filepath.Join(geminiHome, ".env"), "GOOGLE_API_KEY") != "" {
 		return true
 	}
 	var accounts map[string]any
@@ -700,7 +1042,51 @@ func readGeminiMCP(path string) []ExternalMCPServerView {
 	if !readLimitedJSON(path, &config) {
 		return []ExternalMCPServerView{}
 	}
-	return mcpViewsFromMap(config["mcpServers"], path, "gemini")
+	servers := config["mcpServers"]
+	if servers == nil {
+		// A few Antigravity preview builds used the config object itself when
+		// writing mcp_config.json. Accept that shape without losing compatibility.
+		if _, ok := config["mcp"]; ok {
+			servers = config["mcp"]
+		}
+	}
+	return mcpViewsFromMap(servers, path, "gemini")
+}
+
+func normalizeAntigravityMCPServerObject(value map[string]any) map[string]any {
+	if value == nil {
+		return value
+	}
+	next := make(map[string]any, len(value)+1)
+	for key, item := range value {
+		next[key] = item
+	}
+	if _, exists := next["serverUrl"]; !exists {
+		if urlValue, ok := next["url"].(string); ok && strings.TrimSpace(urlValue) != "" {
+			next["serverUrl"] = urlValue
+			delete(next, "url")
+		} else if urlValue, ok := next["httpUrl"].(string); ok && strings.TrimSpace(urlValue) != "" {
+			next["serverUrl"] = urlValue
+			delete(next, "httpUrl")
+		}
+	}
+	return next
+}
+
+func normalizeAntigravityMCPServers(value any) any {
+	servers, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	next := make(map[string]any, len(servers))
+	for name, raw := range servers {
+		if entry, ok := raw.(map[string]any); ok {
+			next[name] = normalizeAntigravityMCPServerObject(entry)
+		} else {
+			next[name] = raw
+		}
+	}
+	return next
 }
 
 func readOpenCodeMCP(path string) []ExternalMCPServerView {
@@ -715,12 +1101,13 @@ func externalRuntimeConfigPath(runtime, scope, workspace string) string {
 	home, _ := os.UserHomeDir()
 	if scope != "project" || strings.TrimSpace(workspace) == "" {
 		if runtime == "gemini" {
-			return filepath.Join(resolveGeminiHome(), "settings.json")
+			home := resolveGeminiHome()
+			return geminiGlobalMCPConfigPath(home, geminiSettingsConfigPath(home))
 		}
 		return openCodeConfigPath(home)
 	}
 	if runtime == "gemini" {
-		return filepath.Join(workspace, ".gemini", "settings.json")
+		return geminiProjectMCPConfigPath(workspace)
 	}
 	for _, candidate := range []string{
 		filepath.Join(workspace, ".opencode", "opencode.json"),
@@ -757,6 +1144,9 @@ func readExternalMCPByScope(runtime, globalPath, workspace string) []ExternalMCP
 	read := readGeminiMCP
 	if runtime == "opencode" {
 		read = readOpenCodeMCP
+	}
+	if runtime == "gemini" {
+		globalPath = geminiGlobalMCPConfigPath(resolveGeminiHome(), globalPath)
 	}
 	global := read(globalPath)
 	if strings.TrimSpace(workspace) == "" {
@@ -813,6 +1203,12 @@ func mcpViewsFromMap(raw any, path, runtime string) []ExternalMCPServerView {
 			view.URL = value
 		}
 		if value, ok := entry["httpUrl"].(string); ok && view.URL == "" {
+			view.URL = value
+		}
+		if value, ok := entry["serverUrl"].(string); ok && view.URL == "" {
+			view.URL = value
+		}
+		if value, ok := entry["server_url"].(string); ok && view.URL == "" {
 			view.URL = value
 		}
 		if command, ok := entry["command"].([]any); ok {
@@ -874,12 +1270,21 @@ func mergeExternalMCPServers(existingRaw, incomingRaw any) map[string]any {
 			}
 			entry[key] = value
 		}
-		if urlValue, ok := incomingEntry["url"].(string); ok && strings.TrimSpace(urlValue) != "" {
+		urlValue, hasURL := incomingEntry["url"].(string)
+		if !hasURL {
+			urlValue, hasURL = incomingEntry["serverUrl"].(string)
+		}
+		if !hasURL {
+			urlValue, hasURL = incomingEntry["httpUrl"].(string)
+		}
+		if hasURL && strings.TrimSpace(urlValue) != "" {
 			delete(entry, "command")
 			delete(entry, "args")
 		} else if commandValue, ok := incomingEntry["command"].(string); ok && strings.TrimSpace(commandValue) != "" {
 			delete(entry, "url")
 			delete(entry, "httpUrl")
+			delete(entry, "serverUrl")
+			delete(entry, "server_url")
 		}
 		merged[name] = entry
 	}
@@ -1653,6 +2058,9 @@ func readGeminiNativeHistoryPage(record *SessionRecord, before int) (externalNat
 }
 
 func loadGeminiNativeTurns(path string) ([]externalTurn, error) {
+	if isAntigravityTranscriptPath(path) {
+		return loadAntigravityNativeTurns(path)
+	}
 	incremental := make([]map[string]any, 0, 64)
 	var snapshotMessages []any
 	hasIncrementalUser := false
@@ -1695,6 +2103,586 @@ func loadGeminiNativeTurns(path string) ([]externalTurn, error) {
 		}
 	}
 	return geminiTurnsFromMessages(incremental), nil
+}
+
+func isAntigravityTranscriptPath(path string) bool {
+	lower := strings.ToLower(filepath.ToSlash(path))
+	return strings.Contains(lower, "/antigravity/brain/") || strings.Contains(lower, "/antigravity-cli/brain/")
+}
+
+func findAntigravityNativeSessionFile(home, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	for _, root := range []string{
+		filepath.Join(home, "antigravity", "brain"),
+		filepath.Join(home, "antigravity-cli", "brain"),
+	} {
+		entries, _ := os.ReadDir(root)
+		for _, entry := range entries {
+			if !entry.IsDir() || (entry.Name() != sessionID && !strings.EqualFold(entry.Name(), sessionID)) {
+				continue
+			}
+			for _, candidate := range []string{
+				filepath.Join(root, entry.Name(), ".system_generated", "logs", "transcript.jsonl"),
+				filepath.Join(root, entry.Name(), "transcript.jsonl"),
+			} {
+				if fileOrDirExists(candidate) {
+					return candidate
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// antigravityStepPayload unwraps the step_update envelope used by the
+// stream-json protocol. A few early builds used camelCase, so both spellings
+// are accepted when reading persisted transcripts as well as live output.
+func antigravityStepPayload(event map[string]any) map[string]any {
+	if event == nil {
+		return nil
+	}
+	for _, key := range []string{"step_update", "stepUpdate"} {
+		if step, ok := event[key].(map[string]any); ok && step != nil {
+			return step
+		}
+	}
+	return nil
+}
+
+func antigravityResultPayload(event map[string]any) map[string]any {
+	if event == nil {
+		return nil
+	}
+	if result, ok := event["result"].(map[string]any); ok && result != nil {
+		return result
+	}
+	return nil
+}
+
+func antigravityInitPayload(event map[string]any) map[string]any {
+	if event == nil {
+		return nil
+	}
+	if init, ok := event["init"].(map[string]any); ok && init != nil {
+		return init
+	}
+	return nil
+}
+
+func normalizeAntigravityEventValue(value string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(value), "-", "_"), ".", "_"))
+}
+
+func antigravityEventType(event map[string]any) string {
+	return normalizeAntigravityEventValue(firstMapString(event, "event", "type", "kind"))
+}
+
+func antigravityStepType(event map[string]any) string {
+	if step := antigravityStepPayload(event); step != nil {
+		if value := firstMapString(step, "step_type", "stepType", "type", "kind"); value != "" {
+			return normalizeAntigravityEventValue(value)
+		}
+	}
+	return normalizeAntigravityEventValue(firstMapString(event, "step_type", "stepType"))
+}
+
+func antigravityEventSource(event map[string]any) string {
+	if step := antigravityStepPayload(event); step != nil {
+		if value := firstMapString(step, "source", "role", "from"); value != "" {
+			return normalizeAntigravityEventValue(value)
+		}
+	}
+	return normalizeAntigravityEventValue(firstMapString(event, "source", "role", "from"))
+}
+
+// antigravityNestedString searches the envelope in protocol order. Values such
+// as model/workspace/message can be objects in statusline/transcript records;
+// unwrap their common scalar fields before falling back to text extraction.
+func antigravityNestedString(event map[string]any, keys ...string) string {
+	if event == nil {
+		return ""
+	}
+	containers := make([]map[string]any, 0, 8)
+	appendContainer := func(value map[string]any) {
+		if value == nil {
+			return
+		}
+		for _, existing := range containers {
+			if fmt.Sprintf("%p", existing) == fmt.Sprintf("%p", value) {
+				return
+			}
+		}
+		containers = append(containers, value)
+	}
+	appendContainer(antigravityStepPayload(event))
+	appendContainer(event)
+	appendContainer(antigravityResultPayload(event))
+	appendContainer(antigravityInitPayload(event))
+	for _, name := range []string{"metadata", "meta", "context", "settings"} {
+		if nested, ok := event[name].(map[string]any); ok {
+			appendContainer(nested)
+		}
+	}
+	for _, container := range containers {
+		for _, key := range keys {
+			value, exists := container[key]
+			if !exists || value == nil {
+				continue
+			}
+			if text := strings.TrimSpace(stringFromAny(value)); text != "" {
+				return text
+			}
+			if nested, ok := value.(map[string]any); ok {
+				for _, scalarKey := range []string{"id", "name", "display_name", "displayName", "current_dir", "project_dir", "path", "value", "text", "content"} {
+					if text := strings.TrimSpace(stringFromAny(nested[scalarKey])); text != "" {
+						return text
+					}
+				}
+			}
+			if text := strings.TrimSpace(textFromExternalValue(value)); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func antigravityEventText(event map[string]any) string {
+	return antigravityNestedString(event, "text_delta", "text", "content", "response", "prompt", "message", "input", "user_input", "userInput")
+}
+
+func antigravityEventWorkspace(event map[string]any) string {
+	return antigravityNestedString(event, "workspace", "workspace_path", "workspacePath", "cwd", "working_directory", "workingDirectory", "project_root", "projectRoot", "current_dir", "project_dir")
+}
+
+func antigravityEventModel(event map[string]any) string {
+	return antigravityNestedString(event, "model", "model_id", "modelId", "model_version", "modelVersion")
+}
+
+func antigravityEventStepIndex(event map[string]any) string {
+	return antigravityNestedString(event, "step_index", "stepIndex")
+}
+
+func antigravityEventStepKey(event map[string]any, fallback string) string {
+	trajectory := strings.TrimSpace(antigravityEventTrajectoryID(event))
+	index := strings.TrimSpace(antigravityEventStepIndex(event))
+	if trajectory == "" && index == "" {
+		return fallback
+	}
+	return trajectory + "\x00" + index
+}
+
+// reconcileAntigravityStepText accepts both protocol variants seen in native
+// transcripts: ACTIVE records are deltas, while DONE may be either a final
+// delta (commonly just a newline) or a complete step snapshot.
+func reconcileAntigravityStepText(previous, chunk, state string) (next, delta string, replace bool) {
+	if chunk == "" {
+		return previous, "", false
+	}
+	if previous == "" {
+		return chunk, chunk, false
+	}
+	if normalizeAntigravityEventValue(state) != "done" {
+		return previous + chunk, chunk, false
+	}
+	if chunk == previous || strings.HasPrefix(previous, chunk) {
+		return previous, "", false
+	}
+	if strings.HasPrefix(chunk, previous) {
+		return chunk, strings.TrimPrefix(chunk, previous), false
+	}
+	if strings.TrimSpace(chunk) != "" {
+		return chunk, chunk, true
+	}
+	return previous + chunk, chunk, false
+}
+
+func antigravityExplicitTurnKey(event map[string]any) string {
+	return antigravityNestedString(event, "turn_id", "turnId", "request_id", "requestId", "requestID")
+}
+
+func antigravityIsUserEvent(event map[string]any) bool {
+	eventType := antigravityEventType(event)
+	stepType := antigravityStepType(event)
+	source := antigravityEventSource(event)
+	if source == "user" || source == "user_explicit" || source == "human" {
+		return true
+	}
+	for _, value := range []string{"user", "user_message", "user_input", "prompt", "input"} {
+		if eventType == value || stepType == value {
+			return true
+		}
+	}
+	return false
+}
+
+func antigravityIsInitEvent(event map[string]any) bool {
+	return antigravityEventType(event) == "init" || antigravityEventType(event) == "session_init"
+}
+
+func antigravityIsTerminalEvent(event map[string]any) bool {
+	switch antigravityEventType(event) {
+	case "result", "final", "completed", "done", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func antigravityEventConversationID(event map[string]any) string {
+	if event == nil {
+		return ""
+	}
+	// Prefer the parent conversation id on the envelope/step/result. Do not walk
+	// into subagent_info here: its conversation_id is a child trajectory.
+	for _, container := range []map[string]any{event, antigravityStepPayload(event), antigravityResultPayload(event), antigravityInitPayload(event)} {
+		if id := firstMapString(container, "conversation_id", "conversationId", "conversationID", "session_id", "sessionId"); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func antigravityEventTrajectoryID(event map[string]any) string {
+	for _, container := range []map[string]any{antigravityStepPayload(event), event, antigravityResultPayload(event)} {
+		if id := firstMapString(container, "trajectory_id", "trajectoryId", "trajectoryID", "cascade_id", "cascadeId"); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func antigravityEventBelongsToChild(event map[string]any, mainConversationID, mainTrajectoryID string) bool {
+	conversationID := strings.TrimSpace(antigravityEventConversationID(event))
+	trajectoryID := strings.TrimSpace(antigravityEventTrajectoryID(event))
+	if mainTrajectoryID != "" && trajectoryID != "" && !strings.EqualFold(trajectoryID, mainTrajectoryID) {
+		return true
+	}
+	if mainConversationID != "" && conversationID != "" && !strings.EqualFold(conversationID, mainConversationID) {
+		return true
+	}
+	return false
+}
+
+func cloneNormalizedExternalUsage(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	clone := make(map[string]any, len(value)+1)
+	for key, item := range value {
+		clone[key] = item
+	}
+	// collectGeminiNativeUsage can distinguish this normalized shape from the
+	// legacy Gemini message shape whose input token count includes cache hits.
+	clone["__nicecodex_normalized_usage"] = true
+	return clone
+}
+
+func aggregateNormalizedExternalUsage(values map[string]map[string]any) map[string]any {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]any)
+	for _, usage := range values {
+		if usage == nil {
+			continue
+		}
+		for _, key := range []string{"inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"} {
+			result[key] = int64FromAny(result[key]) + int64FromAny(usage[key])
+		}
+	}
+	if int64FromAny(result["totalTokens"]) <= 0 {
+		result["totalTokens"] = int64FromAny(result["inputTokens"]) + int64FromAny(result["cachedInputTokens"]) + int64FromAny(result["outputTokens"]) + int64FromAny(result["reasoningOutputTokens"])
+	}
+	contextTokens := int64FromAny(result["inputTokens"]) + int64FromAny(result["cachedInputTokens"])
+	if contextTokens > 0 {
+		result["contextTokens"] = contextTokens
+		result["contextUsageSource"] = "antigravity-step-sum"
+	}
+	return cloneNormalizedExternalUsage(result)
+}
+
+func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
+	turns := make([]externalTurn, 0, 4)
+	var current *externalTurn
+	turnNumber := 0
+	eventOrdinal := 0
+	mainConversationID := ""
+	mainTrajectoryID := ""
+	lastUserMarker := ""
+	stepUsage := make(map[string]map[string]any)
+	finalUsage := map[string]any(nil)
+	toolIndexes := make(map[string]int)
+	agentIndexes := make(map[string]int)
+	reasoningIndexes := make(map[string]int)
+	fallbackTime := int64(0)
+	if info, err := os.Stat(path); err == nil {
+		fallbackTime = info.ModTime().Unix()
+	}
+	ensureTurn := func() *externalTurn {
+		if current == nil {
+			current = &externalTurn{ID: fmt.Sprintf("antigravity-turn-%d", turnNumber), Status: "inProgress", StartedAt: fallbackTime}
+			turnNumber++
+		}
+		return current
+	}
+	hasTurnData := func(turn *externalTurn) bool {
+		return turn != nil && (strings.TrimSpace(turn.UserText) != "" || strings.TrimSpace(turn.AgentText) != "" || len(turn.Items) > 0 || turn.Usage != nil)
+	}
+	flush := func() {
+		if current == nil {
+			return
+		}
+		if finalUsage != nil {
+			current.Usage = cloneNormalizedExternalUsage(finalUsage)
+		} else if aggregate := aggregateNormalizedExternalUsage(stepUsage); aggregate != nil {
+			current.Usage = aggregate
+		}
+		if current.Status == "" || current.Status == "inProgress" {
+			current.Status = "completed"
+		}
+		if current.UserText == "" {
+			current.UserText = "Antigravity session turn"
+		}
+		if current.CompletedAt == 0 {
+			current.CompletedAt = current.StartedAt
+		}
+		if current.DurationMS == 0 && current.CompletedAt >= current.StartedAt {
+			current.DurationMS = (current.CompletedAt - current.StartedAt) * 1000
+		}
+		turns = append(turns, *current)
+		current = nil
+		stepUsage = make(map[string]map[string]any)
+		finalUsage = nil
+		toolIndexes = make(map[string]int)
+		agentIndexes = make(map[string]int)
+		reasoningIndexes = make(map[string]int)
+	}
+	rebuildAgentText := func(turn *externalTurn) {
+		if turn == nil {
+			return
+		}
+		var text strings.Builder
+		for _, item := range turn.Items {
+			if firstMapString(item, "type") == "agentMessage" {
+				text.WriteString(firstMapString(item, "text"))
+			}
+		}
+		turn.AgentText = text.String()
+	}
+	reconcileFinalText := func(turn *externalTurn, text string) {
+		if turn == nil || text == "" || text == turn.AgentText {
+			return
+		}
+		lastAgent := -1
+		for index, item := range turn.Items {
+			if firstMapString(item, "type") == "agentMessage" {
+				lastAgent = index
+			}
+		}
+		if lastAgent < 0 {
+			turn.Items = append(turn.Items, map[string]any{"id": turn.ID + ":agent:final", "type": "agentMessage", "status": "completed", "text": text})
+			turn.AgentText = text
+			return
+		}
+		if strings.HasPrefix(text, turn.AgentText) {
+			suffix := strings.TrimPrefix(text, turn.AgentText)
+			turn.Items[lastAgent]["text"] = firstMapString(turn.Items[lastAgent], "text") + suffix
+			turn.AgentText = text
+			return
+		}
+		// result.response is authoritative. Keep the final agent row at its native
+		// timeline position while clearing superseded partial rows.
+		for index, item := range turn.Items {
+			if firstMapString(item, "type") == "agentMessage" {
+				item["text"] = ""
+				if index == lastAgent {
+					item["text"] = text
+				}
+			}
+		}
+		turn.AgentText = text
+	}
+	err := visitJSONLLines(path, func(line []byte) bool {
+		eventOrdinal++
+		var event map[string]any
+		if json.Unmarshal(line, &event) != nil || event == nil {
+			return false
+		}
+		eventConversation := antigravityEventConversationID(event)
+		if eventConversation != "" && mainConversationID == "" {
+			mainConversationID = eventConversation
+		}
+		eventTrajectory := antigravityEventTrajectoryID(event)
+		if mainTrajectoryID == "" && eventTrajectory != "" && antigravityIsUserEvent(event) {
+			if eventConversation == "" || mainConversationID == "" || strings.EqualFold(eventConversation, mainConversationID) {
+				mainTrajectoryID = eventTrajectory
+			}
+		}
+		isChild := antigravityEventBelongsToChild(event, mainConversationID, mainTrajectoryID)
+		if antigravityIsInitEvent(event) {
+			// init carries session metadata only; it must never allocate an empty
+			// conversation turn.
+			return false
+		}
+		if antigravityIsUserEvent(event) && !isChild {
+			marker := antigravityExplicitTurnKey(event)
+			if marker == "" {
+				marker = antigravityEventStepIndex(event)
+			}
+			if marker != "" && marker == lastUserMarker {
+				return false
+			}
+			if current != nil && hasTurnData(current) {
+				flush()
+			}
+			turn := ensureTurn()
+			text := cleanAntigravityUserText(antigravityEventText(event))
+			if text != "" {
+				turn.UserText = text
+			}
+			if started := nativeEventUnix(event); started > 0 {
+				turn.StartedAt = started
+			}
+			lastUserMarker = marker
+			return false
+		}
+
+		// Usage is attached to step_update/result envelopes, not only to the
+		// rendered text. Keep one snapshot per step and prefer the terminal result
+		// (the result usage is cumulative, while step usage is per-step).
+		if usage := extractExternalUsage(event); usage != nil && !isChild {
+			if antigravityIsTerminalEvent(event) {
+				finalUsage = cloneNormalizedExternalUsage(usage)
+			} else {
+				stepKey := antigravityEventStepKey(event, fmt.Sprintf("event:%d", eventOrdinal))
+				stepUsage[stepKey] = usage
+			}
+		}
+
+		items := parseExternalToolEvents("gemini", event)
+		chunk, _, final, kind := parseExternalEvent("gemini", event)
+		if current == nil && len(items) == 0 && chunk == "" {
+			return false
+		}
+		turn := ensureTurn()
+		if started := nativeEventUnix(event); started > 0 && turn.StartedAt == 0 {
+			turn.StartedAt = started
+		}
+		if len(items) > 0 && !isChild {
+			for _, item := range items {
+				itemID := strings.TrimSpace(firstMapString(item, "id", "itemId", "callId"))
+				if itemID == "" {
+					continue
+				}
+				if index, exists := toolIndexes[itemID]; exists && index >= 0 && index < len(turn.Items) {
+					for key, value := range item {
+						turn.Items[index][key] = value
+					}
+				} else {
+					toolIndexes[itemID] = len(turn.Items)
+					turn.Items = append(turn.Items, item)
+				}
+			}
+		}
+		if !isChild {
+			switch kind {
+			case "text", "replace":
+				if chunk != "" {
+					if final {
+						reconcileFinalText(turn, chunk)
+					} else {
+						stepKey := antigravityEventStepKey(event, fmt.Sprintf("event:%d", eventOrdinal))
+						index, exists := agentIndexes[stepKey]
+						previous := ""
+						if exists && index >= 0 && index < len(turn.Items) {
+							previous = firstMapString(turn.Items[index], "text")
+						}
+						next, _, _ := reconcileAntigravityStepText(previous, chunk, antigravityStepState(event))
+						if next != previous {
+							if exists && index >= 0 && index < len(turn.Items) {
+								turn.Items[index]["text"] = next
+							} else {
+								agentIndexes[stepKey] = len(turn.Items)
+								turn.Items = append(turn.Items, map[string]any{"id": turn.ID + ":agent:" + strconv.Itoa(len(turn.Items)), "type": "agentMessage", "status": "completed", "text": next})
+							}
+							rebuildAgentText(turn)
+						}
+					}
+				}
+			case "thought", "thought_replace":
+				if chunk != "" {
+					stepKey := antigravityEventStepKey(event, fmt.Sprintf("event:%d", eventOrdinal))
+					index, exists := reasoningIndexes[stepKey]
+					previous := ""
+					if exists && index >= 0 && index < len(turn.Items) {
+						previous = firstMapString(turn.Items[index], "summary", "content")
+					}
+					next, _, _ := reconcileAntigravityStepText(previous, chunk, antigravityStepState(event))
+					if next != previous {
+						if exists && index >= 0 && index < len(turn.Items) {
+							turn.Items[index]["summary"] = next
+							turn.Items[index]["content"] = next
+						} else {
+							reasoningIndexes[stepKey] = len(turn.Items)
+							turn.Items = append(turn.Items, map[string]any{"id": turn.ID + ":reasoning:" + strconv.Itoa(len(turn.Items)), "type": "reasoning", "status": "completed", "summary": next, "content": next})
+						}
+					}
+				}
+			case "error":
+				turn.Status = "failed"
+				turn.Error = chunk
+			}
+		}
+		if final && !isChild {
+			turn.CompletedAt = nativeEventUnix(event)
+			if turn.CompletedAt == 0 {
+				turn.CompletedAt = time.Now().Unix()
+			}
+			if turn.Status == "" || turn.Status == "inProgress" {
+				turn.Status = "completed"
+			}
+			flush()
+		}
+		return false
+	})
+	if err != nil {
+		return nil, err
+	}
+	flush()
+	return turns, nil
+}
+
+func nativeEventUnix(event map[string]any) int64 {
+	containers := []map[string]any{antigravityStepPayload(event), event, antigravityResultPayload(event), antigravityInitPayload(event)}
+	for _, name := range []string{"metadata", "meta", "context"} {
+		if nested, ok := event[name].(map[string]any); ok {
+			containers = append(containers, nested)
+		}
+	}
+	for _, container := range containers {
+		if container == nil {
+			continue
+		}
+		for _, key := range []string{"timestamp", "ts", "time", "created_at", "createdAt", "updated_at", "updatedAt"} {
+			value := container[key]
+			if number := int64FromAny(value); number > 0 {
+				if number > 10_000_000_000 {
+					return number / 1000
+				}
+				return number
+			}
+			if text := strings.TrimSpace(stringFromAny(value)); text != "" {
+				if parsed, err := time.Parse(time.RFC3339Nano, text); err == nil {
+					return parsed.Unix()
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func geminiTurnsFromMessages(messages []map[string]any) []externalTurn {
@@ -1882,6 +2870,9 @@ func findGeminiNativeSessionFile(home, sessionID string) string {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return ""
+	}
+	if path := findAntigravityNativeSessionFile(home, sessionID); path != "" {
+		return path
 	}
 	root := filepath.Join(home, "tmp")
 	entries, _ := os.ReadDir(root)
@@ -2086,6 +3077,18 @@ func runOpenCodeDatabaseQuery(home, query string) (string, error) {
 
 func listGeminiNativeSessions(home, workspace string) []ExternalSessionView {
 	result := make([]ExternalSessionView, 0)
+	seen := make(map[string]struct{})
+	appendView := func(view ExternalSessionView, ok bool) {
+		if !ok || strings.TrimSpace(view.ID) == "" {
+			return
+		}
+		key := strings.ToLower(strings.TrimSpace(view.ID))
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		result = append(result, view)
+	}
 	root := filepath.Join(home, "tmp")
 	entries, _ := os.ReadDir(root)
 	for _, project := range entries {
@@ -2104,9 +3107,56 @@ func listGeminiNativeSessions(home, workspace string) []ExternalSessionView {
 				continue
 			}
 			view, ok := parseGeminiSessionFile(filepath.Join(chatsDir, file.Name()), workspace)
-			if ok {
-				result = append(result, view)
+			appendView(view, ok)
+		}
+	}
+	for _, view := range listAntigravityNativeSessions(home, workspace) {
+		appendView(view, true)
+	}
+	sort.SliceStable(result, func(i, j int) bool { return result[i].UpdatedAt > result[j].UpdatedAt })
+	if len(result) > 100 {
+		result = result[:100]
+	}
+	return result
+}
+
+func antigravityNativeRoots(home string) []string {
+	return uniqueExistingOrConfiguredPaths([]string{
+		filepath.Join(home, "antigravity-cli", "brain"),
+		filepath.Join(home, "antigravity", "brain"),
+	})
+}
+
+func listAntigravityNativeSessions(home, workspace string) []ExternalSessionView {
+	result := make([]ExternalSessionView, 0)
+	seen := make(map[string]struct{})
+	for _, root := range antigravityNativeRoots(home) {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
 			}
+			conversationID := strings.TrimSpace(entry.Name())
+			if conversationID == "" {
+				continue
+			}
+			transcript := filepath.Join(root, conversationID, ".system_generated", "logs", "transcript.jsonl")
+			if !fileOrDirExists(transcript) {
+				transcript = filepath.Join(root, conversationID, "transcript.jsonl")
+			}
+			view, ok := parseAntigravitySessionFile(transcript, conversationID, workspace)
+			if !ok {
+				continue
+			}
+			key := strings.ToLower(view.ID)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, view)
 		}
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].UpdatedAt > result[j].UpdatedAt })
@@ -2114,6 +3164,125 @@ func listGeminiNativeSessions(home, workspace string) []ExternalSessionView {
 		result = result[:100]
 	}
 	return result
+}
+
+func parseAntigravitySessionFile(path, conversationID, workspace string) (ExternalSessionView, bool) {
+	if strings.TrimSpace(path) == "" || !fileOrDirExists(path) {
+		return ExternalSessionView{}, false
+	}
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		conversationID = filepath.Base(filepath.Dir(filepath.Dir(filepath.Dir(path))))
+	}
+	view := ExternalSessionView{ID: conversationID, Workspace: workspace, Provider: "gemini", Native: true}
+	var firstUser string
+	var discoveredWorkspace string
+	var createdAt, updatedAt int64
+	mainConversationID := conversationID
+	mainTrajectoryID := ""
+	seenRecord := false
+	err := visitJSONLLines(path, func(line []byte) bool {
+		var event map[string]any
+		if json.Unmarshal(line, &event) != nil || event == nil {
+			return false
+		}
+		seenRecord = true
+		eventConversation := antigravityEventConversationID(event)
+		if mainConversationID == "" && eventConversation != "" {
+			mainConversationID = eventConversation
+			view.ID = eventConversation
+		}
+		eventTrajectory := antigravityEventTrajectoryID(event)
+		if mainTrajectoryID == "" && eventTrajectory != "" && antigravityIsUserEvent(event) &&
+			(eventConversation == "" || mainConversationID == "" || strings.EqualFold(eventConversation, mainConversationID)) {
+			mainTrajectoryID = eventTrajectory
+		}
+		isChild := antigravityEventBelongsToChild(event, mainConversationID, mainTrajectoryID)
+		if timestamp := nativeEventUnix(event); timestamp > 0 {
+			if createdAt == 0 || timestamp < createdAt {
+				createdAt = timestamp
+			}
+			if timestamp > updatedAt {
+				updatedAt = timestamp
+			}
+		}
+		if discoveredWorkspace == "" {
+			discoveredWorkspace = antigravityEventWorkspace(event)
+		}
+		if view.Model == "" && !isChild {
+			view.Model = antigravityEventModel(event)
+		}
+		content := antigravityEventText(event)
+		if firstUser == "" && !isChild && antigravityIsUserEvent(event) {
+			content = cleanAntigravityUserText(content)
+			if content != "" && !isGeminiContextMessage(content) {
+				firstUser = content
+			}
+		}
+		if view.Model == "" && !isChild && strings.Contains(strings.ToLower(content), "model selection") {
+			view.Model = extractAntigravityModelFromText(content)
+		}
+		return false
+	})
+	if err != nil || !seenRecord {
+		return ExternalSessionView{}, false
+	}
+	if discoveredWorkspace != "" {
+		if workspace != "" && !samePath(discoveredWorkspace, workspace) {
+			return ExternalSessionView{}, false
+		}
+		view.Workspace = discoveredWorkspace
+	}
+	if view.Workspace == "" {
+		view.Workspace = workspace
+	}
+	if firstUser != "" {
+		view.Title = truncateRunes(firstUser, 80)
+		view.Preview = truncateRunes(firstUser, 160)
+	}
+	if view.Title == "" {
+		view.Title = "Antigravity session " + conversationID
+	}
+	if info, statErr := os.Stat(path); statErr == nil {
+		if updatedAt == 0 {
+			updatedAt = info.ModTime().Unix()
+		}
+		if createdAt == 0 {
+			createdAt = info.ModTime().Unix()
+		}
+	}
+	view.CreatedAt, view.UpdatedAt = createdAt, updatedAt
+	return view, true
+}
+
+func cleanAntigravityUserText(value string) string {
+	text := strings.TrimSpace(value)
+	for _, tag := range []string{"<USER_REQUEST>", "</USER_REQUEST>", "USER_REQUEST:", "USER_INPUT:"} {
+		text = strings.ReplaceAll(text, tag, "")
+	}
+	for _, marker := range []string{"<ADDITIONAL_METADATA>", "<USER_SETTINGS_CHANGE>", "<SYSTEM_CONTEXT>"} {
+		if index := strings.Index(text, marker); index >= 0 {
+			text = text[:index]
+		}
+	}
+	return strings.TrimSpace(text)
+}
+
+func extractAntigravityModelFromText(value string) string {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"model selection", "model:"} {
+		if index := strings.Index(lower, marker); index >= 0 {
+			candidate := strings.TrimSpace(value[index+len(marker):])
+			candidate = strings.Trim(candidate, " :\\\"'`\t\r\n")
+			if newline := strings.IndexAny(candidate, "\r\n,;"); newline >= 0 {
+				candidate = candidate[:newline]
+			}
+			if candidate != "" {
+				return strings.TrimSpace(candidate)
+			}
+		}
+	}
+	return ""
 }
 
 func parseGeminiSessionFile(path, workspace string) (ExternalSessionView, bool) {
@@ -2298,11 +3467,148 @@ func collectGeminiUsage(home, workspace string) ExternalUsageSummary {
 			}
 		}
 	}
+	scanAntigravityNativeUsage(home, workspace,
+		func(value any, model string) { _ = addUsage(value, model) },
+		func() { result.Sessions++ },
+		func() { result.Messages++ },
+	)
 	for _, item := range byModel {
 		result.ByModel = append(result.ByModel, *item)
 	}
 	sort.SliceStable(result.ByModel, func(i, j int) bool { return result.ByModel[i].TotalTokens > result.ByModel[j].TotalTokens })
 	return result
+}
+
+// scanAntigravityNativeUsage reads each transcript once and selects one usage
+// record per user turn. Antigravity can emit cumulative step usage followed by a
+// terminal result usage; counting both would inflate totals, so the final result
+// wins and the last step is used only when no result exists.
+func scanAntigravityNativeUsage(home, workspace string, addUsage func(any, string), addSession, addMessage func()) {
+	if addUsage == nil {
+		return
+	}
+	seenConversations := make(map[string]struct{})
+	for _, root := range antigravityNativeRoots(home) {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			conversationID := strings.TrimSpace(entry.Name())
+			conversationKey := strings.ToLower(conversationID)
+			if conversationKey == "" {
+				continue
+			}
+			if _, seen := seenConversations[conversationKey]; seen {
+				continue
+			}
+			transcript := filepath.Join(root, conversationID, ".system_generated", "logs", "transcript.jsonl")
+			if !fileOrDirExists(transcript) {
+				transcript = filepath.Join(root, conversationID, "transcript.jsonl")
+			}
+			view, ok := parseAntigravitySessionFile(transcript, conversationID, workspace)
+			if !ok {
+				continue
+			}
+			seenConversations[conversationKey] = struct{}{}
+			if addSession != nil {
+				addSession()
+			}
+			mainConversationID := conversationID
+			mainTrajectoryID := ""
+			lastUserMarker := ""
+			turnNumber := 0
+			turnActive := false
+			stepUsage := make(map[string]map[string]any)
+			var finalUsage map[string]any
+			turnModel := ""
+			flushTurn := func() {
+				if !turnActive {
+					return
+				}
+				usage := finalUsage
+				if usage == nil {
+					usage = aggregateNormalizedExternalUsage(stepUsage)
+				}
+				if usage != nil {
+					model := turnModel
+					if model == "" {
+						model = view.Model
+					}
+					addUsage(usage, model)
+				}
+				turnActive = false
+				stepUsage = make(map[string]map[string]any)
+				finalUsage = nil
+				turnModel = ""
+			}
+			_ = visitJSONLLines(transcript, func(line []byte) bool {
+				var event map[string]any
+				if json.Unmarshal(line, &event) != nil || event == nil {
+					return false
+				}
+				eventConversation := antigravityEventConversationID(event)
+				if mainConversationID == "" && eventConversation != "" {
+					mainConversationID = eventConversation
+				}
+				eventTrajectory := antigravityEventTrajectoryID(event)
+				if mainTrajectoryID == "" && eventTrajectory != "" && antigravityIsUserEvent(event) &&
+					(eventConversation == "" || mainConversationID == "" || strings.EqualFold(eventConversation, mainConversationID)) {
+					mainTrajectoryID = eventTrajectory
+				}
+				isChild := antigravityEventBelongsToChild(event, mainConversationID, mainTrajectoryID)
+				if antigravityIsInitEvent(event) || isChild {
+					return false
+				}
+				if antigravityIsUserEvent(event) {
+					marker := antigravityExplicitTurnKey(event)
+					if marker == "" {
+						marker = antigravityEventStepKey(event, "")
+					}
+					if marker != "" && marker == lastUserMarker {
+						return false
+					}
+					flushTurn()
+					turnNumber++
+					turnActive = true
+					lastUserMarker = marker
+					turnModel = antigravityEventModel(event)
+					if addMessage != nil {
+						addMessage()
+					}
+					return false
+				}
+				usage := extractExternalUsage(event)
+				if usage == nil && !antigravityIsTerminalEvent(event) {
+					return false
+				}
+				if !turnActive {
+					turnActive = true
+				}
+				model := antigravityEventModel(event)
+				if model != "" {
+					turnModel = model
+				}
+				if antigravityIsTerminalEvent(event) {
+					if usage != nil {
+						finalUsage = cloneNormalizedExternalUsage(usage)
+					}
+					flushTurn()
+					return false
+				}
+				if usage != nil {
+					fallbackKey := fmt.Sprintf("turn:%d:%s", turnNumber, antigravityStepType(event))
+					stepKey := antigravityEventStepKey(event, fallbackKey)
+					stepUsage[stepKey] = usage
+				}
+				return false
+			})
+			flushTurn()
+		}
+	}
 }
 
 func firstGeminiSessionMeta(payload []byte) map[string]any {
@@ -2326,12 +3632,12 @@ func collectNativeUsage(value any, input, output, cached, reasoning, total *int6
 				if tokenMap, ok := nested.(map[string]any); ok {
 					*input += firstPositiveInt64(tokenMap, "input", "input_tokens", "prompt", "prompt_tokens")
 					*output += firstPositiveInt64(tokenMap, "output", "output_tokens", "completion", "completion_tokens")
-					*reasoning += firstPositiveInt64(tokenMap, "reasoning", "reasoning_tokens", "thoughts", "thoughts_tokens")
+					*reasoning += firstPositiveInt64(tokenMap, "reasoning", "reasoning_tokens", "thinking_tokens", "thinkingTokens", "thoughts", "thoughts_tokens")
 					*total += firstPositiveInt64(tokenMap, "total", "total_tokens", "totalTokenCount")
 					if cache, ok := tokenMap["cache"].(map[string]any); ok {
 						*cached += firstPositiveInt64(cache, "read", "cached", "input", "tokens")
 					} else {
-						*cached += firstPositiveInt64(tokenMap, "cached", "cached_tokens", "cache_read", "cache_read_input_tokens")
+						*cached += firstPositiveInt64(tokenMap, "cached", "cached_tokens", "cache_read", "cache_read_tokens", "cache_read_input_tokens")
 					}
 				}
 				continue
@@ -2346,11 +3652,11 @@ func collectNativeUsage(value any, input, output, cached, reasoning, total *int6
 				if number > 0 {
 					*output += number
 				}
-			case "cachedcontenttokencount", "cachedtokens", "cacheread":
+			case "cachedcontenttokencount", "cachedtokens", "cacheread", "cachereadtokens", "cachereadinputtokens":
 				if number > 0 {
 					*cached += number
 				}
-			case "thoughtstokencount", "reasoningtokens", "reasoningtokencount":
+			case "thoughtstokencount", "reasoningtokens", "reasoningtokencount", "thinkingtokens":
 				if number > 0 {
 					*reasoning += number
 				}
@@ -2369,6 +3675,14 @@ func collectNativeUsage(value any, input, output, cached, reasoning, total *int6
 }
 
 func collectGeminiNativeUsage(value any, input, output, cached, reasoning, total *int64) {
+	if normalized, ok := value.(map[string]any); ok {
+		if marker, exists := normalized["__nicecodex_normalized_usage"]; exists {
+			if enabled, valid := boolFromConfig(marker); valid && enabled {
+				collectNativeUsage(value, input, output, cached, reasoning, total)
+				return
+			}
+		}
+	}
 	collectNativeUsage(value, input, output, cached, reasoning, total)
 	if *cached > 0 && *input >= *cached {
 		// Gemini persists promptTokenCount as `tokens.input`; the API defines it

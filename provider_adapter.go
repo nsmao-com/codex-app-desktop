@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"nice_codex_desktop/internal/codex"
 )
@@ -59,8 +60,9 @@ type externalRun struct {
 }
 
 const (
-	externalStreamFlushInterval = 32 * time.Millisecond
-	externalStreamFlushBytes    = 512
+	externalStreamFlushInterval = 48 * time.Millisecond
+	externalStreamFlushBytes    = 2 * 1024
+	externalStreamSnapshotBytes = 1_000_000
 )
 
 // externalStreamCoalescer preserves CLI stdout order while reducing the number
@@ -78,6 +80,66 @@ type externalStreamCoalescer struct {
 type openCodeTextDeduper struct {
 	parts     map[string]string
 	anonymous string
+}
+
+type antigravityLiveStepUpdate struct {
+	kind            string
+	delta           string
+	previous        string
+	next            string
+	segmentSnapshot string
+	replace         bool
+}
+
+type antigravityLiveStepAssembler struct {
+	steps       map[string]string
+	activeKind  string
+	segmentText string
+	ordinal     uint64
+}
+
+func newAntigravityLiveStepAssembler() *antigravityLiveStepAssembler {
+	return &antigravityLiveStepAssembler{steps: make(map[string]string)}
+}
+
+func (a *antigravityLiveStepAssembler) Barrier() {
+	if a == nil {
+		return
+	}
+	a.activeKind = ""
+	a.segmentText = ""
+}
+
+func (a *antigravityLiveStepAssembler) Next(event map[string]any, kind, chunk string) antigravityLiveStepUpdate {
+	if a == nil || chunk == "" || (kind != "text" && kind != "thought") {
+		return antigravityLiveStepUpdate{}
+	}
+	a.ordinal++
+	if a.activeKind != kind {
+		a.activeKind = kind
+		a.segmentText = ""
+	}
+	fallback := fmt.Sprintf("event:%d", a.ordinal)
+	key := kind + "\x00" + antigravityEventStepKey(event, fallback)
+	previous := a.steps[key]
+	next, delta, replace := reconcileAntigravityStepText(previous, chunk, antigravityStepState(event))
+	if next == previous || (delta == "" && !replace) {
+		return antigravityLiveStepUpdate{}
+	}
+	a.steps[key] = next
+	if replace {
+		if strings.HasSuffix(a.segmentText, previous) {
+			a.segmentText = strings.TrimSuffix(a.segmentText, previous) + next
+		} else {
+			a.segmentText = next
+		}
+	} else {
+		a.segmentText += delta
+	}
+	return antigravityLiveStepUpdate{
+		kind: kind, delta: delta, previous: previous, next: next,
+		segmentSnapshot: a.segmentText, replace: replace,
+	}
 }
 
 func newOpenCodeTextDeduper() *openCodeTextDeduper {
@@ -131,7 +193,7 @@ func (c *externalStreamCoalescer) Push(kind, chunk string) {
 	if c == nil || c.onStream == nil || chunk == "" {
 		return
 	}
-	if kind == "replace" {
+	if kind == "replace" || kind == "thought_replace" {
 		if c.kind != "" && c.kind != kind {
 			c.Flush()
 		}
@@ -165,6 +227,41 @@ func (c *externalStreamCoalescer) Flush() {
 	if c.onStream != nil {
 		c.onStream(kind, chunk)
 	}
+}
+
+func appendBoundedExternalStreamText(builder *strings.Builder, value string) {
+	if builder == nil || value == "" {
+		return
+	}
+	remaining := externalStreamSnapshotBytes - builder.Len()
+	if remaining <= 0 {
+		return
+	}
+	if len(value) <= remaining {
+		builder.WriteString(value)
+		return
+	}
+	end := remaining
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	if end > 0 {
+		builder.WriteString(value[:end])
+	}
+}
+
+func replaceExternalBuilderSuffix(builder *strings.Builder, previous, next string) bool {
+	if builder == nil {
+		return false
+	}
+	current := builder.String()
+	if !strings.HasSuffix(current, previous) {
+		return false
+	}
+	builder.Reset()
+	builder.WriteString(strings.TrimSuffix(current, previous))
+	builder.WriteString(next)
+	return true
 }
 
 func externalProviderKind(value string) string {
@@ -662,8 +759,38 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	segmentNumber := 0
 	activeAgentID := ""
 	activeAgentText := strings.Builder{}
+	activeAgentStreamText := strings.Builder{}
+	activeAgentStreamSequence := uint64(0)
 	activeReasoningID := ""
 	activeReasoningText := strings.Builder{}
+	activeReasoningStreamText := strings.Builder{}
+	activeReasoningStreamSequence := uint64(0)
+	emitAgentDelta := func(itemID, delta string, replace bool) {
+		if replace {
+			activeAgentStreamText.Reset()
+			appendBoundedExternalStreamText(&activeAgentStreamText, activeAgentText.String())
+		} else {
+			appendBoundedExternalStreamText(&activeAgentStreamText, delta)
+		}
+		activeAgentStreamSequence++
+		s.emitExternalNotification("item/agentMessage/delta", map[string]any{
+			"threadId": threadID, "turnId": turnID, "itemId": itemID, "delta": delta,
+			"streamSequence": activeAgentStreamSequence, "streamText": activeAgentStreamText.String(), "streamMode": "replace",
+		})
+	}
+	emitReasoningDelta := func(itemID, delta string, replace bool) {
+		if replace {
+			activeReasoningStreamText.Reset()
+			appendBoundedExternalStreamText(&activeReasoningStreamText, activeReasoningText.String())
+		} else {
+			appendBoundedExternalStreamText(&activeReasoningStreamText, delta)
+		}
+		activeReasoningStreamSequence++
+		s.emitExternalNotification("item/reasoning/summaryTextDelta", map[string]any{
+			"threadId": threadID, "turnId": turnID, "itemId": itemID, "delta": delta,
+			"streamSequence": activeReasoningStreamSequence, "streamText": activeReasoningStreamText.String(), "streamMode": "replace",
+		})
+	}
 	recordTimelineItem := func(item map[string]any) {
 		if item == nil {
 			return
@@ -686,13 +813,15 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		if activeReasoningID != "" {
 			item := map[string]any{"id": activeReasoningID, "type": "reasoning", "status": "completed", "summary": activeReasoningText.String()}
 			recordTimelineItem(item)
-			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
 			activeReasoningID = ""
 			activeReasoningText.Reset()
 		}
 		activeAgentID = fmt.Sprintf("%s:agent:%d", turnID, segmentNumber)
 		segmentNumber++
 		activeAgentText.Reset()
+		activeAgentStreamText.Reset()
+		activeAgentStreamSequence = 0
 		item := map[string]any{"id": activeAgentID, "type": "agentMessage", "status": "inProgress", "text": ""}
 		recordTimelineItem(item)
 		s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
@@ -705,13 +834,15 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		if activeAgentID != "" {
 			item := map[string]any{"id": activeAgentID, "type": "agentMessage", "status": "completed", "text": activeAgentText.String()}
 			recordTimelineItem(item)
-			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
 			activeAgentID = ""
 			activeAgentText.Reset()
 		}
 		activeReasoningID = fmt.Sprintf("%s:reasoning:%d", turnID, segmentNumber)
 		segmentNumber++
 		activeReasoningText.Reset()
+		activeReasoningStreamText.Reset()
+		activeReasoningStreamSequence = 0
 		item := map[string]any{"id": activeReasoningID, "type": "reasoning", "status": "inProgress", "summary": ""}
 		recordTimelineItem(item)
 		s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
@@ -721,14 +852,14 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		if activeReasoningID != "" {
 			item := map[string]any{"id": activeReasoningID, "type": "reasoning", "status": status, "summary": activeReasoningText.String()}
 			recordTimelineItem(item)
-			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
 			activeReasoningID = ""
 			activeReasoningText.Reset()
 		}
 		if activeAgentID != "" {
 			item := map[string]any{"id": activeAgentID, "type": "agentMessage", "status": status, "text": activeAgentText.String()}
 			recordTimelineItem(item)
-			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+			s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
 			activeAgentID = ""
 			activeAgentText.Reset()
 		}
@@ -748,8 +879,11 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 				s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "runtime": provider})
 				return
 			}
-			if item, ok := decodeExternalToolTimelineItem(delta); ok {
+			items := decodeExternalToolTimelineItems(delta)
+			for _, item := range items {
 				recordTimelineItem(item)
+			}
+			if len(items) > 0 {
 				s.emitExternalToolNotification(threadID, turnID, provider, delta)
 			}
 			return
@@ -758,12 +892,16 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 			s.bindExternalSession(threadID, provider, delta)
 			return
 		}
-		if kind == "thought" {
+		if kind == "thought" || kind == "thought_replace" {
 			itemID := ensureReasoningSegment()
-			activeReasoningText.WriteString(delta)
-			s.emitExternalNotification("item/reasoning/summaryTextDelta", map[string]any{
-				"threadId": threadID, "turnId": turnID, "itemId": itemID, "delta": delta,
-			})
+			if kind == "thought_replace" {
+				activeReasoningText.Reset()
+				activeReasoningText.WriteString(delta)
+				emitReasoningDelta(itemID, delta, true)
+			} else {
+				activeReasoningText.WriteString(delta)
+				emitReasoningDelta(itemID, delta, false)
+			}
 			return
 		}
 		if kind == "replace" {
@@ -772,7 +910,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 			activeAgentText.WriteString(delta)
 			item := map[string]any{"id": itemID, "type": "agentMessage", "status": "inProgress", "text": delta}
 			recordTimelineItem(item)
-			s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
+			emitAgentDelta(itemID, delta, true)
 			return
 		}
 		if kind != "" && kind != "text" {
@@ -780,9 +918,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 		}
 		itemID := ensureAgentSegment()
 		activeAgentText.WriteString(delta)
-		s.emitExternalNotification("item/agentMessage/delta", map[string]any{
-			"threadId": threadID, "turnId": turnID, "itemId": itemID, "delta": delta,
-		})
+		emitAgentDelta(itemID, delta, false)
 	})
 	// Gemini/OpenCode can omit usage on stdout. OpenCode also emits one usage
 	// record per tool step, while this stream loop only retains the latest map.
@@ -847,10 +983,8 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	// for a missing suffix and appended a second time at process exit.
 	if output != "" {
 		rendered := ""
-		agentSegments := 0
 		for _, item := range timelineItems {
 			if firstMapString(item, "type") == "agentMessage" {
-				agentSegments++
 				if firstMapString(item, "id", "itemId") == activeAgentID {
 					rendered += activeAgentText.String()
 				} else {
@@ -859,28 +993,60 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 			}
 		}
 		if rendered != output {
-			itemID := ensureAgentSegment()
 			switch {
 			case rendered == "":
+				itemID := ensureAgentSegment()
 				activeAgentText.Reset()
 				activeAgentText.WriteString(output)
 				item := map[string]any{"id": itemID, "type": "agentMessage", "status": "inProgress", "text": output}
 				recordTimelineItem(item)
-				s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
+				emitAgentDelta(itemID, output, true)
 			case strings.HasPrefix(output, rendered):
+				itemID := ensureAgentSegment()
 				suffix := strings.TrimPrefix(output, rendered)
 				if suffix != "" {
 					activeAgentText.WriteString(suffix)
-					s.emitExternalNotification("item/agentMessage/delta", map[string]any{"threadId": threadID, "turnId": turnID, "itemId": itemID, "delta": suffix})
+					emitAgentDelta(itemID, suffix, false)
 				}
-			case activeAgentID != "" && agentSegments == 1:
-				// A divergent final snapshot replaces the only live segment. Do not
-				// append it to the streamed draft, which would duplicate both versions.
-				activeAgentText.Reset()
-				activeAgentText.WriteString(output)
-				item := map[string]any{"id": itemID, "type": "agentMessage", "status": "inProgress", "text": output}
-				recordTimelineItem(item)
-				s.emitExternalNotification("item/started", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
+			default:
+				// A terminal provider snapshot can revise text across multiple segments.
+				// Clear superseded rows and place the authoritative answer in the last
+				// agent row without disturbing tools between those rows.
+				targetID := activeAgentID
+				if targetID == "" {
+					for index := len(timelineItems) - 1; index >= 0; index-- {
+						if firstMapString(timelineItems[index], "type") == "agentMessage" {
+							targetID = firstMapString(timelineItems[index], "id", "itemId")
+							break
+						}
+					}
+				}
+				if targetID == "" {
+					targetID = ensureAgentSegment()
+				}
+				for index, existing := range timelineItems {
+					if firstMapString(existing, "type") != "agentMessage" {
+						continue
+					}
+					itemID := firstMapString(existing, "id", "itemId")
+					text := ""
+					if itemID == targetID {
+						text = output
+					}
+					itemStatus := status
+					if itemID == activeAgentID {
+						itemStatus = "inProgress"
+					}
+					item := map[string]any{"id": itemID, "type": "agentMessage", "status": itemStatus, "text": text}
+					timelineItems[index] = cloneExternalTimelineItem(item, itemStatus)
+					if itemID == activeAgentID {
+						activeAgentText.Reset()
+						activeAgentText.WriteString(output)
+						emitAgentDelta(itemID, output, true)
+					} else {
+						s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
+					}
+				}
 			}
 		}
 	}
@@ -888,7 +1054,7 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	if len(timelineItems) == 0 && output != "" {
 		item := map[string]any{"id": turnID + ":agent:0", "type": "agentMessage", "status": status, "text": output}
 		recordTimelineItem(item)
-		s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item})
+		s.emitExternalNotification("item/completed", map[string]any{"threadId": threadID, "turnId": turnID, "item": item, "replace": true})
 	}
 	completed := time.Now()
 	if normalizedProvider := strings.ToLower(strings.TrimSpace(provider)); normalizedProvider == "gemini" || normalizedProvider == "opencode" {
@@ -973,32 +1139,30 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 // same item id is reused for running/completed updates, so a long tool call is
 // updated in place instead of being appended again at the end of the turn.
 func (s *AppService) emitExternalToolNotification(threadID, turnID, provider, encoded string) {
-	tool, ok := decodeExternalToolTimelineItem(encoded)
-	if !ok {
-		return
+	for _, tool := range decodeExternalToolTimelineItems(encoded) {
+		itemID := strings.TrimSpace(firstMapString(tool, "id", "itemId", "callId"))
+		if itemID == "" {
+			continue
+		}
+		status := strings.TrimSpace(firstMapString(tool, "status"))
+		if status == "" {
+			status = "inProgress"
+		}
+		item := cloneExternalTimelineItem(tool, status)
+		item["id"] = itemID
+		item["type"] = "dynamicToolCall"
+		item["status"] = status
+		method := "item/started"
+		if status == "completed" || status == "failed" || status == "interrupted" {
+			method = "item/completed"
+		}
+		s.emitExternalNotification(method, map[string]any{
+			"threadId": threadID,
+			"turnId":   turnID,
+			"item":     item,
+			"runtime":  normalizeExternalRuntime(provider),
+		})
 	}
-	itemID := strings.TrimSpace(firstMapString(tool, "id", "itemId", "callId"))
-	if itemID == "" {
-		return
-	}
-	status := strings.TrimSpace(firstMapString(tool, "status"))
-	if status == "" {
-		status = "inProgress"
-	}
-	item := cloneExternalTimelineItem(tool, status)
-	item["id"] = itemID
-	item["type"] = "dynamicToolCall"
-	item["status"] = status
-	method := "item/started"
-	if status == "completed" || status == "failed" || status == "interrupted" {
-		method = "item/completed"
-	}
-	s.emitExternalNotification(method, map[string]any{
-		"threadId": threadID,
-		"turnId":   turnID,
-		"item":     item,
-		"runtime":  normalizeExternalRuntime(provider),
-	})
 }
 
 func decodeExternalToolTimelineItem(encoded string) (map[string]any, bool) {
@@ -1007,6 +1171,36 @@ func decodeExternalToolTimelineItem(encoded string) (map[string]any, bool) {
 		return nil, false
 	}
 	if strings.TrimSpace(firstMapString(item, "id", "itemId", "callId")) == "" {
+		return nil, false
+	}
+	return item, true
+}
+
+func decodeExternalToolTimelineItems(encoded string) []map[string]any {
+	var raw any
+	if json.Unmarshal([]byte(encoded), &raw) != nil || raw == nil {
+		return nil
+	}
+	items := make([]map[string]any, 0, 1)
+	switch value := raw.(type) {
+	case map[string]any:
+		if item, ok := decodeExternalToolTimelineItemMap(value); ok {
+			items = append(items, item)
+		}
+	case []any:
+		for _, entry := range value {
+			if itemMap, ok := entry.(map[string]any); ok {
+				if item, valid := decodeExternalToolTimelineItemMap(itemMap); valid {
+					items = append(items, item)
+				}
+			}
+		}
+	}
+	return items
+}
+
+func decodeExternalToolTimelineItemMap(item map[string]any) (map[string]any, bool) {
+	if item == nil || strings.TrimSpace(firstMapString(item, "id", "itemId", "callId")) == "" {
 		return nil, false
 	}
 	return item, true
@@ -1080,7 +1274,7 @@ func (s *AppService) executeExternalTurn(
 		return "", sessionID, nil, fmt.Errorf("%s CLI executable was not found", provider)
 	}
 	prompt := externalPrompt(text, images)
-	args, generatedSessionID := externalCommandArgs(provider, sessionID, workspace, settings, prompt)
+	args, generatedSessionID := externalCommandArgsForExecutable(provider, executable, sessionID, workspace, settings, prompt)
 	if sessionID == "" {
 		sessionID = generatedSessionID
 	}
@@ -1141,6 +1335,9 @@ func (s *AppService) executeExternalTurn(
 	emitted := false
 	stream := newExternalStreamCoalescer(onStream)
 	openCodeText := newOpenCodeTextDeduper()
+	antigravityText := newAntigravityLiveStepAssembler()
+	antigravityConversationID := ""
+	antigravityTrajectoryID := ""
 	// Claude stream-json has two live channels:
 	//  1) stream_event content_block_delta (true increments) → append
 	//  2) type=assistant partial messages (--include-partial-messages) → full snapshots
@@ -1158,7 +1355,24 @@ func (s *AppService) executeExternalTurn(
 		if err := json.Unmarshal(line, &event); err != nil || event == nil {
 			continue
 		}
+		isAntigravityEvent := provider == "gemini" && (antigravityStepPayload(event) != nil || antigravityResultPayload(event) != nil || antigravityInitPayload(event) != nil)
+		antigravityChildEvent := false
+		if isAntigravityEvent {
+			eventConversation := antigravityEventConversationID(event)
+			if antigravityConversationID == "" && eventConversation != "" {
+				antigravityConversationID = eventConversation
+			}
+			eventTrajectory := antigravityEventTrajectoryID(event)
+			if antigravityTrajectoryID == "" && eventTrajectory != "" && antigravityIsUserEvent(event) {
+				antigravityTrajectoryID = eventTrajectory
+			}
+			antigravityChildEvent = antigravityEventBelongsToChild(event, antigravityConversationID, antigravityTrajectoryID)
+		}
 		chunk, nextSessionID, final, kind := parseExternalEvent(provider, event)
+		if antigravityChildEvent && (kind == "text" || kind == "thought") {
+			chunk = ""
+			kind = ""
+		}
 		grokTerminal := provider == "grok" && final
 		if grokTerminal {
 			sawGrokTerminal = true
@@ -1171,13 +1385,14 @@ func (s *AppService) executeExternalTurn(
 		}
 		// Always try to capture spend fields — Grok end events often have empty text
 		// so kind/final alone is not enough; also catch mid-stream usage if present.
-		if next := extractExternalUsage(event); next != nil {
+		if next := extractExternalUsage(event); next != nil && !antigravityChildEvent {
 			usage = next
 		}
 		if kind == "tool" || kind == "compact" {
 			// Flush text accumulated before structured activity first. Without this
 			// barrier a coalesced text delta can cross the bridge after a tool event.
 			stream.Flush()
+			antigravityText.Barrier()
 			if onStream != nil {
 				onStream(kind, chunk)
 			}
@@ -1192,6 +1407,31 @@ func (s *AppService) executeExternalTurn(
 			if grokTerminal {
 				break
 			}
+			continue
+		}
+		if isAntigravityEvent && antigravityStepPayload(event) != nil && (kind == "text" || kind == "thought") {
+			update := antigravityText.Next(event, kind, chunk)
+			if update.kind == "" {
+				continue
+			}
+			if update.kind == "thought" {
+				if update.replace {
+					stream.Push("thought_replace", update.segmentSnapshot)
+				} else {
+					stream.Push("thought", update.delta)
+				}
+				continue
+			}
+			if update.replace {
+				if !replaceExternalBuilderSuffix(&output, update.previous, update.next) {
+					output.WriteString(update.delta)
+				}
+				stream.Push("replace", update.segmentSnapshot)
+			} else {
+				output.WriteString(update.delta)
+				stream.Push("text", update.delta)
+			}
+			emitted = true
 			continue
 		}
 		if kind == "thought" {
@@ -1219,6 +1459,14 @@ func (s *AppService) executeExternalTurn(
 			output.WriteString(claudeSnapshotFallback)
 			emitted = true
 			stream.Push("replace", output.String())
+			continue
+		}
+		if isAntigravityEvent && final && chunk != "" {
+			// result.response is the authoritative full turn snapshot. The caller
+			// reconciles it against timeline segments after the pending stream flush.
+			output.Reset()
+			output.WriteString(chunk)
+			emitted = true
 			continue
 		}
 		if final && emitted {
@@ -1407,6 +1655,14 @@ func mergeExternalSnapshot(current, next string) string {
 }
 
 func (s *AppService) externalExecutable(provider string) string {
+	// Gemini may have both legacy `gemini` and replacement `agy` binaries. Always
+	// re-resolve this provider so a newly installed agy is preferred over a stale
+	// cached runtime entry.
+	if provider == "gemini" {
+		if executable := findGeminiExecutable(); executable != "" {
+			return executable
+		}
+	}
 	s.mu.Lock()
 	for _, runtime := range s.agentProviders {
 		if runtime.Kind == provider && runtime.RuntimeReady {
@@ -1420,8 +1676,17 @@ func (s *AppService) externalExecutable(provider string) string {
 }
 
 func externalCommandArgs(provider, sessionID, workspace string, settings UserSettings, prompt string) ([]string, string) {
+	executable := ""
+	if provider == "gemini" {
+		executable = findGeminiExecutable()
+	}
+	return externalCommandArgsForExecutable(provider, executable, sessionID, workspace, settings, prompt)
+}
+
+func externalCommandArgsForExecutable(provider, executable, sessionID, workspace string, settings UserSettings, prompt string) ([]string, string) {
+	antigravity := provider == "gemini" && isAntigravityExecutable(executable)
 	generatedSessionID := sessionID
-	if generatedSessionID == "" && (provider == "claude" || provider == "gemini" || provider == "grok") {
+	if generatedSessionID == "" && (provider == "claude" || provider == "grok" || (provider == "gemini" && !antigravity)) {
 		generatedSessionID = newUUID()
 	}
 	model := strings.TrimSpace(settings.Model)
@@ -1443,14 +1708,27 @@ func externalCommandArgs(provider, sessionID, workspace string, settings UserSet
 		}
 		return append(args, claudePermissionArgs(settings)...), generatedSessionID
 	case "gemini":
-		args := []string{"-p", prompt, "--output-format", "stream-json", "--skip-trust"}
-		if sessionID != "" {
-			args = append(args, "--resume", sessionID)
+		args := []string{"-p", prompt, "--output-format", "stream-json"}
+		if antigravity {
+			// Antigravity owns the conversation id and emits it in the init
+			// event. Passing a locally generated id makes `--conversation`
+			// point at a non-existent native transcript.
+			if sessionID != "" {
+				args = append(args, "--conversation", sessionID)
+			}
 		} else {
-			args = append(args, "--session-id", generatedSessionID)
+			args = append(args, "--skip-trust")
+			if sessionID != "" {
+				args = append(args, "--resume", sessionID)
+			} else {
+				args = append(args, "--session-id", generatedSessionID)
+			}
 		}
 		if model != "" {
 			args = append(args, "--model", model)
+		}
+		if antigravity {
+			return append(args, antigravityPermissionArgs(settings.GeminiSandbox, settings.GeminiApprovalPolicy, effort)...), generatedSessionID
 		}
 		return append(args, geminiPermissionArgs(settings.GeminiSandbox, settings.GeminiApprovalPolicy)...), generatedSessionID
 	case "grok":
@@ -1565,6 +1843,25 @@ func geminiPermissionArgs(sandbox, approvalPolicy string) []string {
 	return []string{"--approval-mode", "default"}
 }
 
+// antigravityPermissionArgs maps the shared safety controls to Antigravity's
+// headless flags. Antigravity defaults to its interactive safety policy; only an
+// explicit full-access/never combination enables the documented bypass flag.
+func antigravityPermissionArgs(sandbox, approvalPolicy, effort string) []string {
+	args := make([]string, 0, 3)
+	if sandbox == "danger-full-access" && approvalPolicy == "never" {
+		args = append(args, "--dangerously-skip-permissions")
+	} else if sandbox == "read-only" {
+		// `--sandbox` keeps tool execution inside Antigravity's read-only
+		// sandbox. Do not pass a value: current and older agy releases expose it
+		// as a boolean switch.
+		args = append(args, "--sandbox")
+	}
+	if isExternalEffort(effort, "low", "medium", "high") {
+		args = append(args, "--effort", effort)
+	}
+	return args
+}
+
 func grokPermissionArgs(settings UserSettings) []string {
 	profile := "workspace"
 	switch settings.GrokSandbox {
@@ -1645,6 +1942,23 @@ func extractExternalUsage(event map[string]any) map[string]any {
 	if raw == nil {
 		if update, ok := event["update"].(map[string]any); ok {
 			raw = update["usage"]
+		}
+	}
+	// Antigravity wraps usage in step_update; result.usage is the terminal
+	// snapshot while step_update.usage may be an intermediate cumulative value.
+	if raw == nil {
+		for _, key := range []string{"step_update", "stepUpdate"} {
+			if step, ok := event[key].(map[string]any); ok {
+				raw = step["usage"]
+				if raw == nil {
+					if nested, ok := step["result"].(map[string]any); ok {
+						raw = nested["usage"]
+					}
+				}
+				if raw != nil {
+					break
+				}
+			}
 		}
 	}
 	// OpenAI-compatible stream final chunk often has usage at the root.
@@ -1729,6 +2043,12 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	// ACP / session updates use inputTokens (often FULL) + cachedReadTokens.
 	_, hasSnakeInput := raw["input_tokens"]
 	_, hasSnakeCache := raw["cache_read_input_tokens"]
+	_, hasAntigravityCache := raw["cache_read_tokens"]
+	_, hasAntigravityThinking := raw["thinking_tokens"]
+	isAntigravityUsage := hasSnakeInput && (hasAntigravityCache || hasAntigravityThinking)
+	if !hasSnakeCache {
+		hasSnakeCache = hasAntigravityCache
+	}
 	_, hasCachedRead := raw["cachedReadTokens"]
 	_, hasCamelInput := raw["inputTokens"]
 
@@ -1754,6 +2074,9 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	cached := anyToFloat(raw["cache_read_input_tokens"])
 	if cached <= 0 {
 		cached = anyToFloat(raw["cached_input_tokens"]) // Codex token_count
+	}
+	if cached <= 0 {
+		cached = anyToFloat(raw["cache_read_tokens"]) // Antigravity stream-json
 	}
 	if cached <= 0 {
 		cached = anyToFloat(raw["cachedReadTokens"]) // Grok updates.jsonl
@@ -1829,6 +2152,12 @@ func normalizeTokenUsageMap(value any) map[string]any {
 		reasoning = anyToFloat(raw["reasoningTokens"])
 	}
 	if reasoning <= 0 {
+		reasoning = anyToFloat(raw["thinking_tokens"]) // Antigravity stream-json
+	}
+	if reasoning <= 0 {
+		reasoning = anyToFloat(raw["thinkingTokens"])
+	}
+	if reasoning <= 0 {
 		reasoning = anyToFloat(raw["reasoningOutputTokens"])
 	}
 	if reasoning <= 0 {
@@ -1872,7 +2201,9 @@ func normalizeTokenUsageMap(value any) map[string]any {
 	// - Codex token_count / Grok ACP: input*_tokens is FULL prompt; total ≈ fullInput + output.
 	input := inputRaw
 	inputIsFull := false
-	if cached > 0 && inputRaw >= cached && total > 0 {
+	if isAntigravityUsage && cached > 0 && inputRaw >= cached {
+		inputIsFull = true
+	} else if cached > 0 && inputRaw >= cached && total > 0 {
 		if almostEqualFloat(total, inputRaw+output, 2) {
 			// full input + output == total  → input includes cache (Codex + Grok ACP)
 			inputIsFull = true
@@ -1894,17 +2225,25 @@ func normalizeTokenUsageMap(value any) map[string]any {
 			input = 0
 		}
 	}
+	if isAntigravityUsage && reasoning > 0 && output > 0 {
+		// Antigravity reports thinking_tokens as a subset of output_tokens.
+		// Split them for the UI without changing the provider-reported total.
+		output -= reasoning
+		if output < 0 {
+			output = 0
+		}
+	}
 
 	// Prefer reported total; otherwise compose.
 	if total <= 0 {
 		if inputIsFull {
 			total = inputRaw + output
 		} else {
-			total = input + cached + output
+			total = input + cached + output + reasoning
 		}
 	}
 	if total <= 0 && (input > 0 || cached > 0 || output > 0 || reasoning > 0) {
-		total = input + cached + output
+		total = input + cached + output + reasoning
 	}
 	if total <= 0 && input <= 0 && output <= 0 && cached <= 0 && reasoning <= 0 {
 		return nil
@@ -1986,10 +2325,10 @@ func externalEventSessionID(event map[string]any) string {
 			}
 		}
 		if record, ok := value.(map[string]any); ok {
-			if id := firstMapString(record, "session_id", "sessionId", "sessionID"); id != "" {
+			if id := firstMapString(record, "session_id", "sessionId", "sessionID", "conversation_id", "conversationId", "conversationID"); id != "" {
 				return id
 			}
-			for _, key := range []string{"part", "data", "message", "result", "state", "event"} {
+			for _, key := range []string{"part", "data", "message", "result", "state", "event", "step_update", "stepUpdate", "init", "subagent_info", "subagentInfo"} {
 				if id := visit(record[key], depth+1); id != "" {
 					return id
 				}
@@ -2079,8 +2418,13 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 	sessionID := externalEventSessionID(event)
 	eventType := strings.ToLower(firstMapString(event, "type", "event"))
 	eventType = strings.ReplaceAll(eventType, "-", "_")
-	if tool, ok := parseExternalToolEvent(provider, event); ok {
-		encoded, _ := json.Marshal(tool)
+	if tools := parseExternalToolEvents(provider, event); len(tools) > 0 {
+		var encoded []byte
+		if len(tools) == 1 {
+			encoded, _ = json.Marshal(tools[0])
+		} else {
+			encoded, _ = json.Marshal(tools)
+		}
 		return string(encoded), sessionID, false, "tool"
 	}
 	if provider == "claude" {
@@ -2191,16 +2535,81 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 		return "", sessionID, false, ""
 	}
 	if provider == "gemini" {
-		// Official Gemini CLI stream-json (geminicli.com/docs/cli/headless):
-		//   init | message | tool_use | tool_result | error | result
-		if eventType == "error" {
+		// Gemini CLI and Antigravity CLI both use NDJSON, but Antigravity wraps
+		// incremental output in `step_update` and finishes with a nested result.
+		// Keep the legacy Gemini shapes below while accepting both envelopes.
+		if eventType == "init" {
+			// The conversation id is extracted by externalEventSessionID above;
+			// init itself carries no assistant text.
+			return "", sessionID, false, ""
+		}
+		// Native Antigravity transcripts (1.1.x) use flat records such as
+		// PLANNER_RESPONSE/MODEL_RESPONSE rather than step_update envelopes.
+		// A planner record is normally a complete snapshot; retain empty records
+		// as non-terminal so a following ERROR_MESSAGE can still attach to the
+		// same user turn.
+		flatType := strings.ReplaceAll(eventType, ".", "_")
+		switch flatType {
+		case "planner_response", "model_response", "assistant_response", "model_output", "assistant_output":
+			text := antigravityEventText(event)
+			if strings.TrimSpace(text) == "" {
+				text = firstMapString(event, "content", "text", "response", "output", "message")
+			}
+			if text == "" {
+				for _, key := range []string{"content", "response", "output", "message"} {
+					if value := textFromExternalValue(event[key]); value != "" {
+						text = value
+						break
+					}
+				}
+			}
+			if strings.TrimSpace(text) == "" {
+				return "", sessionID, false, ""
+			}
+			status := strings.ToLower(strings.TrimSpace(firstMapString(event, "status", "state")))
+			final := status == "" || status == "done" || status == "completed" || status == "success" || status == "final"
+			return text, sessionID, final, "text"
+		}
+		if eventType == "step_update" || eventType == "stepupdate" {
+			step, _ := event["step_update"].(map[string]any)
+			if step == nil {
+				step, _ = event["stepUpdate"].(map[string]any)
+			}
+			if step == nil {
+				step = event
+			}
+			stepType := strings.ToLower(strings.ReplaceAll(firstMapString(step, "step_type", "stepType", "type", "kind"), "-", "_"))
+			if strings.Contains(stepType, "thinking") || strings.Contains(stepType, "reasoning") {
+				return firstMapString(step, "text_delta", "text", "delta", "content", "thinking", "reasoning"), sessionID, false, "thought"
+			}
+			if strings.Contains(stepType, "agent_response") || strings.Contains(stepType, "response") || strings.Contains(stepType, "text") || stepType == "" {
+				text := firstMapString(step, "text_delta", "text", "delta", "content", "response")
+				if text == "" {
+					text = textFromExternalValue(step["text_delta"])
+				}
+				if text == "" {
+					text = textFromExternalValue(step["content"])
+				}
+				return text, sessionID, false, "text"
+			}
+			return "", sessionID, false, ""
+		}
+		if eventType == "error" || flatType == "error_message" {
 			severity := strings.ToLower(firstMapString(event, "severity"))
 			if severity == "warning" || severity == "info" {
 				return "", sessionID, false, ""
 			}
-			message := firstMapString(event, "message", "error", "text")
+			message := firstMapString(event, "message", "error", "text", "content")
 			if message == "" {
-				message = "Gemini stream error"
+				if nested, ok := event["error"].(map[string]any); ok {
+					message = firstMapString(nested, "message", "text", "detail")
+				}
+			}
+			if message == "" {
+				message = antigravityEventText(event)
+			}
+			if message == "" {
+				message = "Gemini/Antigravity stream error"
 			}
 			return message, sessionID, true, "error"
 		}
@@ -2208,23 +2617,35 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 			return textFromExternalValue(event["content"]), sessionID, false, "text"
 		}
 		if eventType == "result" {
+			result, _ := event["result"].(map[string]any)
 			status := strings.ToLower(firstMapString(event, "status"))
+			if status == "" {
+				status = strings.ToLower(firstMapString(result, "status", "state"))
+			}
 			if status == "error" || status == "failed" {
 				message := firstMapString(event, "message")
+				if message == "" {
+					message = firstMapString(result, "message", "error", "detail")
+				}
 				if message == "" {
 					if errObj, ok := event["error"].(map[string]any); ok {
 						message = firstMapString(errObj, "message", "type")
 					}
 				}
 				if message == "" {
-					message = "Gemini turn failed"
+					message = "Gemini/Antigravity turn failed"
 				}
 				return message, sessionID, true, "error"
 			}
-			// Official result carries stats, not a full assistant snapshot.
 			text := textFromExternalValue(event["response"])
 			if text == "" {
+				text = textFromExternalValue(result["response"])
+			}
+			if text == "" {
 				text = firstMapString(event, "text", "content")
+			}
+			if text == "" {
+				text = firstMapString(result, "text", "content", "output")
 			}
 			return text, sessionID, true, "text"
 		}
@@ -2338,6 +2759,57 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 	return "", sessionID, false, ""
 }
 
+// parseExternalToolEvents accepts one native event that may contain more than
+// one structured activity. Antigravity reports delegated agents as an array;
+// the rest of the providers normally emit one tool item per line.
+func parseExternalToolEvents(provider string, event map[string]any) []map[string]any {
+	if provider == "gemini" {
+		items := make([]map[string]any, 0, 2)
+		appendSubagents := func(info map[string]any) {
+			if info == nil {
+				return
+			}
+			raw := info["subagents"]
+			if raw == nil {
+				raw = info["subAgents"]
+			}
+			if raw == nil {
+				raw = info["agents"]
+			}
+			if values, ok := raw.([]any); ok {
+				for _, value := range values {
+					if agent, ok := value.(map[string]any); ok {
+						if item, valid := antigravitySubagentItem(agent, event); valid {
+							items = append(items, item)
+						}
+					}
+				}
+				return
+			}
+			if item, valid := antigravitySubagentItem(info, event); valid {
+				items = append(items, item)
+			}
+		}
+		step, _ := event["step_update"].(map[string]any)
+		if step == nil {
+			step, _ = event["stepUpdate"].(map[string]any)
+		}
+		if info, ok := firstNestedMap(step, "subagent_info", "subagentInfo", "sub_agent_info"); ok {
+			appendSubagents(info)
+		}
+		if info, ok := firstNestedMap(event, "subagent_info", "subagentInfo", "sub_agent_info"); ok {
+			appendSubagents(info)
+		}
+		if len(items) > 0 {
+			return items
+		}
+	}
+	if item, ok := parseExternalToolEvent(provider, event); ok {
+		return []map[string]any{item}
+	}
+	return nil
+}
+
 // parseExternalToolEvent accepts the JSON event variants emitted by Gemini CLI
 // and OpenCode's `run --format json`. Both have changed field nesting between
 // releases, so the parser intentionally looks through part/data/state/tool
@@ -2348,6 +2820,37 @@ func parseExternalToolEvent(provider string, event map[string]any) (map[string]a
 	}
 	eventType := strings.ToLower(firstMapString(event, "type", "event", "kind"))
 	eventType = strings.ReplaceAll(eventType, "-", "_")
+	if provider == "gemini" {
+		// Antigravity nests tool and child-agent lifecycle data under a
+		// `step_update` envelope. Normalize those records into the same shape used
+		// by the existing dynamic-tool timeline and sub-agent sidebar.
+		step, _ := event["step_update"].(map[string]any)
+		if step == nil {
+			step, _ = event["stepUpdate"].(map[string]any)
+		}
+		if step != nil {
+			if info, ok := firstNestedMap(step, "subagent_info", "subagentInfo", "sub_agent_info"); ok {
+				if item, valid := antigravitySubagentItem(info, event); valid {
+					return item, true
+				}
+			}
+			if info, ok := firstNestedMap(step, "tool_info", "toolInfo", "tool_call", "toolCall"); ok {
+				event = mergeExternalEventWithToolInfo(event, info)
+				eventType = "tool"
+			} else {
+				stepType := strings.ToLower(strings.ReplaceAll(firstMapString(step, "step_type", "stepType", "type", "kind"), "-", "_"))
+				if strings.Contains(stepType, "tool") || strings.Contains(stepType, "function") {
+					event = mergeExternalEventWithToolInfo(event, step)
+					eventType = "tool"
+				}
+			}
+		}
+		if info, ok := firstNestedMap(event, "subagent_info", "subagentInfo", "sub_agent_info"); ok {
+			if item, valid := antigravitySubagentItem(info, event); valid {
+				return item, true
+			}
+		}
+	}
 	if !strings.Contains(eventType, "tool") && !strings.Contains(eventType, "function") {
 		// OpenCode puts the lifecycle type on `part` for some releases.
 		part, _ := event["part"].(map[string]any)
@@ -2462,6 +2965,154 @@ func parseExternalToolEvent(provider string, event map[string]any) (map[string]a
 		"status":       status,
 		"arguments":    input,
 		"contentItems": externalToolContentItems(output),
+	}
+	if status == "completed" {
+		item["success"] = true
+	} else if status == "failed" {
+		item["success"] = false
+	}
+	return item, true
+}
+
+func firstNestedMap(value map[string]any, keys ...string) (map[string]any, bool) {
+	for _, key := range keys {
+		if nested, ok := value[key].(map[string]any); ok && nested != nil {
+			return nested, true
+		}
+	}
+	return nil, false
+}
+
+func mergeExternalEventWithToolInfo(event, info map[string]any) map[string]any {
+	merged := make(map[string]any, len(event)+len(info)+2)
+	for key, value := range event {
+		merged[key] = value
+	}
+	for key, value := range info {
+		if _, exists := merged[key]; !exists {
+			merged[key] = value
+		}
+	}
+	merged["type"] = "tool"
+	merged["tool"] = info
+	// Antigravity's tool_info does not always carry a call id. Derive one from
+	// immutable step metadata (never the output, which changes between ACTIVE and
+	// DONE) so lifecycle updates merge into one timeline row.
+	if id := firstMapString(info, "call_id", "callId", "callID", "id", "tool_call_id"); id != "" {
+		merged["id"] = id
+	} else if id := firstMapString(event, "call_id", "callId", "callID", "id", "tool_call_id"); id != "" {
+		merged["id"] = id
+	} else {
+		merged["id"] = antigravityStableToolID(event, info)
+	}
+	if state := antigravityStepState(event); state != "" {
+		merged["status"] = state
+	}
+	return merged
+}
+
+func antigravityStepState(event map[string]any) string {
+	step, _ := event["step_update"].(map[string]any)
+	if step == nil {
+		step, _ = event["stepUpdate"].(map[string]any)
+	}
+	if step == nil {
+		step = event
+	}
+	return firstMapString(step, "state", "status", "phase", "outcome")
+}
+
+func antigravityStableToolID(event, info map[string]any) string {
+	conversation := firstMapString(event, "conversation_id", "conversationId", "conversationID", "session_id", "sessionId")
+	step, _ := event["step_update"].(map[string]any)
+	if step == nil {
+		step, _ = event["stepUpdate"].(map[string]any)
+	}
+	if step != nil {
+		if conversation == "" {
+			conversation = firstMapString(step, "conversation_id", "conversationId", "conversationID", "session_id", "sessionId")
+		}
+		index := stringFromAny(step["step_index"])
+		if index == "" {
+			index = stringFromAny(step["stepIndex"])
+		}
+		if conversation != "" && index != "" {
+			return conversation + ":step:" + index
+		}
+	}
+	name := firstMapString(info, "name", "tool_name", "toolName", "tool")
+	parameters, _ := json.Marshal(info["parameters"])
+	seed := conversation + "\x00" + name + "\x00" + string(parameters)
+	sum := sha256.Sum256([]byte(seed))
+	return "agy-tool-" + fmt.Sprintf("%x", sum[:8])
+}
+
+func firstNonNilExternalValue(values ...any) any {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func antigravitySubagentItem(info, event map[string]any) (map[string]any, bool) {
+	id := firstMapString(info, "subagent_id", "subagentId", "child_agent_id", "childAgentId", "agent_id", "agentId", "conversation_id", "conversationId", "id", "session_id", "sessionId")
+	if id == "" {
+		// Do not fall back to the parent conversation id. A missing child id
+		// should be ignored rather than collapsing the parent turn into a fake
+		// subagent row.
+		id = firstMapString(event, "subagent_id", "subagentId", "child_agent_id", "childAgentId", "agent_id", "agentId")
+	}
+	if id == "" {
+		return nil, false
+	}
+	name := firstMapString(info, "agent_name", "agentName", "role", "name", "display_name", "displayName", "type_name", "typeName", "type")
+	if name == "" {
+		name = "subagent"
+	}
+	status := strings.ToLower(firstMapString(info, "status", "state", "phase", "outcome"))
+	if status == "" {
+		status = strings.ToLower(antigravityStepState(event))
+	}
+	switch status {
+	case "", "queued", "pending", "waiting":
+		status = "inProgress"
+	case "active", "running", "started", "in_progress", "inprogress":
+		status = "inProgress"
+	case "done", "success", "succeeded", "completed", "complete", "finished":
+		status = "completed"
+	case "failed", "failure", "error":
+		status = "failed"
+	case "cancelled", "canceled", "interrupted":
+		status = "interrupted"
+	default:
+		status = "inProgress"
+	}
+	detail := firstMapString(info, "task", "prompt", "description", "detail", "text", "message", "role", "type_name", "typeName")
+	if detail == "" {
+		detail = textFromExternalValue(info["input"])
+	}
+	if detail == "" {
+		detail = firstMapString(info, "log_uri", "logUri")
+	}
+	output := info["output"]
+	if output == nil {
+		output = info["result"]
+	}
+	item := map[string]any{
+		"id":           id,
+		"type":         "dynamicToolCall",
+		"tool":         "subagent",
+		"subagentId":   id,
+		"agentName":    name,
+		"status":       status,
+		"detail":       detail,
+		"arguments":    firstNonNilExternalValue(info["input"], info["workspace_uris"], info["workspaceUris"]),
+		"contentItems": externalToolContentItems(output),
+	}
+	if parent := firstMapString(info, "parent_agent_id", "parentAgentId", "parent_conversation_id", "parentConversationId"); parent != "" {
+		item["parentAgentId"] = parent
 	}
 	if status == "completed" {
 		item["success"] = true

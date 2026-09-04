@@ -230,9 +230,7 @@ export const useCodexStore = defineStore('codex', () => {
 
   function isRuntimeReady(runtime: WorkspaceRuntime): boolean {
     if (runtime === 'gemini' || runtime === 'opencode') {
-      return appStore.agentProviders.some((provider) =>
-        provider.kind === runtime && provider.runtimeReady,
-      )
+      return Boolean(appStore.providerForRuntime(runtime)?.runtimeReady)
     }
     return runtime === 'codex' && connection.value.state === 'ready'
   }
@@ -251,7 +249,9 @@ export const useCodexStore = defineStore('codex', () => {
   const activeThreadBusy = computed(() => threadIsBusy(activeThreadId.value) || activeQueuedMessages.value.length > 0)
   const activeThreadUsesExternalProvider = computed(() => {
     const provider = activeThread.value?.modelProvider || ''
-    return provider === '__gemini__' || provider === '__opencode__'
+    const normalized = provider.toLocaleLowerCase()
+    return normalized === '__gemini__' || normalized === '__antigravity__' || normalized === 'gemini-cli' || normalized === 'antigravity' || normalized === 'antigravity-cli' || normalized === 'agy'
+      || normalized === '__opencode__'
       || appStore.isGeminiMode || appStore.isOpenCodeMode
   })
 
@@ -260,7 +260,7 @@ export const useCodexStore = defineStore('codex', () => {
       ? (findThreadSummary(threadID) || (activeThread.value && sameThreadSession(activeThread.value.id, threadID) ? activeThread.value : null))
       : activeThread.value
     const provider = (thread?.modelProvider || threadModelIdentity[threadID]?.provider || '').toLocaleLowerCase()
-    if (provider === '__gemini__' || provider === 'gemini-cli') return 'gemini'
+    if (provider === '__gemini__' || provider === '__antigravity__' || provider === 'gemini-cli' || provider === 'antigravity' || provider === 'antigravity-cli' || provider === 'agy') return 'gemini'
     if (provider === '__opencode__' || provider === 'opencode-cli') return 'opencode'
     if (thread || threadModelIdentity[threadID]) return 'codex'
     return null
@@ -276,9 +276,10 @@ export const useCodexStore = defineStore('codex', () => {
 
   function runtimeNameForThread(threadID = ''): string {
     const runtime = runtimeIDForThread(threadID)
-    if (runtime === 'gemini') return 'Gemini CLI'
-    if (runtime === 'opencode') return 'OpenCode'
-    return 'Codex'
+    // Provider names are reported by the runtime probe (for example
+    // Antigravity CLI for the Gemini-compatible runtime). Keep the persisted
+    // runtime id stable while using that name in notifications.
+    return appStore.runtimeDisplayName(runtime)
   }
   const canSteerActiveTurn = computed(() => {
     const threadID = activeThreadId.value
@@ -758,7 +759,7 @@ export const useCodexStore = defineStore('codex', () => {
   async function loadModels(): Promise<void> {
     const requestedRuntime = appStore.activeRuntime
     if (requestedRuntime === 'gemini' || requestedRuntime === 'opencode') {
-      let provider = appStore.agentProviders.find((item) => item.kind === requestedRuntime)
+      let provider = appStore.providerForRuntime(requestedRuntime)
       let catalog = provider?.models ?? []
       let nativeActiveProvider = ''
       try {
@@ -768,7 +769,9 @@ export const useCodexStore = defineStore('codex', () => {
         nativeActiveProvider = nativeCatalog.activeProvider || ''
         if (provider && nativeCatalog.models?.length) {
           const nextProviders = [...appStore.agentProviders]
-          const index = nextProviders.findIndex((item) => item.kind === requestedRuntime)
+          const index = provider
+            ? nextProviders.findIndex((item) => item.id === provider?.id)
+            : -1
           if (index >= 0) {
             nextProviders[index] = { ...nextProviders[index], models: catalog }
             appStore.agentProviders = nextProviders
@@ -5796,8 +5799,8 @@ export const useCodexStore = defineStore('codex', () => {
         // Normal snapshots must not truncate buffered deltas. External adapters
         // can explicitly mark a provider revision as an authoritative replacement.
         text: authoritativeText ? item.text : mergeStreamText(item.text, current.text),
-        reasoningSummary: mergeStreamText(item.reasoningSummary, current.reasoningSummary),
-        reasoningContent: mergeStreamText(item.reasoningContent, current.reasoningContent),
+	      reasoningSummary: authoritativeText ? item.reasoningSummary : mergeStreamText(item.reasoningSummary, current.reasoningSummary),
+	      reasoningContent: authoritativeText ? item.reasoningContent : mergeStreamText(item.reasoningContent, current.reasoningContent),
         output: mergeStreamText(item.output, current.output),
         attachments: item.attachments.length ? item.attachments : current.attachments,
       }

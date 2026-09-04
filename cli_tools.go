@@ -96,7 +96,7 @@ var (
 	semverInText   = regexp.MustCompile(`(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)`)
 )
 
-// CheckCLITools detects every supported local CLI and queries npm for latest versions.
+// CheckCLITools detects every supported local CLI and checks applicable latest versions.
 func (s *AppService) CheckCLITools() CLIToolsReport {
 	codex.EnrichPathForLookups()
 	pm, nodeOK, nodeVer := detectNodePackageManager()
@@ -127,8 +127,8 @@ func (s *AppService) CheckCLITools() CLIToolsReport {
 }
 
 // InstallCLITool installs or upgrades a CLI.
-// Codex / Claude / Gemini / OpenCode use pnpm global packages.
-// Grok Build uses the official x.ai installer / `grok update` (native binary).
+// Codex / Claude / legacy Gemini / OpenCode use pnpm global packages.
+// Antigravity and Grok Build use their official native installers/update paths.
 func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) {
 	toolID = strings.ToLower(strings.TrimSpace(toolID))
 	spec, ok := lookupCLIPackage(toolID)
@@ -151,6 +151,14 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 
 	if spec.id == cliToolGrok {
 		return s.installOrUpdateGrokCLI()
+	}
+	if spec.id == cliToolGemini {
+		// New consumer installs use the native Antigravity binary (`agy`). Keep
+		// updating an existing legacy Gemini CLI through pnpm when it is the only
+		// binary present, so enterprise/API users are not migrated unexpectedly.
+		if executable := findGeminiExecutable(); executable == "" || isAntigravityExecutable(executable) {
+			return s.installOrUpdateAntigravityCLI()
+		}
 	}
 
 	codex.EnrichPathForLookups()
@@ -396,6 +404,68 @@ func (s *AppService) installOrUpdateGrokCLI() (CLIToolActionResult, error) {
 	}, nil
 }
 
+// installOrUpdateAntigravityCLI installs Google's native replacement for the
+// consumer Gemini CLI. The installer is intentionally invoked through a bounded
+// child process so a stalled network request cannot freeze the desktop UI.
+func (s *AppService) installOrUpdateAntigravityCLI() (CLIToolActionResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	output, err := runOfficialAntigravityInstaller(ctx)
+	text := strings.TrimSpace(string(output))
+	if len(text) > 8000 {
+		text = text[len(text)-8000:]
+	}
+	codex.EnrichPathForLookups()
+	// Invalidate the short provider probe cache so the new agy binary appears
+	// immediately in the runtime picker.
+	providerProbeCache.Lock()
+	delete(providerProbeCache.entries, "gemini")
+	providerProbeCache.Unlock()
+	detection := codex.Detect()
+	providers := detectAgentProviders(detection)
+	s.mu.Lock()
+	s.agentProviders = providers
+	s.mu.Unlock()
+	tool := probeCLITool(cliPackages[cliPackageIndex(cliToolGemini)], "official", true)
+	if err != nil {
+		message := fmt.Sprintf("Antigravity CLI installer failed: %v", err)
+		if text != "" {
+			message += "\n" + firstOutputLines(text, 10)
+		}
+		return CLIToolActionResult{OK: false, Message: message, Output: text, Tool: tool}, errors.New(message)
+	}
+	if !tool.Installed || !isAntigravityExecutable(tool.Executable) {
+		message := "Installer finished but agy was not found. Restart Nice Codex or add the Antigravity CLI directory to PATH."
+		return CLIToolActionResult{OK: false, Message: message, Output: text, Tool: tool}, errors.New(message)
+	}
+	return CLIToolActionResult{
+		OK: true, Message: fmt.Sprintf("Antigravity CLI is ready (%s)", firstNonEmpty(tool.Version, "ok")), Output: text, Tool: tool,
+	}, nil
+}
+
+func runOfficialAntigravityInstaller(ctx context.Context) ([]byte, error) {
+	if runtime.GOOS == "windows" {
+		ps := findCommand(commandCandidates("powershell"))
+		if ps == "" {
+			ps = findCommand(commandCandidates("pwsh"))
+		}
+		if ps == "" {
+			ps = "powershell"
+		}
+		// Official Windows bootstrap from antigravity.google/docs/cli.
+		script := "irm https://antigravity.google/cli/install.ps1 | iex"
+		cmd := exec.CommandContext(ctx, ps, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)
+		return runManagedCombinedOutput(ctx, cmd)
+	}
+	shell := findCommand(commandCandidates("bash"))
+	if shell == "" {
+		shell = "/bin/bash"
+	}
+	script := "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+	cmd := exec.CommandContext(ctx, shell, "-lc", script)
+	return runManagedCombinedOutput(ctx, cmd)
+}
+
 func cliPackageIndex(id CLIToolID) int {
 	for index, spec := range cliPackages {
 		if spec.id == id {
@@ -532,7 +602,7 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 				}
 			}
 		}
-	case cliToolClaude, cliToolGemini, cliToolOpenCode:
+	case cliToolClaude, cliToolOpenCode:
 		status.Executable = findCommand(commandCandidates(spec.binName))
 		status.Installed = status.Executable != ""
 		if status.Installed {
@@ -540,10 +610,42 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 				status.Version = normalizeCLIVersion(firstOutputLine(output))
 			}
 		}
+	case cliToolGemini:
+		status.Executable = findGeminiExecutable()
+		status.Installed = status.Executable != ""
+		if isAntigravityExecutable(status.Executable) {
+			status.Name = "Antigravity CLI"
+			status.Package = "antigravity-cli (native)"
+			status.PackageManager = "official"
+			status.NodeAvailable = nodeOK
+			status.CanInstall = true
+			status.InstallCommand = officialAntigravityInstallCommand()
+		} else if status.Executable == "" {
+			// Offer the supported native installer even on machines without
+			// Node/pnpm. The legacy npm package remains available as a manual
+			// fallback for enterprise users.
+			status.Name = "Antigravity CLI"
+			status.Package = "antigravity-cli (native)"
+			status.PackageManager = "official"
+			status.CanInstall = true
+			status.InstallCommand = officialAntigravityInstallCommand()
+		} else {
+			status.Name = "Gemini CLI"
+		}
+		if status.Installed {
+			if output, err := runProbeCommand(status.Executable, []string{"--version"}, 4*time.Second); err == nil {
+				status.Version = normalizeCLIVersion(firstOutputLine(output))
+			}
+		}
 	}
 
-	// npm latest only applies to real npm-managed CLIs (not Grok Build).
-	if spec.id != cliToolGrok && strings.TrimSpace(spec.npmPkg) != "" && !strings.Contains(spec.npmPkg, "x.ai") {
+	// Antigravity is native, while an actually selected legacy Gemini binary is
+	// still managed by @google/gemini-cli and needs the normal update check.
+	npmManaged := spec.id != cliToolGrok && strings.TrimSpace(spec.npmPkg) != "" && !strings.Contains(spec.npmPkg, "x.ai")
+	if spec.id == cliToolGemini {
+		npmManaged = status.Installed && !isAntigravityExecutable(status.Executable)
+	}
+	if npmManaged {
 		latest, err := fetchNPMLatestVersion(spec.npmPkg)
 		if err == nil {
 			status.LatestVersion = latest
@@ -556,7 +658,11 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 	switch {
 	case spec.id == cliToolGrok && !status.Installed:
 		status.Message = "Not installed — uses official x.ai/cli installer"
-	case spec.id != cliToolGrok && !nodeOK:
+	case spec.id == cliToolGemini && isAntigravityExecutable(status.Executable):
+		status.Message = "Antigravity CLI (agy) ready"
+	case spec.id == cliToolGemini && status.Executable == "":
+		status.Message = "Not installed — uses the official Antigravity CLI installer"
+	case spec.id != cliToolGrok && spec.id != cliToolGemini && !nodeOK:
 		status.Message = "Install Node.js and pnpm first"
 	case spec.id != cliToolGrok && pm == "":
 		status.Message = "Install pnpm first"
@@ -584,6 +690,13 @@ func officialGrokInstallCommand() string {
 		return "irm https://x.ai/cli/install.ps1 | iex"
 	}
 	return "curl -fsSL https://x.ai/cli/install.sh | bash"
+}
+
+func officialAntigravityInstallCommand() string {
+	if runtime.GOOS == "windows" {
+		return "irm https://antigravity.google/cli/install.ps1 | iex"
+	}
+	return "curl -fsSL https://antigravity.google/cli/install.sh | bash"
 }
 
 func detectNodePackageManager() (manager string, nodeOK bool, nodeVersion string) {

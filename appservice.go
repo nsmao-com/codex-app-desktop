@@ -3894,12 +3894,19 @@ func readSettings(path string) (UserSettings, error) {
 	settings.ClaudeEffort = normalizeClaudeEffort(settings.ClaudeEffort)
 	settings.GeminiModel = sanitizeShortText(settings.GeminiModel, 160)
 	migratedGeminiModel := false
+	legacyGeminiModel := strings.ToLower(strings.TrimSpace(settings.GeminiModel))
 	if nativeModel := readEnvValue(filepath.Join(resolveGeminiHome(), ".env"), "GEMINI_MODEL"); nativeModel != "" {
-		legacy := strings.ToLower(strings.TrimSpace(settings.GeminiModel))
-		if legacy == "" || legacy == "gemini-2.5-pro" || legacy == "gemini-2.5-flash" {
+		if legacyGeminiModel == "" || legacyGeminiModel == "gemini-2.5-pro" || legacyGeminiModel == "gemini-2.5-flash" {
 			settings.GeminiModel = nativeModel
 			migratedGeminiModel = true
 		}
+	} else if (legacyGeminiModel == "gemini-2.5-pro" || legacyGeminiModel == "gemini-2.5-flash") &&
+		geminiRuntimeDisplayName(findGeminiExecutable()) == "Antigravity CLI" {
+		// Older NiceCodex releases injected Gemini 2.5 as an app fallback. Do not
+		// carry that synthetic choice into Antigravity; an empty value lets agy use
+		// its current native default model.
+		settings.GeminiModel = ""
+		migratedGeminiModel = true
 	}
 	settings.GeminiWorkspace = strings.TrimSpace(settings.GeminiWorkspace)
 	settings.GeminiCustomModels = sanitizeCustomModels(settings.GeminiCustomModels)

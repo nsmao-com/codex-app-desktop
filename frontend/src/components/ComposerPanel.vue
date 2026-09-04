@@ -574,7 +574,10 @@ const sessionLocked = computed(() => Boolean(
 ))
 const grokProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'grok'))
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
-const externalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === paneRuntime.value))
+const externalProvider = computed(() => appStore.providerForRuntime(paneRuntime.value))
+const externalRuntimeName = computed(() => isGeminiMode.value
+  ? appStore.runtimeDisplayName('gemini')
+  : appStore.runtimeDisplayName('opencode'))
 const externalModelCatalog = computed(() => {
   const custom = isGeminiMode.value
     ? (appStore.settings.geminiCustomModels ?? [])
@@ -1117,8 +1120,7 @@ const composerPlaceholder = computed(() => {
   if (isClaudeMode.value && willQueueOnSend.value) return t('chat.queuePlaceholder')
   if (isClaudeMode.value) return t('chat.claudePlaceholder')
   if ((isGeminiMode.value || isOpenCodeMode.value) && willQueueOnSend.value) return t('chat.queuePlaceholder')
-  if (isGeminiMode.value) return t('chat.runtimePlaceholder', { runtime: 'Gemini CLI' })
-  if (isOpenCodeMode.value) return t('chat.runtimePlaceholder', { runtime: 'OpenCode' })
+  if (isGeminiMode.value || isOpenCodeMode.value) return t('chat.runtimePlaceholder', { runtime: externalRuntimeName.value })
   if (willQueueOnSend.value) return t('chat.queuePlaceholder')
   return t('chat.placeholder')
 })

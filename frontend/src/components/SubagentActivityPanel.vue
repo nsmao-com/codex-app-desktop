@@ -48,7 +48,7 @@ const expandedActivityIds = shallowRef<string[]>([])
 const runtimeLabels: Record<SubagentRuntime, { zh: string; en: string }> = {
   codex: { zh: 'Codex / OpenAI', en: 'Codex / OpenAI' },
   claude: { zh: 'Claude Code / Anthropic', en: 'Claude Code / Anthropic' },
-  gemini: { zh: 'Gemini CLI / Google', en: 'Gemini CLI / Google' },
+  gemini: { zh: 'Gemini / Antigravity CLI / Google', en: 'Gemini / Antigravity CLI / Google' },
   grok: { zh: 'Grok / xAI', en: 'Grok / xAI' },
   opencode: { zh: 'OpenCode', en: 'OpenCode' },
 }
@@ -72,14 +72,18 @@ const statusLabels: Record<SubagentStatus, { zh: string; en: string }> = {
 const capabilityDescriptions: Record<SubagentRuntime, { zh: string; en: string }> = {
   codex: { zh: '原生协作线程与子代理工具事件，可持续查看各代理进度。', en: 'Native collaboration threads and sub-agent tool events expose ongoing progress.' },
   claude: { zh: '原生 Task / Agent 工具可提供子代理生命周期。', en: 'Native Task and Agent tools expose child-agent lifecycle updates.' },
-  gemini: { zh: '原生子代理与 invoke_agent 事件；明细取决于已安装 CLI 版本。', en: 'Native sub-agents and invoke_agent events; detail depends on the installed CLI version.' },
+  gemini: { zh: 'Gemini CLI 与 Antigravity CLI 均支持原生子代理；明细取决于已安装 CLI 版本。', en: 'Gemini CLI and Antigravity CLI expose native sub-agents; detail depends on the installed CLI version.' },
   grok: { zh: 'Grok Build 支持 spawn_subagent；直连 API 模式可能没有子代理事件。', en: 'Grok Build supports spawn_subagent; direct API mode may not emit child-agent events.' },
   opencode: { zh: '原生 primary / subagent 与 Task 工具事件可被追踪。', en: 'Native primary/subagent and Task tool events can be tracked.' },
 }
 
+function runtimeLabel(runtimeID: SubagentRuntime): string {
+  if (runtimeID === 'gemini') return appStore.runtimeDisplayName('gemini')
+  return runtimeLabels[runtimeID][isChinese.value ? 'zh' : 'en']
+}
+
 const activeRuntimeLabel = computed(() => {
-  const label = runtimeLabels[runtime.value]
-  return isChinese.value ? label.zh : label.en
+  return runtimeLabel(runtime.value)
 })
 
 function text(value: { zh: string; en: string }): string {
@@ -87,7 +91,7 @@ function text(value: { zh: string; en: string }): string {
 }
 
 function capabilityName(capability: SubagentCapability): string {
-  return runtimeLabels[capability.runtime][isChinese.value ? 'zh' : 'en']
+  return runtimeLabel(capability.runtime)
 }
 
 function capabilityStatus(capability: SubagentCapability): string {

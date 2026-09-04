@@ -23,8 +23,14 @@ func TestUpsertAndRemoveExternalMCPServer(t *testing.T) {
 	t.Setenv("GEMINI_CLI_HOME", geminiHome)
 	t.Setenv("OPENCODE_CONFIG", filepath.Join(opencodeDir, "opencode.json"))
 
-	// Seed an unrelated setting plus one existing server that must survive.
-	geminiPath := filepath.Join(geminiHome, "settings.json")
+	// Seed the config selected by the runtime on this machine. Developers may
+	// already have Antigravity installed, while CI normally exercises legacy
+	// Gemini; both paths must preserve unrelated settings and servers.
+	geminiPath := externalRuntimeConfigPath("gemini", "global", "")
+	if err := os.MkdirAll(filepath.Dir(geminiPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	usingAntigravity := geminiUsesAntigravity(geminiHome)
 	seed := map[string]any{
 		"theme": "dark",
 		"mcpServers": map[string]any{
@@ -146,7 +152,11 @@ func TestUpsertAndRemoveExternalMCPServer(t *testing.T) {
 	}
 	servers, _ = after["mcpServers"].(map[string]any)
 	entry, _ := servers["remote-server"].(map[string]any)
-	if entry == nil || entry["url"] != "https://example.com/mcp" {
+	urlKey := "url"
+	if usingAntigravity {
+		urlKey = "serverUrl"
+	}
+	if entry == nil || entry[urlKey] != "https://example.com/mcp" {
 		t.Fatalf("remote server malformed: %v", entry)
 	}
 }

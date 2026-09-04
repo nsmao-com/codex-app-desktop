@@ -222,6 +222,9 @@ func (s *AppService) UpsertExternalMCPServer(runtime, scope string, input MCPSer
 	if err != nil {
 		return err
 	}
+	if runtime == "gemini" && geminiUsesAntigravity(resolveGeminiHome()) {
+		object = normalizeAntigravityMCPServerObject(object)
+	}
 	scope, err = externalMCPScopeAndWorkspace(scope)
 	if err != nil {
 		return err

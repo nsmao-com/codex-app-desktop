@@ -88,8 +88,10 @@ const isGrokMode = computed(() => appStore.isGrokMode)
 const isClaudeMode = computed(() => appStore.isClaudeMode)
 const isGeminiMode = computed(() => appStore.isGeminiMode)
 const isOpenCodeMode = computed(() => appStore.isOpenCodeMode)
-const externalRuntimeName = computed(() => isGeminiMode.value ? 'Gemini CLI' : 'OpenCode')
-const externalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === appStore.activeRuntime))
+const externalRuntimeName = computed(() => isGeminiMode.value
+  ? appStore.runtimeDisplayName('gemini')
+  : appStore.runtimeDisplayName('opencode'))
+const externalProvider = computed(() => appStore.providerForRuntime(appStore.activeRuntime))
 const grokProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'grok'))
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
 const grokCatalog = shallowRef<GrokCapabilitiesCatalog | null>(null)
@@ -98,11 +100,15 @@ const grokTab = shallowRef<GrokCapTab>('runtime')
 const claudeCatalog = shallowRef<ClaudeCapabilitiesCatalog | null>(null)
 const claudeCatalogLoading = shallowRef(false)
 const claudeTab = shallowRef<ClaudeCapTab>('runtime')
-const externalTab = shallowRef<'runtime' | 'mcp' | 'instructions'>('runtime')
+const externalTab = shallowRef<'runtime' | 'mcp' | 'skills' | 'instructions'>('runtime')
 const externalCatalog = shallowRef<ExternalRuntimeCatalog | null>(null)
 const externalCatalogLoading = shallowRef(false)
 const externalInstructionScope = shallowRef<'global' | 'project'>('global')
 const externalMcpScope = shallowRef<'global' | 'project'>('global')
+const externalMcpGlobalPath = computed(() => externalCatalog.value?.mcpConfigPath || externalCatalog.value?.configPath || '')
+const externalScopedMcpServers = computed(() => (externalCatalog.value?.mcp || []).filter((server) => externalMcpScope.value === 'global'
+  ? server.configPath === externalMcpGlobalPath.value
+  : server.configPath !== externalMcpGlobalPath.value))
 const externalInstructionDraft = shallowRef('')
 const externalMcpJSON = shallowRef('')
 const externalMcpSaving = shallowRef(false)
@@ -183,6 +189,7 @@ const providerBusy = computed(() => {
 const externalTabs = computed(() => [
   { value: 'runtime' as const, label: t('capabilities.externalTabRuntime'), icon: isGeminiMode.value ? GeminiIcon : OpenCodeIcon, count: externalCatalog.value?.models?.length ?? 0 },
   { value: 'mcp' as const, label: t('capabilities.externalTabMcp'), icon: PlugZap, count: externalCatalog.value?.mcp?.length ?? 0 },
+  { value: 'skills' as const, label: t('capabilities.externalTabSkills'), icon: Sparkles, count: externalCatalog.value?.skills?.length ?? 0 },
   { value: 'instructions' as const, label: t('capabilities.externalTabInstructions'), icon: Settings2, count: 0 },
 ])
 
@@ -391,9 +398,7 @@ function hydrateExternalEditors(): void {
     : catalog.projectInstructions
   externalInstructionDraft.value = info?.content || ''
   const key = isGeminiMode.value ? 'mcpServers' : 'mcp'
-  const mcpServers = (catalog.mcp || []).filter((server) => externalMcpScope.value === 'global'
-    ? server.configPath === catalog.configPath
-    : server.configPath !== catalog.configPath)
+  const mcpServers = externalScopedMcpServers.value
   const servers = Object.fromEntries(mcpServers.map((server) => [server.name, {
     type: server.type,
     command: server.command || undefined,
@@ -476,7 +481,8 @@ function applyProviderConfiguration(configuration: ProviderConfigurationView): v
   providerConfiguration.value = configuration
   hydrateProviderContext(configuration)
   const next = [...appStore.agentProviders]
-  const index = next.findIndex((item) => item.kind === configuration.runtime.kind)
+  const configuredID = configuration.runtime.id || configuration.runtime.kind
+  const index = next.findIndex((item) => item.id === configuredID)
   if (index >= 0) next[index] = configuration.runtime
   else next.push(configuration.runtime)
   appStore.agentProviders = next
@@ -597,7 +603,7 @@ function applyRouteTab(tab: unknown): void {
   if (value === 'runtime' || value === 'mcp' || value === 'skills' || value === 'plugins' || value === 'agents' || value === 'hooks' || value === 'instructions') {
     claudeTab.value = value
   }
-  if (value === 'runtime' || value === 'mcp' || value === 'instructions') {
+  if (value === 'runtime' || value === 'mcp' || value === 'skills' || value === 'instructions') {
     externalTab.value = value
   }
 }
@@ -1897,7 +1903,7 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                       </div>
                     </div>
                     <div>
-                       <div class="mb-2 flex items-center justify-between"><p class="text-[11px] font-medium">{{ isOpenCodeMode ? t('capabilities.externalProviderCatalog') : t('capabilities.geminiModels') }}</p><span class="text-[10px] text-muted-foreground">{{ externalCatalog?.models?.length || 0 }} {{ t('capabilities.models') }}</span></div>
+                       <div class="mb-2 flex items-center justify-between"><p class="text-[11px] font-medium">{{ isOpenCodeMode ? t('capabilities.externalProviderCatalog') : t('capabilities.geminiModels', { runtime: externalRuntimeName }) }}</p><span class="text-[10px] text-muted-foreground">{{ externalCatalog?.models?.length || 0 }} {{ t('capabilities.models') }}</span></div>
                       <div class="max-h-64 space-y-1 overflow-y-auto rounded-lg border p-1.5">
                         <div v-for="model in (externalCatalog?.models || [])" :key="model.model" class="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted/40">
                            <span class="min-w-0 flex-1 truncate font-mono text-[11px]">{{ model.model }}</span><Badge v-if="model.isDefault" variant="secondary" class="text-[9px]">{{ t('common.default') }}</Badge><span v-if="model.contextWindow" class="text-[9px] tabular-nums text-muted-foreground">{{ Math.round(model.contextWindow / 1000) }}K {{ t('capabilities.context') }}</span>
@@ -1905,7 +1911,7 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                       </div>
                     </div>
                     <div class="grid gap-2 sm:grid-cols-4">
-                       <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ t('capabilities.externalNativeHistory') }}</p><p class="mt-1 text-lg font-semibold tabular-nums">{{ externalCatalog?.sessions?.length || 0 }}</p><p class="text-[10px] text-muted-foreground">{{ isGeminiMode ? t('capabilities.geminiHistorySource') : t('capabilities.openCodeHistorySource') }}</p></div>
+                       <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ t('capabilities.externalNativeHistory') }}</p><p class="mt-1 text-lg font-semibold tabular-nums">{{ externalCatalog?.sessions?.length || 0 }}</p><p class="text-[10px] text-muted-foreground">{{ isGeminiMode ? t('capabilities.geminiHistorySource', { runtime: externalRuntimeName }) : t('capabilities.openCodeHistorySource') }}</p></div>
                        <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ t('capabilities.messages') }}</p><p class="mt-1 text-lg font-semibold tabular-nums">{{ externalCatalog?.usage?.messages || 0 }}</p><p class="text-[10px] text-muted-foreground">{{ t('capabilities.last30Days') }}</p></div>
                        <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ t('capabilities.cost') }}</p><p class="mt-1 text-lg font-semibold tabular-nums">{{ externalCatalog?.usage?.cost?.toFixed(4) || '0.0000' }}</p><p class="text-[10px] text-muted-foreground">{{ t('capabilities.nativeReported') }}</p></div>
                        <div class="rounded-lg border px-3 py-2"><p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ t('capabilities.tokenBreakdown') }}</p><p class="mt-1 text-[10px] text-muted-foreground">{{ t('capabilities.tokenBreakdownValue', { input: externalCatalog?.usage?.inputTokens?.toLocaleString() || 0, output: externalCatalog?.usage?.outputTokens?.toLocaleString() || 0, reasoning: externalCatalog?.usage?.reasoningTokens?.toLocaleString() || 0, cache: externalCatalog?.usage?.cachedTokens?.toLocaleString() || 0 }) }}</p></div>
@@ -1934,19 +1940,48 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                 <Card>
                    <CardHeader class="pb-2"><CardTitle class="text-[13px]">{{ t('capabilities.externalMcpTitle', { runtime: externalRuntimeName }) }}</CardTitle></CardHeader>
                   <CardContent class="space-y-3">
-                     <p class="text-[11px] text-muted-foreground">{{ t('capabilities.nativeConfigFile') }}：<code class="font-mono">{{ externalCatalog?.configPath }}</code></p>
+	                     <p class="text-[11px] text-muted-foreground">{{ t('capabilities.nativeConfigFile') }}：<code class="font-mono">{{ externalMcpGlobalPath }}</code></p>
                     <div class="grid grid-cols-2 rounded-md border bg-muted/40 p-0.5">
                        <Button type="button" size="xs" :variant="externalMcpScope === 'global' ? 'secondary' : 'ghost'" @click="externalMcpScope = 'global'">{{ t('capabilities.globalMcp') }}</Button>
                        <Button type="button" size="xs" :variant="externalMcpScope === 'project' ? 'secondary' : 'ghost'" @click="externalMcpScope = 'project'">{{ t('capabilities.projectMcp') }}</Button>
                     </div>
-                    <p class="truncate font-mono text-[10px] text-muted-foreground">{{ externalMcpScope === 'global' ? externalCatalog?.configPath : (externalCatalog?.mcp?.find((item) => item.configPath !== externalCatalog?.configPath)?.configPath || t('capabilities.projectConfig')) }}</p>
-                    <div v-if="externalCatalog?.mcp?.filter((item) => externalMcpScope === 'global' ? item.configPath === externalCatalog?.configPath : item.configPath !== externalCatalog?.configPath).length" class="space-y-1">
-                      <div v-for="server in (externalCatalog?.mcp || []).filter((item) => externalMcpScope === 'global' ? item.configPath === externalCatalog?.configPath : item.configPath !== externalCatalog?.configPath)" :key="server.name" class="flex items-center gap-3 rounded-md border px-3 py-2 text-[11px]"><span class="min-w-0 flex-1 truncate font-medium">{{ server.name }}</span><span class="max-w-[45%] truncate font-mono text-[10px] text-muted-foreground">{{ server.command || server.url || '—' }}</span><Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">{{ server.enabled ? t('capabilities.enabled') : t('capabilities.disabled') }}</Badge><Button v-if="externalMcpScope === 'global'" size="icon-sm" variant="ghost" :aria-label="t('capabilities.deleteMcp')" @click="void removeRuntimeMcpServer(externalRuntimeID(), server.name)"><Trash2 :size="13" /></Button></div>
+	                    <p class="truncate font-mono text-[10px] text-muted-foreground">{{ externalMcpScope === 'global' ? externalMcpGlobalPath : (externalScopedMcpServers[0]?.configPath || t('capabilities.projectConfig')) }}</p>
+	                    <div v-if="externalScopedMcpServers.length" class="space-y-1">
+	                      <div v-for="server in externalScopedMcpServers" :key="server.name" class="flex items-center gap-3 rounded-md border px-3 py-2 text-[11px]"><span class="min-w-0 flex-1 truncate font-medium">{{ server.name }}</span><span class="max-w-[45%] truncate font-mono text-[10px] text-muted-foreground">{{ server.command || server.url || '—' }}</span><Badge :variant="server.enabled ? 'default' : 'outline'" class="text-[9px]">{{ server.enabled ? t('capabilities.enabled') : t('capabilities.disabled') }}</Badge><Button v-if="externalMcpScope === 'global'" size="icon-sm" variant="ghost" :aria-label="t('capabilities.deleteMcp')" @click="void removeRuntimeMcpServer(externalRuntimeID(), server.name)"><Trash2 :size="13" /></Button></div>
                     </div>
                      <p v-else class="rounded-md border border-dashed px-3 py-5 text-center text-[11px] text-muted-foreground">{{ t('capabilities.externalMcpEmpty', { runtime: externalRuntimeName }) }}</p>
                      <div v-if="externalMcpScope === 'global'" class="flex justify-start"><Button size="sm" variant="outline" @click="openRuntimeMcpDialog(externalRuntimeID())"><Plus :size="13" class="mr-1.5" />{{ t('capabilities.addMcp') }}</Button></div>
                     <Textarea v-model="externalMcpJSON" class="min-h-52 font-mono text-[11px] leading-5" spellcheck="false" :placeholder="isGeminiMode ? '{ &quot;mcpServers&quot;: {} }' : '{ &quot;mcp&quot;: {} }'" />
                      <div class="flex justify-end"><Button size="sm" :disabled="externalMcpSaving || !externalMcpJSON.trim()" @click="void saveExternalMCP()"><LoaderCircle v-if="externalMcpSaving" :size="13" class="mr-1.5 animate-spin" />{{ t('capabilities.saveNativeMcp') }}</Button></div>
+                  </CardContent>
+                </Card>
+              </template>
+
+              <template v-else-if="externalTab === 'skills'">
+                <Card>
+                  <CardHeader class="pb-2">
+                    <CardTitle class="text-[13px]">{{ t('capabilities.externalSkillsTitle', { runtime: externalRuntimeName }) }}</CardTitle>
+                  </CardHeader>
+                  <CardContent class="space-y-2">
+                    <p class="text-[11px] text-muted-foreground">{{ t('capabilities.externalSkillsHint') }}</p>
+                    <div v-if="externalCatalog?.skills?.length" class="space-y-1.5">
+                      <div
+                        v-for="skill in (externalCatalog?.skills || [])"
+                        :key="skill.path"
+                        class="flex items-start gap-3 rounded-md border px-3 py-2"
+                      >
+                        <Sparkles :size="14" class="mt-0.5 shrink-0 text-primary" />
+                        <div class="min-w-0 flex-1">
+                          <p class="truncate text-[12px] font-medium">{{ skill.displayName || skill.name }}</p>
+                          <p class="mt-0.5 line-clamp-2 text-[10px] text-muted-foreground">{{ skill.description || skill.path }}</p>
+                          <p class="mt-1 truncate font-mono text-[9px] text-muted-foreground/70">{{ skill.path }}</p>
+                        </div>
+                        <Badge variant="outline" class="shrink-0 text-[9px]">{{ skill.scope }}</Badge>
+                      </div>
+                    </div>
+                    <div v-else class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground">
+                      {{ t('capabilities.externalSkillsEmpty', { runtime: externalRuntimeName }) }}
+                    </div>
                   </CardContent>
                 </Card>
               </template>
@@ -1957,7 +1992,7 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                   <CardContent class="space-y-3">
                      <div class="grid grid-cols-2 rounded-md border bg-muted/40 p-0.5"><Button type="button" size="xs" :variant="externalInstructionScope === 'global' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'global'">{{ t('settings.instructionsGlobal') }}</Button><Button type="button" size="xs" :variant="externalInstructionScope === 'project' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'project'">{{ t('settings.instructionsProject') }}</Button></div>
                     <p class="text-[10px] text-muted-foreground">{{ externalInstructionScope === 'global' ? externalCatalog?.globalInstructions?.path : externalCatalog?.projectInstructions?.path }}</p>
-                    <Textarea v-model="externalInstructionDraft" class="min-h-72 font-mono text-[11px] leading-5" spellcheck="false" :placeholder="isGeminiMode ? t('capabilities.geminiInstructionsPlaceholder') : t('capabilities.openCodeInstructionsPlaceholder')" />
+                    <Textarea v-model="externalInstructionDraft" class="min-h-72 font-mono text-[11px] leading-5" spellcheck="false" :placeholder="isGeminiMode ? t('capabilities.geminiInstructionsPlaceholder', { runtime: externalRuntimeName }) : t('capabilities.openCodeInstructionsPlaceholder')" />
                      <div class="flex justify-end"><Button size="sm" @click="void saveExternalInstructions()">{{ t('settings.saveNativeInstructions') }}</Button></div>
                      <p v-if="externalCatalog?.configInstructions" class="rounded-md border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">{{ t('capabilities.openCodeConfigInstructions') }}: {{ externalCatalog.configInstructions }}</p>
                   </CardContent>

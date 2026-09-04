@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.3: queued goal commands, actionable WSL recovery, safer MCP/Skill settings, and smoother streaming on low-end PCs.</sub></p>
+<p align="center"><sub>v1.5.4: Antigravity CLI compatibility, native sub-agent activity, queued goals, actionable WSL recovery, and smoother streaming on low-end PCs.</sub></p>
 
 ## Why Nice Codex
 

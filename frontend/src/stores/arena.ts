@@ -27,6 +27,13 @@ function normalizeRuntime(value: string | undefined | null): WorkspaceRuntime {
     case 'grok':
       return 'grok'
     case 'gemini':
+    case 'gemini-cli':
+    case 'antigravity':
+    case 'antigravity-cli':
+    case 'antigravity_cli':
+    case 'antigravitycli':
+    case 'agy':
+    case 'google':
       return 'gemini'
     case 'opencode':
     case 'open-code':

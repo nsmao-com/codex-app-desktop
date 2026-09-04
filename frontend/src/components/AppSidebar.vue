@@ -96,6 +96,7 @@ const sidebarIsClaudeMode = computed(() => sidebarActionRuntime.value === 'claud
 const sidebarIsGrokMode = computed(() => sidebarActionRuntime.value === 'grok')
 const sidebarIsGeminiMode = computed(() => sidebarActionRuntime.value === 'gemini')
 const sidebarIsOpenCodeMode = computed(() => sidebarActionRuntime.value === 'opencode')
+const geminiRuntimeName = computed(() => appStore.runtimeDisplayName('gemini'))
 
 onBeforeUnmount(() => {
   if (externalSearchTimer) window.clearTimeout(externalSearchTimer)
@@ -332,7 +333,7 @@ const sidebarNewSessionDisabled = computed(() => {
   const runtime = sidebarActionRuntime.value
   if (runtime === 'codex') return !appStore.codexAvailable
   if (runtime === 'gemini' || runtime === 'opencode') {
-    return !appStore.agentProviders.some((provider) => provider.kind === runtime && provider.runtimeReady)
+    return !appStore.providerForRuntime(runtime)?.runtimeReady
   }
   return false
 })
@@ -511,7 +512,7 @@ function onArenaMenuEscape(event: KeyboardEvent): void {
 }
 
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
-const activeExternalProvider = computed(() => appStore.agentProviders.find((item) => item.kind === sidebarActionRuntime.value))
+const activeExternalProvider = computed(() => appStore.providerForRuntime(sidebarActionRuntime.value))
 
 function runtimeSlideX(): string {
   if (sidebarIsClaudeMode.value) return '100%'
@@ -810,7 +811,7 @@ function togglePin(thread: ThreadSummary, event?: Event): void {
 function providerLabel(thread: ThreadSummary): string {
   const provider = thread.modelProvider.trim()
   const normalized = provider.toLocaleLowerCase()
-  if (normalized === '__gemini__' || normalized === 'gemini-cli') return 'Gemini CLI'
+  if (normalized === '__gemini__' || normalized === '__antigravity__' || normalized === 'gemini-cli' || normalized === 'antigravity' || normalized === 'antigravity-cli' || normalized === 'agy') return geminiRuntimeName.value
   if (normalized === '__opencode__' || normalized === 'opencode-cli') {
     const modelProvider = thread.model.includes('/') ? thread.model.split('/', 1)[0]?.trim() : ''
     return modelProvider ? `OpenCode · ${modelProvider}` : 'OpenCode'
@@ -818,7 +819,7 @@ function providerLabel(thread: ThreadSummary): string {
   if (normalized === '__claude__' || normalized === 'claude-cli') return 'Claude Code'
   if (normalized === '__grok__' || normalized === 'grok-cli') return 'Grok'
   if (provider) return provider
-  if (sidebarIsGeminiMode.value) return 'Gemini CLI'
+  if (sidebarIsGeminiMode.value) return geminiRuntimeName.value
   if (sidebarIsOpenCodeMode.value) return 'OpenCode'
   return 'Codex / OpenAI'
 }
@@ -1086,12 +1087,12 @@ function formatGrokUpdated(value?: number | null): string {
           size="sm"
           class="relative z-[1] h-8 justify-center rounded-md px-1 hover:bg-transparent"
           :class="sidebarIsGeminiMode ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'"
-          aria-label="Gemini"
+          :aria-label="geminiRuntimeName"
           @click="void setActiveRuntime('gemini')"
           @contextmenu.prevent="openArenaContextMenu($event, 'gemini')"
         >
           <GeminiIcon :size="13" class="shrink-0 opacity-90" />
-        </Button></TooltipTrigger><TooltipContent side="bottom">{{ t('arena.tabTip', { name: 'Gemini' }) }}</TooltipContent></Tooltip>
+        </Button></TooltipTrigger><TooltipContent side="bottom">{{ t('arena.tabTip', { name: geminiRuntimeName }) }}</TooltipContent></Tooltip>
         <Tooltip><TooltipTrigger as-child><Button
           variant="ghost"
           size="sm"
@@ -2176,7 +2177,7 @@ function formatGrokUpdated(value?: number | null): string {
                   <OpenCodeIcon v-else :size="13" class="opacity-80" />
                 </span>
                 <div class="min-w-0 flex-1">
-                  <p class="truncate text-[11px] font-medium">{{ sidebarIsGeminiMode ? 'Gemini CLI' : 'OpenCode' }}</p>
+                  <p class="truncate text-[11px] font-medium">{{ sidebarIsGeminiMode ? geminiRuntimeName : 'OpenCode' }}</p>
                   <p class="truncate text-[9px] text-muted-foreground">
                     <span v-if="appStore.accountUsage?.lifetimeTokens != null">
                       {{ t('sidebar.usageLifetimeShort', { count: formatTokenCount(appStore.accountUsage.lifetimeTokens) }) }}

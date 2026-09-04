@@ -32,6 +32,13 @@ type ProviderContextCatalog = {
   models?: ProviderModelContext[] | null
 }
 
+function normalizeProviderRuntime(value: string): string {
+  const id = String(value || '').trim().toLowerCase()
+  if (id === 'gemini' || id === 'gemini-cli' || id === 'gemini_cli' || id === 'antigravity' || id === 'antigravity-cli' || id === 'antigravity_cli' || id === 'antigravitycli' || id === 'agy' || id === 'google') return 'gemini'
+  if (id === 'opencode' || id === 'open-code') return 'opencode'
+  return id
+}
+
 export function resolveProviderModelContextWindow(
   providers: ProviderContextCatalog[] | null | undefined,
   runtime: 'grok' | 'claude' | 'gemini' | 'opencode',
@@ -39,15 +46,16 @@ export function resolveProviderModelContextWindow(
 ): number {
   const normalizedModel = model.trim().toLowerCase()
   if (!normalizedModel) return 0
+  const runtimeID = normalizeProviderRuntime(runtime)
   const catalogs = providers ?? []
-  const runtimeCatalog = catalogs.find((provider) => provider.kind === runtime)
+  const runtimeCatalog = catalogs.find((provider) => normalizeProviderRuntime(provider.kind) === runtimeID)
   const exact = runtimeCatalog?.models?.find((item) => item.model.trim().toLowerCase() === normalizedModel)
     ?? catalogs.flatMap((provider) => provider.models ?? [])
       .find((item) => item.model.trim().toLowerCase() === normalizedModel)
   const exactWindow = Math.max(0, Number(exact?.contextWindow) || 0)
   if (exactWindow > 0) return exactWindow
 
-  if (runtime === 'claude') {
+  if (runtimeID === 'claude') {
     const family = ['fable', 'opus', 'sonnet', 'haiku']
       .find((name) => normalizedModel.includes(name))
     if (family) {
@@ -55,7 +63,7 @@ export function resolveProviderModelContextWindow(
       return Math.max(0, Number(alias?.contextWindow) || 0)
     }
   }
-  if (runtime === 'gemini') {
+  if (runtimeID === 'gemini') {
     return normalizedModel.includes('gemma-4') || normalizedModel.includes('gemma_4')
       ? 256_000
       : 1_048_576

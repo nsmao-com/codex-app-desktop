@@ -115,7 +115,9 @@ function initAppearance(initial: AppearanceState = {}): void {
 }
 
 function normalizeRuntime(value: string | undefined | null): AppRuntime {
-  if (value === 'grok' || value === 'claude' || value === 'gemini' || value === 'opencode') return value
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'grok' || normalized === 'claude' || normalized === 'opencode') return normalized
+  if (normalized === 'gemini' || normalized === 'gemini-cli' || normalized === 'antigravity' || normalized === 'antigravity-cli' || normalized === 'antigravity_cli' || normalized === 'antigravitycli' || normalized === 'agy' || normalized === 'google') return 'gemini'
   return 'codex'
 }
 

@@ -148,7 +148,7 @@ var tomlModelPattern = regexp.MustCompile(`(?m)^\s*(?:model|default_model)\s*=\s
 var geminiModelPattern = regexp.MustCompile(`gemini-[A-Za-z0-9._-]+`)
 
 func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime {
-	// Product runtimes: Codex, Claude Code, Grok, Gemini CLI, and OpenCode.
+	// Product runtimes: Codex, Claude Code, Grok, Gemini/Antigravity CLI, and OpenCode.
 	codexProvider := codexAgentProvider(codexDetection)
 	claudeProbe := providerProbe{
 		id:           "claude",
@@ -163,7 +163,7 @@ func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime
 	go func() { grokStatusCh <- detectGrokRuntime() }()
 	claudeProvider := cachedRunProviderProbe(claudeProbe)
 	geminiProvider := cachedRunProviderProbe(providerProbe{
-		id: "gemini", name: "Gemini CLI", commands: commandCandidates("gemini"),
+		id: "gemini", name: geminiRuntimeDisplayName(findGeminiExecutable()), commands: geminiCommandCandidates(),
 		capabilities: []string{"cli", "streaming", "tools", "mcp"}, healthArgs: []string{"--version"},
 	})
 	opencodeProvider := cachedRunProviderProbe(providerProbe{
@@ -214,16 +214,16 @@ func detectAgentProvidersQuick(codexDetection codex.Detection, grokStatus GrokRu
 		ReasoningEfforts: claudeEfforts,
 	}
 	geminiModels, geminiEfforts := discoverProviderCatalog("gemini")
-	geminiExecutable := findCommand(commandCandidates("gemini"))
+	geminiExecutable := findGeminiExecutable()
 	geminiProvider := AgentProviderRuntime{
-		ID: "gemini", Name: "Gemini CLI", Kind: "gemini", Installed: geminiExecutable != "",
+		ID: "gemini", Name: geminiRuntimeDisplayName(geminiExecutable), Kind: "gemini", Installed: geminiExecutable != "",
 		Healthy: geminiExecutable != "", RuntimeReady: geminiExecutable != "", Executable: geminiExecutable,
 		Status:  providerStatus(geminiExecutable != "", geminiExecutable != "", true),
-		Message: "Install Gemini CLI (gemini) to use this runtime", Capabilities: []string{"cli", "streaming", "tools", "mcp"},
+		Message: "Install Antigravity CLI (agy) or Gemini CLI (gemini) to use this runtime", Capabilities: []string{"cli", "streaming", "tools", "mcp"},
 		Models: geminiModels, ReasoningEfforts: geminiEfforts,
 	}
 	if geminiExecutable != "" {
-		geminiProvider.Message = "Gemini CLI installed; authentication is checked when opened"
+		geminiProvider.Message = geminiRuntimeReadyMessage(geminiExecutable)
 	}
 	opencodeModels, opencodeEfforts := discoverProviderCatalog("opencode")
 	opencodeExecutable := findCommand(commandCandidates("opencode"))
@@ -341,6 +341,9 @@ func runProviderProbe(probe providerProbe) AgentProviderRuntime {
 	}
 	result.Installed = true
 	result.Executable = executable
+	if probe.id == "gemini" {
+		result.Name = geminiRuntimeDisplayName(executable)
+	}
 	versionOutput, _ := runProbeCommand(executable, []string{"--version"}, 2500*time.Millisecond)
 	result.Version = firstOutputLine(versionOutput)
 
@@ -359,6 +362,9 @@ func runProviderProbe(probe providerProbe) AgentProviderRuntime {
 	result.RuntimeReady = true
 	result.Status = "ready"
 	result.Message = "CLI is healthy and ready for Nice Codex conversations"
+	if probe.id == "gemini" {
+		result.Message = geminiRuntimeReadyMessage(executable)
+	}
 	return result
 }
 
@@ -412,8 +418,14 @@ func discoverProviderCatalog(kind string) ([]AgentProviderModel, []AgentProvider
 		if model := readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_MODEL"); model != "" {
 			addModel(model, model, "Configured by GEMINI_MODEL", true, knownProviderContextWindow("gemini", model))
 		}
-		for _, model := range readJSONModelValues(filepath.Join(geminiHome, "settings.json")) {
-			addModel(model, model, "Discovered in Gemini CLI configuration", len(models) == 0, knownProviderContextWindow("gemini", model))
+		for _, configPath := range geminiModelConfigPaths(geminiHome) {
+			for _, model := range readJSONModelValues(configPath) {
+				description := "Discovered in Gemini CLI configuration"
+				if isAntigravityConfigPath(configPath) {
+					description = "Discovered in Antigravity CLI configuration"
+				}
+				addModel(model, model, description, len(models) == 0, knownProviderContextWindow("gemini", model))
+			}
 		}
 		for _, model := range readModelIDsFromDirectory(geminiHome, geminiModelPattern) {
 			addModel(model, model, "Discovered in local Gemini CLI data", len(models) == 0, knownProviderContextWindow("gemini", model))
@@ -488,6 +500,13 @@ func fallbackProviderModels(kind string) []AgentProviderModel {
 			{Model: "fable", DisplayName: "Claude Fable", Description: "alias `fable` → latest Fable (e.g. claude-fable-5)", ContextWindow: 1_000_000},
 		}
 	case "gemini":
+		// Antigravity owns its current model defaults. If no legacy Gemini binary
+		// is actually selected, an empty catalog means "use the native default"
+		// instead of forcing obsolete Gemini 2.5 ids into `agy --model`.
+		executable := findGeminiExecutable()
+		if executable == "" || isAntigravityExecutable(executable) {
+			return nil
+		}
 		return []AgentProviderModel{
 			{Model: "gemini-2.5-pro", DisplayName: "Gemini 2.5 Pro", Description: "Gemini CLI default model fallback", IsDefault: true, ContextWindow: 1_048_576},
 			{Model: "gemini-2.5-flash", DisplayName: "Gemini 2.5 Flash", Description: "Gemini CLI flash model fallback", ContextWindow: 1_048_576},
@@ -631,6 +650,42 @@ func readJSONModelValues(paths ...string) []string {
 		if json.Unmarshal(payload, &value) == nil {
 			collect(value)
 		}
+	}
+	return result
+}
+
+func geminiModelConfigPaths(home string) []string {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return nil
+	}
+	// Prefer the Antigravity settings file when present, but always include the
+	// legacy Gemini file so upgrades do not hide models configured there.
+	paths := []string{
+		filepath.Join(home, "antigravity-cli", "settings.json"),
+		filepath.Join(home, "settings.json"),
+	}
+	return uniqueExistingOrConfiguredPaths(paths)
+}
+
+func isAntigravityConfigPath(path string) bool {
+	return strings.Contains(strings.ToLower(filepath.ToSlash(path)), "/antigravity-cli/")
+}
+
+func uniqueExistingOrConfiguredPaths(paths []string) []string {
+	result := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		clean := filepath.Clean(strings.TrimSpace(path))
+		if clean == "." || clean == "" {
+			continue
+		}
+		key := strings.ToLower(filepath.ToSlash(clean))
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, clean)
 	}
 	return result
 }
@@ -1056,6 +1111,53 @@ func commandCandidates(name string) []string {
 	return []string{name}
 }
 
+// geminiCommandCandidates keeps the internal runtime id (`gemini`) stable while
+// preferring Google's replacement Antigravity CLI. The old Gemini CLI remains a
+// fully supported fallback for enterprise/API installations and existing users.
+func geminiCommandCandidates() []string {
+	// Keep this helper useful to callers that need one ordered list, while
+	// findGeminiExecutable below enforces preference across PATH entries too.
+	if runtime.GOOS == "windows" {
+		return []string{"agy.exe", "agy.cmd", "agy.bat", "agy.ps1", "agy", "antigravity.exe", "antigravity.cmd", "antigravity.bat", "antigravity.ps1", "antigravity", "gemini.exe", "gemini.cmd", "gemini.bat", "gemini.ps1", "gemini"}
+	}
+	return []string{"agy", "antigravity", "gemini"}
+}
+
+// findGeminiExecutable resolves agy first, then the long Antigravity alias,
+// then the legacy gemini command. Calling findCommand once per command is
+// intentional: findCommand walks PATH directories first, which otherwise could
+// let an old gemini binary in an early directory shadow agy in a later one.
+func findGeminiExecutable() string {
+	for _, name := range []string{"agy", "antigravity", "gemini"} {
+		if executable := findCommand(commandCandidates(name)); executable != "" {
+			return executable
+		}
+	}
+	return ""
+}
+
+func isAntigravityExecutable(executable string) bool {
+	base := strings.ToLower(strings.TrimSpace(filepath.Base(executable)))
+	for _, suffix := range []string{".exe", ".cmd", ".bat", ".ps1"} {
+		base = strings.TrimSuffix(base, suffix)
+	}
+	return base == "agy" || base == "antigravity" || strings.Contains(base, "antigravity-cli")
+}
+
+func geminiRuntimeDisplayName(executable string) string {
+	if executable != "" && !isAntigravityExecutable(executable) {
+		return "Gemini CLI"
+	}
+	return "Antigravity CLI"
+}
+
+func geminiRuntimeReadyMessage(executable string) string {
+	if isAntigravityExecutable(executable) {
+		return "Antigravity CLI installed; Gemini-compatible sessions use the agy runtime"
+	}
+	return "Gemini CLI installed; authentication is checked when opened"
+}
+
 // knownCLIRoots returns directories that ship CLI binaries but may be missing from a
 // GUI process PATH (Windows Explorer / macOS Finder / Dock launches).
 func knownCLIRoots() []string {
@@ -1063,6 +1165,8 @@ func knownCLIRoots() []string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		roots = append(roots,
 			filepath.Join(home, ".grok", "bin"),
+			filepath.Join(home, ".gemini", "antigravity-cli", "bin"),
+			filepath.Join(home, ".gemini", "bin"),
 			filepath.Join(home, ".local", "bin"),
 			filepath.Join(home, "go", "bin"),
 			filepath.Join(home, ".cargo", "bin"),
@@ -1093,6 +1197,9 @@ func knownCLIRoots() []string {
 		roots = append(roots,
 			filepath.Join(local, "Programs"),
 			filepath.Join(local, "Programs", "nodejs"),
+			filepath.Join(local, "agy", "bin"),
+			filepath.Join(local, "Antigravity"),
+			filepath.Join(local, "Antigravity", "bin"),
 			filepath.Join(local, "pnpm"),
 			filepath.Join(local, "Yarn", "bin"),
 		)
