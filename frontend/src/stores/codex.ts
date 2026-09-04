@@ -973,7 +973,7 @@ export const useCodexStore = defineStore('codex', () => {
         ? (appStore.settings.openCodeModel || 'anthropic/claude-sonnet-4-6')
         : appStore.settings.model
     const externalEffort = runtime === 'gemini'
-      ? (appStore.settings.geminiEffort || 'auto')
+      ? (appStore.settings.geminiEffort || 'high')
       : runtime === 'opencode'
         ? (appStore.settings.openCodeEffort || 'high')
         : appStore.settings.effort

@@ -441,9 +441,7 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	if !isAllowed(settings.GeminiApprovalPolicy, "on-request", "never") {
 		settings.GeminiApprovalPolicy = "on-request"
 	}
-	if settings.GeminiEffort == "" {
-		settings.GeminiEffort = "auto"
-	}
+	settings.GeminiEffort = normalizeGeminiEffort(settings.GeminiEffort)
 	settings.OpenCodeModel = sanitizeShortText(settings.OpenCodeModel, 160)
 	settings.OpenCodeWorkspace = strings.TrimSpace(settings.OpenCodeWorkspace)
 	settings.OpenCodeRecentWorkspaces = sanitizeRecentWorkspaces(settings.OpenCodeRecentWorkspaces)
@@ -3746,7 +3744,7 @@ func defaultSettings() UserSettings {
 		GeminiWorkspace:           "",
 		GeminiRecentWorkspaces:    []string{},
 		GeminiModel:               "",
-		GeminiEffort:              "auto",
+		GeminiEffort:              "high",
 		GeminiSandbox:             "workspace-write",
 		GeminiApprovalPolicy:      "on-request",
 		GeminiCustomModels:        []string{},
@@ -3916,9 +3914,9 @@ func readSettings(path string) (UserSettings, error) {
 	if !isAllowed(settings.GeminiApprovalPolicy, "on-request", "never") {
 		settings.GeminiApprovalPolicy = "on-request"
 	}
-	if settings.GeminiEffort == "" {
-		settings.GeminiEffort = "auto"
-	}
+	previousGeminiEffort := settings.GeminiEffort
+	settings.GeminiEffort = normalizeGeminiEffort(settings.GeminiEffort)
+	migratedGeminiEffort := settings.GeminiEffort != previousGeminiEffort
 	settings.OpenCodeModel = sanitizeShortText(settings.OpenCodeModel, 160)
 	settings.OpenCodeWorkspace = strings.TrimSpace(settings.OpenCodeWorkspace)
 	settings.OpenCodeEffort = sanitizeShortText(settings.OpenCodeEffort, 32)
@@ -3967,7 +3965,7 @@ func readSettings(path string) (UserSettings, error) {
 		settings.OpenCodeWorkspace = ""
 	}
 	// Persist migrations so subsequent launches and the frontend see the same values.
-	if migratedOnboarding || migratedGeminiModel {
+	if migratedOnboarding || migratedGeminiModel || migratedGeminiEffort {
 		_ = writeSettings(path, settings)
 	}
 	return settings, nil

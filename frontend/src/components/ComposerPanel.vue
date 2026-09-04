@@ -665,7 +665,7 @@ const externalModelCatalog = computed(() => {
     })),
     serviceTiers: [],
     defaultReasoningEffort: externalProvider.value?.reasoningEfforts?.find((effort) => effort.isDefault)?.effort
-      || (isGeminiMode.value ? 'auto' : 'high'),
+      || 'high',
     defaultServiceTier: '',
   }))
   for (const model of custom) {
@@ -678,7 +678,7 @@ const externalModelCatalog = computed(() => {
       isDefault: false,
       supportedReasoningEfforts: [],
       serviceTiers: [],
-      defaultReasoningEffort: isGeminiMode.value ? 'auto' : 'high',
+      defaultReasoningEffort: 'high',
       defaultServiceTier: '',
     })
   }
@@ -708,7 +708,7 @@ const displayModel = computed(() => {
 const displayEffort = computed(() => {
   if (isGrokMode.value) return composerGrokSession.value?.effort || appStore.settings.grokEffort || 'high'
   if (isClaudeMode.value) return composerClaudeSession.value?.effort || appStore.settings.claudeEffort || 'high'
-  if (isGeminiMode.value) return composerTimelineThread.value?.effort || appStore.settings.geminiEffort || 'auto'
+  if (isGeminiMode.value) return composerTimelineThread.value?.effort || appStore.settings.geminiEffort || 'high'
   if (isOpenCodeMode.value) return composerTimelineThread.value?.effort || appStore.settings.openCodeEffort || 'high'
   return composerTimelineThread.value?.effort || appStore.settings.effort
 })

@@ -1206,13 +1206,39 @@ func decodeExternalToolTimelineItemMap(item map[string]any) (map[string]any, boo
 	return item, true
 }
 
-// sanitizedExternalProcessEnv drops MSYS-style variables for the Grok CLI on
-// Windows. When HOME is inherited (e.g. the app was launched from Git Bash),
-// grok.exe picks its bash/login-shell backend for run_terminal_command and
-// deadlocks during ConPTY bootstrap in a console-less child process. Removing
-// those variables keeps it on the plain PowerShell pipeline, which works.
-// Other providers and platforms keep the inherited environment untouched.
+var geminiExternalEnvironmentKeys = []string{
+	"GEMINI_API_KEY",
+	"GOOGLE_API_KEY",
+	"GOOGLE_GEMINI_BASE_URL",
+	"GOOGLE_GEMINI_API_VERSION",
+}
+
+// sanitizedExternalProcessEnv repairs provider-specific child environments.
+// Antigravity no longer loads the legacy ~/.gemini/.env file itself, while
+// Grok on Windows must not inherit MSYS markers in a console-less process.
 func sanitizedExternalProcessEnv(provider string) []string {
+	if provider == "gemini" {
+		env := os.Environ()
+		changed := false
+		for _, name := range geminiExternalEnvironmentKeys {
+			if strings.TrimSpace(os.Getenv(name)) != "" {
+				continue
+			}
+			value := codex.PersistentEnvironmentValue(name)
+			if strings.TrimSpace(value) == "" {
+				value = readEnvValue(filepath.Join(resolveGeminiHome(), ".env"), name)
+			}
+			if strings.TrimSpace(value) == "" {
+				continue
+			}
+			env = replaceEnvironmentValue(env, name, value)
+			changed = true
+		}
+		if changed {
+			return env
+		}
+		return nil
+	}
 	if provider != "grok" || runtime.GOOS != "windows" {
 		return nil
 	}
@@ -1728,6 +1754,12 @@ func externalCommandArgsForExecutable(provider, executable, sessionID, workspace
 			args = append(args, "--model", model)
 		}
 		if antigravity {
+			// Antigravity 1.1.25 requires an explicit variant whenever --model is
+			// provided. Migrate the former Gemini "auto" value at dispatch too so
+			// already-open sessions cannot fail before settings are persisted.
+			if model != "" && !isExternalEffort(effort, "low", "medium", "high") {
+				effort = "high"
+			}
 			return append(args, antigravityPermissionArgs(settings.GeminiSandbox, settings.GeminiApprovalPolicy, effort)...), generatedSessionID
 		}
 		return append(args, geminiPermissionArgs(settings.GeminiSandbox, settings.GeminiApprovalPolicy)...), generatedSessionID

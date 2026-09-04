@@ -45,6 +45,10 @@ func enrichProcessPath() {
 	}
 }
 
+func persistentEnvironmentValue(string) string {
+	return ""
+}
+
 func commonUnixCLIBinDirs() []string {
 	home, _ := os.UserHomeDir()
 	candidates := make([]string, 0, 40)

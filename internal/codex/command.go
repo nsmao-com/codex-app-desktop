@@ -22,6 +22,15 @@ func EnrichPathForLookups() {
 	enrichProcessPath()
 }
 
+// PersistentEnvironmentValue falls back to the operating system's persisted
+// environment when a long-running GUI parent has not inherited a recent change.
+func PersistentEnvironmentValue(name string) string {
+	if value, ok := os.LookupEnv(name); ok && strings.TrimSpace(value) != "" {
+		return value
+	}
+	return persistentEnvironmentValue(name)
+}
+
 func Detect() Detection {
 	enrichProcessPath()
 

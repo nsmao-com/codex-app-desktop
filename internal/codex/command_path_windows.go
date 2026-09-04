@@ -76,6 +76,31 @@ func readRegistryPATH(root registry.Key, path string) []string {
 	return splitPathList(os.ExpandEnv(value))
 }
 
+func persistentEnvironmentValue(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	for _, source := range []struct {
+		root registry.Key
+		path string
+	}{
+		{root: registry.CURRENT_USER, path: `Environment`},
+		{root: registry.LOCAL_MACHINE, path: `SYSTEM\CurrentControlSet\Control\Session Manager\Environment`},
+	} {
+		key, err := registry.OpenKey(source.root, source.path, registry.QUERY_VALUE)
+		if err != nil {
+			continue
+		}
+		value, _, valueErr := key.GetStringValue(name)
+		_ = key.Close()
+		if valueErr == nil && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func commonCodexBinDirs() []string {
 	home, _ := os.UserHomeDir()
 	appData := os.Getenv("APPDATA")

@@ -1880,7 +1880,7 @@ async function save(): Promise<void> {
       claudeCustomModels: isClaudeSettings.value ? claudeCustomModels.value : (appStore.settings.claudeCustomModels ?? []),
       grokCustomModels: isGrokSettings.value ? grokCustomModels.value : (appStore.settings.grokCustomModels ?? []),
 	      geminiModel: appStore.settings.geminiModel || '',
-      geminiEffort: appStore.settings.geminiEffort || 'auto',
+	      geminiEffort: appStore.settings.geminiEffort || 'high',
       geminiSandbox: isGeminiSettings.value ? (geminiSandbox.value || 'workspace-write') : appStore.settings.geminiSandbox,
       geminiApprovalPolicy: isGeminiSettings.value ? (geminiApprovalPolicy.value || 'on-request') : appStore.settings.geminiApprovalPolicy,
       geminiCustomModels: appStore.settings.geminiCustomModels ?? [],

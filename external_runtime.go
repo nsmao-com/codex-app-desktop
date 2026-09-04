@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nice_codex_desktop/internal/codex"
 )
 
 // externalNativeHistoryPage is the provider-neutral page returned to the
@@ -941,8 +943,8 @@ func geminiConfigured(configPath, geminiHome string) bool {
 	}
 	if readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_API_KEY") != "" ||
 		readEnvValue(filepath.Join(geminiHome, ".env"), "GOOGLE_API_KEY") != "" ||
-		strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" ||
-		strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")) != "" {
+		strings.TrimSpace(codex.PersistentEnvironmentValue("GEMINI_API_KEY")) != "" ||
+		strings.TrimSpace(codex.PersistentEnvironmentValue("GOOGLE_API_KEY")) != "" {
 		return true
 	}
 	var config map[string]any
@@ -966,11 +968,15 @@ func geminiAuthenticated(configPath, geminiHome string) bool {
 		// Antigravity only enables API-key mode when both pieces are present.
 		// OAuth credentials live in the OS keyring and cannot be inferred from the
 		// legacy Gemini account JSON without risking a false authenticated state.
+		apiKey := codex.PersistentEnvironmentValue("GEMINI_API_KEY")
+		if strings.TrimSpace(apiKey) == "" {
+			apiKey = readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_API_KEY")
+		}
 		return strings.EqualFold(strings.TrimSpace(stringFromAny(config["modelProvider"])), "gemini") &&
-			strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != ""
+			strings.TrimSpace(apiKey) != ""
 	}
-	if strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) != "" ||
-		strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")) != "" ||
+	if strings.TrimSpace(codex.PersistentEnvironmentValue("GEMINI_API_KEY")) != "" ||
+		strings.TrimSpace(codex.PersistentEnvironmentValue("GOOGLE_API_KEY")) != "" ||
 		readEnvValue(filepath.Join(geminiHome, ".env"), "GEMINI_API_KEY") != "" ||
 		readEnvValue(filepath.Join(geminiHome, ".env"), "GOOGLE_API_KEY") != "" {
 		return true

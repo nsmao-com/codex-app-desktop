@@ -145,7 +145,7 @@ type providerProbe struct {
 
 var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 var tomlModelPattern = regexp.MustCompile(`(?m)^\s*(?:model|default_model)\s*=\s*["']([^"']+)["']`)
-var geminiModelPattern = regexp.MustCompile(`gemini-[A-Za-z0-9._-]+`)
+var geminiModelPattern = regexp.MustCompile(`gemini-(?:[0-9]+(?:\.[0-9]+)*(?:-[A-Za-z0-9]+)*|(?:pro|flash|ultra|nano|exp|live)(?:-[A-Za-z0-9]+)*)`)
 
 func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime {
 	// Product runtimes: Codex, Claude Code, Grok, Gemini/Antigravity CLI, and OpenCode.
@@ -598,9 +598,14 @@ func fallbackReasoningEfforts(kind string) []AgentProviderReasoningEffort {
 			{Effort: "max", DisplayName: "Max", Description: "Maximum provider variant"},
 		}
 	case "gemini":
-		return []AgentProviderReasoningEffort{{
-			Effort: "auto", DisplayName: "Auto", Description: "Gemini chooses the thinking budget for the selected model", IsDefault: true,
-		}}
+		if defaultGeminiEffort() == "high" {
+			return []AgentProviderReasoningEffort{
+				{Effort: "high", DisplayName: "High", Description: "Antigravity model variant with deeper reasoning", IsDefault: true},
+				{Effort: "medium", DisplayName: "Medium", Description: "Antigravity model variant balancing speed and depth"},
+				{Effort: "low", DisplayName: "Low", Description: "Antigravity model variant with faster responses"},
+			}
+		}
+		return []AgentProviderReasoningEffort{{Effort: "auto", DisplayName: "Auto", Description: "Gemini chooses the thinking budget for the selected model", IsDefault: true}}
 	case "grok":
 		return []AgentProviderReasoningEffort{
 			{Effort: "high", DisplayName: "High", Description: "Highest implementation quality with extensive reasoning", IsDefault: true},
@@ -611,6 +616,25 @@ func fallbackReasoningEfforts(kind string) []AgentProviderReasoningEffort {
 	default:
 		return nil
 	}
+}
+
+func defaultGeminiEffort() string {
+	executable := findGeminiExecutable()
+	if executable == "" || isAntigravityExecutable(executable) {
+		return "high"
+	}
+	return "auto"
+}
+
+func normalizeGeminiEffort(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if defaultGeminiEffort() != "high" {
+		return "auto"
+	}
+	if value == "low" || value == "medium" || value == "high" {
+		return value
+	}
+	return "high"
 }
 
 func readJSONModelValues(paths ...string) []string {
