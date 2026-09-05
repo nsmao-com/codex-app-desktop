@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.5: an inline multi-line goal editor, queue-safe goal updates without delayed dialogs, and separate message/goal drafts.</sub></p>
+<p align="center"><sub>v1.5.6: a Windows installer with an app icon, install-aware updates, and GPT-6 Astra support.</sub></p>
 
 ## Why Nice Codex
 
@@ -146,7 +146,8 @@ Download the latest build from [GitHub Releases](https://github.com/nsmao-com/co
 
 | Platform | Release asset |
 |---|---|
-| Windows x64 | `NiceCodex-<version>-windows-amd64.exe` |
+| Windows x64 installer | `NiceCodex-<version>-windows-amd64-installer.exe` |
+| Windows x64 portable | `NiceCodex-<version>-windows-amd64-portable.exe` |
 | macOS Apple Silicon | `NiceCodex-<version>-darwin-arm64.zip` |
 | macOS Intel | `NiceCodex-<version>-darwin-amd64.zip` |
 
@@ -157,13 +158,13 @@ On first launch:
 3. Install/sign in to the corresponding official CLI, or configure the provider/API mode it supports.
 4. Review the permission preset before sending the first task.
 
-Nice Codex checks GitHub Releases on startup. The sidebar version badge and **Settings -> Appearance -> Check for updates** open the matching platform asset when a newer version is available.
+Nice Codex checks GitHub Releases on startup. The sidebar version badge and **Settings -> Appearance -> Check for updates** select the installer or portable asset that matches the current installation when a newer version is available.
 
 ## Growth and release channel
 
 Nice Codex is moving quickly. Rather than publishing hard-coded vanity metrics, this README uses live GitHub release, download, star, and activity badges. Follow the [changelog](./update.md) for the detailed product history.
 
-Every `v*` release tag builds and publishes three desktop artifacts through GitHub Actions. Release pages receive the matching `update.md` section with human-readable **Added / Changed / Fixed** notes; a missing section fails the publish job instead of creating an empty download page.
+Every `v*` release tag builds and publishes four desktop artifacts through GitHub Actions. Release pages receive the matching `update.md` section with human-readable **Added / Changed / Fixed** notes; a missing section fails the publish job instead of creating an empty download page.
 
 Current product scale:
 
@@ -227,12 +228,17 @@ pnpm --dir frontend typecheck
 # Current OS binary
 wails3 build
 
-# Windows package (NSIS / makensis required)
+# Windows installer (NSIS / makensis required; includes the app icon)
+wails3 task windows:package ARCH=amd64 INSTALL_SCOPE=user
+
+# Or use the default machine-wide scope
 wails3 package
 
 # macOS .app (run on macOS)
 wails3 task darwin:package
 ```
+
+Windows Releases include both an icon-bearing NSIS installer and a portable executable. In-app update checks select the installer for copies installed in a system directory and the portable executable for portable copies, so an installer is never copied over the running program.
 
 ## Versioning and releases
 

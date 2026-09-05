@@ -3661,6 +3661,13 @@ func (s *AppService) withBrowserWindow(action func(application.Window)) error {
 func (s *AppService) shutdown() {
 	s.shutdownOnce.Do(func() {
 		setSystemSleepPrevention(false)
+		s.updateState.mu.Lock()
+		updateCancel := s.updateState.cancel
+		s.updateState.cancel = nil
+		s.updateState.mu.Unlock()
+		if updateCancel != nil {
+			updateCancel()
+		}
 		s.cancelExternalRuns()
 		s.stopAllTerminalSessions()
 		if s.providerRouter != nil {

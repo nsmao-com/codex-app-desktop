@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -49,6 +50,9 @@ func (s *AppService) DownloadAndStageUpdate() (UpdateProgress, error) {
 	}
 	if !isTrustedUpdateURL(info.DownloadURL) {
 		return UpdateProgress{}, errors.New("update download URL is not trusted")
+	}
+	if runtime.GOOS == "windows" && runningFromInstalledWindowsPath() && !isInstallerAssetName(info.DownloadURL) {
+		return UpdateProgress{}, errors.New("no Windows installer package was found for this release; open the release page to update manually")
 	}
 	if strings.Contains(strings.ToLower(info.DownloadURL), "github.com/"+GitHubRepo+"/releases") &&
 		!strings.Contains(strings.ToLower(info.DownloadURL), "objects.githubusercontent.com") &&
@@ -113,18 +117,32 @@ func (s *AppService) ApplyUpdateAndRestart() error {
 		return errors.New("downloaded update file is missing")
 	}
 	lower := strings.ToLower(path)
-	if runtime.GOOS == "windows" && !strings.HasSuffix(lower, ".exe") {
-		return errors.New("downloaded package is not a Windows executable")
+	if runtime.GOOS == "windows" && !strings.HasSuffix(lower, ".exe") && !strings.HasSuffix(lower, ".msi") {
+		return errors.New("downloaded package is not a Windows installer or executable")
 	}
-	if runtime.GOOS == "darwin" && (strings.HasSuffix(lower, ".dmg") || strings.HasSuffix(lower, ".pkg")) {
+	if runtime.GOOS == "windows" && isInstallerAssetName(path) {
+		exePath, err := resolvedExecutablePath()
+		if err != nil {
+			return err
+		}
+		if err := launchWindowsInstaller(path, exePath, os.Getpid()); err != nil {
+			return err
+		}
+		s.setUpdatePhase("restarting", 100, "Starting installer…")
+		s.emitUpdateProgress()
+		go func() {
+			time.Sleep(400 * time.Millisecond)
+			if s.app != nil {
+				s.app.Quit()
+			}
+		}()
+		return nil
+	}
+	if runtime.GOOS == "darwin" && (strings.HasSuffix(lower, ".dmg") || strings.HasSuffix(lower, ".pkg") || strings.HasSuffix(lower, ".zip")) {
 		_ = openPathInOS(path)
 		return errors.New("macOS installer packages were opened for manual install; in-app replace supports portable binaries only")
 	}
-	exePath, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	exePath, err = filepath.EvalSymlinks(exePath)
+	exePath, err := resolvedExecutablePath()
 	if err != nil {
 		return err
 	}
@@ -169,20 +187,34 @@ func (s *AppService) downloadUpdateFile(ctx context.Context, downloadURL, versio
 		return "", err
 	}
 	req.Header.Set("User-Agent", "NiceCodex/"+AppVersion)
-	client := &http.Client{Timeout: 0}
+	client := &http.Client{
+		Timeout: 0,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("too many update redirects")
+			}
+			if !isTrustedUpdateURL(req.URL.String()) {
+				return errors.New("update redirect is not trusted")
+			}
+			return nil
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.Request != nil && !isTrustedUpdateURL(resp.Request.URL.String()) {
+		return "", errors.New("update download URL is not trusted")
+	}
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return "", fmt.Errorf("download failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	ext := ""
-	if parsed, parseErr := url.Parse(resp.Request.URL.String()); parseErr == nil {
-		ext = filepath.Ext(parsed.Path)
+	ext := updatePackageExtension(downloadURL)
+	if ext == "" && resp.Request != nil {
+		ext = updatePackageExtension(resp.Request.URL.String())
 	}
 	if ext == "" {
 		if runtime.GOOS == "windows" {
@@ -197,7 +229,15 @@ func (s *AppService) downloadUpdateFile(ctx context.Context, downloadURL, versio
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	target := filepath.Join(dir, fmt.Sprintf("NiceCodex-%s%s", sanitizeFileToken(version), ext))
+	assetSuffix := ""
+	if runtime.GOOS == "windows" {
+		if isInstallerAssetName(downloadURL) {
+			assetSuffix = "-installer"
+		} else {
+			assetSuffix = "-portable"
+		}
+	}
+	target := filepath.Join(dir, fmt.Sprintf("NiceCodex-%s%s%s", sanitizeFileToken(version), assetSuffix, ext))
 	temp := target + ".partial"
 	_ = os.Remove(temp)
 	file, err := os.Create(temp)
@@ -295,7 +335,7 @@ func isTrustedUpdateURL(raw string) bool {
 	repo := strings.ToLower(GitHubRepo)
 	switch host {
 	case "github.com", "www.github.com":
-		return strings.Contains(path, "/"+repo+"/")
+		return strings.HasPrefix(path, "/"+repo+"/")
 	case "objects.githubusercontent.com", "release-assets.githubusercontent.com":
 		return true
 	default:
@@ -346,6 +386,59 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
 	return command.Start()
 }
 
+func launchWindowsInstaller(installerPath, currentExe string, pid int) error {
+	script := filepath.Join(os.TempDir(), fmt.Sprintf("nice-codex-installer-%d.ps1", pid))
+	content := fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+$pidToWait = %d
+$source = %s
+$target = %s
+for ($i = 0; $i -lt 60; $i++) {
+  if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) { break }
+  Start-Sleep -Milliseconds 500
+}
+Start-Sleep -Milliseconds 400
+$installerExitCode = 0
+if ($source -match '(?i)\.msi$') {
+  $msiArgs = '/i "' + $source.Replace('"', '\"') + '" /norestart'
+  $installer = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
+  $installerExitCode = $installer.ExitCode
+} else {
+  $installer = Start-Process -FilePath $source -Wait -PassThru
+  $installerExitCode = $installer.ExitCode
+}
+if ($installerExitCode -eq 0 -or $installerExitCode -eq 3010) {
+  for ($i = 0; $i -lt 20; $i++) {
+    if (Test-Path -LiteralPath $target) {
+      Start-Process -FilePath $target
+      break
+    }
+    Start-Sleep -Milliseconds 250
+  }
+}
+Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+`, pid, powershellQuote(installerPath), powershellQuote(currentExe))
+	if err := os.WriteFile(script, []byte(content), 0o600); err != nil {
+		return err
+	}
+	command := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script)
+	configureBackgroundProcess(command)
+	return command.Start()
+}
+
+func resolvedExecutablePath() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	// Some packaged Windows locations do not expose symlink metadata. The
+	// executable path is still a valid update target in that case.
+	if resolved, resolveErr := filepath.EvalSymlinks(executable); resolveErr == nil {
+		return resolved, nil
+	}
+	return executable, nil
+}
+
 func launchUnixUpdateSwap(currentExe, newPackage string, pid int) error {
 	script := filepath.Join(os.TempDir(), fmt.Sprintf("nice-codex-update-%d.sh", pid))
 	content := fmt.Sprintf(`#!/bin/sh
@@ -379,4 +472,18 @@ func powershellQuote(value string) string {
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func updatePackageExtension(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	ext := strings.ToLower(path.Ext(parsed.Path))
+	switch ext {
+	case ".exe", ".msi", ".dmg", ".pkg", ".zip", ".appimage", ".bin":
+		return ext
+	default:
+		return ""
+	}
 }

@@ -77,6 +77,21 @@ jobs:
           git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
           go install github.com/wailsapp/wails/v3/cmd/wails3@${{ env.WAILS_VERSION }}
 
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install nsis --yes --no-progress
+          $nsisDir = Join-Path ${env:ProgramFiles(x86)} 'NSIS'
+          if (-not (Test-Path (Join-Path $nsisDir 'makensis.exe'))) {
+            $nsisDir = Join-Path $env:ProgramFiles 'NSIS'
+          }
+          if (-not (Test-Path (Join-Path $nsisDir 'makensis.exe'))) {
+            throw 'NSIS makensis.exe was not found after installation'
+          }
+          $env:Path = "$nsisDir;$env:Path"
+          Add-Content -Path $env:GITHUB_PATH -Value $nsisDir
+
       - name: Sync release version
         shell: pwsh
         env:
@@ -87,14 +102,35 @@ jobs:
           (Get-Content version.go -Raw) -replace 'var AppVersion = "[^"]+"', "var AppVersion = `"$version`"" | Set-Content version.go -NoNewline
           (Get-Content build/config.yml -Raw) -replace 'version: "[0-9]+\.[0-9]+\.[0-9]+"', "version: `"$version`"" | Set-Content build/config.yml -NoNewline
           (Get-Content frontend/package.json -Raw) -replace '"version": "[0-9]+\.[0-9]+\.[0-9]+"', "`"version`": `"$version`"" | Set-Content frontend/package.json -NoNewline
+          $appStore = Get-Content frontend/src/stores/app.ts -Raw
+          $appStore = $appStore -replace "const AppVersionFallback = '[^']+'", "const AppVersionFallback = '$version'"
+          $appStore = $appStore -replace "const appVersion = shallowRef\('[^']+'\)", "const appVersion = shallowRef('$version')"
+          Set-Content frontend/src/stores/app.ts -Value $appStore -NoNewline
+          $info = Get-Content build/windows/info.json -Raw
+          $info = $info -replace '"file_version":\s*"[^"]+"', ('"file_version": "' + $version + '"')
+          $info = $info -replace '"ProductVersion":\s*"[^"]+"', ('"ProductVersion": "' + $version + '"')
+          Set-Content build/windows/info.json -Value $info -NoNewline
+          $manifest = Get-Content build/windows/wails.exe.manifest -Raw
+          $manifest = $manifest -replace '(name="com\.nicecodex\.desktop"\s+version=")[^"]+', ('${1}' + $version)
+          Set-Content build/windows/wails.exe.manifest -Value $manifest -NoNewline
+          $msixManifest = Get-Content build/windows/msix/app_manifest.xml -Raw
+          $msixManifest = $msixManifest -replace '(Identity[\s\S]*?Version=")[^"]+', ('${1}' + $version + '.0')
+          Set-Content build/windows/msix/app_manifest.xml -Value $msixManifest -NoNewline
+          $nsisTools = Get-Content build/windows/nsis/wails_tools.nsh -Raw
+          $nsisTools = $nsisTools -replace '(!define INFO_PRODUCTVERSION\s+")[^"]+', ('${1}' + $version)
+          Set-Content build/windows/nsis/wails_tools.nsh -Value $nsisTools -NoNewline
 
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
-      - name: Build Windows
+      - name: Build Windows binary and installer
         shell: bash
-        run: wails3 build GOOS=windows
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          wails3 task windows:package GOOS=windows ARCH=amd64 INSTALL_SCOPE=user VERSION="$VERSION"
 
       - name: Stage Windows artifact
         shell: pwsh
@@ -103,10 +139,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path release | Out-Null
-          $src = Get-ChildItem -Path bin -Filter *.exe | Select-Object -First 1
-          if (-not $src) { throw 'Windows binary not found in bin/' }
-          $dest = "release/NiceCodex-${env:VERSION}-windows-amd64.exe"
-          Copy-Item $src.FullName $dest -Force
+          $portable = Get-ChildItem -Path bin -Filter *.exe |
+            Where-Object { $_.Name -notmatch '(?i)(installer|setup|uninstall)' } |
+            Select-Object -First 1
+          $installer = Get-ChildItem -Path bin -Filter *installer.exe | Select-Object -First 1
+          if (-not $portable) { throw 'Windows portable binary not found in bin/' }
+          if (-not $installer) { throw 'Windows NSIS installer not found in bin/' }
+          Copy-Item $portable.FullName "release/NiceCodex-${env:VERSION}-windows-amd64-portable.exe" -Force
+          Copy-Item $installer.FullName "release/NiceCodex-${env:VERSION}-windows-amd64-installer.exe" -Force
           Get-ChildItem release
 
       - uses: actions/upload-artifact@v5
@@ -165,7 +205,9 @@ jobs:
           sed -i.bak -E "s/var AppVersion = \"[^\"]+\"/var AppVersion = \"${VERSION}\"/" version.go
           sed -i.bak -E "s/version: \"[0-9]+\.[0-9]+\.[0-9]+\"/version: \"${VERSION}\"/" build/config.yml
           sed -i.bak -E "s/\"version\": \"[0-9]+\.[0-9]+\.[0-9]+\"/\"version\": \"${VERSION}\"/" frontend/package.json
-          rm -f version.go.bak build/config.yml.bak frontend/package.json.bak
+          sed -i.bak -E "s/const AppVersionFallback = '[^']+'/const AppVersionFallback = '${VERSION}'/" frontend/src/stores/app.ts
+          sed -i.bak -E "s/const appVersion = shallowRef\('[^']+'\)/const appVersion = shallowRef('${VERSION}')/" frontend/src/stores/app.ts
+          rm -f version.go.bak build/config.yml.bak frontend/package.json.bak frontend/src/stores/app.ts.bak
 
       - name: Install frontend dependencies
         working-directory: frontend

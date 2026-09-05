@@ -5,19 +5,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 )
 
 type UpdateInfo struct {
-	CurrentVersion string `json:"currentVersion"`
-	LatestVersion  string `json:"latestVersion"`
-	UpdateAvailable bool  `json:"updateAvailable"`
-	ReleaseURL     string `json:"releaseUrl"`
-	DownloadURL    string `json:"downloadUrl"`
-	ReleaseNotes   string `json:"releaseNotes"`
-	PublishedAt    string `json:"publishedAt"`
+	CurrentVersion  string `json:"currentVersion"`
+	LatestVersion   string `json:"latestVersion"`
+	UpdateAvailable bool   `json:"updateAvailable"`
+	ReleaseURL      string `json:"releaseUrl"`
+	DownloadURL     string `json:"downloadUrl"`
+	ReleaseNotes    string `json:"releaseNotes"`
+	PublishedAt     string `json:"publishedAt"`
 }
 
 type githubRelease struct {
@@ -82,6 +84,7 @@ func (s *AppService) CheckForUpdates() (UpdateInfo, error) {
 
 func pickReleaseAsset(release githubRelease, goos, goarch string) string {
 	needles := []string{}
+	preferInstaller := goos == "windows" && runningFromInstalledWindowsPath()
 	switch goos {
 	case "windows":
 		needles = []string{".exe", "windows", "win"}
@@ -101,7 +104,11 @@ func pickReleaseAsset(release githubRelease, goos, goarch string) string {
 	best := ""
 	bestScore := -1
 	for _, asset := range release.Assets {
-		name := strings.ToLower(asset.Name)
+		assetName := strings.TrimSpace(asset.Name)
+		if assetName == "" || strings.TrimSpace(asset.BrowserDownloadURL) == "" {
+			continue
+		}
+		name := strings.ToLower(assetName)
 		score := 0
 		for _, needle := range needles {
 			if strings.Contains(name, strings.ToLower(needle)) {
@@ -113,6 +120,20 @@ func pickReleaseAsset(release githubRelease, goos, goarch string) string {
 				score++
 			}
 		}
+		if goos == "windows" {
+			if isInstallerAssetName(assetName) {
+				// Installed copies should update through NSIS so shortcuts and
+				// uninstall metadata stay valid. Portable copies keep the old
+				// in-place replacement flow.
+				if preferInstaller {
+					score += 20
+				} else {
+					score -= 1
+				}
+			} else if strings.Contains(name, "portable") && !preferInstaller {
+				score += 4
+			}
+		}
 		if score > bestScore {
 			bestScore = score
 			best = asset.BrowserDownloadURL
@@ -122,6 +143,47 @@ func pickReleaseAsset(release githubRelease, goos, goarch string) string {
 		return ""
 	}
 	return best
+}
+
+func isInstallerAssetName(value string) bool {
+	name := strings.TrimSpace(value)
+	name = strings.ReplaceAll(name, "\\", "/")
+	if query := strings.IndexAny(name, "?#"); query >= 0 {
+		name = name[:query]
+	}
+	if slash := strings.LastIndex(name, "/"); slash >= 0 {
+		name = name[slash+1:]
+	}
+	name = strings.ToLower(name)
+	return strings.HasSuffix(name, ".msi") ||
+		strings.Contains(name, "installer") ||
+		strings.Contains(name, "setup") ||
+		strings.Contains(name, "nsis")
+}
+
+func runningFromInstalledWindowsPath() bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(executable); resolveErr == nil {
+		executable = resolved
+	}
+	path := strings.ToLower(filepath.ToSlash(executable))
+	for _, marker := range []string{"/program files/", "/program files (x86)/", "/appdata/local/programs/"} {
+		if strings.Contains(path, marker) {
+			return true
+		}
+	}
+	// NSIS writes this file beside the executable even when the user chooses
+	// a custom install directory outside the standard Windows paths.
+	if _, err := os.Stat(filepath.Join(filepath.Dir(executable), "uninstall.exe")); err == nil {
+		return true
+	}
+	return false
 }
 
 // compareSemver returns 1 if a>b, -1 if a<b, 0 if equal (best-effort).

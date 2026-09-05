@@ -70,7 +70,7 @@ func main() {
 			TitleBar: application.MacTitleBarHidden,
 		},
 		Windows: application.WindowsWindow{
-			DisableIcon: true,
+			DisableIcon: false,
 			// Keep Aero shadow / Win11 rounded corners while Frameless removes the caption.
 			DisableFramelessWindowDecorations: false,
 		},

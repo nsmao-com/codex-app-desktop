@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.5：输入区内多行目标编辑、目标更新安全排队且不再延迟弹窗，并分离普通消息与目标草稿。</sub></p>
+<p align="center"><sub>v1.5.6：Windows 带图标安装包、按安装方式更新，以及 GPT-6 Astra 支持。</sub></p>
 
 ## 为什么是 Nice Codex
 
@@ -146,7 +146,8 @@ Nice Codex 不使用一套通用公式硬套所有模型商。应用会标准化
 
 | 平台 | 安装产物 |
 |---|---|
-| Windows x64 | `NiceCodex-<version>-windows-amd64.exe` |
+| Windows x64 安装版 | `NiceCodex-<version>-windows-amd64-installer.exe` |
+| Windows x64 便携版 | `NiceCodex-<version>-windows-amd64-portable.exe` |
 | macOS Apple Silicon | `NiceCodex-<version>-darwin-arm64.zip` |
 | macOS Intel | `NiceCodex-<version>-darwin-amd64.zip` |
 
@@ -157,13 +158,13 @@ Nice Codex 不使用一套通用公式硬套所有模型商。应用会标准化
 3. 安装并登录对应官方 CLI，或配置该运行时支持的 Provider/API 模式。
 4. 在发送第一个任务前确认权限预设。
 
-Nice Codex 启动时会检查 GitHub Releases。发现新版本后，侧栏版本徽章和 **设置 -> 外观 -> 检查更新** 会打开当前平台对应的下载产物。
+Nice Codex 启动时会检查 GitHub Releases。发现新版本后，侧栏版本徽章和 **设置 -> 外观 -> 检查更新** 会按当前安装方式选择安装版或便携版下载产物。
 
 ## 增长与发布节奏
 
 Nice Codex 正在快速迭代。README 不写死容易过期的虚假繁荣数字，顶部版本、下载、Star 和提交活跃度均来自 GitHub 动态徽章。完整产品演进可查看 [update.md](./update.md)。
 
-每个 `v*` tag 都会通过 GitHub Actions 构建并发布三个桌面产物。Release 页面自动读取 `update.md` 对应版本的 **新增 / 修改 / 修复**；缺少该章节会直接终止发布，避免再次出现“有下载、没说明”的页面。
+每个 `v*` tag 都会通过 GitHub Actions 构建并发布四个桌面产物。Release 页面自动读取 `update.md` 对应版本的 **新增 / 修改 / 修复**；缺少该章节会直接终止发布，避免再次出现“有下载、没说明”的页面。
 
 当前产品规模：
 
@@ -227,12 +228,17 @@ pnpm --dir frontend typecheck
 # 当前系统二进制
 wails3 build
 
-# Windows 安装包（需要 NSIS / makensis）
+# Windows 安装包（需要 NSIS / makensis；已包含应用图标）
+wails3 task windows:package ARCH=amd64 INSTALL_SCOPE=user
+
+# 或使用默认的机器范围安装
 wails3 package
 
 # macOS .app（需要在 macOS 上执行）
 wails3 task darwin:package
 ```
+
+Windows Release 会同时提供带图标的 NSIS 安装版和便携版。应用内检查更新时，已安装到系统目录的版本优先使用安装包，便携版优先替换便携可执行文件，不会把安装器误当作主程序覆盖。
 
 ## 版本与发布
 

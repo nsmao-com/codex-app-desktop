@@ -209,7 +209,7 @@ git push origin v1.2.7
 - 工作流：`.github/workflows/release.yml`  
 - 触发：`push` tags `v*`，或 `workflow_dispatch` 手动指定 tag  
 - 说明：按 tag 版本从 `update.md` 提取对应章节，缺失时终止发布
-- 产物：Windows `.exe`、macOS `.zip` 等上传到 GitHub Release  
+- 产物：Windows NSIS 安装版与便携版 `.exe`、macOS `.zip` 等上传到 GitHub Release
 
 因此：**main = 源码线；tag = 发版线。** 两边都要推，tag 说明要当「端版本说明书」来写。
 
