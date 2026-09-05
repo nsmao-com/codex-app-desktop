@@ -22,11 +22,8 @@ import { sameWorkspacePath as sameWorkspace, workspaceKey } from '../utils/works
 import { savePersistedQueues, loadPersistedQueues } from '../utils/persistedQueues'
 import {
   buildRuntimeProviders,
-  cleanModelDisplayName,
-  DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING,
-  FALLBACK_CODEX_MODELS,
-  selectCodexCatalog,
+  mergeCodexCatalog,
 } from '../utils/runtimeProviders'
 import { translate } from '../i18n'
 import type {
@@ -832,29 +829,7 @@ export const useCodexStore = defineStore('codex', () => {
 
     const customModels = appStore.settings.customModels ?? []
     const raw = response ? normalizeModels(asRecord(response).data) : []
-    const selected = selectCodexCatalog(raw).map((model) => ({
-      ...model,
-      displayName: cleanModelDisplayName(model.model, model.displayName),
-    }))
-
-    const merged = [...selected]
-    for (const custom of customModels) {
-      const id = custom.trim()
-      if (!id) continue
-      if (merged.some((model) => model.model.toLocaleLowerCase() === id.toLocaleLowerCase())) continue
-      merged.push(stubCodexModel(id, false))
-    }
-    if (!merged.length) {
-      for (const [index, id] of FALLBACK_CODEX_MODELS.entries()) {
-        merged.push(stubCodexModel(id, index === 0))
-      }
-    }
-    if (merged.some((model) => model.model.toLocaleLowerCase() === DEFAULT_CODEX_MODEL)) {
-      for (const model of merged) {
-        model.isDefault = model.model.toLocaleLowerCase() === DEFAULT_CODEX_MODEL
-      }
-    }
-    appStore.models = merged
+    appStore.models = mergeCodexCatalog(raw, customModels)
 
     const configuredModel = appStore.settings.model.trim()
     const configuredCatalogModel = appStore.models.find(
@@ -890,24 +865,6 @@ export const useCodexStore = defineStore('codex', () => {
       && !appStore.settings.modelProvider
     ) return
     appStore.patchSettings(next)
-  }
-
-  function stubCodexModel(id: string, isDefault: boolean): import('../types/codex').ModelOption {
-    return {
-      id,
-      model: id,
-      displayName: cleanModelDisplayName(id, id),
-      description: 'Codex model',
-      isDefault,
-      defaultReasoningEffort: /sol$/i.test(id) ? 'low' : 'medium',
-      defaultServiceTier: '',
-      serviceTiers: [],
-      supportsPersonality: false,
-      supportedReasoningEfforts: DEFAULT_CODEX_REASONING.map((option) => ({
-        effort: option.effort,
-        description: option.description,
-      })),
-    }
   }
 
   async function loadModelProviders(): Promise<void> {

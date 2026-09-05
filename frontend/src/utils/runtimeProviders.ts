@@ -94,37 +94,70 @@ function looksLikeOtherRuntime(text: string): boolean {
     || /^(sonnet|opus|haiku|fable)$/.test(text)
 }
 
-/** Prefer Codex / OpenAI-shaped IDs; never return an empty picker. */
+/** Keep Codex IDs and provider aliases; exclude models from other runtimes. */
 export function selectCodexCatalog(codexModels: ModelOption[]): ModelOption[] {
-  const openaiShaped = codexModels.filter((item) => looksLikeOpenAI(item.model.toLowerCase()))
-  if (openaiShaped.length) return openaiShaped
-  const withoutOther = codexModels.filter((item) => !looksLikeOtherRuntime(`${item.model} ${item.displayName}`.toLowerCase()))
-  if (withoutOther.length) return withoutOther
-  return codexModels
+  return codexModels.filter((item) => looksLikeOpenAI(item.model.toLowerCase())
+    || !looksLikeOtherRuntime(`${item.model} ${item.displayName}`.toLowerCase()))
 }
 
-export function modelsForRuntime(
+/** Merge live, custom and built-in choices without replacing live capabilities. */
+export function mergeCodexCatalog(
   codexModels: ModelOption[],
   customModels: string[] = [],
-): Array<{ model: string; displayName: string; isDefault: boolean }> {
+): ModelOption[] {
   const options = selectCodexCatalog(codexModels).map((item) => ({
-    model: item.model,
+    ...item,
     displayName: cleanModelDisplayName(item.model, item.displayName),
-    isDefault: item.isDefault === true,
   }))
   for (const custom of customModels) {
     const id = custom.trim()
     if (!id) continue
     if (looksLikeOtherRuntime(id.toLowerCase()) && !looksLikeOpenAI(id.toLowerCase())) continue
     if (options.some((item) => item.model.toLocaleLowerCase() === id.toLocaleLowerCase())) continue
-    options.push({ model: id, displayName: cleanModelDisplayName(id, id), isDefault: false })
+    options.push(stubCodexModel(id))
   }
   if (!options.length) {
-    for (const [index, id] of FALLBACK_CODEX_MODELS.entries()) {
-      options.push({ model: id, displayName: formatModelLabel(id), isDefault: index === 0 })
+    for (const id of FALLBACK_CODEX_MODELS) {
+      options.push(stubCodexModel(id))
     }
   }
+  // model/list may be nonempty but older than the application's built-in model.
+  if (!options.some((item) => item.model.toLocaleLowerCase() === DEFAULT_CODEX_MODEL)) {
+    options.unshift(stubCodexModel(DEFAULT_CODEX_MODEL))
+  }
+  for (const option of options) {
+    option.isDefault = option.model.toLocaleLowerCase() === DEFAULT_CODEX_MODEL
+  }
   return options
+}
+
+function stubCodexModel(id: string): ModelOption {
+  return {
+    id,
+    model: id,
+    displayName: cleanModelDisplayName(id, id),
+    description: 'Codex model',
+    isDefault: false,
+    defaultReasoningEffort: /sol$/i.test(id) ? 'low' : 'medium',
+    defaultServiceTier: '',
+    serviceTiers: [],
+    supportsPersonality: false,
+    supportedReasoningEfforts: DEFAULT_CODEX_REASONING.map((option) => ({
+      effort: option.effort,
+      description: option.description,
+    })),
+  }
+}
+
+export function modelsForRuntime(
+  codexModels: ModelOption[],
+  customModels: string[] = [],
+): Array<{ model: string; displayName: string; isDefault: boolean }> {
+  return mergeCodexCatalog(codexModels, customModels).map((item) => ({
+    model: item.model,
+    displayName: item.displayName,
+    isDefault: item.isDefault,
+  }))
 }
 
 export function modelsForGrokRuntime(

@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.6：Windows 带图标安装包、按安装方式更新，以及 GPT-6 Astra 支持。</sub></p>
+<p align="center"><sub>v1.5.7：修复旧 CLI 目录和离线情况下 GPT-6 Astra 在输入框与设置模型列表中缺失的问题。</sub></p>
 
 ## 为什么是 Nice Codex
 

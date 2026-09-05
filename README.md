@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.6: a Windows installer with an app icon, install-aware updates, and GPT-6 Astra support.</sub></p>
+<p align="center"><sub>v1.5.7: GPT-6 Astra stays available in both model pickers, including with older CLI catalogs and offline fallbacks.</sub></p>
 
 ## Why Nice Codex
 

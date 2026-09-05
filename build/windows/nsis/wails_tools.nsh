@@ -14,7 +14,7 @@
     !define INFO_PRODUCTNAME "Nice Codex"
 !endif
 !ifndef INFO_PRODUCTVERSION
-    !define INFO_PRODUCTVERSION "1.5.6"
+    !define INFO_PRODUCTVERSION "1.5.7"
 !endif
 !ifndef INFO_COPYRIGHT
     !define INFO_COPYRIGHT "Copyright 2026 Nice Codex"
