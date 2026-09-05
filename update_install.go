@@ -403,7 +403,9 @@ if ($source -match '(?i)\.msi$') {
   $installer = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
   $installerExitCode = $installer.ExitCode
 } else {
-  $installer = Start-Process -FilePath $source -Wait -PassThru
+  # NSIS requires /D to be last and unquoted, even when the path contains spaces.
+  $installArgs = '/D=' + [System.IO.Path]::GetDirectoryName($target)
+  $installer = Start-Process -FilePath $source -ArgumentList $installArgs -Wait -PassThru
   $installerExitCode = $installer.ExitCode
 }
 if ($installerExitCode -eq 0 -or $installerExitCode -eq 3010) {
@@ -418,7 +420,8 @@ if ($installerExitCode -eq 0 -or $installerExitCode -eq 3010) {
 Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 `, pid, powershellQuote(installerPath), powershellQuote(currentExe))
-	if err := os.WriteFile(script, []byte(content), 0o600); err != nil {
+	// Windows PowerShell 5.1 needs a BOM to preserve non-ASCII installation paths.
+	if err := os.WriteFile(script, []byte("\ufeff"+content), 0o600); err != nil {
 		return err
 	}
 	command := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script)

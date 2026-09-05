@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.9: Antigravity workspace targeting, native thinking summaries, ordered streaming/tool events, and consistent history restoration.</sub></p>
+<p align="center"><sub>v1.5.10: Windows setup remembers the installation folder and shortcut choices, with reliable in-app updates for Unicode paths.</sub></p>
 
 ## Why Nice Codex
 

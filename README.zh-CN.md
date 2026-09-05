@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.9：修复 Antigravity 工作区传递、思考摘要展示、正文与工具事件乱序，以及原生历史恢复。</sub></p>
+<p align="center"><sub>v1.5.10：Windows 安装器记住安装目录，支持桌面与开始菜单快捷方式选择，并修复中文路径下的软件内更新。</sub></p>
 
 ## 为什么是 Nice Codex
 

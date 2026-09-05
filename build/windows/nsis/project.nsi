@@ -50,6 +50,8 @@ VIAddVersionKey "ProductName"     "${INFO_PRODUCTNAME}"
 ManifestDPIAware true
 
 !include "MUI.nsh"
+!include "FileFunc.nsh"
+!include "Sections.nsh"
 
 !define MUI_ICON "..\icon.ico"
 !define MUI_UNICON "..\icon.ico"
@@ -60,6 +62,11 @@ ManifestDPIAware true
 !insertmacro MUI_PAGE_WELCOME # Welcome to the installer page.
 # !insertmacro MUI_PAGE_LICENSE "resources\eula.txt" # Adds a EULA page to the installer
 !insertmacro MUI_PAGE_DIRECTORY # In which folder install page.
+!define MUI_PAGE_HEADER_TEXT "Choose Shortcuts"
+!define MUI_PAGE_HEADER_SUBTEXT "Choose where ${INFO_PRODUCTNAME} appears in Windows."
+!define MUI_COMPONENTSPAGE_TEXT_TOP "Choose which shortcuts to keep. Your choices will be remembered for future updates. Unchecked shortcuts will be removed."
+!define MUI_COMPONENTSPAGE_TEXT_COMPLIST "Shortcuts:"
+!insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_INSTFILES # Installing page.
 !insertmacro MUI_PAGE_FINISH # Finished installation page.
 
@@ -73,16 +80,9 @@ ManifestDPIAware true
 
 Name "${INFO_PRODUCTNAME}"
 OutFile "..\..\..\bin\${INFO_PROJECTNAME}-${ARCH}-installer.exe" # Name of the installer's file.
-!if "${WAILS_INSTALL_SCOPE}" == "user"
-    InstallDir "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
-!else
-    InstallDir "$PROGRAMFILES64\${INFO_COMPANYNAME}\${INFO_PRODUCTNAME}"
-!endif
+# Resolve defaults in .onInit so an explicit NSIS /D= path always wins.
+InstallDir ""
 ShowInstDetails show # This will always show the installation details.
-
-Function .onInit
-   !insertmacro wails.checkArchitecture
-FunctionEnd
 
 Section
     !insertmacro wails.setShellContext
@@ -93,14 +93,90 @@ Section
     
     !insertmacro wails.files
 
-    CreateShortcut "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
-    CreateShortCut "$DESKTOP\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
-
     !insertmacro wails.associateFiles
     !insertmacro wails.associateCustomProtocols
     
     !insertmacro wails.writeUninstaller
+    WriteRegStr SHCTX "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
 SectionEnd
+
+Section "Desktop shortcut" DesktopShortcut
+    CreateShortCut "$DESKTOP\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
+SectionEnd
+
+Section "Start menu shortcut" StartMenuShortcut
+    CreateShortCut "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
+SectionEnd
+
+Section -SaveShortcutChoices
+    ${If} ${SectionIsSelected} ${DesktopShortcut}
+        WriteRegDWORD SHCTX "${UNINST_KEY}" "DesktopShortcut" 1
+    ${Else}
+        Delete "$DESKTOP\${INFO_PRODUCTNAME}.lnk"
+        WriteRegDWORD SHCTX "${UNINST_KEY}" "DesktopShortcut" 0
+    ${EndIf}
+    ${If} ${SectionIsSelected} ${StartMenuShortcut}
+        WriteRegDWORD SHCTX "${UNINST_KEY}" "StartMenuShortcut" 1
+    ${Else}
+        Delete "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk"
+        WriteRegDWORD SHCTX "${UNINST_KEY}" "StartMenuShortcut" 0
+    ${EndIf}
+SectionEnd
+
+Function .onInit
+    !insertmacro wails.checkArchitecture
+    !insertmacro wails.setShellContext
+    SetRegView 64
+
+    ReadRegStr $0 SHCTX "${UNINST_KEY}" "InstallLocation"
+    ${If} $0 == ""
+        # Older installers only stored the executable path, without an icon index.
+        ReadRegStr $1 SHCTX "${UNINST_KEY}" "DisplayIcon"
+        ${If} $1 != ""
+            ${GetParent} "$1" $0
+        ${EndIf}
+    ${EndIf}
+    ${If} $INSTDIR == ""
+        ${If} $0 != ""
+            StrCpy $INSTDIR $0
+        ${Else}
+            !if "${WAILS_INSTALL_SCOPE}" == "user"
+                StrCpy $INSTDIR "$LOCALAPPDATA\Programs\${INFO_PRODUCTNAME}"
+            !else
+                StrCpy $INSTDIR "$PROGRAMFILES64\${INFO_COMPANYNAME}\${INFO_PRODUCTNAME}"
+            !endif
+        ${EndIf}
+    ${EndIf}
+
+    # Migrate old installs using the actual links, including links users removed.
+    ClearErrors
+    ReadRegDWORD $1 SHCTX "${UNINST_KEY}" "DesktopShortcut"
+    ${If} ${Errors}
+        ${If} $0 != ""
+            ${IfNot} ${FileExists} "$DESKTOP\${INFO_PRODUCTNAME}.lnk"
+                !insertmacro UnselectSection ${DesktopShortcut}
+            ${EndIf}
+        ${EndIf}
+    ${ElseIf} $1 == 0
+        !insertmacro UnselectSection ${DesktopShortcut}
+    ${EndIf}
+    ClearErrors
+    ReadRegDWORD $1 SHCTX "${UNINST_KEY}" "StartMenuShortcut"
+    ${If} ${Errors}
+        ${If} $0 != ""
+            ${IfNot} ${FileExists} "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk"
+                !insertmacro UnselectSection ${StartMenuShortcut}
+            ${EndIf}
+        ${EndIf}
+    ${ElseIf} $1 == 0
+        !insertmacro UnselectSection ${StartMenuShortcut}
+    ${EndIf}
+FunctionEnd
+
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+    !insertmacro MUI_DESCRIPTION_TEXT ${DesktopShortcut} "Show ${INFO_PRODUCTNAME} on the desktop."
+    !insertmacro MUI_DESCRIPTION_TEXT ${StartMenuShortcut} "Show ${INFO_PRODUCTNAME} in the Windows Start menu."
+!insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Section "uninstall" 
     !insertmacro wails.setShellContext
