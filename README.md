@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.10: Windows setup remembers the installation folder and shortcut choices, with reliable in-app updates for Unicode paths.</sub></p>
+<p align="center"><sub>v1.5.11: Keep all opened projects without the eight-folder limit, preserving project order and duplicate detection.</sub></p>
 
 ## Why Nice Codex
 
