@@ -1004,7 +1004,7 @@ function formatGrokUpdated(value?: number | null): string {
     <div class="flex h-full w-[276px] flex-col">
     <div class="flex h-12 items-center justify-between px-3.5">
       <div class="flex min-w-0 items-center gap-2.5">
-        <div class="grid size-6 place-items-center rounded-lg bg-foreground/90 text-[10px] font-bold text-background shadow-sm">N</div>
+        <img src="/nice-mark.svg" alt="" aria-hidden="true" width="28" height="28" class="size-7 shrink-0" />
         <div class="min-w-0">
           <div class="flex items-center gap-1.5">
             <span class="text-[13px] font-semibold tracking-tight">Nice Codex</span>

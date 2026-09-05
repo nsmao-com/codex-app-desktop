@@ -663,7 +663,7 @@ function mcpAuthLabel(status: string): string {
     oAuth: 'capabilities.mcpAuthOAuth',
     loading: 'capabilities.mcpChecking',
   }
-  return t(keys[status] ?? 'capabilities.mcpConfigured')
+  return t(keys[status] ?? 'capabilities.mcpAuthUnknown')
 }
 
 function closeCapabilities(): void {

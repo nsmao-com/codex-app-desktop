@@ -229,12 +229,13 @@ func resolveWindowsCodexShim(commandPath string) (commandSpec, bool) {
 		}
 		relative := filepath.FromSlash(strings.ReplaceAll(string(match[1]), `\`, `/`))
 		target := filepath.Clean(filepath.Join(filepath.Dir(commandPath), relative))
-		if info, err := os.Stat(target); err != nil || info.IsDir() {
+		if strings.EqualFold(filepath.Ext(target), ".exe") {
+			if info, err := os.Stat(target); err == nil && !info.IsDir() {
+				return commandSpec{path: target}, true
+			}
 			continue
 		}
-		if strings.EqualFold(filepath.Ext(target), ".exe") {
-			return commandSpec{path: target}, true
-		}
+		// A missing JS entry does not imply the matching native package is gone.
 		if spec, ok := resolveBundledCodexBinary(target); ok {
 			return spec, true
 		}

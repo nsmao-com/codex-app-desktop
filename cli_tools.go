@@ -91,9 +91,10 @@ var cliPackages = []cliPackageSpec{
 }
 
 var (
-	cliInstallMu   sync.Mutex
-	cliInstallBusy = map[string]bool{}
-	semverInText   = regexp.MustCompile(`(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)`)
+	cliInstallMu     sync.Mutex
+	cliPNPMInstallMu sync.Mutex
+	cliInstallBusy   = map[string]bool{}
+	semverInText     = regexp.MustCompile(`(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)`)
 )
 
 // CheckCLITools detects every supported local CLI and checks applicable latest versions.
@@ -161,6 +162,13 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 		}
 	}
 
+	// All pnpm-managed providers share one global manifest and virtual store.
+	// Reject overlapping installs instead of racing another provider's update.
+	if !cliPNPMInstallMu.TryLock() {
+		return CLIToolActionResult{}, errors.New("another CLI is installing via pnpm; wait for it to finish before trying again")
+	}
+	defer cliPNPMInstallMu.Unlock()
+
 	codex.EnrichPathForLookups()
 	pm, nodeOK, _ := detectNodePackageManager()
 	if !nodeOK || pm == "" {
@@ -190,7 +198,7 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 	// OpenCode ship stub bin/*.exe placeholders and only install the real native
 	// binary in postinstall — without --allow-build the command "succeeds" but
 	// leaves a non-runnable stub (or leaves an older npm copy on PATH in use).
-	commandArgs := []string{"add", "-g", "--allow-build=" + spec.npmPkg, spec.npmPkg + "@latest"}
+	commandArgs := pnpmGlobalInstallArgs(spec.npmPkg, true)
 	commandPath, resolvedArgs, resolveErr := providerCommand(packageManagerBinary(pm), commandArgs)
 	if resolveErr != nil {
 		return CLIToolActionResult{}, resolveErr
@@ -201,7 +209,7 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 	output, err := runManagedCombinedOutput(ctx, cmd)
 	// Older pnpm without --allow-build: retry plain install, then run postinstall ourselves.
 	if err != nil && looksLikeUnknownPNPMOption(string(output), err) {
-		fallbackArgs := []string{"add", "-g", spec.npmPkg + "@latest"}
+		fallbackArgs := pnpmGlobalInstallArgs(spec.npmPkg, false)
 		commandPath, resolvedArgs, resolveErr = providerCommand(packageManagerBinary(pm), fallbackArgs)
 		if resolveErr != nil {
 			return CLIToolActionResult{}, resolveErr
@@ -575,6 +583,7 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 		status.Installed = det.Available
 		status.Executable = det.Binary
 		status.Version = normalizeCLIVersion(det.Version)
+		status.Message = det.Error
 	case cliToolGrok:
 		// Always re-probe the official binary for CLI tools UI (skip short TTL cache).
 		invalidateGrokRuntimeProbeCache()
@@ -656,6 +665,8 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 	}
 
 	switch {
+	case spec.id == cliToolCodex && status.Message != "":
+		// Keep the actionable missing-bundle diagnostic, not just "Not installed".
 	case spec.id == cliToolGrok && !status.Installed:
 		status.Message = "Not installed — uses official x.ai/cli installer"
 	case spec.id == cliToolGemini && isAntigravityExecutable(status.Executable):
@@ -676,13 +687,28 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 	return status
 }
 
+func pnpmGlobalInstallArgs(npmPkg string, allowBuild bool) []string {
+	args := []string{"add", "-g"}
+	if allowBuild {
+		args = append(args, "--allow-build="+npmPkg)
+	}
+	if runtime.GOOS == "windows" {
+		// Retain old global packages during this install (100 years, in minutes).
+		// A running CLI can lock its EXE: pnpm pruning otherwise removes its
+		// helpers first and then stalls on the EXE. Do not change user config or
+		// terminate sessions; unused bundles can be cleaned after all CLIs exit.
+		args = append(args, "--config.modules-cache-max-age=52560000")
+	}
+	return append(args, npmPkg+"@latest")
+}
+
 func formatInstallCommand(pm, npmPkg string) string {
 	if npmPkg == "x.ai/cli" || strings.EqualFold(npmPkg, "x.ai/cli") {
 		return officialGrokInstallCommand()
 	}
 	// --allow-build is required on pnpm 10+ so postinstall can place native binaries
 	// (Claude Code / OpenCode ship stub bin placeholders without it).
-	return "pnpm add -g --allow-build=" + npmPkg + " " + npmPkg
+	return "pnpm " + strings.Join(pnpmGlobalInstallArgs(npmPkg, true), " ")
 }
 
 func officialGrokInstallCommand() string {

@@ -39,6 +39,7 @@ import { useRouter } from 'vue-router'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import AttachmentImage from '@/components/AttachmentImage.vue'
+import CodexWarningsIndicator from '@/components/CodexWarningsIndicator.vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -3005,6 +3006,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
       </div>
 
       <div v-if="isGoalComposer" class="flex min-h-9 flex-wrap items-center justify-between gap-2 px-1">
+        <CodexWarningsIndicator v-if="isCodexMode" :thread-id="composerSessionId" :workspace="composerWorkspacePath" />
         <span class="min-w-0 flex-1 text-[10px] leading-4 text-muted-foreground">{{ goalActionHint }}</span>
         <div class="ml-auto flex shrink-0 items-center gap-1.5">
           <Button
@@ -3034,6 +3036,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
 
       <div v-else class="composer-toolbar flex min-h-8 flex-wrap items-center justify-between gap-x-2 gap-y-1 px-1">
         <div class="flex min-w-0 flex-1 items-center gap-0.5">
+          <CodexWarningsIndicator v-if="isCodexMode" :thread-id="composerSessionId" :workspace="composerWorkspacePath" />
           <DropdownMenu :open="addMenuOpen" @update:open="onAddMenuOpenChange">
             <DropdownMenuTrigger as-child>
               <Button

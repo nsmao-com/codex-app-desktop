@@ -105,6 +105,12 @@ func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) e
 		c.failStart(err, workspace)
 		return err
 	}
+	detection := detectResolvedCommand(spec)
+	if !detection.Available {
+		err := errors.New(detection.Error)
+		c.failStart(err, workspace)
+		return err
+	}
 
 	// Priority: settings (info) > env vars > official desktop defaults.
 	// Unofficial names like "nice_codex_desktop" are rejected by some channels with:
@@ -119,11 +125,22 @@ func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) e
 	}
 
 	args := append(append([]string{}, spec.prefixArgs...), "app-server", "--listen", "stdio://")
+	env := withEnvOverride(os.Environ(), "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", clientName)
+	catalogPath, catalogCleanup, catalogErr := prepareModelCatalog(ctx, spec, workspace, env)
+	defer func() { catalogCleanup() }()
+	if catalogErr != nil {
+		// Do not block other models when an old CLI lacks the catalog command.
+		c.emit(Event{Type: "stderr", Data: map[string]any{
+			"message": "Astra model metadata compatibility: " + catalogErr.Error(),
+		}})
+	} else if catalogPath != "" {
+		args = append(args, "-c", "model_catalog_json="+strconv.Quote(catalogPath))
+	}
 	command := exec.Command(spec.path, args...)
 	command.Dir = workspace
 	// Force originator early (before initialize) so the first HTTP client also
 	// carries the spoofed identity. Matches app-server initialize clientInfo.name.
-	command.Env = withEnvOverride(os.Environ(), "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", clientName)
+	command.Env = env
 	configureProcess(command)
 
 	stdin, err := command.StdinPipe()
@@ -154,8 +171,16 @@ func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) e
 			"message": "process-tree guard unavailable: " + cleanupErr.Error(),
 		}})
 	}
+	processCleanup := cleanup
+	removeCatalog := catalogCleanup
+	cleanup = func() {
+		if processCleanup != nil {
+			processCleanup()
+		}
+		removeCatalog()
+	}
+	catalogCleanup = func() {} // Ownership transfers to the process lifetime.
 
-	detection := Detect()
 	done := make(chan struct{})
 	c.mu.Lock()
 	c.command = command

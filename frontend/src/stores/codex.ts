@@ -1,6 +1,6 @@
 import { Events } from '@wailsio/runtime'
 import { defineStore } from 'pinia'
-import { computed, shallowRef, watch } from 'vue'
+import { computed, shallowReactive, shallowRef, watch } from 'vue'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type {
@@ -17,6 +17,7 @@ import { useNavigationStore } from './navigation'
 import { useTerminalStore } from './terminal'
 import { useWorkspaceStore } from './workspace'
 import { notify } from '../utils/notify'
+import { addCodexWarning, loadCodexWarnings, normalizeCodexWarning, saveCodexWarnings } from '../utils/codexWarnings'
 import { friendlyErrorMessage } from '../utils/errorMessage'
 import { sameWorkspacePath as sameWorkspace, workspaceKey } from '../utils/workspacePath'
 import { savePersistedQueues, loadPersistedQueues } from '../utils/persistedQueues'
@@ -155,8 +156,12 @@ export const useCodexStore = defineStore('codex', () => {
   )
   watch(queuedMessagesByThread, (queues) => savePersistedQueues('nice-codex.queue.codex.v1', queues))
   const loadingThreadId = shallowRef('')
-  const loadingSequenceByThread = new Map<string, number>()
-  const workspaceSelectionSequenceByThread = new Map<string, number>()
+  const warnings = shallowRef(loadCodexWarnings())
+  watch(warnings, saveCodexWarnings, { flush: 'sync' })
+  // These maps participate in computed busy/queue state. Their deletion must
+  // invalidate that state even when no turn or message changed during hydration.
+  const loadingSequenceByThread = shallowReactive(new Map<string, number>())
+  const workspaceSelectionSequenceByThread = shallowReactive(new Map<string, number>())
   const threadAlias = new Map<string, string>()
   const pendingSubmissionByThread = new Map<string, PendingThreadSubmission>()
   const creatingThread = shallowRef(false)
@@ -2705,6 +2710,9 @@ export const useCodexStore = defineStore('codex', () => {
       case 'status':
         {
           const next = normalizeStatus(event.data)
+          // Clear only when a new process starts, before its warning events.
+          // A frontend reload or a reused healthy connection keeps diagnostics.
+          if (next.state === 'starting') warnings.value = []
           connection.value = next.state === 'disconnected'
             && connection.value.state === 'error'
             && lastTransportMessage.value
@@ -3247,19 +3255,19 @@ export const useCodexStore = defineStore('codex', () => {
         break
       case 'warning':
       case 'configWarning':
-        notify('warning', translate('notifications.runtimeWarning', {
-          runtime: runtimeNameForThread(asString(payload.threadId)),
-        }), asString(payload.message, translate('notifications.warningFallbackRuntime', {
-          runtime: runtimeNameForThread(asString(payload.threadId)),
-        })))
-        break
       case 'guardianWarning':
       case 'deprecationNotice':
-      case 'windows/worldWritableWarning':
-        notify('warning', translate('notifications.runtimeWarning', {
-          runtime: runtimeNameForThread(asString(payload.threadId)),
-        }), asString(payload.message, asString(payload.detail)))
+      case 'windows/worldWritableWarning': {
+        const threadId = asString(payload.threadId)
+        if (threadId && knownRuntimeIDForThread(threadId) && runtimeIDForThread(threadId) !== 'codex') {
+          notify('warning', translate('notifications.runtimeWarning', { runtime: runtimeNameForThread(threadId) }),
+            asString(payload.summary) || asString(payload.message) || asString(payload.details) || asString(payload.detail))
+          break
+        }
+        const warning = normalizeCodexWarning(method, payload, connection.value.workspace)
+        if (warning) warnings.value = addCodexWarning(warnings.value, warning)
         break
+      }
       case 'error':
       case 'turn/error': {
         const threadID = asString(payload.threadId)
@@ -5936,6 +5944,9 @@ export const useCodexStore = defineStore('codex', () => {
     queuedMessagesByThread,
     historyByThread,
     loadingThreadId,
+    warnings,
+    loadingSequenceByThread,
+    workspaceSelectionSequenceByThread,
     creatingThread,
     itemsByThread,
     diffsByTurn,

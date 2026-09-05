@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -11,6 +12,11 @@ import (
 )
 
 const canvasSize = 1024
+
+// One mark for the desktop, macOS Icon Composer and in-app branding. Keep the
+// vector geometry identical to the raster drawing below (no fonts required).
+const markSVG = `<path d="M322 688V352L688 688V352" fill="none" stroke="#f6f0e5" stroke-width="144" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="788" cy="230" r="44" fill="#eea56b"/>`
 
 type point struct {
 	x float64
@@ -24,26 +30,13 @@ func main() {
 	}
 
 	canvas := image.NewRGBA(image.Rect(0, 0, canvasSize, canvasSize))
-	background := color.RGBA{R: 24, G: 25, B: 21, A: 255}
-	roundedRect(canvas, 58, 58, 966, 966, 218, background)
-
-	grid := color.RGBA{R: 255, G: 255, B: 255, A: 12}
-	for position := 160; position <= 864; position += 88 {
-		line(canvas, point{float64(position), 98}, point{float64(position), 926}, 2, grid)
-		line(canvas, point{98, float64(position)}, point{926, float64(position)}, 2, grid)
-	}
-
-	ring(canvas, 512, 512, 326, 4, color.RGBA{R: 221, G: 162, B: 80, A: 72})
-	ring(canvas, 512, 512, 247, 3, color.RGBA{R: 242, G: 239, B: 230, A: 42})
-	ring(canvas, 512, 512, 174, 2, color.RGBA{R: 221, G: 162, B: 80, A: 55})
-
-	diamond(canvas, 512, 512, 246, color.RGBA{R: 221, G: 162, B: 80, A: 38})
-	diamond(canvas, 512, 512, 178, color.RGBA{R: 221, G: 162, B: 80, A: 255})
-	diamond(canvas, 512, 512, 105, color.RGBA{R: 24, G: 25, B: 21, A: 255})
-	diamond(canvas, 512, 512, 54, color.RGBA{R: 242, G: 239, B: 230, A: 255})
-
-	circle(canvas, 238, 290, 22, color.RGBA{R: 143, G: 180, B: 119, A: 255})
-	circle(canvas, 804, 704, 14, color.RGBA{R: 242, G: 239, B: 230, A: 180})
+	background := color.RGBA{R: 23, G: 59, B: 54, A: 255}
+	roundedRect(canvas, 64, 64, 960, 960, 224, background)
+	letter := color.RGBA{R: 246, G: 240, B: 229, A: 255}
+	line(canvas, point{322, 688}, point{322, 352}, 72, letter)
+	line(canvas, point{322, 352}, point{688, 688}, 72, letter)
+	line(canvas, point{688, 688}, point{688, 352}, 72, letter)
+	circle(canvas, 788, 230, 44, color.RGBA{R: 238, G: 165, B: 107, A: 255})
 
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 		log.Fatal(err)
@@ -56,6 +49,22 @@ func main() {
 	if err := png.Encode(file, canvas); err != nil {
 		log.Fatal(err)
 	}
+	// Derive companion assets from the PNG output location, so the generator
+	// works both from the repository root and the build Taskfile directory.
+	buildDir := filepath.Dir(output)
+	writeSVG(filepath.Join(buildDir, "appicon.icon", "Assets", "nice_codex_vector.svg"), markSVG)
+	writeSVG(filepath.Join(buildDir, "..", "frontend", "public", "nice-mark.svg"),
+		`<rect x="64" y="64" width="896" height="896" rx="224" fill="#173b36"/>`+"\n  "+markSVG)
+}
+
+func writeSVG(path, content string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Fatal(err)
+	}
+	svg := fmt.Sprintf("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1024 1024\">\n  %s\n</svg>\n", content)
+	if err := os.WriteFile(path, []byte(svg), 0o644); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func roundedRect(canvas *image.RGBA, left, top, right, bottom, radius int, fill color.RGBA) {
@@ -64,57 +73,6 @@ func roundedRect(canvas *image.RGBA, left, top, right, bottom, radius int, fill 
 			dx := maxInt(left+radius-x, 0, x-(right-radius-1))
 			dy := maxInt(top+radius-y, 0, y-(bottom-radius-1))
 			if dx*dx+dy*dy <= radius*radius {
-				blend(canvas, x, y, fill)
-			}
-		}
-	}
-}
-
-func diamond(canvas *image.RGBA, centerX, centerY, radius int, fill color.RGBA) {
-	polygon(canvas, []point{
-		{float64(centerX), float64(centerY - radius)},
-		{float64(centerX + radius), float64(centerY)},
-		{float64(centerX), float64(centerY + radius)},
-		{float64(centerX - radius), float64(centerY)},
-	}, fill)
-}
-
-func polygon(canvas *image.RGBA, vertices []point, fill color.RGBA) {
-	minX, minY := float64(canvas.Bounds().Max.X), float64(canvas.Bounds().Max.Y)
-	maxX, maxY := 0.0, 0.0
-	for _, vertex := range vertices {
-		minX = math.Min(minX, vertex.x)
-		minY = math.Min(minY, vertex.y)
-		maxX = math.Max(maxX, vertex.x)
-		maxY = math.Max(maxY, vertex.y)
-	}
-	for y := int(minY); y <= int(maxY); y++ {
-		for x := int(minX); x <= int(maxX); x++ {
-			inside := false
-			previous := len(vertices) - 1
-			for current := range vertices {
-				a, b := vertices[current], vertices[previous]
-				intersects := (a.y > float64(y)) != (b.y > float64(y)) &&
-					float64(x) < (b.x-a.x)*(float64(y)-a.y)/(b.y-a.y)+a.x
-				if intersects {
-					inside = !inside
-				}
-				previous = current
-			}
-			if inside {
-				blend(canvas, x, y, fill)
-			}
-		}
-	}
-}
-
-func ring(canvas *image.RGBA, centerX, centerY, radius, width int, fill color.RGBA) {
-	inner := float64(radius - width)
-	outer := float64(radius + width)
-	for y := centerY - radius - width; y <= centerY+radius+width; y++ {
-		for x := centerX - radius - width; x <= centerX+radius+width; x++ {
-			distance := math.Hypot(float64(x-centerX), float64(y-centerY))
-			if distance >= inner && distance <= outer {
 				blend(canvas, x, y, fill)
 			}
 		}

@@ -195,12 +195,15 @@ tasks:
     run: once
     dir: build
     sources:
+      - "../tools/icon/*.go"
       - "appicon.png"
       - "appicon.icon"
     generates:
       - "darwin/icons.icns"
       - "windows/icon.ico"
+      - "../frontend/public/nice-mark.svg"
     cmds:
+      - go run ../tools/icon appicon.png
       - wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icon.ico -iconcomposerinput appicon.icon -macassetdir darwin
 
   dev:frontend:

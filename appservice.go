@@ -81,6 +81,7 @@ const (
 
 type codexHistorySnapshot struct {
 	turns     []any
+	cursors   map[int]string
 	weight    int64
 	touchedAt time.Time
 }
@@ -1550,10 +1551,14 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 	// snapshot is substantially faster while another project owns a long running
 	// turn; SendMessage still resumes the backend thread immediately before send.
 	result, err := s.readBackendThreadSnapshot(backendID, workspace)
-	if err != nil {
+	if err != nil && !s.codexUsesPagedHistory() {
 		// Older app-server versions can reject includeTurns. Preserve the proven
 		// resume path as a compatibility fallback.
 		result, err = s.loadBackendThread(backendID, workspace, settings, session)
+	}
+	if err != nil && s.codexUsesPagedHistory() {
+		// Never disguise a paging/transport failure as an empty local history.
+		return nil, err
 	}
 	if err != nil {
 		if session != nil {
@@ -1567,7 +1572,9 @@ func (s *AppService) ReadThread(threadID string) (map[string]any, error) {
 	}
 	s.attachSessionIdentity(result, session, threadID)
 	s.rememberThread(threadID, workspace)
-	s.cacheCodexHistory(backendID, codexThreadTurns(result))
+	if !s.codexUsesPagedHistory() {
+		s.cacheCodexHistory(backendID, codexThreadTurns(result))
+	}
 	return paginateCodexThreadResponse(result, -1), nil
 }
 
@@ -1623,7 +1630,7 @@ func (s *AppService) ReadThreadLiveness(threadID string) (TurnLivenessView, erro
 		return TurnLivenessView{Runtime: "codex", State: "idle"}, nil
 	}
 
-	result, err := s.readBackendThreadSnapshot(backendID, workspace)
+	result, err := s.readBackendThreadSnapshotPage(backendID, workspace, true)
 	if err != nil {
 		return TurnLivenessView{}, err
 	}
@@ -1708,7 +1715,53 @@ func (s *AppService) ReadThreadHistory(threadID string, before int) (map[string]
 			return nil, errors.New("thread history is temporarily unavailable")
 		}
 	}
+	if s.codexUsesPagedHistory() {
+		return s.readCachedCodexHistoryPage(backendID, turns, before)
+	}
 	return codexTurnsPage(turns, before), nil
+}
+
+func (s *AppService) readCachedCodexHistoryPage(backendID string, turns []any, before int) (map[string]any, error) {
+	page := codexTurnsPage(turns, before)
+	start, _ := page["historyStart"].(int)
+	end := before
+	if end < 0 || end > len(turns) {
+		end = len(turns)
+	}
+	if end == 0 {
+		return page, nil
+	}
+	s.historyMu.Lock()
+	snapshot := s.codexHistoryCache[backendID]
+	var cursor string
+	var ok bool
+	if snapshot != nil {
+		cursor, ok = snapshot.cursors[end]
+	}
+	s.historyMu.Unlock()
+	if !ok {
+		return nil, errors.New("Codex history page expired; reopen the conversation and retry")
+	}
+	params := map[string]any{"threadId": backendID, "limit": end - start, "sortDirection": "desc", "itemsView": "full"}
+	if cursor != "" {
+		params["cursor"] = cursor
+	}
+	result, err := s.call("thread/turns/list", params)
+	if err != nil {
+		return nil, err
+	}
+	rows, ok := result["data"].([]any)
+	if !ok || len(rows) != end-start {
+		return nil, errors.New("Codex history changed; reopen the conversation and retry")
+	}
+	if estimateConversationValueWeight(rows) > conversationHistoryEntryBytes {
+		return nil, errors.New("Codex history page exceeds the safe memory limit")
+	}
+	for left, right := 0, len(rows)-1; left < right; left, right = left+1, right-1 {
+		rows[left], rows[right] = rows[right], rows[left]
+	}
+	page["turns"] = rows
+	return page, nil
 }
 
 func codexThreadTurns(response map[string]any) []any {
@@ -1759,7 +1812,7 @@ func codexTurnsPage(turns []any, before int) map[string]any {
 	}
 }
 
-func (s *AppService) cacheCodexHistory(backendID string, turns []any) {
+func (s *AppService) cacheCodexHistory(backendID string, turns []any, pageCursors ...map[int]string) {
 	backendID = strings.TrimSpace(backendID)
 	if backendID == "" {
 		return
@@ -1778,6 +1831,9 @@ func (s *AppService) cacheCodexHistory(backendID string, turns []any) {
 		turns:     append([]any(nil), turns...),
 		weight:    weight,
 		touchedAt: time.Now(),
+	}
+	if len(pageCursors) > 0 {
+		s.codexHistoryCache[backendID].cursors = pageCursors[0]
 	}
 	s.pruneConversationHistoryCachesLocked()
 }
@@ -4927,6 +4983,11 @@ func (s *AppService) loadBackendThread(backendID, workspace string, settings Use
 	if externalProviderKind(providerID) == "" && providerID != "" {
 		params["modelProvider"] = providerID
 	}
+	if s.codexUsesPagedHistory() {
+		// Resume is a dispatch preflight, not a history download. New CLIs warn
+		// on every full-history resume; the timeline uses the read/paging path.
+		params["excludeTurns"] = true
+	}
 	result, err := s.call("thread/resume", params)
 	if err != nil {
 		return nil, err
@@ -4939,6 +5000,14 @@ func (s *AppService) loadBackendThread(backendID, workspace string, settings Use
 // thread in the app-server. It is used only for display; SendMessage owns the
 // stateful resume needed before turn/start.
 func (s *AppService) readBackendThreadSnapshot(backendID, workspace string) (map[string]any, error) {
+	return s.readBackendThreadSnapshotPage(backendID, workspace, false)
+}
+
+func (s *AppService) codexUsesPagedHistory() bool {
+	return s.client != nil && compareSemver(normalizeCLIVersion(s.client.Status().Version), "0.153.4") >= 0
+}
+
+func (s *AppService) readBackendThreadSnapshotPage(backendID, workspace string, latestOnly bool) (map[string]any, error) {
 	backendID = strings.TrimSpace(backendID)
 	if backendID == "" {
 		return nil, errors.New("thread id is required")
@@ -4949,7 +5018,7 @@ func (s *AppService) readBackendThreadSnapshot(backendID, workspace string) (map
 	}
 	result, err := s.call("thread/read", map[string]any{
 		"threadId":     backendID,
-		"includeTurns": true,
+		"includeTurns": !s.codexUsesPagedHistory(),
 	})
 	if err != nil {
 		return nil, err
@@ -4958,13 +5027,73 @@ func (s *AppService) readBackendThreadSnapshot(backendID, workspace string) (map
 	if !ok {
 		return nil, errors.New("Codex returned an invalid thread snapshot")
 	}
-	if _, ok := thread["turns"]; !ok {
-		return nil, errors.New("Codex thread snapshot did not include history")
-	}
 	if threadWorkspace, _ := thread["cwd"].(string); strings.TrimSpace(threadWorkspace) != "" && !samePath(threadWorkspace, cleanWorkspace) {
 		return nil, errors.New("this thread belongs to a different workspace")
 	}
+	if s.codexUsesPagedHistory() {
+		turns, err := s.readPagedCodexTurns(backendID, latestOnly)
+		if err != nil {
+			return nil, err
+		}
+		thread["turns"] = turns
+	} else if _, ok := thread["turns"]; !ok {
+		return nil, errors.New("Codex thread snapshot did not include history")
+	}
 	return result, nil
+}
+
+// Keep only the latest full page plus lightweight older turn metadata/cursors.
+// Earlier items are fetched on demand, not accumulated as full history in Go.
+// Liveness only needs one metadata turn, never its tool output.
+func (s *AppService) readPagedCodexTurns(backendID string, latestOnly bool) ([]any, error) {
+	params := map[string]any{
+		"threadId": backendID, "sortDirection": "desc",
+		"limit": conversationHistoryPageTurns, "itemsView": "full",
+	}
+	if latestOnly {
+		params["limit"], params["itemsView"] = 1, "notLoaded"
+	}
+	var turns []any
+	var weight int64
+	seen := make(map[string]bool)
+	pageOffsets := make(map[int]string)
+	for page := 0; page < 2048; page++ {
+		pageOffsets[len(turns)], _ = params["cursor"].(string)
+		result, err := s.call("thread/turns/list", params)
+		if err != nil {
+			return nil, err
+		}
+		rows, ok := result["data"].([]any)
+		if !ok {
+			return nil, errors.New("Codex returned an invalid history page")
+		}
+		weight += estimateConversationValueWeight(rows)
+		if weight > conversationHistoryEntryBytes {
+			return nil, errors.New("Codex history exceeds the safe memory limit; open a shorter conversation or fork the thread")
+		}
+		turns = append(turns, rows...)
+		cursor, _ := result["nextCursor"].(string)
+		if latestOnly || cursor == "" {
+			for left, right := 0, len(turns)-1; left < right; left, right = left+1, right-1 {
+				turns[left], turns[right] = turns[right], turns[left]
+			}
+			if !latestOnly {
+				cursors := make(map[int]string, len(pageOffsets))
+				for offset, value := range pageOffsets {
+					cursors[len(turns)-offset] = value
+				}
+				s.cacheCodexHistory(backendID, turns, cursors)
+			}
+			return turns, nil
+		}
+		if seen[cursor] || len(rows) == 0 {
+			return nil, errors.New("Codex returned a non-advancing history cursor")
+		}
+		seen[cursor] = true
+		params["cursor"] = cursor
+		params["itemsView"] = "notLoaded"
+	}
+	return nil, errors.New("Codex history pagination exceeded the safe page limit")
 }
 
 func (s *AppService) ensureCodexBackendThread(session *SessionRecord, settings UserSettings, workspace string) (string, error) {

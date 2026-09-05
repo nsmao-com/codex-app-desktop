@@ -1,5 +1,26 @@
 import type { DiffFileView, DiffHunkView, DiffLineView } from '../types/codex'
 
+/** Native Codex add/delete events contain file contents, not unified diffs. */
+export function normalizeFileChangeDiff(diff: string, kind: string, path: string, contentsOnly = false): string {
+  if (!diff || (kind !== 'add' && kind !== 'delete')) return diff
+  if (!contentsOnly && /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(diff)) return diff
+  const lines = diff.replace(/\r\n/g, '\n').split('\n')
+  const endsWithNewline = lines.at(-1) === ''
+  if (endsWithNewline) lines.pop()
+  const normalizedPath = path.replace(/\\/g, '/')
+  const adding = kind === 'add'
+  const before = adding ? '/dev/null' : `a/${normalizedPath}`
+  const after = adding ? `b/${normalizedPath}` : '/dev/null'
+  const range = adding ? `-0,0 +1,${lines.length}` : `-1,${lines.length} +0,0`
+  return [
+    `diff --git a/${normalizedPath} b/${normalizedPath}`,
+    `--- ${before}`, `+++ ${after}`, `@@ ${range} @@`,
+    ...lines.map((line) => `${adding ? '+' : '-'}${line}`),
+    ...(endsWithNewline ? [] : ['\\ No newline at end of file']),
+    '',
+  ].join('\n')
+}
+
 export function parseUnifiedDiff(diff: string): DiffFileView[] {
   if (!diff.trim()) return []
 
@@ -25,12 +46,12 @@ export function parseUnifiedDiff(diff: string): DiffFileView[] {
       continue
     }
 
-    if (line.startsWith('--- ')) {
+    if (!hunk && line.startsWith('--- ')) {
       const current = ensureFile()
       current.oldPath = cleanDiffPath(line.slice(4))
       continue
     }
-    if (line.startsWith('+++ ')) {
+    if (!hunk && line.startsWith('+++ ')) {
       const current = ensureFile()
       current.newPath = cleanDiffPath(line.slice(4))
       current.displayPath = current.newPath === '/dev/null' ? current.oldPath : current.newPath
@@ -117,10 +138,10 @@ function pathsMatch(candidate: string, target: string): boolean {
 }
 
 function toDiffLine(line: string, oldLine: number, newLine: number): DiffLineView {
-  if (line.startsWith('+') && !line.startsWith('+++')) {
+  if (line.startsWith('+')) {
     return { kind: 'add', content: line.slice(1), oldLine: null, newLine }
   }
-  if (line.startsWith('-') && !line.startsWith('---')) {
+  if (line.startsWith('-')) {
     return { kind: 'delete', content: line.slice(1), oldLine, newLine: null }
   }
   if (line.startsWith(' ')) {

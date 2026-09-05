@@ -1,4 +1,5 @@
 import type { Status as CodexStatus } from '../../bindings/nice_codex_desktop/internal/codex/models'
+import { normalizeFileChangeDiff } from './diff'
 import type {
   AccountInfo,
   AccountRateLimits,
@@ -738,13 +739,18 @@ function normalizeFileChanges(value: unknown): FileChangeView[] {
 
   return entries.map((changeValue) => {
     const change = asRecord(changeValue)
+    const path = asString(change.path, asString(change.filePath, 'Unknown file'))
+    const kind = normalizePatchKind(change.kind ?? change.type)
+    const diff = boundedText(
+      asString(change.diff, asString(change.unifiedDiff, asString(change.content))),
+      300_000,
+    )
     return {
-      path: asString(change.path, asString(change.filePath, 'Unknown file')),
-      kind: normalizePatchKind(change.kind ?? change.type),
-      diff: boundedText(
-        asString(change.diff, asString(change.unifiedDiff, asString(change.content))),
-        300_000,
-      ),
+      path,
+      kind,
+      // Tagged native PatchChangeKind add/delete diffs are always contents,
+      // even if the file itself happens to contain patch-looking text.
+      diff: normalizeFileChangeDiff(diff, kind, path, typeof change.kind === 'object' && change.kind !== null),
     }
   })
 }

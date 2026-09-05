@@ -42,7 +42,7 @@ import { extractFileDiff, parseUnifiedDiff } from '@/utils/diff'
 import { formatToolPayload, renderToolPayloadHTML } from '@/utils/formatPayload'
 import { renderMarkdown, renderMarkdownLite, extractCandidateFilePaths } from '@/utils/markdown'
 import { notify } from '@/utils/notify'
-import { compactDisplayPath, fullDisplayPath } from '@/utils/workspacePath'
+import { compactDisplayPath, fullDisplayPath, workspaceKey } from '@/utils/workspacePath'
 
 const props = defineProps<{
   kind: 'user' | 'agent'
@@ -274,6 +274,10 @@ type DisplayFileChange = {
   diff: string
 }
 
+function fileChangeKey(path: string): string {
+  return workspaceKey(fullDisplayPath(path, displayWorkspacePath.value))
+}
+
 const resolvedFileChanges = computed<DisplayFileChange[]>(() => {
   // Skip heavy diff parsing while the turn is still streaming — list shows after completion.
   if (props.streaming) return []
@@ -282,12 +286,14 @@ const resolvedFileChanges = computed<DisplayFileChange[]>(() => {
 
   for (const item of props.items) {
     if (item.type !== 'fileChange') continue
+    if (['failed', 'declined', 'rejected', 'cancelled', 'canceled'].includes(item.status)) continue
     for (const change of item.changes) {
       const path = change.path.trim()
       if (!path) continue
       const stats = diffStats(change.diff)
-      const prev = byPath.get(path)
-      byPath.set(path, {
+      const key = fileChangeKey(path)
+      const prev = byPath.get(key)
+      byPath.set(key, {
         path,
         kind: change.kind || prev?.kind || 'update',
         add: Math.max(stats.add, prev?.add ?? 0),
@@ -317,9 +323,10 @@ const resolvedFileChanges = computed<DisplayFileChange[]>(() => {
         : (!file.oldPath || file.oldPath === '/dev/null')
           ? 'add'
           : 'update'
-      const prev = byPath.get(path)
-      const fileDiff = prev?.diff || extractFileDiff(turnDiff, path) || turnDiff
-      byPath.set(path, {
+      const key = fileChangeKey(path)
+      const prev = byPath.get(key)
+      const fileDiff = extractFileDiff(turnDiff, path) || prev?.diff || turnDiff
+      byPath.set(key, {
         path,
         kind: prev?.kind || kind,
         add: Math.max(file.additions, prev?.add ?? 0),
@@ -565,9 +572,7 @@ function patchChanges(item: TimelineItem): DisplayFileChange[] {
 }
 
 function pathsLooseEqual(left: string, right: string): boolean {
-  const a = left.replace(/\\/g, '/').replace(/^\.\//, '')
-  const b = right.replace(/\\/g, '/').replace(/^\.\//, '')
-  return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`)
+  return fileChangeKey(left) === fileChangeKey(right)
 }
 
 function normalizeKindLabel(kind: string): string {
@@ -969,9 +974,12 @@ function toolGroupRunning(items: TimelineItem[]): boolean {
 function diffStats(diff: string): { add: number; del: number } {
   let add = 0
   let del = 0
+  let inHunk = false
   for (const line of diff.split('\n')) {
-    if (line.startsWith('+') && !line.startsWith('+++')) add += 1
-    else if (line.startsWith('-') && !line.startsWith('---')) del += 1
+    if (line.startsWith('diff --git ')) inHunk = false
+    else if (line.startsWith('@@ ')) inHunk = true
+    else if (line.startsWith('+') && (inHunk || !line.startsWith('+++'))) add += 1
+    else if (line.startsWith('-') && (inHunk || !line.startsWith('---'))) del += 1
   }
   return { add, del }
 }

@@ -1,6 +1,6 @@
 {
   "fill": {
-    "automatic-gradient": "extended-srgb:0.09412,0.09804,0.08235,1.00000"
+    "automatic-gradient": "extended-srgb:0.09020,0.23137,0.21176,1.00000"
   },
   "groups": [
     {
@@ -9,7 +9,7 @@
           "image-name": "nice_codex_vector.svg",
           "name": "nice_codex_vector",
           "position": {
-            "scale": 0.92,
+            "scale": 1.0,
             "translation-in-points": [0.0, 0.0]
           }
         }

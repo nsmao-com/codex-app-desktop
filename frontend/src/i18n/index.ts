@@ -1924,6 +1924,44 @@ Object.assign(messages['zh-CN'].notifications, {
   turnFailedRuntime: '{runtime} 回合失败',
   turnCompleteHintRuntime: '{runtime} 已完成本回合。',
 })
+Object.assign(messages['zh-CN'], {
+  codexWarnings: {
+    indicator: 'Codex 有 {count} 项提示', title: 'Codex 运行提示',
+    hint: '这些提示不会重复弹窗，也不会阻止你输入。相同内容只保留一项，最多保留最近 32 项。',
+    hoverHint: '点击查看原因、配置位置和处理建议。',
+    config: '配置兼容性', compatibility: '软件 / CLI 兼容性', runtime: '运行提醒', security: '安全提醒',
+    compatibilityHelp: '这是 CLI 接口或功能的弃用提示，不一定是本地配置错误。优先检查软件与 CLI 版本；只有原文明示配置项时才修改对应配置。',
+    location: '配置文件与位置',
+    noPath: 'CLI 未提供文件位置。请根据上方配置项名称检查 CODEX_HOME 下的 config.toml、项目 .codex/config.toml 或启动参数。',
+    configHelp: '先备份配置，再按原文修改已弃用或不支持的项；不要删除整个配置文件。保存后可在任务空闲时重新检查。',
+    missingSummary: 'CLI 未提供警告摘要；请查看下方详情。',
+    worldWritable: 'Windows 检测到可被其他用户写入的目录，或未能完成权限扫描。',
+    extraPaths: '另有 {count} 个目录未列出。', scanFailed: '权限扫描未完成，请检查目录访问权限。',
+    copy: '复制诊断', copied: '已复制', copyFailed: '复制失败，可直接选中上方文字复制。', settings: '配置设置',
+    recheck: '重新检查', recheckHint: '重新连接 Codex 后重新收集提示；若不再出现，旧提示会移除。',
+    busyHint: '请等待所有运行中、排队或待审批的任务结束，再重新检查。',
+    noWorkspace: '请先选择工作区，再重新连接 Codex 检查提示。',
+  },
+})
+Object.assign(messages['en-US'], {
+  codexWarnings: {
+    indicator: '{count} Codex notices', title: 'Codex notices',
+    hint: 'Notices stay here without repeated popups or blocking input. Duplicates are merged; the latest 32 are retained.',
+    hoverHint: 'Click for the cause, configuration location, and guidance.',
+    config: 'Configuration compatibility', compatibility: 'App / CLI compatibility', runtime: 'Runtime notice', security: 'Security notice',
+    compatibilityHelp: 'This is an API or feature deprecation notice, not necessarily a configuration error. Check the app and CLI versions first; only edit configuration entries explicitly named by the notice.',
+    location: 'Configuration file and location',
+    noPath: 'The CLI did not provide a file location. Look up the named setting in CODEX_HOME/config.toml, the project .codex/config.toml, or launch arguments.',
+    configHelp: 'Back up the configuration, then follow the notice to update deprecated or unsupported entries. Do not delete the whole file. Recheck when tasks are idle.',
+    missingSummary: 'The CLI did not provide a summary. See the details below.',
+    worldWritable: 'Windows detected directories writable by other users, or could not complete its permission scan.',
+    extraPaths: '{count} additional directories are not listed.', scanFailed: 'The permission scan did not complete. Check directory access permissions.',
+    copy: 'Copy diagnostics', copied: 'Copied', copyFailed: 'Copy failed. You can select and copy the text above.', settings: 'Settings',
+    recheck: 'Recheck', recheckHint: 'Reconnects Codex to collect notices again. Notices that no longer occur are removed.',
+    busyHint: 'Wait for all running, queued, and approval-pending tasks before rechecking.',
+    noWorkspace: 'Choose a workspace before reconnecting Codex to recheck notices.',
+  },
+})
 Object.assign(messages['en-US'].notifications, {
   contextCompactedRuntimeHint: '{runtime} compacted older context so this long conversation can continue.',
   runtimeWarning: '{runtime} warning',
@@ -2269,6 +2307,13 @@ Object.assign(messages['en-US'], {
     scopeTotal: 'Full active context', scopeBodyAfterPrefix: 'Only text after compacted prefix',
     thresholdScopeHint: 'Choose whether the auto-compact threshold counts the full active context or only content added after the previous compaction prefix.',
   },
+})
+
+Object.assign(messages['zh-CN'].capabilities, {
+  mcpAuthUnknown: '授权状态未知',
+})
+Object.assign(messages['en-US'].capabilities, {
+  mcpAuthUnknown: 'Authentication status unknown',
 })
 
 export const i18n = createI18n({
