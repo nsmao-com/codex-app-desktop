@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.8: Persistent, actionable Codex notices; native paginated history; Astra metadata and file-change fixes; refreshed Nice icons.</sub></p>
+<p align="center"><sub>v1.5.9: Antigravity workspace targeting, native thinking summaries, ordered streaming/tool events, and consistent history restoration.</sub></p>
 
 ## Why Nice Codex
 

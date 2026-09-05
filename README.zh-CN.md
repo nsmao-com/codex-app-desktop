@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.8：Codex 提示常驻且可定位原因，适配原生分页历史，修复 Astra 元数据与文件改动展示，更新 Nice 品牌图标。</sub></p>
+<p align="center"><sub>v1.5.9：修复 Antigravity 工作区传递、思考摘要展示、正文与工具事件乱序，以及原生历史恢复。</sub></p>
 
 ## 为什么是 Nice Codex
 

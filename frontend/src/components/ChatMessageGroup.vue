@@ -456,11 +456,11 @@ const latestReasoningItem = computed(() => {
 })
 
 const planningShimmerLabel = computed(() => reasoningLiveLabel(latestReasoningItem.value))
-const completedReasoningText = computed(() => {
-  if (props.streaming) return ''
-  const item = latestReasoningItem.value
-  return item ? reasoningBodyText(item) : ''
-})
+const reasoningText = computed(() => stream.value
+  .filter((block): block is Extract<StreamBlock, { kind: 'reasoning' }> => block.kind === 'reasoning')
+  .map((block) => reasoningBodyText(block.item))
+  .filter(Boolean)
+  .join('\n\n---\n\n'))
 
 function stripReasoningMarkdown(text: string): string {
   return text
@@ -1071,7 +1071,7 @@ function diffStats(diff: string): { add: number; del: number } {
           class="timeline-step-item"
           :class="animateEnter ? 'timeline-step-item--enter' : ''"
         >
-          <!-- Reasoning is rendered only as the live shimmer row below (hidden when done). -->
+          <!-- Reasoning is collected in the expandable live/history panel below. -->
 
           <!-- Plan checklist (update_plan) -->
           <div v-if="block.kind === 'plan'" class="space-y-1.5 py-0.5">
@@ -1383,7 +1383,7 @@ function diffStats(diff: string): { add: number; del: number } {
         </div>
 
         <div
-          v-else-if="completedReasoningText"
+          v-if="reasoningText"
           class="py-0.5"
         >
           <SimpleTooltip :content="t('timeline.reasoningHint')">
@@ -1409,15 +1409,16 @@ function diffStats(diff: string): { add: number; del: number } {
                   type="button"
                   class="absolute right-1.5 top-1.5 z-[1] inline-flex size-5 items-center justify-center rounded bg-card/80 text-muted-foreground hover:text-foreground"
                   :aria-label="isCopied('reasoning') ? t('timeline.copied') : t('timeline.copyMessage')"
-                  @click="copyText(completedReasoningText, 'reasoning')"
+                  @click="copyText(reasoningText, 'reasoning')"
                 >
                   <Check v-if="isCopied('reasoning')" :size="11" class="text-positive" />
                   <Copy v-else :size="11" />
                 </button>
                 <div
-                  class="prose prose-sm reasoning-prose max-w-none rounded-xl bg-muted/35 px-3 py-2 pr-8 text-[13px] leading-6 text-foreground/85"
+                  v-if="isOpen('completed-reasoning')"
+                  class="prose prose-sm reasoning-prose max-h-80 max-w-none overflow-y-auto break-words rounded-xl bg-muted/35 px-3 py-2 pr-8 text-[13px] leading-6 text-foreground/85"
                   @click="onMarkdownClick"
-                  v-html="markdownHTML(completedReasoningText)"
+                  v-html="markdownHTML(reasoningText)"
                 />
               </div>
             </div>

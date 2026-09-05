@@ -217,6 +217,13 @@ export const useCodexStore = defineStore('codex', () => {
   const deltaBuffers = new Map<string, DeltaBuffer>()
   /** Last accepted transport sequence for each item/field stream. */
   const streamSequenceByDelta = new Map<string, number>()
+  // Wails dispatches events concurrently. Sequence the entire external turn,
+  // not just text deltas, so tools and terminal states cannot overtake text.
+  const externalEventStreams = new Map<string, {
+    next: number
+    pending: Map<number, { method: string; data: unknown }>
+    timer: number
+  }>()
   /** Goal notifications also cross Wails' concurrent event bridge. */
   const goalSequenceByThread = new Map<string, number>()
   const pendingDiffs = new Map<string, { threadId: string; turnId: string; diff: string }>()
@@ -513,6 +520,7 @@ export const useCodexStore = defineStore('codex', () => {
     tokenUsageTimer = 0
     deltaBuffers.clear()
     streamSequenceByDelta.clear()
+    externalEventStreams.clear()
     goalSequenceByThread.clear()
     pendingDiffs.clear()
     pendingTokenUsage.clear()
@@ -2735,7 +2743,7 @@ export const useCodexStore = defineStore('codex', () => {
         }
         break
       case 'notification':
-        handleNotification(event.method ?? '', event.data)
+        handleOrderedExternalNotification(event.method ?? '', event.data)
         break
       case 'request':
         {
@@ -2823,6 +2831,46 @@ export const useCodexStore = defineStore('codex', () => {
         break
       }
     }
+  }
+
+  function handleOrderedExternalNotification(method: string, data: unknown): void {
+    const payload = asRecord(data)
+    const turnID = asString(payload.externalEventTurnId)
+    const sequence = Number(payload.externalEventSequence)
+    if (!turnID || !Number.isSafeInteger(sequence) || sequence < 1) {
+      handleNotification(method, data)
+      return
+    }
+    const key = `${asString(payload.threadId)}:${turnID}`
+    let stream = externalEventStreams.get(key)
+    if (!stream) {
+      stream = { next: 1, pending: new Map(), timer: 0 }
+      externalEventStreams.set(key, stream)
+      if (externalEventStreams.size > 64) {
+        const oldest = externalEventStreams.keys().next().value
+        if (oldest) {
+          const old = externalEventStreams.get(oldest)
+          if (old?.timer) clearTrackedTimeout(old.timer)
+          externalEventStreams.delete(oldest)
+        }
+      }
+    }
+    if (sequence < stream.next) return
+    stream.pending.set(sequence, { method, data })
+    const drain = (skipGap = false): void => {
+      if (stream.timer) clearTrackedTimeout(stream.timer)
+      stream.timer = 0
+      if (skipGap && stream.pending.size) stream.next = Math.min(...stream.pending.keys())
+      while (stream.pending.has(stream.next)) {
+        const event = stream.pending.get(stream.next)!
+        stream.pending.delete(stream.next++)
+        handleNotification(event.method, event.data)
+      }
+      // A WebView opened mid-turn may not have received its initial events.
+      // Recover after a bounded grace period instead of leaving it blocked.
+      if (stream.pending.size) stream.timer = trackedTimeout(() => drain(true), 1000)
+    }
+    drain(stream.pending.size > 256)
   }
 
   function handleNotification(method: string, data: unknown): void {
@@ -3047,6 +3095,9 @@ export const useCodexStore = defineStore('codex', () => {
         const authoritativeText = payload.replace === true
         let item = normalizeTimelineItem(payload.item, turnID)
         if (item) {
+          const itemID = item.id
+          const existing = itemsByThread.value[threadID]?.find((entry) => entry.id === itemID)
+          if (method === 'item/started' && existing && isTerminalTurnStatus(existing.status)) break
           if (completedTurns.has(turnID) && isActiveStatus(item.status)) {
             item = {
               ...item,
@@ -5874,6 +5925,9 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   function resetConversationState(): void {
+    for (const stream of externalEventStreams.values()) {
+      if (stream.timer) clearTrackedTimeout(stream.timer)
+    }
     openThreadSequence += 1
     projectLoadingByRuntime.value = {}
     activeThread.value = null
@@ -5901,6 +5955,7 @@ export const useCodexStore = defineStore('codex', () => {
     loadedThreadIDs.clear()
     deltaBuffers.clear()
     streamSequenceByDelta.clear()
+    externalEventStreams.clear()
     goalSequenceByThread.clear()
     pendingDiffs.clear()
     pendingTokenUsage.clear()

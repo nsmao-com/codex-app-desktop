@@ -2269,7 +2269,34 @@ func antigravityEventModel(event map[string]any) string {
 }
 
 func antigravityEventStepIndex(event map[string]any) string {
-	return antigravityNestedString(event, "step_index", "stepIndex")
+	for _, container := range []map[string]any{antigravityStepPayload(event), event} {
+		for _, key := range []string{"step_index", "stepIndex"} {
+			switch value := container[key].(type) {
+			case float64:
+				if value >= 0 && value == float64(int64(value)) {
+					return strconv.FormatInt(int64(value), 10)
+				}
+			case json.Number:
+				return value.String()
+			case string:
+				if value != "" {
+					return value
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func reconcileAntigravityEventText(previous, chunk string, event map[string]any) (string, string, bool) {
+	if step := antigravityStepPayload(event); step != nil {
+		// text_delta remains a delta on DONE, including a large final chunk.
+		// A terminal state alone is not evidence of a full-text replacement.
+		if _, delta := step["text_delta"]; delta {
+			return previous + chunk, chunk, false
+		}
+	}
+	return reconcileAntigravityStepText(previous, chunk, antigravityStepState(event))
 }
 
 func antigravityEventStepKey(event map[string]any, fallback string) string {
@@ -2424,6 +2451,7 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 	toolIndexes := make(map[string]int)
 	agentIndexes := make(map[string]int)
 	reasoningIndexes := make(map[string]int)
+	var nativeToolQueue []int
 	fallbackTime := int64(0)
 	if info, err := os.Stat(path); err == nil {
 		fallbackTime = info.ModTime().Unix()
@@ -2441,6 +2469,14 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 	flush := func() {
 		if current == nil {
 			return
+		}
+		for _, index := range nativeToolQueue {
+			status := "interrupted"
+			if current.Status == "failed" {
+				status = "failed"
+			}
+			current.Items[index]["status"] = status
+			current.Items[index]["success"] = false
 		}
 		if finalUsage != nil {
 			current.Usage = cloneNormalizedExternalUsage(finalUsage)
@@ -2466,6 +2502,7 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 		toolIndexes = make(map[string]int)
 		agentIndexes = make(map[string]int)
 		reasoningIndexes = make(map[string]int)
+		nativeToolQueue = nil
 	}
 	rebuildAgentText := func(turn *externalTurn) {
 		if turn == nil {
@@ -2571,12 +2608,38 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 
 		items := parseExternalToolEvents("gemini", event)
 		chunk, _, final, kind := parseExternalEvent("gemini", event)
-		if current == nil && len(items) == 0 && chunk == "" {
+		nativeThought := firstMapString(event, "thinking", "reasoning")
+		if current == nil && len(items) == 0 && chunk == "" && nativeThought == "" {
 			return false
 		}
 		turn := ensureTurn()
+		// Native 1.1.x planner snapshots include thinking beside text/tool calls;
+		// stream-json can omit that field. Preserve it before the associated tools.
+		if nativeThought != "" && !isChild && kind != "thought" && kind != "thought_replace" {
+			stepKey := antigravityEventStepKey(event, fmt.Sprintf("event:%d", eventOrdinal))
+			if index, exists := reasoningIndexes[stepKey]; exists {
+				turn.Items[index]["summary"] = nativeThought
+				turn.Items[index]["content"] = nativeThought
+			} else {
+				reasoningIndexes[stepKey] = len(turn.Items)
+				turn.Items = append(turn.Items, map[string]any{"id": turn.ID + ":reasoning:" + strconv.Itoa(len(turn.Items)), "type": "reasoning", "status": "completed", "summary": nativeThought, "content": nativeThought})
+			}
+		}
 		if started := nativeEventUnix(event); started > 0 && turn.StartedAt == 0 {
 			turn.StartedAt = started
+		}
+		if completed := nativeEventUnix(event); completed > turn.CompletedAt {
+			turn.CompletedAt = completed
+		}
+		if !isChild && antigravityEventType(event) == "generic" && len(nativeToolQueue) > 0 {
+			index := nativeToolQueue[0]
+			nativeToolQueue = nativeToolQueue[1:]
+			turn.Items[index]["status"] = "completed"
+			// A native DONE record confirms completion, not necessarily success.
+			if success, ok := event["success"].(bool); ok {
+				turn.Items[index]["success"] = success
+			}
+			turn.Items[index]["output"] = firstMapString(event, "content", "text", "output")
 		}
 		if len(items) > 0 && !isChild {
 			for _, item := range items {
@@ -2607,7 +2670,7 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 						if exists && index >= 0 && index < len(turn.Items) {
 							previous = firstMapString(turn.Items[index], "text")
 						}
-						next, _, _ := reconcileAntigravityStepText(previous, chunk, antigravityStepState(event))
+						next, _, _ := reconcileAntigravityEventText(previous, chunk, event)
 						if next != previous {
 							if exists && index >= 0 && index < len(turn.Items) {
 								turn.Items[index]["text"] = next
@@ -2627,7 +2690,7 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 					if exists && index >= 0 && index < len(turn.Items) {
 						previous = firstMapString(turn.Items[index], "summary", "content")
 					}
-					next, _, _ := reconcileAntigravityStepText(previous, chunk, antigravityStepState(event))
+					next, _, _ := reconcileAntigravityEventText(previous, chunk, event)
 					if next != previous {
 						if exists && index >= 0 && index < len(turn.Items) {
 							turn.Items[index]["summary"] = next
@@ -2641,6 +2704,28 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 			case "error":
 				turn.Status = "failed"
 				turn.Error = chunk
+			}
+			// Flat native transcripts keep calls on the planner response and their
+			// outputs on following GENERIC records. Keep reasoning → text → tools.
+			if antigravityStepPayload(event) == nil {
+				for callIndex, value := range nativeAnySlice(event["tool_calls"]) {
+					call, ok := value.(map[string]any)
+					if !ok {
+						continue
+					}
+					id := fmt.Sprintf("%s:native-tool:%s:%d", turn.ID, antigravityEventStepKey(event, strconv.Itoa(eventOrdinal)), callIndex)
+					if _, exists := toolIndexes[id]; exists {
+						continue
+					}
+					item, valid := parseExternalToolEvent("gemini", map[string]any{"type": "tool", "id": id, "name": firstMapString(call, "name", "tool_name"), "arguments": call["args"], "status": "inProgress"})
+					if valid {
+						// No result must not be represented as a successful tool call.
+						delete(item, "success")
+						toolIndexes[id] = len(turn.Items)
+						nativeToolQueue = append(nativeToolQueue, len(turn.Items))
+						turn.Items = append(turn.Items, item)
+					}
+				}
 			}
 		}
 		if final && !isChild {
