@@ -10,11 +10,12 @@ export const DEFAULT_CODEX_REASONING = [
   { effort: 'ultra', description: 'Ultra reasoning depth' },
 ] as const
 
-export const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol'
+export const DEFAULT_CODEX_MODEL = 'gpt-6-astra'
 
 /** Soft fallback when model/list is unavailable. */
 export const FALLBACK_CODEX_MODELS = [
   DEFAULT_CODEX_MODEL,
+  'gpt-5.6-sol',
   'gpt-5.6-terra',
   'gpt-5.6-luna',
   'gpt-5.5',
@@ -68,7 +69,7 @@ export function formatModelLabel(id: string): string {
   label = label.replace(/^gpt-/i, 'GPT-')
   label = label.replace(/^codex-/i, 'Codex-')
   label = label.replace(/^o([0-9])/i, 'O$1')
-  label = label.replace(/-(mini|nano|pro|ultra|preview|latest|sol|terra|luna|high|low|medium)\b/gi, (_, word: string) =>
+  label = label.replace(/-(mini|nano|pro|ultra|preview|latest|astra|sol|terra|luna|high|low|medium)\b/gi, (_, word: string) =>
     ` ${word.charAt(0).toUpperCase()}${word.slice(1).toLowerCase()}`,
   )
   // Capitalize leftover all-lowercase trailing tokens: foo-bar → Foo Bar segments after first brand

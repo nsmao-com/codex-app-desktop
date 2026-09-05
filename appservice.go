@@ -69,7 +69,7 @@ type AppService struct {
 	providerRouter       *providerRouter
 }
 
-const defaultCodexModel = "gpt-5.6-sol"
+const defaultCodexModel = "gpt-6-astra"
 
 const (
 	conversationHistoryPageTurns        = 24
