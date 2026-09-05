@@ -4577,14 +4577,12 @@ func rememberWorkspace(items []string, workspace string) []string {
 			return result
 		}
 	}
-	if len(result) >= 8 {
-		result = result[:7]
-	}
+	// These paths also back the project list; opening a folder must not evict another.
 	return append(result, workspace)
 }
 
 func sanitizeRecentWorkspaces(items []string) []string {
-	result := make([]string, 0, 8)
+	result := make([]string, 0, len(items))
 	seen := make(map[string]struct{})
 	for _, item := range items {
 		cleaned, err := validateWorkspace(item)
@@ -4597,9 +4595,6 @@ func sanitizeRecentWorkspaces(items []string) []string {
 		}
 		seen[key] = struct{}{}
 		result = append(result, cleaned)
-		if len(result) == 8 {
-			break
-		}
 	}
 	return result
 }

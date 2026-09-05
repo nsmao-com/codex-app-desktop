@@ -410,12 +410,10 @@ function rememberWorkspacePath(recent: string[], current: string): string[] {
     if (!value || seen.has(key)) continue
     seen.add(key)
     result.push(value)
-    if (result.length === 8) break
   }
   const currentValue = current.trim()
   const currentKey = workspaceKey(currentValue)
   if (!currentValue || seen.has(currentKey)) return result
-  if (result.length === 8) result.pop()
   result.push(currentValue)
   return result
 }
