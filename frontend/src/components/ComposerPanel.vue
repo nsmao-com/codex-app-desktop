@@ -118,7 +118,7 @@ type EditableQueuedMessage = {
   kind?: 'message' | 'goal'
   text: string
   images: string[]
-  state: 'queued' | 'sending' | 'failed'
+  state: 'queued' | 'sending' | 'paused' | 'failed'
   error?: string
 }
 type ComposerSubmission = {
@@ -957,16 +957,16 @@ const activeQueuedMessages = computed<EditableQueuedMessage[]>(() => {
 })
 /** Only show the queue strip when something is actually waiting / failed — not the in-flight send. */
 const showQueueStrip = computed(() =>
-  activeQueuedMessages.value.some((message) => message.state === 'queued' || message.state === 'failed'),
+  activeQueuedMessages.value.some((message) => message.state !== 'sending'),
 )
 const queuedWaitingCount = computed(() =>
-  activeQueuedMessages.value.filter((message) => message.state === 'queued').length,
+  activeQueuedMessages.value.filter((message) => message.state === 'queued' || message.state === 'paused').length,
 )
 const queuedFailedCount = computed(() =>
   activeQueuedMessages.value.filter((message) => message.state === 'failed').length,
 )
 const nextQueuedPreview = computed(() => {
-  const next = activeQueuedMessages.value.find((message) => message.state === 'queued' || message.state === 'failed')
+  const next = activeQueuedMessages.value.find((message) => message.state !== 'sending')
   if (!next) return ''
   const text = (next.text || '').replace(/\s+/g, ' ').trim()
   if (text) return text.length > 42 ? `${text.slice(0, 42)}…` : text
@@ -1039,6 +1039,11 @@ function removeQueued(messageId: string): void {
   if (isGrokMode.value) grokStore.removeQueuedMessage(messageId)
   else if (isClaudeMode.value) claudeStore.removeQueuedMessage(messageId)
   else codexStore.removeQueuedMessage(messageId, composerSessionId.value)
+}
+
+function resumeRestoredQueue(): void {
+  const restored = activeQueuedMessages.value.filter((message) => message.state === 'paused')
+  for (const message of restored) retryQueued(message.id)
 }
 
 function updateQueued(messageId: string, text: string): boolean {
@@ -1139,7 +1144,7 @@ const willQueueOnSend = computed(() => {
 const willQueueGoal = computed(() => {
   const sessionId = composerSessionId.value
   return Boolean(sessionId && codexStore.threadIsBusy(sessionId))
-    || activeQueuedMessages.value.some((item) => item.state === 'queued' || item.state === 'sending')
+    || activeQueuedMessages.value.some((item) => item.state === 'queued' || item.state === 'sending' || item.state === 'paused')
 })
 const activeRuntimeTurnRunning = computed(() => {
   const sessionId = composerSessionId.value
@@ -2729,6 +2734,15 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                 {{ t('chat.clearFailedQueued') }}
               </Button>
             </div>
+            <div v-if="activeQueuedMessages.some((message) => message.state === 'paused')" class="mb-2 rounded-md bg-muted/60 p-2">
+              <p class="text-[11px] leading-4 text-muted-foreground">{{ t('chat.queueRestoredHint') }}</p>
+              <Button
+                variant="outline"
+                size="sm"
+                class="mt-2 h-7 text-xs"
+                @click="resumeRestoredQueue"
+              >{{ t('chat.resumeQueue') }}</Button>
+            </div>
             <div class="max-h-64 space-y-0.5 overflow-y-auto">
               <div
                 v-for="(message, queueIndex) in activeQueuedMessages"
@@ -2771,6 +2785,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                   <div class="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
                     <span v-if="message.state === 'sending'">{{ t('chat.queuedSending') }}</span>
                     <span v-else-if="message.state === 'failed'" class="text-destructive">{{ t('chat.queuedFailed') }}</span>
+                    <span v-else-if="message.state === 'paused'">{{ t('chat.queuedPaused') }}</span>
                     <span v-else>{{ t('chat.queuedWaiting') }}</span>
                     <span v-if="message.images.length">· {{ t('chat.queuedAttachments', { count: message.images.length }) }}</span>
                   </div>

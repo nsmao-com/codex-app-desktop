@@ -40,8 +40,9 @@ type Client struct {
 	status         Status
 	onEvent        func(Event)
 	// processCleanup tears down the OS process tree (Windows Job Object / process group).
-	processCleanup func()
-	transportErr   error
+	processCleanup     func()
+	processTreeGuarded bool
+	transportErr       error
 	// streamStates accumulates Codex delta notifications into bounded snapshots.
 	// Wails dispatches each emitted event from its own goroutine, so individual
 	// deltas can reach the WebView out of order. A per-stream sequence and snapshot
@@ -173,12 +174,12 @@ func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) e
 	}
 	processCleanup := cleanup
 	removeCatalog := catalogCleanup
-	cleanup = func() {
+	cleanup = sync.OnceFunc(func() {
 		if processCleanup != nil {
 			processCleanup()
 		}
 		removeCatalog()
-	}
+	})
 	catalogCleanup = func() {} // Ownership transfers to the process lifetime.
 
 	done := make(chan struct{})
@@ -187,6 +188,7 @@ func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) e
 	c.stdin = stdin
 	c.done = done
 	c.processCleanup = cleanup
+	c.processTreeGuarded = cleanupErr == nil
 	c.transportErr = nil
 	c.streamStates = make(map[string]streamState)
 	c.streamOrder = 0
@@ -250,7 +252,9 @@ func (c *Client) Stop() error {
 	stdin := c.stdin
 	done := c.done
 	cleanup := c.processCleanup
+	guarded := c.processTreeGuarded
 	c.processCleanup = nil
+	c.processTreeGuarded = false
 	if command == nil || done == nil {
 		c.mu.Unlock()
 		if cleanup != nil {
@@ -263,6 +267,11 @@ func (c *Client) Stop() error {
 	c.mu.Unlock()
 	c.emit(Event{Type: "status", Data: c.Status()})
 
+	if !guarded && cleanup != nil {
+		// Without a Job/process group, EOF may let the parent exit before the
+		// fallback can discover its MCP descendants. Tear down the live tree first.
+		cleanup()
+	}
 	if stdin != nil {
 		c.writeMu.Lock()
 		_ = stdin.Close()
@@ -820,6 +829,7 @@ func (c *Client) waitLoop(command *exec.Cmd, done chan struct{}) {
 	c.transportErr = nil
 	c.processCleanup = nil
 	c.stopStreamFlushTimerLocked()
+	c.processTreeGuarded = false
 	c.streamStates = make(map[string]streamState)
 	c.streamOrder = 0
 	c.command = nil

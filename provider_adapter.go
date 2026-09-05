@@ -2689,7 +2689,7 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 		switch flatType {
 		case "planner_response", "model_response", "assistant_response", "model_output", "assistant_output":
 			text := antigravityEventText(event)
-			if strings.TrimSpace(text) == "" {
+			if text == "" {
 				text = firstMapString(event, "content", "text", "response", "output", "message")
 			}
 			if text == "" {
@@ -2700,7 +2700,7 @@ func parseExternalEvent(provider string, event map[string]any) (string, string, 
 					}
 				}
 			}
-			if strings.TrimSpace(text) == "" {
+			if text == "" {
 				return "", sessionID, false, ""
 			}
 			// DONE closes this planner step, not the user turn. A turn can contain

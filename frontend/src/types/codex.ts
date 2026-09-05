@@ -46,13 +46,14 @@ export interface TurnFeedback {
   intentional?: boolean
 }
 
-export type QueuedMessageState = 'queued' | 'sending' | 'failed'
+export type QueuedMessageState = 'queued' | 'sending' | 'paused' | 'failed'
 
 export type QueuedMessageKind = 'message' | 'goal'
 
 export interface QueuedMessage {
   id: string
   threadId: string
+  threadSummary?: ThreadSummary
   kind?: QueuedMessageKind
   runtime: 'codex' | 'gemini' | 'opencode'
   workspace: string

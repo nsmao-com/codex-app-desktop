@@ -3,11 +3,14 @@
 package codex
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -26,17 +29,24 @@ func configureProcess(command *exec.Cmd) {
 // attachKillOnCloseJob puts the process in a Windows Job Object so that when the
 // job handle is closed (or NiceCodex exits), the whole tree dies — including MCP
 // servers (python / node / npx / …) that Codex spawns as children.
-//
-// Official Codex Desktop often leaves those children orphaned after reconnect or
-// exit because only the parent PID is killed.
 func attachKillOnCloseJob(proc *os.Process) (cleanup func(), err error) {
 	if proc == nil || proc.Pid <= 0 {
 		return func() {}, nil
 	}
+	// Always return a working cleanup, even when Windows refuses Job assignment.
+	// Stop must run this fallback before closing stdin, while the root still lives.
+	defer func() {
+		if err != nil {
+			cleanup = sync.OnceFunc(func() {
+				killProcessTree(proc.Pid)
+				_ = proc.Kill()
+			})
+		}
+	}()
 
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
-		return func() {}, fmt.Errorf("CreateJobObject: %w", err)
+		return nil, fmt.Errorf("CreateJobObject: %w", err)
 	}
 
 	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
@@ -48,7 +58,7 @@ func attachKillOnCloseJob(proc *os.Process) (cleanup func(), err error) {
 		uint32(unsafe.Sizeof(info)),
 	); err != nil {
 		_ = windows.CloseHandle(job)
-		return func() {}, fmt.Errorf("SetInformationJobObject: %w", err)
+		return nil, fmt.Errorf("SetInformationJobObject: %w", err)
 	}
 
 	// PROCESS_SET_QUOTA | PROCESS_TERMINATE are required to assign into a job.
@@ -56,24 +66,19 @@ func attachKillOnCloseJob(proc *os.Process) (cleanup func(), err error) {
 	handle, err := windows.OpenProcess(access, false, uint32(proc.Pid))
 	if err != nil {
 		_ = windows.CloseHandle(job)
-		return func() {}, fmt.Errorf("OpenProcess: %w", err)
+		return nil, fmt.Errorf("OpenProcess: %w", err)
 	}
 	defer windows.CloseHandle(handle)
 
 	if err := windows.AssignProcessToJobObject(job, handle); err != nil {
 		_ = windows.CloseHandle(job)
-		return func() {}, fmt.Errorf("AssignProcessToJobObject: %w", err)
+		return nil, fmt.Errorf("AssignProcessToJobObject: %w", err)
 	}
 
-	var closed bool
-	cleanup = func() {
-		if closed {
-			return
-		}
-		closed = true
+	cleanup = sync.OnceFunc(func() {
 		// Closing the job with KILL_ON_JOB_CLOSE terminates every process in the job.
 		_ = windows.CloseHandle(job)
-	}
+	})
 	return cleanup, nil
 }
 
@@ -83,7 +88,9 @@ func killProcessTree(pid int) {
 	if pid <= 0 {
 		return
 	}
-	cmd := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "taskkill", "/T", "/F", "/PID", strconv.Itoa(pid))
 	configureProcess(cmd)
 	_ = cmd.Run()
 }

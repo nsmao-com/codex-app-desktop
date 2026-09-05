@@ -2257,7 +2257,16 @@ func antigravityNestedString(event map[string]any, keys ...string) string {
 }
 
 func antigravityEventText(event map[string]any) string {
-	return antigravityNestedString(event, "text_delta", "text", "content", "response", "prompt", "message", "input", "user_input", "userInput")
+	// Body chunks are lossless: whitespace-only deltas carry Markdown boundaries.
+	// Keep the trimmed metadata reader for IDs, model names and filesystem paths.
+	for _, container := range []map[string]any{antigravityStepPayload(event), event, antigravityResultPayload(event), antigravityInitPayload(event)} {
+		for _, key := range []string{"text_delta", "text", "content", "response", "prompt", "message", "input", "user_input", "userInput"} {
+			if text := textFromExternalValue(container[key]); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
 }
 
 func antigravityEventWorkspace(event map[string]any) string {
@@ -2289,7 +2298,7 @@ func antigravityEventStepIndex(event map[string]any) string {
 }
 
 func reconcileAntigravityEventText(previous, chunk string, event map[string]any) (string, string, bool) {
-	if step := antigravityStepPayload(event); step != nil {
+	for _, step := range []map[string]any{antigravityStepPayload(event), event} {
 		// text_delta remains a delta on DONE, including a large final chunk.
 		// A terminal state alone is not evidence of a full-text replacement.
 		if _, delta := step["text_delta"]; delta {

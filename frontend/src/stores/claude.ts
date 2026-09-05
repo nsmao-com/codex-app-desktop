@@ -163,7 +163,7 @@ export interface ClaudeQueuedMessage {
   effort: string
   text: string
   images: string[]
-  state: 'queued' | 'sending' | 'failed'
+  state: 'queued' | 'sending' | 'paused' | 'failed'
   error: string
   createdAt: number
   blockedByTurnId?: string
@@ -274,7 +274,15 @@ export const useClaudeStore = defineStore('claude', () => {
   const queueBySession = shallowRef<Record<string, ClaudeQueuedMessage[]>>(
     loadPersistedQueues<ClaudeQueuedMessage>('nice-codex.queue.claude.v1'),
   )
-  watch(queueBySession, (queues) => savePersistedQueues('nice-codex.queue.claude.v1', queues))
+  watch(queueBySession, (queues) => savePersistedQueues('nice-codex.queue.claude.v1', queues), { flush: 'sync' })
+  sessions.value = Object.entries(queueBySession.value).flatMap(([id, queue]) => {
+    const first = queue[0]
+    return first?.workspace ? [{
+      id, workspace: first.workspace, name: first.text.slice(0, 80) || translate('sidebar.newTask'),
+      preview: first.text, model: first.model, effort: first.effort,
+      createdAt: Math.floor(first.createdAt / 1000), updatedAt: Math.floor(first.createdAt / 1000),
+    }] : []
+  })
   /** real session id → pending id (and reverse) while a create is in flight */
   const sessionAlias = new Map<string, string>()
   /** Latest history request and active loading barrier for each session. */
@@ -2369,8 +2377,8 @@ export const useClaudeStore = defineStore('claude', () => {
     const list = queueBySession.value[queueSessionId] || []
     // Keep failed rows available for explicit retry without parking every later
     // prompt behind a request that never reached Claude.
-    const next = list.find((item) => item.state === 'queued')
-    if (!next) return
+    const next = list.find((item) => item.state === 'queued' || item.state === 'paused')
+    if (!next || next.state === 'paused') return
     await dispatchQueuedMessage(next.id, false)
   }
 
@@ -2550,7 +2558,7 @@ export const useClaudeStore = defineStore('claude', () => {
           row.id === messageId ? { ...row, state: 'queued', error: '' } : row,
         ),
       }
-    } else if (found.item.state === 'failed') {
+    } else if (found.item.state === 'failed' || found.item.state === 'paused') {
       queueBySession.value = {
         ...queueBySession.value,
         [found.sessionId]: found.list.map((row) =>
@@ -2665,7 +2673,7 @@ export const useClaudeStore = defineStore('claude', () => {
 
   function retryQueuedMessage(messageId: string): void {
     const found = findQueuedMessage(messageId)
-    if (!found || found.item.state !== 'failed') return
+    if (!found || (found.item.state !== 'failed' && found.item.state !== 'paused')) return
     queueBySession.value = {
       ...queueBySession.value,
       [found.sessionId]: found.list.map((row) =>

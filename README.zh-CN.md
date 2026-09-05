@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.5.11：取消项目文件夹 8 个数量上限，打开更多项目不再挤掉已有项目，保留排序与路径去重。</sub></p>
+<p align="center"><sub>v1.6.0：重启后恢复待发队列与会话入口，确认后继续发送；修复 Antigravity Markdown 空白丢失与流式修正文同步。</sub></p>
 
 ## 为什么是 Nice Codex
 

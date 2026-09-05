@@ -154,7 +154,21 @@ export const useCodexStore = defineStore('codex', () => {
   const queuedMessagesByThread = shallowRef<Record<string, QueuedMessage[]>>(
     loadPersistedQueues<QueuedMessage>('nice-codex.queue.codex.v1'),
   )
-  watch(queuedMessagesByThread, (queues) => savePersistedQueues('nice-codex.queue.codex.v1', queues))
+  watch(queuedMessagesByThread, (queues) => savePersistedQueues('nice-codex.queue.codex.v1', queues), { flush: 'sync' })
+  for (const [id, queue] of Object.entries(queuedMessagesByThread.value)) {
+    const first = queue[0]
+    if (!first?.workspace) continue
+    const restored: ThreadSummary = {
+      name: first.text.slice(0, 80) || translate('sidebar.newTask'), preview: first.text,
+      createdAt: Math.floor(first.createdAt / 1000), updatedAt: Math.floor(first.createdAt / 1000),
+      cliVersion: '', model: '',
+      modelProvider: first.runtime === 'gemini' ? '__gemini__' : first.runtime === 'opencode' ? '__opencode__' : '',
+      ...first.threadSummary,
+      id, cwd: first.workspace, status: 'idle', turns: undefined,
+    }
+    const path = Object.keys(projectThreads.value).find((path) => sameWorkspace(path, first.workspace)) || first.workspace
+    projectThreads.value = { ...projectThreads.value, [path]: [...(projectThreads.value[path] ?? []), restored] }
+  }
   const loadingThreadId = shallowRef('')
   const warnings = shallowRef(loadCodexWarnings())
   watch(warnings, saveCodexWarnings, { flush: 'sync' })
@@ -373,17 +387,20 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   function runtimeRecentWorkspaces(runtime: WorkspaceRuntime): string[] {
+    const restored = Object.values(queuedMessagesByThread.value).flatMap((queue) =>
+      queue[0]?.runtime === runtime ? [queue[0].workspace] : [],
+    )
+    let recent = appStore.settings.recentWorkspaces ?? []
     if (runtime === 'gemini') {
-      return appStore.settings.geminiRecentWorkspaces?.length
+      recent = appStore.settings.geminiRecentWorkspaces?.length
         ? appStore.settings.geminiRecentWorkspaces
-        : (appStore.settings.recentWorkspaces ?? [])
-    }
-    if (runtime === 'opencode') {
-      return appStore.settings.openCodeRecentWorkspaces?.length
+        : recent
+    } else if (runtime === 'opencode') {
+      recent = appStore.settings.openCodeRecentWorkspaces?.length
         ? appStore.settings.openCodeRecentWorkspaces
-        : (appStore.settings.recentWorkspaces ?? [])
+        : recent
     }
-    return appStore.settings.recentWorkspaces ?? []
+    return uniqueWorkspacePaths('', [...recent, ...restored])
   }
 
   function activeRuntimeRecentWorkspaces(): string[] {
@@ -404,7 +421,7 @@ export const useCodexStore = defineStore('codex', () => {
       ...replacement,
       ...current.filter((thread) =>
         !replacementIds.has(thread.id)
-        && (thread.id.startsWith('pending-thread-') || runtimeIDForThread(thread.id) !== runtime),
+        && (thread.id.startsWith('pending-thread-') || queuedMessagesByThread.value[thread.id]?.length || runtimeIDForThread(thread.id) !== runtime),
       ),
     ]
   }
@@ -1924,6 +1941,7 @@ export const useCodexStore = defineStore('codex', () => {
       id: `queued-${now}-${sequence}`,
       threadId: threadID,
       kind: 'message',
+      threadSummary: queueOwnerSummary(threadID),
       runtime: runtime === 'gemini' || runtime === 'opencode' ? runtime : 'codex',
       workspace,
       text: message,
@@ -1981,6 +1999,7 @@ export const useCodexStore = defineStore('codex', () => {
       id: `queued-goal-${now}-${sequence}`,
       threadId: id,
       kind: 'goal',
+      threadSummary: queueOwnerSummary(id),
       runtime,
       workspace: thread.cwd?.trim() || appStore.currentWorkspacePath,
       text: commandText,
@@ -2009,8 +2028,8 @@ export const useCodexStore = defineStore('codex', () => {
     // broken stream. A sending row remains an explicit dispatch barrier below.
     const queue = queuedMessagesByThread.value[threadID]
     if (queue?.some((message) => message.state === 'sending')) return
-    const queuedMessage = queue?.find((message) => message.state === 'queued')
-    if (!queuedMessage || !isRuntimeReady(queuedMessage.runtime)) return
+    const queuedMessage = queue?.find((message) => message.state === 'queued' || message.state === 'paused')
+    if (!queuedMessage || queuedMessage.state === 'paused' || !isRuntimeReady(queuedMessage.runtime)) return
     // A transient status/alias update must not release a follow-up before the
     // exact turn that accepted it as queued has reached a terminal event.
     if (queuedMessage.blockedByTurnId && !completedTurns.has(queuedMessage.blockedByTurnId)) return
@@ -2473,7 +2492,7 @@ export const useCodexStore = defineStore('codex', () => {
   function retryQueuedMessage(messageID: string, threadID = activeThreadId.value): void {
     const queueID = queueThreadKey(resolveThreadID(threadID) || threadID.trim())
     const message = queuedMessagesByThread.value[queueID]?.find((item) => item.id === messageID)
-    if (!message || message.state !== 'failed') return
+    if (!message || (message.state !== 'failed' && message.state !== 'paused')) return
     patchQueuedMessage(queueID, messageID, { state: 'queued', error: '' })
     scheduleThreadQueueDrain(queueID)
   }
@@ -2521,7 +2540,7 @@ export const useCodexStore = defineStore('codex', () => {
       if (isThreadSubmitting(id) || threadIsRunning(id) || pendingThreadSubmission(id)) return
       patchQueuedMessage(queueID, messageID, { state: 'queued', error: '' })
     }
-    if (message.state === 'failed') {
+    if (message.state === 'failed' || message.state === 'paused') {
       patchQueuedMessage(queueID, messageID, { state: 'queued', error: '' })
     }
     reorderQueuedMessage(messageID, 'top', queueID)
@@ -3603,7 +3622,7 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   function queueDelta(delta: DeltaBuffer): void {
-    if (!delta.threadId || !delta.itemId || !delta.delta) return
+    if (!delta.threadId || !delta.itemId || (!delta.delta && !(delta.replace && delta.streamText !== undefined))) return
     // Keep the historical buffer key shape so summary-part barriers can inspect
     // a pending item. Sequence ownership still includes the turn id below.
     const key = `${delta.threadId}:${delta.itemId}:${delta.field}`
@@ -3947,7 +3966,7 @@ export const useCodexStore = defineStore('codex', () => {
     }
     const queueID = queueThreadKey(id)
     const hasWaitingCommand = (queuedMessagesByThread.value[queueID] ?? [])
-      .some((message) => message.state === 'queued' || message.state === 'sending')
+      .some((message) => message.state === 'queued' || message.state === 'sending' || message.state === 'paused')
     if (
       goalCommandCanQueue(argument)
       && options.queueIfBusy !== false
@@ -4697,6 +4716,11 @@ export const useCodexStore = defineStore('codex', () => {
     if (sameWorkspace(path, appStore.currentWorkspacePath)) threads.value = nextItems
   }
 
+  function queueOwnerSummary(threadID: string): ThreadSummary | undefined {
+    const summary = findThreadSummary(threadID)
+    return summary ? { ...summary, turns: undefined } : undefined
+  }
+
   function setProjectThreads(path: string, nextThreads: ThreadSummary[]): void {
     const existingPath = Object.keys(projectThreads.value).find((projectPath) => sameWorkspace(projectPath, path))
     const key = existingPath ?? path
@@ -5042,7 +5066,7 @@ export const useCodexStore = defineStore('codex', () => {
 
   function canMutateThread(threadID: string): boolean {
     const queued = queuedMessagesForThread(threadID)
-      .some((message) => message.state === 'queued' || message.state === 'sending')
+      .some((message) => message.state === 'queued' || message.state === 'sending' || message.state === 'paused')
     if (!threadIsBusy(threadID) && !queued) return true
     notify(
       'warning',
@@ -6288,14 +6312,9 @@ function appendBoundedDelta(current: string, delta: string, limit: number): stri
   return `${(current + delta).slice(0, limit)}${marker}`
 }
 
-/** Apply a cumulative stream snapshot without allowing a stale final row to shrink it. */
+/** Sequence-checked stream revisions are authoritative, including corrections. */
 function mergeStreamSnapshot(current: string | undefined, incoming: string, limit: number): string {
-  const previous = current ?? ''
-  if (!incoming) return previous
-  // Sequence checks guarantee that incoming is the newest stream revision, but
-  // item snapshots can still race with a longer live value. Never let a shorter
-  // snapshot shrink text that is already known to be a prefix of the stream.
-  if (previous.length >= incoming.length) return previous
+  if (current === incoming) return incoming
   // The JSON decoder already owns an immutable string; avoid another full copy
   // on every coalesced frame when the snapshot is within the display limit.
   return incoming.length <= limit ? incoming : appendBoundedDelta('', incoming, limit)

@@ -421,7 +421,7 @@ export interface GrokQueuedMessage {
   effort: string
   text: string
   images: string[]
-  state: 'queued' | 'sending' | 'failed'
+  state: 'queued' | 'sending' | 'paused' | 'failed'
   error: string
   createdAt: number
   blockedByTurnId?: string
@@ -495,7 +495,16 @@ export const useGrokStore = defineStore('grok', () => {
   const queuedBySession = shallowRef<Record<string, GrokQueuedMessage[]>>(
     loadPersistedQueues<GrokQueuedMessage>('nice-codex.queue.grok.v1'),
   )
-  watch(queuedBySession, (queues) => savePersistedQueues('nice-codex.queue.grok.v1', queues))
+  watch(queuedBySession, (queues) => savePersistedQueues('nice-codex.queue.grok.v1', queues), { flush: 'sync' })
+  sessions.value = Object.entries(queuedBySession.value).flatMap(([id, queue]) => {
+    const first = queue[0]
+    return first?.workspace ? [{
+      id, backend: first.backend, workspace: first.workspace,
+      name: first.text.slice(0, 80) || translate('sidebar.newTask'), preview: first.text,
+      model: first.model, effort: first.effort,
+      createdAt: Math.floor(first.createdAt / 1000), updatedAt: Math.floor(first.createdAt / 1000),
+    }] : []
+  })
   /** Cumulative text snapshots + sequence numbers protect against bridge reordering. */
   const streamSequenceByTurn = new Map<string, number>()
   const pendingLiveText = new Map<string, string>()
@@ -2852,8 +2861,8 @@ export const useGrokStore = defineStore('grok', () => {
     }
     // Failed requests remain visible for retry, but a provider HTTP/stream
     // failure must not make every later prompt unsendable.
-    const next = list.find((item) => item.state === 'queued')
-    if (!next) return
+    const next = list.find((item) => item.state === 'queued' || item.state === 'paused')
+    if (!next || next.state === 'paused') return
     if (next.blockedByTurnId && !finalizedTurnIds.has(next.blockedByTurnId)) return
     if (isSessionBusy(id)) return
 
@@ -2952,7 +2961,7 @@ export const useGrokStore = defineStore('grok', () => {
   function retryQueuedMessage(messageId: string): void {
     for (const [sessionId, list] of Object.entries(queuedBySession.value)) {
       const found = list.find((item) => item.id === messageId)
-      if (!found || found.state !== 'failed') continue
+      if (!found || (found.state !== 'failed' && found.state !== 'paused')) continue
       patchQueuedMessage(sessionId, messageId, { state: 'queued', error: '' })
       void drainQueue(sessionId)
       return
