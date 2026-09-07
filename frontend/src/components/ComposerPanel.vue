@@ -784,7 +784,24 @@ const reasoningOptions = computed(() => {
       { effort: 'max', displayName: 'Max', description: 'Maximum' },
     ]
   }
-  if (isGeminiMode.value) return []
+  if (isGeminiMode.value) {
+    const fromProvider = externalProvider.value?.reasoningEfforts ?? []
+    if (fromProvider.length) {
+      return fromProvider.map((item) => ({
+        effort: item.effort,
+        displayName: item.displayName,
+        description: item.description,
+      }))
+    }
+    // Antigravity's catalog probe can be unavailable while the CLI is busy or
+    // when an older agy version does not expose metadata. Keep the control
+    // usable with the same variants accepted by antigravityPermissionArgs.
+    return [
+      { effort: 'high', displayName: 'High', description: 'Deeper reasoning' },
+      { effort: 'medium', displayName: 'Medium', description: 'Balanced speed and depth' },
+      { effort: 'low', displayName: 'Low', description: 'Faster responses' },
+    ]
+  }
   const fromModel = selectedModel.value?.supportedReasoningEfforts ?? []
   return fromModel.length ? fromModel : [...DEFAULT_CODEX_REASONING]
 })

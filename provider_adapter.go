@@ -1664,6 +1664,13 @@ func (s *AppService) executeExternalTurn(
 		}
 		return output.String(), sessionID, usage, waitErr
 	}
+	// A clean CLI exit without a response is not a successful turn. This is
+	// commonly caused by an expired/overlong native conversation or an
+	// incompatible Antigravity flag. Surface the provider diagnostic instead
+	// of silently completing a blank message.
+	if strings.TrimSpace(output.String()) == "" && strings.TrimSpace(stderrText) != "" {
+		return output.String(), sessionID, usage, errors.New(truncateRunes(stderrText, 1000))
+	}
 	return output.String(), sessionID, usage, nil
 }
 
