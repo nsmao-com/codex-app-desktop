@@ -28,7 +28,7 @@ import {
   unarchiveGrokSession as unarchiveGrokSessionApi,
 } from '@/utils/grokBindings'
 import { resolveProviderModelContextWindow } from '@/utils/accountUsage'
-import { normalizeThreadTokenUsage, uncommittedStreamTextTail } from '@/utils/protocol'
+import { normalizeThreadTokenUsage, uncommittedStreamTextTail, unseenHistoryTail } from '@/utils/protocol'
 import { notify } from '@/utils/notify'
 import { friendlyErrorMessage } from '@/utils/errorMessage'
 import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
@@ -275,6 +275,7 @@ function mergeGrokDiskWithCurrent(
 ): GrokMessage[] {
   if (!current.length) return disk
   const result = [...disk]
+  const unseenTail = unseenHistoryTail(disk, current)
   const diskById = new Map(
     disk.filter((message) => message.id).map((message) => [message.id, message]),
   )
@@ -322,14 +323,13 @@ function mergeGrokDiskWithCurrent(
       continue
     }
     if (
-      preserveLiveMessages
-      && (
+      unseenTail.has(message) || (preserveLiveMessages && (
         isActiveGrokStatus(message.status)
         || (
           (Number(message.createdAt) || 0) >= latestDiskTime
           && !disk.some((row) => sameGrokLiveContent(row, message))
         )
-      )
+      ))
     ) {
       const anchorIndex = lastAnchor ? result.indexOf(lastAnchor) : -1
       const insertionIndex = anchorIndex >= 0 ? anchorIndex + 1 : result.length
@@ -2358,7 +2358,6 @@ export const useGrokStore = defineStore('grok', () => {
         currentHistory
         && currentHistory.backend === requestedBackend
         && currentHistory.start < (Number(detail.historyStart) || 0)
-        && (Number(detail.historyTotal) || 0) >= currentHistory.total,
       )
       const split = keepLoadedPrefix
         ? splitGrokHistoryPrefix(messages, cached)

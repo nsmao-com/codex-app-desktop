@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.0：重启后恢复待发队列与会话入口，确认后继续发送；修复 Antigravity Markdown 空白丢失与流式修正文同步。</sub></p>
+<p align="center"><sub>v1.6.1：修复报错、重连后旧历史覆盖最近消息的问题，覆盖五个运行时；保留已加载历史与主动回退边界。</sub></p>
 
 ## 为什么是 Nice Codex
 

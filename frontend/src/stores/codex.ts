@@ -57,6 +57,7 @@ import {
   normalizeThreadTokenUsage,
   normalizeTimelineItem,
   timelineFromTurns,
+  unseenHistoryTail,
 } from '../utils/protocol'
 
 export interface ThreadModelIdentity {
@@ -1164,6 +1165,8 @@ export const useCodexStore = defineStore('codex', () => {
       // app exited. Only restore one as live when thread/read also confirms the
       // thread is currently active; otherwise it would block this queue forever.
       if (isActiveStatus(thread.status)) runningTurnID = activeTurnIDFromSnapshot(rawThread)
+      flushThreadDeltas(threadID)
+      if (thread.id !== threadID) flushThreadDeltas(thread.id)
       const snapshotItems = timelineFromTurns(rawThread.turns)
       const cachedItems = itemsByThread.value[thread.id] ?? itemsByThread.value[threadID] ?? []
       const currentHistory = historyByThread.value[thread.id] ?? historyByThread.value[threadID]
@@ -1171,23 +1174,13 @@ export const useCodexStore = defineStore('codex', () => {
       const keepLoadedPrefix = Boolean(
         currentHistory
         && currentHistory.start < (Number(responsePage.historyStart) || 0)
-        && (Number(responsePage.historyTotal) || 0) >= currentHistory.total,
       )
       const split = keepLoadedPrefix
         ? splitCodexHistoryPrefix(snapshotItems, cachedItems)
         : { prefix: [] as TimelineItem[], current: cachedItems }
       const knownTurnID = threadTurnID(thread.id) || threadTurnID(threadID)
       const liveTurnID = runningTurnID || (knownTurnID && !completedTurns.has(knownTurnID) ? knownTurnID : '')
-      const preserveInFlightItems = Boolean(
-        liveTurnID
-        || pendingThreadSubmission(thread.id)
-        || pendingThreadSubmission(threadID)
-        || isThreadSubmitting(thread.id)
-        || isThreadSubmitting(threadID)
-        || queuedMessagesForThread(thread.id).length > 0
-        || queuedMessagesForThread(threadID).length > 0
-      )
-      const mergedItems = preserveInFlightItems && split.current.length
+      const mergedItems = split.current.length
         ? mergeThreadSnapshotWithLive(snapshotItems, split.current, liveTurnID)
         : snapshotItems
       const items = split.prefix.length ? [...split.prefix, ...mergedItems] : mergedItems
@@ -1200,7 +1193,7 @@ export const useCodexStore = defineStore('codex', () => {
           hasEarlier: currentHistory.hasEarlier,
         })
       }
-      setThreadMetrics(thread.id, rawThread.turns, split.prefix.length > 0)
+      setThreadMetrics(thread.id, rawThread.turns, cachedItems.length > 0)
       syncThreadContextWindow(thread.id, rawThread)
       rememberLoadedThread(thread.id)
       if (threadID !== thread.id) {
@@ -1242,7 +1235,7 @@ export const useCodexStore = defineStore('codex', () => {
       // Keep a message admitted during loading attached to this thread and visible
       // in its queue. A retry can hydrate it; restoring the old thread made it look
       // as if the message vanished and risked a later send using the wrong owner.
-      if (queuedMessagesForThread(threadID).length === 0) {
+      if (queuedMessagesForThread(threadID).length === 0 && !(itemsByThread.value[threadID]?.length)) {
         activeThread.value = previousThread
         activeThreadId.value = previousThreadID
       }
@@ -1837,6 +1830,10 @@ export const useCodexStore = defineStore('codex', () => {
     const numTurns = mode === 'single' ? 1 : turnIDs.length - turnIndex
     if (numTurns < 1) return
     if (!beginThreadMutation(id, 'rollback')) return
+    // Do not let a pre-rollback read restore deliberately removed turns.
+    for (const key of loadingSequenceByThread.keys()) {
+      if (sameThreadSession(key, id)) loadingSequenceByThread.delete(key)
+    }
     try {
       const response = await backend.RollbackThread(id, numTurns)
       const rawThread = asRecord(asRecord(response).thread)
@@ -6341,6 +6338,7 @@ function mergeThreadSnapshotWithLive(
   liveTurnID: string,
 ): TimelineItem[] {
   const result = [...snapshot]
+  const unseenTail = unseenHistoryTail(snapshot, cached)
   const cachedServerItemIDs = new Set(
     cached.filter((item) => !item.local && item.id).map((item) => item.id),
   )
@@ -6398,7 +6396,7 @@ function mergeThreadSnapshotWithLive(
       )
     }
     if (index < 0) {
-      if (live) {
+      if (live || unseenTail.has(item)) {
         const firstLiveAgentIndex = item.local && item.type === 'userMessage' && !item.turnId
           ? result.findIndex((candidate) =>
               candidate.type !== 'userMessage'

@@ -18,6 +18,24 @@ import type {
   TokenUsageBreakdown,
 } from '../types/codex'
 
+/** A history refresh is not a deletion: retain the observed tail beyond its
+ * last shared row, including completed turns without timestamps. Explicit
+ * rollback/delete paths replace state directly and must not use this helper. */
+export function unseenHistoryTail<T extends { id: string }>(
+  snapshot: T[], cached: T[], equivalent?: (left: T, right: T) => boolean,
+): Set<T> {
+  if (!snapshot.length) return new Set(cached)
+  const ids = new Set(snapshot.map((item) => item.id).filter(Boolean))
+  for (let index = cached.length - 1; index >= 0; index -= 1) {
+    const item = cached[index]!
+    if ((item.id && ids.has(item.id)) || (equivalent && snapshot.some((row) => equivalent(row, item)))) {
+      return new Set(cached.slice(index + 1))
+    }
+  }
+  // No shared identity: do not resurrect an unrelated/re-keyed transcript.
+  return new Set()
+}
+
 export function uncommittedStreamTextTail(fullText: string, committedSegments: string[]): string {
   if (!fullText) return ''
 

@@ -27,7 +27,7 @@ import {
 import { notify } from '@/utils/notify'
 import { friendlyErrorMessage } from '@/utils/errorMessage'
 import { translate } from '@/i18n'
-import { normalizeThreadTokenUsage, uncommittedStreamTextTail } from '@/utils/protocol'
+import { normalizeThreadTokenUsage, uncommittedStreamTextTail, unseenHistoryTail } from '@/utils/protocol'
 import { resolveProviderModelContextWindow } from '@/utils/accountUsage'
 import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
 import { savePersistedQueues, loadPersistedQueues } from '@/utils/persistedQueues'
@@ -1470,7 +1470,6 @@ export const useClaudeStore = defineStore('claude', () => {
       const keepLoadedPrefix = Boolean(
         currentHistory
         && currentHistory.start < (Number(detail.historyStart) || 0)
-        && (Number(detail.historyTotal) || 0) >= currentHistory.total,
       )
       const split = keepLoadedPrefix
         ? splitClaudeHistoryPrefix(fromDisk, cached)
@@ -1806,6 +1805,9 @@ export const useClaudeStore = defineStore('claude', () => {
       return Math.max(latest, typeof time === 'number' ? time : 0)
     }, 0)
     const out = [...disk]
+    const unseenTail = unseenHistoryTail(disk, cached, (row, item) =>
+      item.type === 'userMessage' ? sameClaudeUserRow(row, item) : sameClaudeTerminalContent(row, item),
+    )
 
     for (const item of cached) {
       if (item.id && diskIds.has(item.id)) continue
@@ -1819,7 +1821,7 @@ export const useClaudeStore = defineStore('claude', () => {
       const active = isActiveItemStatus(item.status)
       const sameTurnOnDisk = Boolean(item.turnId && disk.some((row) => row.turnId === item.turnId))
       const itemTime = item.completedAt || item.startedAt || 0
-      if (active || (!sameTurnOnDisk && typeof itemTime === 'number' && itemTime >= latestDiskTime)) {
+      if (active || unseenTail.has(item) || (!sameTurnOnDisk && typeof itemTime === 'number' && itemTime >= latestDiskTime)) {
         out.push(item)
       }
     }
