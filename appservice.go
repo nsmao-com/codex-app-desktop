@@ -174,6 +174,8 @@ type UserSettings struct {
 	ModelProvider             string   `json:"modelProvider"`
 	CustomModels              []string `json:"customModels"`
 	Effort                    string   `json:"effort"`
+	CodexRetryCount           int      `json:"codexRetryCount"`
+	CodexRetryWaitSeconds     int      `json:"codexRetryWaitSeconds"`
 	ServiceTier               string   `json:"serviceTier"`
 	CollaborationMode         string   `json:"collaborationMode"`
 	Personality               string   `json:"personality"`
@@ -2248,6 +2250,26 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 			result, err = s.call("turn/start", params)
 		}
 	}
+	if err != nil && isModelCapacityError(err) {
+		retries := settings.CodexRetryCount
+		if retries < 0 {
+			retries = 0
+		}
+		if retries > 20 {
+			retries = 20
+		}
+		waitSeconds := settings.CodexRetryWaitSeconds
+		if waitSeconds < 0 {
+			waitSeconds = 0
+		}
+		if waitSeconds > 300 {
+			waitSeconds = 300
+		}
+		for attempt := 0; attempt < retries && err != nil && isModelCapacityError(err); attempt++ {
+			time.Sleep(time.Duration(waitSeconds) * time.Second)
+			result, err = s.call("turn/start", params)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2266,6 +2288,14 @@ func (s *AppService) SendMessage(request SendMessageRequest) (map[string]any, er
 	}
 	s.touchSessionPreview(request.ThreadID, request.Text)
 	return result, nil
+}
+
+func isModelCapacityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "selected model is at capacity") || strings.Contains(text, "model is at capacity")
 }
 
 func (s *AppService) SteerTurn(request SteerTurnRequest) (map[string]any, error) {
@@ -3823,6 +3853,8 @@ func defaultSettings() UserSettings {
 		CodexContextWindow:        0,
 		CodexAutoCompactThreshold: 0,
 		Effort:                    "high",
+		CodexRetryCount:           5,
+		CodexRetryWaitSeconds:     10,
 		CollaborationMode:         "default",
 		Personality:               "pragmatic",
 		MultiAgentMode:            "explicitRequestOnly",

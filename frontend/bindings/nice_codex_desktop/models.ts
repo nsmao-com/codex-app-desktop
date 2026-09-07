@@ -965,6 +965,8 @@ export interface UserSettings {
     "geminiRecentWorkspaces": string[] | null;
     "geminiModel": string;
     "geminiEffort": string;
+    "codexRetryCount": number;
+    "codexRetryWaitSeconds": number;
     "geminiSandbox": string;
     "geminiApprovalPolicy": string;
     "geminiCustomModels": string[] | null;

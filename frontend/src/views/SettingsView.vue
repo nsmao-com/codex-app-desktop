@@ -3138,6 +3138,20 @@ wsl --update</code></pre>
             <!-- Personalization -->
             <template v-else-if="activePanel === 'personalization'">
               <section v-if="isCodexSettings" class="overflow-hidden rounded-xl border bg-card">
+                <div class="border-b px-4 py-3">
+                  <h2 class="text-[13px] font-semibold">上游负载重试</h2>
+                  <p class="mt-0.5 text-[11px] text-muted-foreground">模型容量不足时自动重试；设为 0 次可关闭。默认 5 次，每次等待 10 秒。</p>
+                </div>
+                <div class="grid gap-3 p-4 sm:grid-cols-2">
+                  <label class="space-y-1 text-xs">重试次数
+                    <Input type="number" min="0" max="20" :model-value="appStore.settings.codexRetryCount" @update:model-value="appStore.patchSettings({ codexRetryCount: Math.max(0, Math.min(20, Number($event) || 0)) })" />
+                  </label>
+                  <label class="space-y-1 text-xs">重试等待（秒）
+                    <Input type="number" min="0" max="300" :model-value="appStore.settings.codexRetryWaitSeconds" @update:model-value="appStore.patchSettings({ codexRetryWaitSeconds: Math.max(0, Math.min(300, Number($event) || 0)) })" />
+                  </label>
+                </div>
+              </section>
+              <section v-if="isCodexSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="divide-y">
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">

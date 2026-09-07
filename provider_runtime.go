@@ -1136,15 +1136,15 @@ func commandCandidates(name string) []string {
 }
 
 // geminiCommandCandidates keeps the internal runtime id (`gemini`) stable while
-// preferring Google's replacement Antigravity CLI. The old Gemini CLI remains a
-// fully supported fallback for enterprise/API installations and existing users.
+// using Antigravity CLI. Legacy Gemini transcripts remain readable, but the old
+// Gemini executable is no longer selected for new turns.
 func geminiCommandCandidates() []string {
 	// Keep this helper useful to callers that need one ordered list, while
 	// findGeminiExecutable below enforces preference across PATH entries too.
 	if runtime.GOOS == "windows" {
-		return []string{"agy.exe", "agy.cmd", "agy.bat", "agy.ps1", "agy", "antigravity.exe", "antigravity.cmd", "antigravity.bat", "antigravity.ps1", "antigravity", "gemini.exe", "gemini.cmd", "gemini.bat", "gemini.ps1", "gemini"}
+		return []string{"agy.exe", "agy.cmd", "agy.bat", "agy.ps1", "agy", "antigravity.exe", "antigravity.cmd", "antigravity.bat", "antigravity.ps1", "antigravity"}
 	}
-	return []string{"agy", "antigravity", "gemini"}
+	return []string{"agy", "antigravity"}
 }
 
 // findGeminiExecutable resolves agy first, then the long Antigravity alias,
@@ -1152,7 +1152,7 @@ func geminiCommandCandidates() []string {
 // intentional: findCommand walks PATH directories first, which otherwise could
 // let an old gemini binary in an early directory shadow agy in a later one.
 func findGeminiExecutable() string {
-	for _, name := range []string{"agy", "antigravity", "gemini"} {
+	for _, name := range []string{"agy", "antigravity"} {
 		if executable := findCommand(commandCandidates(name)); executable != "" {
 			return executable
 		}

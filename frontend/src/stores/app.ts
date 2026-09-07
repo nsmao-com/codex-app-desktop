@@ -79,6 +79,8 @@ const defaultSettings: UserSettings = {
   modelProvider: '',
   customModels: [],
   effort: 'high',
+  codexRetryCount: 5,
+  codexRetryWaitSeconds: 10,
   serviceTier: '',
   collaborationMode: 'default',
   personality: 'pragmatic',
