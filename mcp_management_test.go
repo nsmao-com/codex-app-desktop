@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +14,50 @@ import (
 	"testing"
 	"time"
 )
+
+type translationRoundTrip func(*http.Request) (*http.Response, error)
+
+func (f translationRoundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestTranslationAndComputerUseSettings(t *testing.T) {
+	t.Setenv("GOOGLE_TRANSLATE_API_KEY", "")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	s := &AppService{}
+	if _, err := s.TranslateMessage("hello", "zh-CN", ""); err == nil {
+		t.Fatal("missing key accepted")
+	}
+	if _, err := s.TranslateMessage("hello", "invalid", "key"); err == nil {
+		t.Fatal("invalid target accepted")
+	}
+	if _, err := s.TranslateMessage(strings.Repeat("字", 30001), "en", "key"); err == nil {
+		t.Fatal("oversized input accepted")
+	}
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = translationRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "translation.googleapis.com" || r.Header.Get("X-Goog-Api-Key") != "test-key" || r.URL.RawQuery != "" {
+			t.Fatal("unsafe translation request")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"translations":[{"translatedText":"你好 &amp; 世界"}]}}`)), Header: make(http.Header)}, nil
+	})
+	if result, err := s.TranslateMessage("hello & world", "zh-CN", "test-key"); err != nil || result != "你好 & 世界" {
+		t.Fatalf("translation: %q %v", result, err)
+	}
+	path := codexConfigPath()
+	if err := os.WriteFile(path, []byte("[features]\ncomputer_use = true # keep other flags\nmemories = true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveComputerUseSetting(false); err != nil {
+		t.Fatal(err)
+	}
+	if enabled, err := s.ReadComputerUseSetting(); err != nil || enabled {
+		t.Fatalf("computer use flag did not persist: %v", err)
+	}
+	payload, _ := os.ReadFile(path)
+	if !strings.Contains(string(payload), "memories = true") || strings.Count(string(payload), "computer_use =") != 1 {
+		t.Fatal("other config changed or duplicate key")
+	}
+}
 
 func TestCodexWindowsProcessTreeCleanup(t *testing.T) {
 	if runtime.GOOS != "windows" {

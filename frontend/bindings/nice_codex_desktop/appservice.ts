@@ -426,6 +426,10 @@ export function ReadCodexFeatureFlags(): $CancellablePromise<$models.CodexFeatur
     return $Call.ByID(1079251556);
 }
 
+export function ReadComputerUseSetting(): $CancellablePromise<boolean> {
+    return $Call.ByID(2689664786);
+}
+
 export function ReadExternalRuntimeCatalog(runtime: string, workspace: string): $CancellablePromise<$models.ExternalRuntimeCatalog> {
     return $Call.ByID(2982606466, runtime, workspace);
 }
@@ -633,6 +637,13 @@ export function SaveCodexFeatureFlags(flags: $models.CodexFeatureFlags): $Cancel
     return $Call.ByID(199517151, flags);
 }
 
+/**
+ * Save only this feature: never rewrite unrelated flags or application grants.
+ */
+export function SaveComputerUseSetting(enabled: boolean): $CancellablePromise<void> {
+    return $Call.ByID(904667639, enabled);
+}
+
 export function SaveExternalRuntimeInstructions(request: $models.ExternalInstructionsSaveRequest): $CancellablePromise<void> {
     return $Call.ByID(1994634985, request);
 }
@@ -792,6 +803,14 @@ export function StopTerminalSession(processID: string): $CancellablePromise<void
 
 export function SwitchGitBranch(request: $models.GitBranchSwitchRequest): $CancellablePromise<$models.GitActionResult> {
     return $Call.ByID(1528710970, request);
+}
+
+/**
+ * TranslateMessage sends only the explicitly selected text to Google Cloud.
+ * Keys are request-scoped (or provided by the environment), never logged/stored.
+ */
+export function TranslateMessage(text: string, target: string, apiKey: string): $CancellablePromise<string> {
+    return $Call.ByID(930304815, text, target, apiKey);
 }
 
 export function UnarchiveClaudeSession(sessionID: string): $CancellablePromise<void> {

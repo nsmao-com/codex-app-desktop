@@ -19,7 +19,7 @@ const router = createRouter({
     {
       path: '/capabilities',
       name: 'capabilities',
-      component: () => import('@/views/CapabilitiesView.vue'),
+      redirect: (to) => ({ name: 'settings', query: { section: 'capabilities', tab: to.query.tab || 'runtime' } }),
     },
   ],
 })

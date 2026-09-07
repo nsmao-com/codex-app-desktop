@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.1: Preserve recent messages across errors and stale history reloads in all five runtimes, while respecting explicit rollback.</sub></p>
+<p align="center"><sub>v1.6.2: Message resend, opt-in Google Cloud translation, Computer Use settings, refined reasoning controls and an integrated capabilities dialog.</sub></p>
 
 ## Why Nice Codex
 

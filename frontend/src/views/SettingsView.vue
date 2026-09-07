@@ -69,6 +69,9 @@ import { supportedLocales } from '@/i18n'
 import { ACCENT_OPTIONS, type AppAccent } from '@/lib/accents'
 import type { AppTheme } from '@/composables/useAppearance'
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
+import CapabilitiesView from '@/views/CapabilitiesView.vue'
+import ComputerUseSettings from '@/components/ComputerUseSettings.vue'
+import ReasoningSlider from '@/components/ReasoningSlider.vue'
 import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
 import {
@@ -106,6 +109,7 @@ type SettingsPanel =
   | 'scheduled'
   | 'mcp'
   | 'routing'
+  | 'computer-use'
 
 type NavItem = {
   id: SettingsPanel
@@ -837,6 +841,7 @@ const navGroups = computed<NavGroup[]>(() => [
       { id: 'mcp', label: t('settings.navMcp'), icon: PlugZap, keywords: 'mcp import json server tool 导入 服务', action: 'capabilities', capabilityTab: 'mcp' },
       { id: 'routing', label: t('settings.navRouting'), icon: Route, keywords: 'provider route failover circuit breaker proxy 服务商 路由 熔断 故障切换 代理' },
       { id: 'browser', label: t('settings.navBrowser'), icon: Compass, keywords: 'browser cdp allowlist 浏览器' },
+      { id: 'computer-use', label: 'Computer Use', icon: Laptop, keywords: 'computer compute use 电脑操作 桌面 控制' },
       { id: 'hooks', label: t('settings.navHooks'), icon: Anchor, keywords: 'hooks automation 钩子', action: 'capabilities', capabilityTab: 'automation' },
       { id: 'scheduled', label: t('settings.navScheduled'), icon: Clock3, keywords: 'scheduled tasks automation 定时任务' },
     ],
@@ -853,9 +858,7 @@ const navGroups = computed<NavGroup[]>(() => [
 
 /** Codex-only product surfaces — hide when editing other runtimes. */
 const codexOnlyPanels = new Set<SettingsPanel>([
-  'plugins',
-  'skills',
-  'mcp',
+  'computer-use',
   'routing',
   'hooks',
   'scheduled',
@@ -1076,10 +1079,18 @@ onUnmounted(() => {
   if (!saved.value) appStore.restoreAppearance()
 })
 
+const showingCapabilities = computed(() => route.query.section === 'capabilities')
+watch(() => [route.query.section, route.query.tab], ([, tab]) => {
+  if (route.query.section === 'capabilities' && (tab === 'plugins' || tab === 'skills' || tab === 'mcp')) activePanel.value = tab
+}, { immediate: true })
+watch(() => route.query.section, (section) => {
+  if (typeof section === 'string' && isSettingsPanel(section)) activePanel.value = section
+}, { immediate: true })
+
 function isSettingsPanel(value: string): value is SettingsPanel {
   return [
     'general', 'appearance', 'shortcuts', 'agent', 'personalization', 'usage', 'account', 'archived',
-    'browser', 'environment', 'git', 'scheduled', 'routing',
+    'browser', 'environment', 'git', 'scheduled', 'routing', 'computer-use',
   ].includes(value)
 }
 
@@ -1703,13 +1714,12 @@ async function checkUpdatesNow(): Promise<void> {
 
 function selectNav(item: NavItem): void {
   if (item.action === 'capabilities') {
-    void router.push({
-      name: 'capabilities',
-      query: { from: 'settings', ...(item.capabilityTab ? { tab: item.capabilityTab } : {}) },
-    })
+    activePanel.value = item.id
+    void router.replace({ name: 'settings', query: { section: 'capabilities', tab: item.capabilityTab || 'runtime' } })
     return
   }
   activePanel.value = item.id
+  void router.replace({ name: 'settings', query: { section: item.id } })
 }
 
 function closeSettings(): void {
@@ -2061,7 +2071,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
             <div class="min-w-0 flex-1">
               <h1 class="text-[15px] font-semibold tracking-tight">{{ activeNavItem?.label || t('settings.title') }}</h1>
             </div>
-            <Button v-if="activePanel !== 'usage' && activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching">
+            <Button v-if="!showingCapabilities && activePanel !== 'computer-use' && activePanel !== 'usage' && activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching">
               {{ saving ? t('common.saving') : t('settings.save') }}
             </Button>
             <SimpleTooltip :content="t('settings.close')">
@@ -2117,8 +2127,12 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
           </div>
         </header>
 
-        <main class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        <main v-if="showingCapabilities" class="min-h-0 flex-1 overflow-hidden">
+          <CapabilitiesView embedded />
+        </main>
+        <main v-else class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-5">
           <form id="settings-form" class="mx-auto max-w-3xl space-y-5" @submit.prevent="submitSettings">
+            <ComputerUseSettings v-if="activePanel === 'computer-use'" />
             <!-- General -->
             <template v-if="activePanel === 'general'">
               <section class="overflow-hidden rounded-xl border bg-card">
@@ -2691,20 +2705,7 @@ wsl --update</code></pre>
                   </div>
                    <div class="space-y-1">
                      <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
-                    <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      <Button
-                        v-for="option in ['low', 'medium', 'high', 'xhigh', 'max']"
-                        :key="option"
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        class="h-8 capitalize"
-                        :class="claudeEffort === option ? 'border-primary bg-primary/5' : ''"
-                        @click="claudeEffort = option"
-                      >
-                        {{ option }}
-                      </Button>
-                    </div>
+                    <ReasoningSlider v-model="claudeEffort" :label="t('settings.reasoning')" :options="['low', 'medium', 'high', 'xhigh', 'max'].map(effort => ({ effort }))" />
                   </div>
                   <div class="space-y-1">
                     <Label class="text-xs">{{ t('settings.claudePermissionMode') }}</Label>
@@ -2880,26 +2881,7 @@ wsl --update</code></pre>
                   </div>
                   <div class="space-y-1">
                     <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
-                    <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      <Button
-                        v-for="option in grokEffortOptions"
-                        :key="option.effort"
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        class="h-auto min-w-0 w-full shrink flex-col items-stretch justify-start gap-1 whitespace-normal px-3 py-2 text-left text-xs"
-                        :class="grokEffort === option.effort ? 'border-primary bg-primary/5' : ''"
-                        @click="grokEffort = option.effort"
-                      >
-                        <span class="flex w-full min-w-0 items-center justify-between gap-1">
-                          <strong class="min-w-0 truncate capitalize">{{ 'displayName' in option ? option.displayName : option.effort }}</strong>
-                          <Check v-if="grokEffort === option.effort" :size="13" class="shrink-0 text-primary" />
-                        </span>
-                        <small class="w-full whitespace-normal break-words line-clamp-2 text-[10px] font-normal leading-snug text-muted-foreground">
-                          {{ option.description }}
-                        </small>
-                      </Button>
-                    </div>
+                    <ReasoningSlider v-model="grokEffort" :label="t('settings.reasoning')" :options="grokEffortOptions" />
                   </div>
                   <div class="grid gap-3 sm:grid-cols-2">
                     <div class="space-y-1">
@@ -3002,20 +2984,7 @@ wsl --update</code></pre>
                   </div>
                   <div class="space-y-1">
                     <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
-                    <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                      <Button
-                        v-for="option in (isGeminiSettings ? antigravityModelEfforts(externalModel, externalRuntimeProvider?.reasoningEfforts || []) : externalRuntimeProvider?.reasoningEfforts || [])"
-                        :key="option.effort"
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        class="h-8"
-                        :class="externalEffort === option.effort ? 'border-primary bg-primary/5' : ''"
-                        @click="externalEffort = option.effort"
-                      >
-                        {{ option.displayName || option.effort }}
-                       </Button>
-                     </div>
+                    <ReasoningSlider v-model="externalEffort" :label="t('settings.reasoning')" :options="isGeminiSettings ? antigravityModelEfforts(externalModel, externalRuntimeProvider?.reasoningEfforts || []) : externalRuntimeProvider?.reasoningEfforts || []" />
                    </div>
                    <div class="grid gap-3 sm:grid-cols-2">
                      <div class="space-y-1">
@@ -3100,26 +3069,7 @@ wsl --update</code></pre>
 
                   <div class="space-y-1">
                     <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
-                    <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      <Button
-                        v-for="option in effortOptions"
-                        :key="option.effort"
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        class="h-auto min-w-0 w-full shrink flex-col items-stretch justify-start gap-1 whitespace-normal px-3 py-2 text-left text-xs"
-                        :class="effort === option.effort ? 'border-primary bg-primary/5' : ''"
-                        @click="effort = option.effort"
-                      >
-                        <span class="flex w-full min-w-0 items-center justify-between gap-1">
-                          <strong class="min-w-0 truncate capitalize">{{ 'displayName' in option ? option.displayName : option.effort }}</strong>
-                          <Check v-if="effort === option.effort" :size="13" class="shrink-0 text-primary" />
-                        </span>
-                        <small class="w-full whitespace-normal break-words line-clamp-2 text-[10px] font-normal leading-snug text-muted-foreground">
-                          {{ option.description }}
-                        </small>
-                      </Button>
-                    </div>
+                    <ReasoningSlider v-model="effort" :label="t('settings.reasoning')" :options="effortOptions" />
                   </div>
 
                   <div class="flex items-center justify-between rounded-lg border px-3 py-2.5">

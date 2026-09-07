@@ -1234,6 +1234,7 @@ onUnmounted(() => {
                 : null"
               :animated="entry.index >= groups.length - 2"
               :streaming="entry.index === streamingAgentGroupIndex"
+              :retry-disabled="timelineSending || Boolean(timelineTurnFeedback?.state === 'running' || timelineTurnFeedback?.state === 'retrying')"
               :turn-diff="isCodexMode && entry.isTurnTail ? (codexStore.diffsByTurn[entry.group.turnId] || '') : ''"
               :allow-turn-actions="isCodexMode && entry.isTurnTail"
               :turn-actions-disabled="isCodexMode && Boolean(codexStore.threadMutationForThread(timelineThreadId))"

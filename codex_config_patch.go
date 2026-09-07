@@ -11,12 +11,12 @@ import (
 )
 
 type CodexFeatureFlags struct {
-	MemoriesEnabled              bool `json:"memoriesEnabled"`
-	MemoriesGenerate             bool `json:"memoriesGenerate"`
-	MemoriesUse                  bool `json:"memoriesUse"`
+	MemoriesEnabled                bool `json:"memoriesEnabled"`
+	MemoriesGenerate               bool `json:"memoriesGenerate"`
+	MemoriesUse                    bool `json:"memoriesUse"`
 	MemoriesDisableExternalContext bool `json:"memoriesDisableExternalContext"`
-	BrowserUseFullCDP            bool `json:"browserUseFullCDP"`
-	InAppBrowser                 bool `json:"inAppBrowser"`
+	BrowserUseFullCDP              bool `json:"browserUseFullCDP"`
+	InAppBrowser                   bool `json:"inAppBrowser"`
 }
 
 func codexConfigPath() string {
@@ -25,6 +25,35 @@ func codexConfigPath() string {
 		return ""
 	}
 	return filepath.Join(home, "config.toml")
+}
+
+func (s *AppService) ReadComputerUseSetting() (bool, error) {
+	payload, err := os.ReadFile(codexConfigPath())
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	body := extractTOMLSection(string(payload), "features")
+	match := regexp.MustCompile(`(?m)^\s*computer_use\s*=\s*(true|false)\s*(?:#.*)?$`).FindStringSubmatch(body)
+	return len(match) < 2 || match[1] == "true", nil
+}
+
+// Save only this feature: never rewrite unrelated flags or application grants.
+func (s *AppService) SaveComputerUseSetting(enabled bool) error {
+	path := codexConfigPath()
+	if path == "" {
+		return os.ErrNotExist
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	return writeTextFileAtomic(path, upsertTOMLScalar(string(payload), "features", "computer_use", strconv.FormatBool(enabled)))
 }
 
 func readCodexFeatureFlags() CodexFeatureFlags {

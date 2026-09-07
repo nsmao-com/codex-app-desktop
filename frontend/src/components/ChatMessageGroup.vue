@@ -36,6 +36,7 @@ import {
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import AttachmentImage from './AttachmentImage.vue'
 import ThinkingOrb from './ThinkingOrb.vue'
+import MessageTranslation from './MessageTranslation.vue'
 import { useAppStore } from '@/stores'
 import type { TimelineItem, TurnMetrics } from '@/types/codex'
 import { extractFileDiff, parseUnifiedDiff } from '@/utils/diff'
@@ -53,6 +54,7 @@ const props = defineProps<{
   turnDiff?: string
   allowTurnActions?: boolean
   turnActionsDisabled?: boolean
+  retryDisabled?: boolean
   workspacePath?: string
   /** Precomputed in ChatTimeline to avoid per-group O(n) scans. */
   turnIndex?: number
@@ -109,7 +111,6 @@ const turnsFromHere = computed(() => {
   if (turnIndex.value < 0) return 0
   return turnCount.value - turnIndex.value
 })
-const isFailed = computed(() => props.items.some((item) => item.failed))
 const agentPlainText = computed(() =>
   props.items
     .filter((item) =>
@@ -1031,8 +1032,9 @@ function diffStats(diff: string): { add: number; del: number } {
           />
         </div>
       </div>
-      <div class="flex h-6 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-        <TooltipProvider v-if="allowTurnActions && isFailed">
+      <div class="flex min-h-7 items-center gap-0.5 opacity-75 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+        <MessageTranslation :text="items[0]?.text || ''" :disabled="streaming" />
+        <TooltipProvider v-if="items[0]">
           <Tooltip>
             <TooltipTrigger as-child>
               <Button
@@ -1040,6 +1042,7 @@ function diffStats(diff: string): { add: number; del: number } {
                 size="icon-xs"
                 class="size-6 text-muted-foreground"
                 :aria-label="t('chat.retryMessage')"
+                :disabled="retryDisabled || streaming"
                 @click="emit('retry', items[0].id)"
               >
                 <RefreshCcw :size="12" />
@@ -1567,6 +1570,7 @@ function diffStats(diff: string): { add: number; del: number } {
               <TooltipContent side="bottom">{{ isCopied('agent') ? t('timeline.copied') : t('timeline.copyMessage') }}</TooltipContent>
             </Tooltip>
           </TooltipProvider>
+          <MessageTranslation :text="agentPlainText" :disabled="streaming" />
           <DropdownMenu v-if="allowTurnActions && turnId && !streaming">
             <DropdownMenuTrigger as-child>
               <Button

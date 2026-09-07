@@ -965,8 +965,6 @@ export interface UserSettings {
     "geminiRecentWorkspaces": string[] | null;
     "geminiModel": string;
     "geminiEffort": string;
-    "codexRetryCount": number;
-    "codexRetryWaitSeconds": number;
     "geminiSandbox": string;
     "geminiApprovalPolicy": string;
     "geminiCustomModels": string[] | null;
@@ -984,6 +982,8 @@ export interface UserSettings {
     "modelProvider": string;
     "customModels": string[] | null;
     "effort": string;
+    "codexRetryCount": number;
+    "codexRetryWaitSeconds": number;
     "serviceTier": string;
     "collaborationMode": string;
     "personality": string;

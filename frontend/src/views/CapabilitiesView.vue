@@ -72,6 +72,7 @@ import { notify } from '@/utils/notify'
 import { MCP_IMPORT_MAX_LENGTH, parseMCPImportJSON, type ImportedMCPServer } from '@/utils/mcpImport'
 
 type CapabilityTab = 'plugins' | 'skills' | 'apps' | 'mcp' | 'automation'
+const props = defineProps<{ embedded?: boolean }>()
 type GrokCapTab = 'runtime' | 'mcp' | 'skills' | 'plugins' | 'instructions'
 type ClaudeCapTab = 'runtime' | 'mcp' | 'skills' | 'plugins' | 'agents' | 'hooks' | 'instructions'
 
@@ -605,6 +606,8 @@ function applyRouteTab(tab: unknown): void {
   }
   if (value === 'runtime' || value === 'mcp' || value === 'skills' || value === 'instructions') {
     externalTab.value = value
+  } else if (value === 'plugins') {
+    externalTab.value = 'runtime'
   }
 }
 
@@ -990,7 +993,7 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
 </script>
 
 <template>
-  <div class="flex h-full w-full overflow-hidden bg-transparent text-foreground">
+  <div class="flex h-full min-w-0 w-full overflow-hidden bg-transparent text-foreground" :class="props.embedded ? 'capabilities-embedded' : ''">
     <Dialog v-model:open="mcpImportOpen">
       <DialogContent class="gap-0 overflow-hidden p-0 sm:max-w-2xl">
         <DialogHeader class="border-b px-5 py-4 text-left">
@@ -1107,9 +1110,9 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
     </Dialog>
 
     <!-- Left tab rail on the gray shell -->
-    <aside class="flex w-[248px] shrink-0 flex-col">
+    <aside class="flex shrink-0 flex-col" :class="props.embedded ? 'w-[140px] max-sm:w-24' : 'w-[248px]'">
       <div class="space-y-2 px-3 pb-2 pt-1">
-        <Button variant="ghost" class="h-8 w-full justify-start px-2 text-xs text-muted-foreground" @click="closeCapabilities">
+        <Button v-if="!props.embedded" variant="ghost" class="h-8 w-full justify-start px-2 text-xs text-muted-foreground" @click="closeCapabilities">
           <ArrowLeft :size="14" class="mr-2" />
           {{ t('settings.backToApp') }}
         </Button>

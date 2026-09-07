@@ -36,6 +36,7 @@ import {
 import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import { sameWorkspacePath, workspaceKey } from '@/utils/workspacePath'
+import { notify } from '@/utils/notify'
 
 const appStore = useAppStore()
 const {
@@ -417,13 +418,30 @@ function onMessageSent(payload: { draftKey: string }): void {
   messageSentEpoch.value += 1
 }
 
-function onRetry(itemID: string): void {
-  if (!isCodexMode.value) return
+const retryPending = shallowRef(false)
+async function onRetry(itemID: string): Promise<void> {
+  if (retryPending.value || paneSessionBusy.value) return
   const threadID = paneSessionId.value
+  if (!threadID) return
   const key = matchingCodexThreadKey(codexStore.itemsByThread, threadID)
-  const item = ((key && codexStore.itemsByThread[key]) || []).find((candidate) => candidate.id === itemID)
-  if (!item?.text) return
-  void codexStore.retryMessage(itemID, item.text, threadID)
+  const items = isGrokMode.value ? grokStore.itemsForSession(threadID)
+    : isClaudeMode.value ? claudeStore.itemsForSession(threadID)
+      : ((key && codexStore.itemsByThread[key]) || [])
+  const item = items.find((candidate) => candidate.id === itemID && candidate.type === 'userMessage')
+  if (!item) return
+  const images = item.attachments.filter((attachment) => attachment.kind === 'local').map((attachment) => attachment.source)
+  if (!item.text.trim() && !images.length) return
+  retryPending.value = true
+  try {
+    if (isGrokMode.value) await grokStore.sendMessage(item.text, images, threadID, paneWorkspacePath.value)
+    else if (isClaudeMode.value) await claudeStore.sendMessage(item.text, images, threadID, paneWorkspacePath.value)
+    else if (item.failed) await codexStore.retryMessage(itemID, item.text, threadID)
+    else await codexStore.sendMessage(item.text, images, threadID)
+  } catch (error) {
+    notify('error', '重新发送失败', error instanceof Error ? error.message : String(error))
+  } finally {
+    retryPending.value = false
+  }
 }
 
 function onRollback(payload: { turnId: string; mode: 'single' | 'fromHere' }): void {

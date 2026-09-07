@@ -10,6 +10,7 @@ import './assets/main.css'
 import './assets/composer-enhancements.css'
 import { i18n } from './i18n'
 import router from './router'
+import { installClickEffects } from './utils/clickEffects'
 
 const app = createApp(App)
 app.use(createPinia())
@@ -35,3 +36,6 @@ app.use(MotionPlugin, {
 app.use(router)
 app.use(i18n)
 app.mount('#app')
+const stopClickEffects = installClickEffects()
+app.onUnmount(stopClickEffects)
+if (import.meta.hot) import.meta.hot.dispose(stopClickEffects)

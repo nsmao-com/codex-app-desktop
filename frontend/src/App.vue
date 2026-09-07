@@ -295,7 +295,7 @@ function onGlobalKeydown(event: KeyboardEvent): void {
           <Dialog :open="settingsOpen" @update:open="onSettingsOpenChange">
             <DialogContent
               :show-close-button="false"
-              class="h-[min(880px,calc(100vh-3rem))] w-[min(1180px,calc(100vw-3rem))] max-w-none gap-0 overflow-hidden rounded-2xl bg-background/98 p-0 shadow-2xl backdrop-blur-xl sm:max-w-none"
+              class="nice-settings-dialog min-w-0 gap-0 overflow-hidden rounded-2xl bg-background/98 p-0 shadow-2xl backdrop-blur-xl sm:max-w-none"
             >
               <DialogTitle class="sr-only">{{ $t('settings.title') }}</DialogTitle>
               <DialogDescription class="sr-only">{{ $t('settings.pageDescription') }}</DialogDescription>
