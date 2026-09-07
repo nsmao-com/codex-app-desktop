@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.2：五运行时消息重发、Google Cloud 翻译、Computer Use 设置、精细思考度滑杆与设置内能力中心弹窗。</sub></p>
+<p align="center"><sub>v1.6.3：翻译支持默认 Google、自定义接口和复用当前厂商 API 配置，修复短窗口引导页按钮不可见。</sub></p>
 
 ## 为什么是 Nice Codex
 

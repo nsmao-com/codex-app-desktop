@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.2: Message resend, opt-in Google Cloud translation, Computer Use settings, refined reasoning controls and an integrated capabilities dialog.</sub></p>
+<p align="center"><sub>v1.6.3: Configurable Google, custom API or current-provider translation, plus scrollable onboarding for short windows.</sub></p>
 
 ## Why Nice Codex
 

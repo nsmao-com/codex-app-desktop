@@ -119,6 +119,11 @@ type BootstrapData struct {
 }
 
 type UserSettings struct {
+	TranslationProvider  string   `json:"translationProvider"`
+	TranslationBaseURL   string   `json:"translationBaseURL"`
+	TranslationModel     string   `json:"translationModel"`
+	TranslationAPIKey    string   `json:"translationAPIKey"`
+	TranslationGoogleKey string   `json:"translationGoogleKey"`
 	ActiveRuntime        string   `json:"activeRuntime"`
 	Workspace            string   `json:"workspace"`
 	RecentWorkspaces     []string `json:"recentWorkspaces"`
@@ -426,6 +431,9 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	settings.GrokCustomModels = sanitizeCustomModels(settings.GrokCustomModels)
 	settings.Effort = strings.TrimSpace(settings.Effort)
 	settings.ActiveRuntime = normalizeRuntime(settings.ActiveRuntime)
+	if err := validateTranslationSettings(&settings); err != nil {
+		return UserSettings{}, err
+	}
 	settings.GrokBackend = normalizeGrokBackend(settings.GrokBackend)
 	settings.GrokBuildModel = sanitizeShortText(settings.GrokBuildModel, 160)
 	settings.GrokAPIModel = sanitizeShortText(settings.GrokAPIModel, 160)

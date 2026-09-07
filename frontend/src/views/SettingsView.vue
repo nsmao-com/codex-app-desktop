@@ -13,6 +13,7 @@ import {
   FolderOpen,
   GitBranch,
   Laptop,
+  Languages,
   LogIn,
   LogOut,
   Network,
@@ -71,6 +72,7 @@ import type { AppTheme } from '@/composables/useAppearance'
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import CapabilitiesView from '@/views/CapabilitiesView.vue'
 import ComputerUseSettings from '@/components/ComputerUseSettings.vue'
+import TranslationSettings from '@/components/TranslationSettings.vue'
 import ReasoningSlider from '@/components/ReasoningSlider.vue'
 import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
@@ -110,6 +112,7 @@ type SettingsPanel =
   | 'mcp'
   | 'routing'
   | 'computer-use'
+  | 'translation'
 
 type NavItem = {
   id: SettingsPanel
@@ -825,6 +828,7 @@ const navGroups = computed<NavGroup[]>(() => [
       { id: 'general', label: t('settings.navGeneral'), icon: Settings2, keywords: 'general permission language terminal notify send follow-up always on top 常规 权限 语言 终端 通知 发送 跟进 置顶' },
       { id: 'appearance', label: t('settings.navAppearance'), icon: Palette, keywords: 'appearance theme font 外观 主题 字体' },
       { id: 'shortcuts', label: t('settings.navShortcuts'), icon: Keyboard, keywords: 'keyboard shortcuts hotkeys 快捷键' },
+      { id: 'translation', label: '消息翻译', icon: Languages, keywords: 'translation google 翻译 谷歌 baseurl key 模型' },
       { id: 'agent', label: t('settings.navAgent'), icon: agentSettingsIcon.value, keywords: 'agent model codex claude gemini grok opencode 配置 模型' },
       { id: 'personalization', label: t('settings.navPersonalization'), icon: Smile, keywords: 'personality collaboration instructions AGENTS memories 个性化 记忆 全局提示词 项目提示词' },
       { id: 'usage', label: t('settings.navUsage'), icon: BarChart3, keywords: 'usage tokens chart models analytics 用量 token 图表 模型 统计' },
@@ -1090,7 +1094,7 @@ watch(() => route.query.section, (section) => {
 function isSettingsPanel(value: string): value is SettingsPanel {
   return [
     'general', 'appearance', 'shortcuts', 'agent', 'personalization', 'usage', 'account', 'archived',
-    'browser', 'environment', 'git', 'scheduled', 'routing', 'computer-use',
+    'browser', 'environment', 'git', 'scheduled', 'routing', 'computer-use', 'translation',
   ].includes(value)
 }
 
@@ -2001,7 +2005,7 @@ async function refreshActiveRuntime(options: { silent?: boolean } = {}): Promise
 }
 
 function submitSettings(): void {
-  if (activePanel.value === 'routing') return
+  if (activePanel.value === 'routing' || activePanel.value === 'translation' || activePanel.value === 'computer-use') return
   void save()
 }
 
@@ -2071,7 +2075,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
             <div class="min-w-0 flex-1">
               <h1 class="text-[15px] font-semibold tracking-tight">{{ activeNavItem?.label || t('settings.title') }}</h1>
             </div>
-            <Button v-if="!showingCapabilities && activePanel !== 'computer-use' && activePanel !== 'usage' && activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching">
+            <Button v-if="!showingCapabilities && activePanel !== 'translation' && activePanel !== 'computer-use' && activePanel !== 'usage' && activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching">
               {{ saving ? t('common.saving') : t('settings.save') }}
             </Button>
             <SimpleTooltip :content="t('settings.close')">
@@ -2133,6 +2137,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
         <main v-else class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-5">
           <form id="settings-form" class="mx-auto max-w-3xl space-y-5" @submit.prevent="submitSettings">
             <ComputerUseSettings v-if="activePanel === 'computer-use'" />
+            <TranslationSettings v-if="activePanel === 'translation'" />
             <!-- General -->
             <template v-if="activePanel === 'general'">
               <section class="overflow-hidden rounded-xl border bg-card">

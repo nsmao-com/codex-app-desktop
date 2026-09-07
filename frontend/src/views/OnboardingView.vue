@@ -198,8 +198,8 @@ onMounted(() => {
     <div class="welcome-orb welcome-orb-a pointer-events-none absolute" aria-hidden="true" />
     <div class="welcome-orb welcome-orb-b pointer-events-none absolute" aria-hidden="true" />
 
-    <div class="relative z-[1] mx-auto flex w-full max-w-2xl flex-1 flex-col px-6 py-10 sm:px-8">
-      <div class="onboarding-chrome mb-8 flex items-center justify-between gap-3">
+    <div class="relative z-[1] mx-auto flex min-h-0 w-full max-w-2xl flex-1 flex-col px-6 py-4 sm:px-8 sm:py-6">
+      <div class="onboarding-chrome mb-4 flex shrink-0 items-center justify-between gap-3">
         <div>
           <p class="text-[11px] font-medium tracking-[0.18em] text-muted-foreground uppercase">Nice Codex</p>
           <p class="mt-1 text-[13px] text-muted-foreground">{{ t('onboarding.kicker') }}</p>
@@ -214,7 +214,8 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="relative flex min-h-0 flex-1 flex-col justify-center overflow-hidden">
+      <div class="onboarding-body scrollbar-thin relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
+        <div class="flex min-h-full flex-col justify-center py-2 [&>.onboarding-panel]:shrink-0">
         <Transition :name="transitionName" mode="out-in">
           <!-- Welcome -->
           <div v-if="step === 0" key="welcome" class="onboarding-panel space-y-4">
@@ -328,7 +329,7 @@ onMounted(() => {
                         {{ toolStatusLabel(tool) }}
                       </Badge>
                     </div>
-                    <p class="mt-1.5 font-mono text-[11px] text-muted-foreground">
+                    <p class="mt-1.5 break-all font-mono text-[11px] text-muted-foreground">
                       {{ tool.package }}
                     </p>
                     <p class="mt-1 text-[11px] text-muted-foreground">
@@ -385,7 +386,7 @@ onMounted(() => {
 
             <p
               v-if="cliReport?.codexHome || cliReport?.grokHome"
-              class="text-[11px] leading-5 text-muted-foreground"
+              class="break-all text-[11px] leading-5 text-muted-foreground"
             >
               {{
                 t('onboarding.cliHomesHint', {
@@ -418,9 +419,10 @@ onMounted(() => {
             <p class="text-[12px] text-muted-foreground">{{ t('onboarding.workspaceHint') }}</p>
           </div>
         </Transition>
+        </div>
       </div>
 
-      <div class="onboarding-chrome mt-8 flex items-center justify-between gap-3">
+      <div class="onboarding-chrome mt-4 flex shrink-0 items-center justify-between gap-3">
         <Button
           v-if="step > 0"
           type="button"

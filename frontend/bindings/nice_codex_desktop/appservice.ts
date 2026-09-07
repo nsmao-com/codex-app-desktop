@@ -806,6 +806,13 @@ export function SwitchGitBranch(request: $models.GitBranchSwitchRequest): $Cance
 }
 
 /**
+ * TranslateConfiguredMessage never joins a CLI conversation or enables model tools.
+ */
+export function TranslateConfiguredMessage(text: string, target: string, runtime: string): $CancellablePromise<string> {
+    return $Call.ByID(110377247, text, target, runtime);
+}
+
+/**
  * TranslateMessage sends only the explicitly selected text to Google Cloud.
  * Keys are request-scoped (or provided by the environment), never logged/stored.
  */

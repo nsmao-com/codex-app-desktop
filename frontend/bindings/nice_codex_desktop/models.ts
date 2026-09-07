@@ -909,6 +909,11 @@ export interface UpdateProgress {
 }
 
 export interface UserSettings {
+    "translationProvider": string;
+    "translationBaseURL": string;
+    "translationModel": string;
+    "translationAPIKey": string;
+    "translationGoogleKey": string;
     "activeRuntime": string;
     "workspace": string;
     "recentWorkspaces": string[] | null;

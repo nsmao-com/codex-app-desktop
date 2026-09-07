@@ -43,6 +43,55 @@ func TestTranslationAndComputerUseSettings(t *testing.T) {
 	if result, err := s.TranslateMessage("hello & world", "zh-CN", "test-key"); err != nil || result != "你好 & 世界" {
 		t.Fatalf("translation: %q %v", result, err)
 	}
+	for _, protocol := range []string{"chat", "responses", "anthropic", "anthropic-bearer"} {
+		http.DefaultTransport = translationRoundTrip(func(r *http.Request) (*http.Response, error) {
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["model"] != "qa-model" || body["tools"] != nil || body["conversation"] != nil {
+				t.Fatal("translation polluted conversation")
+			}
+			response := `{"choices":[{"message":{"content":"译文"},"finish_reason":"stop"}]}`
+			expectedPath := "/v1/chat/completions"
+			if protocol == "responses" {
+				expectedPath = "/v1/responses"
+				response = `{"status":"completed","output":[{"content":[{"type":"output_text","text":"译文"}]}]}`
+			}
+			if strings.HasPrefix(protocol, "anthropic") {
+				expectedPath = "/v1/messages"
+				response = `{"content":[{"type":"text","text":"译文"}]}`
+			}
+			if r.URL.Path != expectedPath {
+				t.Fatalf("wrong endpoint %s", r.URL.Path)
+			}
+			if protocol == "anthropic" {
+				if r.Header.Get("x-api-key") != "qa-key" || r.Header.Get("Authorization") != "" {
+					t.Fatal("wrong anthropic auth")
+				}
+			} else if r.Header.Get("Authorization") != "Bearer qa-key" {
+				t.Fatal("wrong bearer auth")
+			}
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(response)), Header: make(http.Header)}, nil
+		})
+		if result, err := translateWithAPI("hello", "zh-CN", translationAPI{base: "https://example.invalid/v1", model: "qa-model", key: "qa-key", protocol: protocol}); err != nil || result != "译文" {
+			t.Fatalf("%s: %q %v", protocol, result, err)
+		}
+	}
+	for _, base := range []string{"http://remote.example/v1", "https://key@example.com/v1", "https://example.com/v1?key=secret"} {
+		if _, err := translationBaseURL(base); err == nil {
+			t.Fatal("unsafe URL accepted")
+		}
+	}
+	if _, err := currentTranslationAPI(UserSettings{}, "gemini"); err == nil {
+		t.Fatal("CLI OAuth treated as API key")
+	}
+	http.DefaultTransport = translationRoundTrip(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"partial"},"finish_reason":"length"}]}`))}, nil
+	})
+	if _, err := translateWithAPI("hello", "en", translationAPI{base: "https://example.invalid/v1", model: "qa-model", protocol: "chat"}); err == nil {
+		t.Fatal("truncated translation accepted")
+	}
 	path := codexConfigPath()
 	if err := os.WriteFile(path, []byte("[features]\ncomputer_use = true # keep other flags\nmemories = true\n"), 0600); err != nil {
 		t.Fatal(err)

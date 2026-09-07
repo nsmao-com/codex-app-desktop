@@ -47,6 +47,7 @@ import { compactDisplayPath, fullDisplayPath, workspaceKey } from '@/utils/works
 
 const props = defineProps<{
   kind: 'user' | 'agent'
+  runtime?: string
   items: TimelineItem[]
   metrics?: TurnMetrics | null
   animated?: boolean
@@ -1033,7 +1034,7 @@ function diffStats(diff: string): { add: number; del: number } {
         </div>
       </div>
       <div class="flex min-h-7 items-center gap-0.5 opacity-75 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-        <MessageTranslation :text="items[0]?.text || ''" :disabled="streaming" />
+        <MessageTranslation :text="items[0]?.text || ''" :runtime="runtime" :disabled="streaming" />
         <TooltipProvider v-if="items[0]">
           <Tooltip>
             <TooltipTrigger as-child>
@@ -1570,7 +1571,7 @@ function diffStats(diff: string): { add: number; del: number } {
               <TooltipContent side="bottom">{{ isCopied('agent') ? t('timeline.copied') : t('timeline.copyMessage') }}</TooltipContent>
             </Tooltip>
           </TooltipProvider>
-          <MessageTranslation :text="agentPlainText" :disabled="streaming" />
+          <MessageTranslation :text="agentPlainText" :runtime="runtime" :disabled="streaming" />
           <DropdownMenu v-if="allowTurnActions && turnId && !streaming">
             <DropdownMenuTrigger as-child>
               <Button

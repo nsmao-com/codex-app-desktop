@@ -1222,6 +1222,7 @@ onUnmounted(() => {
             class="scroll-mt-8"
           >
             <ChatMessageGroup
+              :runtime="paneRuntime"
               :kind="entry.group.kind"
               :items="entry.group.items"
               :workspace-path="timelineWorkspacePath"
