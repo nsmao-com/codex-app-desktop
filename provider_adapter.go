@@ -3367,6 +3367,18 @@ func textFromClaudeContentBlocks(value any, thinking bool) string {
 func textFromExternalValue(value any) string {
 	switch typed := value.(type) {
 	case string:
+		// Antigravity 1.1.x occasionally serializes a text envelope as a JSON
+		// string (e.g. `{"text":"..."}`); decode that envelope before treating
+		// it as assistant content so protocol punctuation is not displayed.
+		trimmed := strings.TrimSpace(typed)
+		if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+			var envelope map[string]any
+			if json.Unmarshal([]byte(trimmed), &envelope) == nil && len(envelope) > 0 {
+				if decoded := textFromExternalValue(envelope); decoded != "" {
+					return decoded
+				}
+			}
+		}
 		return typed
 	case []any:
 		var builder strings.Builder
@@ -3376,6 +3388,15 @@ func textFromExternalValue(value any) string {
 		return builder.String()
 	case map[string]any:
 		for _, key := range []string{"text", "content", "delta", "output", "response", "result"} {
+			if text := textFromExternalValue(typed[key]); text != "" {
+				return text
+			}
+		}
+		// Some Antigravity builds wrap the assistant payload in a JSON object
+		// whose textual field is named `value`/`message`. Do not stringify the
+		// object itself: that leaks protocol braces (notably a trailing `}`) into
+		// the rendered file/code response.
+		for _, key := range []string{"value", "message", "body"} {
 			if text := textFromExternalValue(typed[key]); text != "" {
 				return text
 			}
