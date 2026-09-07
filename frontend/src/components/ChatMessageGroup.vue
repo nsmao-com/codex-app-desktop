@@ -914,8 +914,26 @@ function stripGenericToolTitle(value: string): string {
 }
 
 function formatToolAction(value: string, toolName = ''): string {
-  const raw = value.trim()
+  let raw = value.trim()
   if (!raw) return ''
+  // Tool details are JSON arguments, not a path. Never split the whole JSON
+  // at slashes (which leaves a filename ending in quote/brace punctuation).
+  if (raw.startsWith('{') || raw.startsWith('"')) {
+    try {
+      let parameters: unknown = JSON.parse(raw)
+      if (typeof parameters === 'string') parameters = JSON.parse(parameters)
+      if (parameters && typeof parameters === 'object' && !Array.isArray(parameters)) {
+        const record = parameters as Record<string, unknown>
+        const target = ['AbsolutePath', 'TargetFile', 'path', 'file_path', 'filePath', 'target_file', 'filename', 'FileName', 'DirectoryPath', 'SearchDirectory', 'command', 'CommandLine', 'query']
+          .map((key) => record[key]).find((value) => typeof value === 'string' && value.trim())
+        if (typeof target !== 'string') return humanizeToolLabel(toolName || 'Tool')
+        raw = target.trim()
+      }
+    } catch {
+      // Partial/unrecognised JSON remains available in details, not the title.
+      return humanizeToolLabel(toolName || 'Tool')
+    }
+  }
   // Don't re-humanize file paths into Title Case; keep basename readable.
   if (/[\\/]/.test(raw) || /\.[a-z0-9]+$/i.test(raw)) {
     const base = raw.split(/[\\/]/).filter(Boolean).at(-1) || raw

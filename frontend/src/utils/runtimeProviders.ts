@@ -12,6 +12,20 @@ export const DEFAULT_CODEX_REASONING = [
 
 export const DEFAULT_CODEX_MODEL = 'gpt-6-astra'
 
+/** agy models: Gemini 3.1 Pro exposes low/high, not the Flash medium variant. */
+export function antigravityModelEfforts<T extends { effort: string }>(model: string, options: T[]): T[] {
+  const id = model.trim().toLowerCase()
+  const fixed = id.match(/-(low|medium|high)$/)?.[1]
+  if (fixed) return options.filter((option) => option.effort === fixed)
+  if (id === 'gemini-3.1-pro') return options.filter((option) => option.effort !== 'medium')
+  return options
+}
+
+export function normalizeAntigravityModelEffort(model: string, effort: string): string {
+  const options = antigravityModelEfforts(model, ['high', 'medium', 'low'].map((effort) => ({ effort })))
+  return options.some((option) => option.effort === effort) ? effort : options[0]!.effort
+}
+
 /** Soft fallback when model/list is unavailable. */
 export const FALLBACK_CODEX_MODELS = [
   DEFAULT_CODEX_MODEL,

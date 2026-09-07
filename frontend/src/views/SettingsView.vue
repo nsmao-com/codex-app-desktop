@@ -86,7 +86,7 @@ import {
   type CLIToolStatus,
   type CLIToolsReport,
 } from '@/utils/cliTools'
-import { DEFAULT_GROK_REASONING, modelsForClaudeRuntime, modelsForGrokRuntime, modelsForRuntime } from '@/utils/runtimeProviders'
+import { antigravityModelEfforts, normalizeAntigravityModelEffort, DEFAULT_GROK_REASONING, modelsForClaudeRuntime, modelsForGrokRuntime, modelsForRuntime } from '@/utils/runtimeProviders'
 
 type SettingsPanel =
   | 'general'
@@ -327,8 +327,9 @@ const externalModel = computed({
   get: () => isGeminiSettings.value ? appStore.settings.geminiModel : appStore.settings.openCodeModel,
   set: (value: string) => {
     if (isGeminiSettings.value) {
-      appStore.patchSettings({ geminiModel: value })
-      syncExternalActiveSession(value, appStore.settings.geminiEffort)
+      const effort = normalizeAntigravityModelEffort(value, appStore.settings.geminiEffort)
+      appStore.patchSettings({ geminiModel: value, geminiEffort: effort })
+      syncExternalActiveSession(value, effort)
       return
     }
     const provider = value.includes('/') ? value.slice(0, value.indexOf('/')).trim() : ''
@@ -3003,7 +3004,7 @@ wsl --update</code></pre>
                     <Label class="text-xs">{{ t('settings.reasoning') }}</Label>
                     <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
                       <Button
-                        v-for="option in (externalRuntimeProvider?.reasoningEfforts || [])"
+                        v-for="option in (isGeminiSettings ? antigravityModelEfforts(externalModel, externalRuntimeProvider?.reasoningEfforts || []) : externalRuntimeProvider?.reasoningEfforts || [])"
                         :key="option.effort"
                         type="button"
                         variant="outline"

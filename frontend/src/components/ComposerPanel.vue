@@ -71,6 +71,8 @@ import { notify } from '@/utils/notify'
 import { sameWorkspacePath } from '@/utils/workspacePath'
 import {
   DEFAULT_CODEX_REASONING,
+  antigravityModelEfforts,
+  normalizeAntigravityModelEffort,
   DEFAULT_GROK_REASONING,
   formatModelLabel,
   modelsForClaudeRuntime,
@@ -331,6 +333,12 @@ const slashCommands = computed<SlashCommand[]>(() => {
   if (isGrokMode.value) {
     return [
       {
+        id: 'compact',
+        label: '/compact',
+        description: t('slash.compactNativeOnly'),
+        run: () => notify('info', t('slash.compact'), t('slash.compactGrokHint')),
+      },
+      {
         id: 'rename',
         label: '/rename',
         description: t('slash.rename'),
@@ -405,9 +413,9 @@ const slashCommands = computed<SlashCommand[]>(() => {
         run: () => runAddCommand(),
       },
       {
-        id: 'summarize',
-        label: '/summarize',
-        description: t('slash.summarizeLocal'),
+        id: 'compact',
+        label: '/compact',
+        description: t('slash.compactNativeOnly'),
         run: compactComposerSession,
       },
       {
@@ -709,7 +717,7 @@ const displayModel = computed(() => {
 const displayEffort = computed(() => {
   if (isGrokMode.value) return composerGrokSession.value?.effort || appStore.settings.grokEffort || 'high'
   if (isClaudeMode.value) return composerClaudeSession.value?.effort || appStore.settings.claudeEffort || 'high'
-  if (isGeminiMode.value) return composerTimelineThread.value?.effort || appStore.settings.geminiEffort || 'high'
+  if (isGeminiMode.value) return normalizeAntigravityModelEffort(displayModel.value, composerTimelineThread.value?.effort || appStore.settings.geminiEffort || 'high')
   if (isOpenCodeMode.value) return composerTimelineThread.value?.effort || appStore.settings.openCodeEffort || 'high'
   return composerTimelineThread.value?.effort || appStore.settings.effort
 })
@@ -787,7 +795,7 @@ const reasoningOptions = computed(() => {
   if (isGeminiMode.value) {
     const fromProvider = externalProvider.value?.reasoningEfforts ?? []
     if (fromProvider.length) {
-      return fromProvider.map((item) => ({
+      return antigravityModelEfforts(displayModel.value, fromProvider).map((item) => ({
         effort: item.effort,
         displayName: item.displayName,
         description: item.description,
@@ -796,11 +804,11 @@ const reasoningOptions = computed(() => {
     // Antigravity's catalog probe can be unavailable while the CLI is busy or
     // when an older agy version does not expose metadata. Keep the control
     // usable with the same variants accepted by antigravityPermissionArgs.
-    return [
+    return antigravityModelEfforts(displayModel.value, [
       { effort: 'high', displayName: 'High', description: 'Deeper reasoning' },
       { effort: 'medium', displayName: 'Medium', description: 'Balanced speed and depth' },
       { effort: 'low', displayName: 'Low', description: 'Faster responses' },
-    ]
+    ])
   }
   const fromModel = selectedModel.value?.supportedReasoningEfforts ?? []
   return fromModel.length ? fromModel : [...DEFAULT_CODEX_REASONING]
@@ -1656,6 +1664,10 @@ async function deleteComposerSession(): Promise<void> {
 }
 
 function compactComposerSession(): void {
+  if (isGeminiMode.value || isOpenCodeMode.value) {
+    notify('info', t('slash.compact'), t(isGeminiMode.value ? 'slash.compactAntigravityHint' : 'slash.compactOpenCodeHint'))
+    return
+  }
   const sessionId = composerSessionId.value
   if (sessionId) void codexStore.compactThread(sessionId, !isArenaPane.value)
 }
@@ -2286,11 +2298,12 @@ async function applyModelSelection(value: string): Promise<void> {
     return
   }
   if (isGeminiMode.value) {
-    appStore.patchSettings({ geminiModel: modelID })
+    const effort = normalizeAntigravityModelEffort(modelID, displayEffort.value)
+    appStore.patchSettings({ geminiModel: modelID, geminiEffort: effort })
     if (composerTimelineThread.value) {
-      codexStore.patchSessionPreferences(composerTimelineThread.value.id, modelID, displayEffort.value)
+      codexStore.patchSessionPreferences(composerTimelineThread.value.id, modelID, effort)
       if (!composerTimelineThread.value.id.startsWith('pending-thread-')) {
-        void codexStore.updateSessionPreferences({ sessionId: composerTimelineThread.value.id, model: modelID, effort: displayEffort.value, collaborationMode: collaborationMode.value }).catch(() => undefined)
+        void codexStore.updateSessionPreferences({ sessionId: composerTimelineThread.value.id, model: modelID, effort, collaborationMode: collaborationMode.value }).catch(() => undefined)
       }
     }
     return

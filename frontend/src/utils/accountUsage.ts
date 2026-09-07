@@ -50,8 +50,6 @@ export function resolveProviderModelContextWindow(
   const catalogs = providers ?? []
   const runtimeCatalog = catalogs.find((provider) => normalizeProviderRuntime(provider.kind) === runtimeID)
   const exact = runtimeCatalog?.models?.find((item) => item.model.trim().toLowerCase() === normalizedModel)
-    ?? catalogs.flatMap((provider) => provider.models ?? [])
-      .find((item) => item.model.trim().toLowerCase() === normalizedModel)
   const exactWindow = Math.max(0, Number(exact?.contextWindow) || 0)
   if (exactWindow > 0) return exactWindow
 
@@ -66,7 +64,7 @@ export function resolveProviderModelContextWindow(
   if (runtimeID === 'gemini') {
     return normalizedModel.includes('gemma-4') || normalizedModel.includes('gemma_4')
       ? 256_000
-      : 1_048_576
+      : normalizedModel.startsWith('gemini-') ? 1_048_576 : 0
   }
   return 0
 }

@@ -544,12 +544,14 @@ func knownProviderContextWindow(kind, model string) int64 {
 			return 500_000
 		}
 	case "gemini":
-		// Gemini CLI 0.56 tokenLimits.ts fixes Gemini models at 1,048,576
-		// tokens and the two Gemma 4 variants at 256,000.
+		// Model-family fallback only, not a measured agy runtime capacity.
+		// Unknown/custom models must not inherit a Gemini window.
 		if strings.Contains(lower, "gemma-4") || strings.Contains(lower, "gemma_4") {
 			return 256_000
 		}
-		return 1_048_576
+		if strings.HasPrefix(lower, "gemini-") {
+			return 1_048_576
+		}
 	case "claude":
 		switch lower {
 		case "sonnet", "opus", "fable":

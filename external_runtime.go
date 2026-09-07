@@ -2439,11 +2439,7 @@ func aggregateNormalizedExternalUsage(values map[string]map[string]any) map[stri
 	if int64FromAny(result["totalTokens"]) <= 0 {
 		result["totalTokens"] = int64FromAny(result["inputTokens"]) + int64FromAny(result["cachedInputTokens"]) + int64FromAny(result["outputTokens"]) + int64FromAny(result["reasoningOutputTokens"])
 	}
-	contextTokens := int64FromAny(result["inputTokens"]) + int64FromAny(result["cachedInputTokens"])
-	if contextTokens > 0 {
-		result["contextTokens"] = contextTokens
-		result["contextUsageSource"] = "antigravity-step-sum"
-	}
+	// Summed spend across model steps is not the current context size.
 	return cloneNormalizedExternalUsage(result)
 }
 
@@ -2456,7 +2452,6 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 	mainTrajectoryID := ""
 	lastUserMarker := ""
 	stepUsage := make(map[string]map[string]any)
-	finalUsage := map[string]any(nil)
 	toolIndexes := make(map[string]int)
 	agentIndexes := make(map[string]int)
 	reasoningIndexes := make(map[string]int)
@@ -2487,9 +2482,7 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 			current.Items[index]["status"] = status
 			current.Items[index]["success"] = false
 		}
-		if finalUsage != nil {
-			current.Usage = cloneNormalizedExternalUsage(finalUsage)
-		} else if aggregate := aggregateNormalizedExternalUsage(stepUsage); aggregate != nil {
+		if aggregate := aggregateNormalizedExternalUsage(stepUsage); aggregate != nil {
 			current.Usage = aggregate
 		}
 		if current.Status == "" || current.Status == "inProgress" {
@@ -2507,7 +2500,6 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 		turns = append(turns, *current)
 		current = nil
 		stepUsage = make(map[string]map[string]any)
-		finalUsage = nil
 		toolIndexes = make(map[string]int)
 		agentIndexes = make(map[string]int)
 		reasoningIndexes = make(map[string]int)
@@ -2604,12 +2596,10 @@ func loadAntigravityNativeTurns(path string) ([]externalTurn, error) {
 		}
 
 		// Usage is attached to step_update/result envelopes, not only to the
-		// rendered text. Keep one snapshot per step and prefer the terminal result
-		// (the result usage is cumulative, while step usage is per-step).
+		// rendered text. Keep one snapshot per step; result usage includes earlier
+		// turns and must not be billed again for each turn.
 		if usage := extractExternalUsage(event); usage != nil && !isChild {
-			if antigravityIsTerminalEvent(event) {
-				finalUsage = cloneNormalizedExternalUsage(usage)
-			} else {
+			if !antigravityIsTerminalEvent(event) {
 				stepKey := antigravityEventStepKey(event, fmt.Sprintf("event:%d", eventOrdinal))
 				stepUsage[stepKey] = usage
 			}
@@ -3623,16 +3613,12 @@ func scanAntigravityNativeUsage(home, workspace string, addUsage func(any, strin
 			turnNumber := 0
 			turnActive := false
 			stepUsage := make(map[string]map[string]any)
-			var finalUsage map[string]any
 			turnModel := ""
 			flushTurn := func() {
 				if !turnActive {
 					return
 				}
-				usage := finalUsage
-				if usage == nil {
-					usage = aggregateNormalizedExternalUsage(stepUsage)
-				}
+				usage := aggregateNormalizedExternalUsage(stepUsage)
 				if usage != nil {
 					model := turnModel
 					if model == "" {
@@ -3642,7 +3628,6 @@ func scanAntigravityNativeUsage(home, workspace string, addUsage func(any, strin
 				}
 				turnActive = false
 				stepUsage = make(map[string]map[string]any)
-				finalUsage = nil
 				turnModel = ""
 			}
 			_ = visitJSONLLines(transcript, func(line []byte) bool {
@@ -3693,9 +3678,6 @@ func scanAntigravityNativeUsage(home, workspace string, addUsage func(any, strin
 					turnModel = model
 				}
 				if antigravityIsTerminalEvent(event) {
-					if usage != nil {
-						finalUsage = cloneNormalizedExternalUsage(usage)
-					}
 					flushTurn()
 					return false
 				}

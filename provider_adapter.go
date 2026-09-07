@@ -634,42 +634,10 @@ func (s *AppService) compactExternalSession(source *SessionRecord) error {
 	if source == nil {
 		return errors.New("session not found")
 	}
-	if len(source.Turns) == 0 {
-		return nil
-	}
-	var summary strings.Builder
-	summary.WriteString("Conversation summary (compacted):\n")
-	for _, turn := range source.Turns {
-		if text := strings.TrimSpace(turn.UserText); text != "" {
-			summary.WriteString("- User: ")
-			summary.WriteString(truncateRunes(text, 240))
-			summary.WriteByte('\n')
-		}
-		if text := strings.TrimSpace(turn.AgentText); text != "" {
-			summary.WriteString("- Agent: ")
-			summary.WriteString(truncateRunes(text, 240))
-			summary.WriteByte('\n')
-		}
-	}
-	now := time.Now().Unix()
-	compacted := externalTurn{
-		ID: "external-turn-" + newUUID(), UserText: "Compact conversation history",
-		AgentText: summary.String(), Status: "completed",
-		StartedAt: now, CompletedAt: now,
-	}
-	s.mu.Lock()
-	stored := s.sessions[source.ID]
-	if stored == nil {
-		s.mu.Unlock()
-		return errors.New("session not found")
-	}
-	stored.Turns = []externalTurn{compacted}
-	stored.Preview = truncateRunes(summary.String(), 120)
-	stored.UpdatedAt = now
-	s.persistSessionsLocked()
-	s.mu.Unlock()
-	s.emitExternalNotification("thread/tokenUsage/updated", map[string]any{"threadId": source.ID})
-	return nil
+	// These print-mode adapters do not expose a verified native compaction
+	// operation. Replacing local Turns never reduces the resumed CLI context
+	// and destroys visible history, so reject without mutating either history.
+	return errors.New("当前运行时尚未接入可验证的原生手动压缩；历史消息保持不变，请使用 CLI 自身的上下文管理功能")
 }
 
 func (s *AppService) rollbackExternalSession(source *SessionRecord, numTurns int) (map[string]any, error) {
@@ -1390,6 +1358,17 @@ func (s *AppService) executeExternalTurn(
 		nativeThoughts = newAntigravityThoughtCursor(sessionID)
 	}
 	args, generatedSessionID := externalCommandArgsForExecutable(provider, executable, sessionID, workspace, settings, prompt)
+	// Own a per-invocation log so a generic CLI result can be explained without
+	// reading another session's diagnostics or exposing an entire global log.
+	antigravityLog := ""
+	if provider == "gemini" && isAntigravityExecutable(executable) {
+		if file, err := os.CreateTemp("", "nice-agy-turn-*.log"); err == nil {
+			antigravityLog = file.Name()
+			_ = file.Close()
+			defer os.Remove(antigravityLog)
+			args = append(args, "--log-file", antigravityLog)
+		}
+	}
 	if sessionID == "" {
 		sessionID = generatedSessionID
 	}
@@ -1446,6 +1425,7 @@ func (s *AppService) executeExternalTurn(
 
 	var output strings.Builder
 	var usage map[string]any
+	antigravityStepUsage := make(map[string]map[string]any)
 	var streamErr string
 	emitted := false
 	stream := newExternalStreamCoalescer(onStream)
@@ -1513,6 +1493,11 @@ func (s *AppService) executeExternalTurn(
 		// so kind/final alone is not enough; also catch mid-stream usage if present.
 		if next := extractExternalUsage(event); next != nil && !antigravityChildEvent {
 			usage = next
+			if isAntigravityEvent && antigravityStepPayload(event) != nil {
+				if index := antigravityEventStepIndex(event); index != "" {
+					antigravityStepUsage[index] = next
+				}
+			}
 		}
 		if kind == "tool" || kind == "compact" {
 			// Flush text accumulated before structured activity first. Without this
@@ -1636,6 +1621,11 @@ func (s *AppService) executeExternalTurn(
 	scanErr := scanner.Err()
 	waitErr := command.Wait()
 	stderrText := strings.TrimSpace(string(<-stderrResult))
+	if provider == "gemini" && isAntigravityExecutable(executable) {
+		// result.usage is conversation-cumulative in agy 1.1.27. Only the
+		// deduplicated model-step usage observed in this invocation is turn spend.
+		usage = aggregateNormalizedExternalUsage(antigravityStepUsage)
+	}
 	historyTerminalOutcome := ""
 	if grokTerminalOutcome != nil {
 		select {
@@ -1648,6 +1638,11 @@ func (s *AppService) executeExternalTurn(
 		return output.String(), sessionID, usage, context.Canceled
 	}
 	if streamErr != "" {
+		if antigravityLog != "" {
+			if detail := antigravityModelErrorFromLog(antigravityLog); detail != "" {
+				streamErr += "\n" + detail
+			}
+		}
 		return output.String(), sessionID, usage, errors.New(truncateRunes(streamErr, 1000))
 	}
 	// Closing Grok's process tree after a confirmed terminal event may make the
@@ -1672,6 +1667,38 @@ func (s *AppService) executeExternalTurn(
 		return output.String(), sessionID, usage, errors.New(truncateRunes(stderrText, 1000))
 	}
 	return output.String(), sessionID, usage, nil
+}
+
+func antigravityModelErrorFromLog(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	if info, err := file.Stat(); err == nil && info.Size() > 256*1024 {
+		_, _ = file.Seek(-256*1024, io.SeekEnd)
+	}
+	scanner := bufio.NewScanner(io.LimitReader(file, 256*1024))
+	scanner.Buffer(make([]byte, 4096), 256*1024)
+	detail := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if index := strings.Index(line, "calling model: Error "); index >= 0 {
+			detail = line[index:]
+			// Server details can contain request payloads. Keep only the summary.
+			if end := strings.Index(detail, ", Details:"); end >= 0 {
+				detail = detail[:end]
+			}
+			// Don't surface arbitrary provider payloads/credentials; only identified
+			// status diagnostics observed in this invocation.
+			if strings.HasPrefix(detail, "calling model: Error 500,") && strings.Contains(detail, "Failed to create task") {
+				detail = "Antigravity upstream: HTTP 500 — Failed to create task."
+			} else {
+				detail = ""
+			}
+		}
+	}
+	return detail
 }
 
 func grokTurnEventsCursor(provider, sessionID string) (string, int64) {
@@ -1866,6 +1893,17 @@ func externalCommandArgsForExecutable(provider, executable, sessionID, workspace
 			args = append(args, "--model", model)
 		}
 		if antigravity {
+			// agy models exposes Pro low/high only; migrate an old Flash medium
+			// selection when a session switches to this model.
+			if strings.EqualFold(model, "gemini-3.1-pro") && effort == "medium" {
+				effort = "high"
+			}
+			for _, variant := range []string{"low", "medium", "high"} {
+				if strings.HasSuffix(strings.ToLower(model), "-"+variant) {
+					effort = variant
+					break
+				}
+			}
 			// Antigravity 1.1.25 requires an explicit variant whenever --model is
 			// provided. Migrate the former Gemini "auto" value at dispatch too so
 			// already-open sessions cannot fail before settings are persisted.
@@ -3367,18 +3405,6 @@ func textFromClaudeContentBlocks(value any, thinking bool) string {
 func textFromExternalValue(value any) string {
 	switch typed := value.(type) {
 	case string:
-		// Antigravity 1.1.x occasionally serializes a text envelope as a JSON
-		// string (e.g. `{"text":"..."}`); decode that envelope before treating
-		// it as assistant content so protocol punctuation is not displayed.
-		trimmed := strings.TrimSpace(typed)
-		if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
-			var envelope map[string]any
-			if json.Unmarshal([]byte(trimmed), &envelope) == nil && len(envelope) > 0 {
-				if decoded := textFromExternalValue(envelope); decoded != "" {
-					return decoded
-				}
-			}
-		}
 		return typed
 	case []any:
 		var builder strings.Builder

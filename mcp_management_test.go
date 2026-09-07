@@ -136,6 +136,7 @@ func TestAntigravityTranscriptReplay(t *testing.T) {
 	assembler := newAntigravityLiveStepAssembler()
 	var streamed strings.Builder
 	finalText := ""
+	stepUsage := make(map[string]map[string]any)
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
@@ -144,6 +145,11 @@ func TestAntigravityTranscriptReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 		chunk, _, final, kind := parseExternalEvent("gemini", event)
+		if antigravityStepPayload(event) != nil {
+			if usage := extractExternalUsage(event); usage != nil {
+				stepUsage[antigravityEventStepIndex(event)] = usage
+			}
+		}
 		if kind == "tool" || kind == "compact" {
 			assembler.Barrier()
 			continue
@@ -183,10 +189,24 @@ func TestAntigravityTranscriptReplay(t *testing.T) {
 	if turns[len(turns)-1].AgentText != finalText {
 		t.Fatal("reopened history differs from the terminal CLI response")
 	}
+	if expected := aggregateNormalizedExternalUsage(stepUsage); expected != nil {
+		for _, key := range []string{"inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"} {
+			if int64FromAny(turns[len(turns)-1].Usage[key]) != int64FromAny(expected[key]) {
+				t.Fatalf("replayed %s differs from per-step usage", key)
+			}
+		}
+		t.Logf("per-turn usage (not cumulative result): %v", expected)
+	}
 	t.Logf("live, terminal and reopened history agree: %d bytes", len(finalText))
 }
 
 func TestAntigravityMarkdownChunksRemainLossless(t *testing.T) {
+	// JSON is also valid assistant/file content, not necessarily a protocol envelope.
+	for _, body := range []string{`{"text":"keep the JSON"}`, `{"message":"keep braces"}`, "\n  {\"content\":\"keep whitespace\"}\n"} {
+		if got := textFromExternalValue(body); got != body {
+			t.Fatalf("JSON body changed: %q", got)
+		}
+	}
 	chunks := []string{"## Analysis", "\n\n", "- Parent\n", "  - Child", "\n\n```go\n", "    value := 1\n", "```\n\n", "| A | B |\n| --- | --- |\n| 1 | 2 |\n"}
 	for _, flat := range []bool{false, true} {
 		assembler := newAntigravityLiveStepAssembler()
@@ -217,6 +237,51 @@ func TestAntigravityMarkdownChunksRemainLossless(t *testing.T) {
 	}
 	if got := antigravityEventWorkspace(map[string]any{"workspace": "  C:/project  "}); got != "C:/project" {
 		t.Fatalf("metadata should still be trimmed: %q", got)
+	}
+}
+
+func TestAntigravityModelVariantsAndDiagnostics(t *testing.T) {
+	provider := AgentProviderRuntime{Kind: "gemini", ReasoningEfforts: fallbackReasoningEfforts("gemini"), Models: []AgentProviderModel{{Model: "gemini-3.8-flash", ContextWindow: 1_048_576}}}
+	view := providerConfigurationView(provider, UserSettings{GeminiModel: "gemini-3.8-flash"})
+	if !view.SupportsEffort || view.Context.CompactAvailable || view.Context.ThresholdConfigurable || !view.Context.IsFallback {
+		t.Fatalf("Antigravity capabilities must not inherit Gemini CLI settings: %+v", view)
+	}
+	if knownProviderContextWindow("grok", "grok-4.6") != 500_000 || knownProviderContextWindow("gemini", "custom-unknown") != 0 {
+		t.Fatal("incorrect model context fallback")
+	}
+	for _, runtime := range []string{"gemini", "opencode"} {
+		session := &SessionRecord{ID: "compact-guard", Provider: runtime, BackendRef: "native-id", Turns: []externalTurn{{ID: "original", UserText: "keep history"}}}
+		service := &AppService{}
+		if service.compactExternalSession(session) == nil || len(session.Turns) != 1 || session.Turns[0].UserText != "keep history" || session.BackendRef != "native-id" {
+			t.Fatal("unsupported compaction must fail without mutating history")
+		}
+	}
+	for _, scenario := range []struct{ model, effort, want string }{
+		{"gemini-3.1-pro", "medium", "high"},
+		{"gemini-3.8-flash", "medium", "medium"},
+		{"gemini-3.8-flash-low", "high", "low"},
+	} {
+		args, _ := externalCommandArgsForExecutable("gemini", "agy.exe", "", "", UserSettings{Model: scenario.model, Effort: scenario.effort}, "read only")
+		if !strings.Contains(strings.Join(args, " "), "--effort "+scenario.want) {
+			t.Fatalf("wrong variant: %v", args)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "invocation.log")
+	if err := os.WriteFile(path, []byte("calling model: Error 500, Message: Failed to create task, Status: INTERNAL, Details: [private payload]"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := antigravityModelErrorFromLog(path); got != "Antigravity upstream: HTTP 500 — Failed to create task." {
+		t.Fatalf("unexpected diagnostic: %q", got)
+	}
+	if aggregateNormalizedExternalUsage(nil) != nil {
+		t.Fatal("no model usage must remain unknown")
+	}
+	steps := map[string]map[string]any{"1": {"inputTokens": int64(10), "outputTokens": int64(2), "totalTokens": int64(12)}}
+	steps["1"] = map[string]any{"inputTokens": int64(10), "outputTokens": int64(4), "totalTokens": int64(14)}
+	steps["2"] = map[string]any{"inputTokens": int64(20), "outputTokens": int64(3), "totalTokens": int64(23)}
+	usage := aggregateNormalizedExternalUsage(steps)
+	if int64FromAny(usage["totalTokens"]) != 37 || usage["contextTokens"] != nil {
+		t.Fatalf("invalid per-step aggregation: %v", usage)
 	}
 }
 

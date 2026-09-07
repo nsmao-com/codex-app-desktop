@@ -251,32 +251,16 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 			}
 		}
 		policy.Description = "Grok Build uses the percentage for native auto-compaction. A custom model context_window only controls compaction calculations; it does not expand the upstream model."
+		policy.CompactAvailable = false // TUI /compact is not connected through this headless adapter.
 	case "gemini":
-		if selectedWindow := knownProviderContextWindow("gemini", selectedProviderModel(settings, "gemini")); selectedWindow > 0 {
-			policy.Tokens = selectedWindow
-			policy.Source = "gemini-cli-fixed"
-			policy.IsFallback = false
+		// agy is not Gemini CLI: model is not a compression settings object.
+		// Its model listing does not report a native context window or a
+		// configurable compaction threshold. Keep catalog estimates labelled.
+		if policy.Tokens > 0 {
+			policy.Source = "fallback"
+			policy.IsFallback = true
 		}
-		config := readProviderJSONMap(path)
-		model := mapFromAny(config["model"])
-		threshold := int64(50)
-		hasThreshold := false
-		if value, ok := floatFromConfig(model["compressionThreshold"]); ok && value > 0 {
-			threshold = int64(value*100 + 0.5)
-			hasThreshold = true
-		}
-		policy.CompactStrategy = "native"
-		policy.CompactAvailable = true
-		policy.AutoCompactSupported = true
-		policy.AutoCompactEnabled = true
-		policy.ThresholdConfigurable = true
-		policy.ThresholdConfigured = hasThreshold
-		policy.AutoCompactThreshold = threshold
-		policy.ThresholdUnit = "percent"
-		policy.ThresholdMinimum = 1
-		policy.ThresholdMaximum = 100
-		policy.ThresholdStep = 1
-		policy.Description = "Gemini CLI fixes the context window per model. model.compressionThreshold controls native compression and is loaded by the next CLI process."
+		policy.Description = "Antigravity 未提供可验证的手动压缩或阈值配置接口；上下文容量以模型目录为准，兜底值不是 CLI 实测值。请勿写入旧 Gemini CLI 的 model.compressionThreshold。"
 	case "opencode":
 		config := readProviderJSONMap(path)
 		compaction := mapFromAny(config["compaction"])
@@ -321,6 +305,7 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 			policy.ThresholdMaximum = policy.Tokens - 1_024
 		}
 		policy.Description = "OpenCode compaction.auto, compaction.prune, and reserved tokens are native settings. Leaving reserved empty keeps OpenCode's model-dependent default; limit.context is editable only for declared models."
+		policy.CompactAvailable = false // Native auto-compaction exists; manual API is not connected here.
 	}
 	return policy
 }
@@ -364,9 +349,10 @@ func providerConfigurationView(provider AgentProviderRuntime, settings UserSetti
 			view.PermissionModes = []string{"default", "bypassPermissions", "plan"}
 		}
 	case "gemini":
-		view.SupportsEffort = false
 		view.PermissionModes = []string{"default", "plan", "yolo"}
-		view.Warnings = append(view.Warnings, "Gemini CLI does not expose a stable reasoning-effort flag; Nice Codex does not send one.")
+		if _, legacyModel := readProviderJSONMap(providerConfigPath("gemini"))["model"].(map[string]any); legacyModel {
+			view.Warnings = append(view.Warnings, "Antigravity settings.json 的 model 是旧版 Gemini CLI 对象配置，agy 会报告 invalid value；请备份后移除该对象，再通过模型选择器或 agy /config 设置模型。")
+		}
 	case "opencode":
 		view.PermissionModes = []string{"auto"}
 		view.Warnings = append(view.Warnings, "OpenCode permission controls are limited to its native --auto mapping.")
@@ -578,19 +564,7 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 			return ProviderApplyResult{}, err
 		}
 	case "gemini":
-		if !thresholdUnset && (threshold < 1 || threshold > 100) {
-			return ProviderApplyResult{}, errors.New("Gemini compression percentage must be between 1 and 100")
-		}
-		config := readProviderJSONMap(path)
-		model := ensureMap(config, "model")
-		if thresholdUnset {
-			delete(model, "compressionThreshold")
-		} else {
-			model["compressionThreshold"] = float64(threshold) / 100
-		}
-		if err := writeProviderJSONMap(path, config); err != nil {
-			return ProviderApplyResult{}, err
-		}
+		return ProviderApplyResult{}, errors.New("Antigravity 不支持旧 Gemini CLI 的压缩阈值配置；未修改 settings.json")
 	case "opencode":
 		if threshold < 0 {
 			return ProviderApplyResult{}, errors.New("OpenCode reserved context cannot be negative")

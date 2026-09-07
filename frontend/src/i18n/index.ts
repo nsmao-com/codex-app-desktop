@@ -2172,9 +2172,17 @@ Object.assign(messages['en-US'].settings, {
 })
 Object.assign(messages['zh-CN'].slash, {
   summarizeLocal: '整理 NiceCodex 本地历史摘要；不会释放模型上下文。',
+  compactNativeOnly: '手动压缩暂未接入：查看原生 CLI 支持说明，不会删除历史。',
+  compactAntigravityHint: 'Antigravity print 模式尚无可验证的手动压缩接口。发送 /compact 得到普通回答不代表已释放上下文；软件不会据此删除历史或重置用量。',
+  compactOpenCodeHint: 'OpenCode 的自动压缩由原生配置管理；当前桌面适配器尚未接入手动压缩 API。请使用原生界面的压缩操作，历史消息未修改。',
+  compactGrokHint: 'Grok Build 可在原生交互界面使用 /compact；桌面端尚未接入该操作。Build 自动压缩阈值可在设置中调整；API 模式不适用。历史消息未修改。',
 })
 Object.assign(messages['en-US'].slash, {
   summarizeLocal: 'Summarize NiceCodex local history; this does not free model context.',
+  compactNativeOnly: 'Manual compaction is not connected: show native CLI guidance without deleting history.',
+  compactAntigravityHint: 'Antigravity print mode has no verified manual compaction interface. An ordinary reply to /compact does not prove context was freed. History and usage remain unchanged.',
+  compactOpenCodeHint: 'OpenCode manages auto-compaction through native configuration. Manual compaction is not connected in this desktop adapter; use the native UI. History is unchanged.',
+  compactGrokHint: 'Use /compact in the native Grok Build interactive UI. This desktop adapter does not yet expose that operation. Build auto-compaction can be configured in Settings; API mode is excluded. History is unchanged.',
 })
 Object.assign(messages['zh-CN'].chat, {
   effortSliderHint: '拖动选择推理强度，释放后应用到当前会话与后续回合。',
