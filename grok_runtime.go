@@ -614,7 +614,9 @@ func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, erro
 	request.Workspace = workspace
 	request.Images = images
 	turnID := "grok-turn-" + newUUID()
-	ctx, cancel := context.WithCancel(context.Background())
+	// A Build CLI that loses its upstream connection may keep stdout open without
+	// producing a terminal event; the bounded context guarantees turn.failed.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	key := grokRunKey(request.Backend, request.SessionID)
 	s.mu.Lock()
 	if s.externalRuns == nil {

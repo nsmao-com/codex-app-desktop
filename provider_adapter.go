@@ -1310,7 +1310,7 @@ func sanitizedExternalProcessEnv(provider string) []string {
 
 // grokTurnInactivityLimit bounds how long a Grok turn may stay silent on both
 // the stdout stream and its own events file before the watchdog kills it.
-const grokTurnInactivityLimit = 10 * time.Minute
+const grokTurnInactivityLimit = 3 * time.Minute
 
 func watchGrokTurnInactivity(stop <-chan struct{}, command *exec.Cmd, eventsPath string, lastOutputTime *atomic.Int64) {
 	ticker := time.NewTicker(30 * time.Second)
@@ -1348,6 +1348,16 @@ func (s *AppService) executeExternalTurn(
 	images []string,
 	onStream func(kind, chunk string),
 ) (string, string, map[string]any, error) {
+	// External CLIs can exit without emitting a terminal record, or keep a pipe
+	// open after a broken upstream connection. Bound every invocation so the UI
+	// always receives a failure instead of remaining in "thinking" forever.
+	turnTimeout := 15 * time.Minute
+	if provider == "gemini" {
+		turnTimeout = 8 * time.Minute
+	}
+	turnCtx, turnCancel := context.WithTimeout(ctx, turnTimeout)
+	defer turnCancel()
+	ctx = turnCtx
 	executable := s.externalExecutable(provider)
 	if executable == "" {
 		return "", sessionID, nil, fmt.Errorf("%s CLI executable was not found", provider)
@@ -1441,6 +1451,7 @@ func (s *AppService) executeExternalTurn(
 	claudeSnapshotFallback := ""
 	claudeTextSource := ""
 	sawGrokTerminal := false
+	sawAntigravityTerminal := false
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
@@ -1469,6 +1480,9 @@ func (s *AppService) executeExternalTurn(
 			kind = ""
 		}
 		grokTerminal := provider == "grok" && final
+		if provider == "gemini" && isAntigravityEvent && final {
+			sawAntigravityTerminal = true
+		}
 		if grokTerminal {
 			sawGrokTerminal = true
 		}
@@ -1658,6 +1672,13 @@ func (s *AppService) executeExternalTurn(
 			return output.String(), sessionID, usage, errors.New(truncateRunes(stderrText, 1000))
 		}
 		return output.String(), sessionID, usage, waitErr
+	}
+	if provider == "gemini" && isAntigravityExecutable(executable) && !sawAntigravityTerminal {
+		detail := "Antigravity CLI connection ended before a terminal response"
+		if stderrText != "" {
+			detail += ": " + truncateRunes(stderrText, 600)
+		}
+		return output.String(), sessionID, usage, errors.New(detail)
 	}
 	// A clean CLI exit without a response is not a successful turn. This is
 	// commonly caused by an expired/overlong native conversation or an

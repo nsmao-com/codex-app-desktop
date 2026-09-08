@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.6：macOS GUI 启动会读取登录 shell 的 CLI 路径，确保 Finder/Dock 也能识别。</sub></p>
+<p align="center"><sub>v1.6.7：修复 Grok Build 和 Antigravity 断链后一直卡在思考的问题。</sub></p>
 
 ## 为什么是 Nice Codex
 
