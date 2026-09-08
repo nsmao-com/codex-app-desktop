@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.7：修复 Grok Build 和 Antigravity 断链后一直卡在思考的问题。</sub></p>
+<p align="center"><sub>v1.6.8：升级 Windows 安装器视觉与安装流程体验。</sub></p>
 
 ## 为什么是 Nice Codex
 

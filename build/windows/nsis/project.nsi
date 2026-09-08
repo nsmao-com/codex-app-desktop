@@ -55,6 +55,18 @@ ManifestDPIAware true
 
 !define MUI_ICON "..\icon.ico"
 !define MUI_UNICON "..\icon.ico"
+!define MUI_BGCOLOR "FFFFFF"
+!define MUI_TEXTCOLOR "202124"
+!define MUI_HEADER_TEXT_COLOR "202124"
+!define MUI_WELCOMEPAGE_TITLE "Welcome to Nice Codex"
+!define MUI_WELCOMEPAGE_TEXT "A focused desktop workspace for Codex-compatible local agents.$\r$\n$\r$\nThis installer remembers your previous folder and shortcut choices during updates."
+!define MUI_FINISHPAGE_TITLE "Nice Codex is ready"
+!define MUI_FINISHPAGE_TEXT "Nice Codex has been installed successfully.$\r$\n$\r$\nUse the shortcut you selected to start your workspace."
+!define MUI_FINISHPAGE_RUN "$INSTDIR\${PRODUCT_EXECUTABLE}"
+!define MUI_FINISHPAGE_RUN_TEXT "Launch Nice Codex"
+!define MUI_COMPONENTSPAGE_SMALLDESC
+!define MUI_INNERDIALOG_COLOR "FFFFFF"
+!define MUI_INSTALLCOLORS "4A90E2 FFFFFF"
 # !define MUI_WELCOMEFINISHPAGE_BITMAP "resources\leftimage.bmp" #Include this to add a bitmap on the left side of the Welcome Page. Must be a size of 164x314
 !define MUI_FINISHPAGE_NOAUTOCLOSE # Wait on the INSTFILES page so the user can take a look into the details of the installation steps
 !define MUI_ABORTWARNING # This will warn the user if they exit from the installer.
