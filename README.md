@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.8: Refined, branded Windows installer experience.</sub></p>
+<p align="center"><sub>v1.6.9: Refined Nice Codex branded Windows installer experience.</sub></p>
 
 ## Why Nice Codex
 

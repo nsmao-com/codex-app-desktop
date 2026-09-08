@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.8：升级 Windows 安装器视觉与安装流程体验。</sub></p>
+<p align="center"><sub>v1.6.9：升级 Nice Codex 品牌化 Windows 安装器视觉与流程体验。</sub></p>
 
 ## 为什么是 Nice Codex
 
