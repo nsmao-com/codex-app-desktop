@@ -1193,6 +1193,9 @@ func knownCLIRoots() []string {
 			filepath.Join(home, ".grok", "bin"),
 			filepath.Join(home, ".gemini", "antigravity-cli", "bin"),
 			filepath.Join(home, ".gemini", "bin"),
+			filepath.Join(home, "Library", "Application Support", "Antigravity", "bin"),
+			filepath.Join(home, "Library", "Application Support", "antigravity", "bin"),
+			filepath.Join(home, "Library", "Application Support", "agy", "bin"),
 			filepath.Join(home, ".local", "bin"),
 			filepath.Join(home, "go", "bin"),
 			filepath.Join(home, ".cargo", "bin"),
@@ -1243,7 +1246,17 @@ func knownCLIRoots() []string {
 	// macOS / Linux system package managers
 	roots = append(roots,
 		"/opt/homebrew/bin",
+		"/opt/homebrew/sbin",
+		"/opt/homebrew/lib/node_modules/.bin",
+		"/opt/homebrew/lib/node_modules/@openai/codex/bin",
+		"/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin",
+		"/opt/homebrew/lib/node_modules/opencode-ai/bin",
 		"/usr/local/bin",
+		"/usr/local/sbin",
+		"/usr/local/lib/node_modules/.bin",
+		"/usr/local/lib/node_modules/@openai/codex/bin",
+		"/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin",
+		"/usr/local/lib/node_modules/opencode-ai/bin",
 		"/home/linuxbrew/.linuxbrew/bin",
 		"/snap/bin",
 	)
@@ -1253,7 +1266,39 @@ func knownCLIRoots() []string {
 	if pnpmHome := strings.TrimSpace(os.Getenv("PNPM_HOME")); pnpmHome != "" {
 		roots = append(roots, pnpmHome)
 	}
+	// npm can be installed through Homebrew, nvm, fnm, or a user prefix. Its
+	// global bin is not necessarily one of the fixed directories above.
+	if npm := findCommandViaShell("npm", "prefix", "-g"); npm != "" {
+		roots = append(roots, filepath.Join(npm, "bin"), filepath.Join(npm, "node_modules", ".bin"))
+	}
 	return roots
+}
+
+// findCommandViaShell is only a lookup fallback for GUI-launched macOS/Linux
+// processes. It does not source a user's shell profile or execute package code.
+func findCommandViaShell(command string, args ...string) string {
+	if runtime.GOOS == "windows" {
+		return ""
+	}
+	path, err := exec.LookPath(command)
+	if err != nil {
+		for _, candidate := range []string{"/opt/homebrew/bin/" + command, "/usr/local/bin/" + command} {
+			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+				path = candidate
+				break
+			}
+		}
+	}
+	if path == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, path, args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func findCommand(candidates []string) string {

@@ -2,6 +2,17 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.6.4 - 2026-09-08
+
+### 修复
+
+- 修复 macOS 从 Finder / Dock 启动时 PATH 不完整导致识别不到 Codex、Claude、Grok、Antigravity 和 OpenCode 的问题；补充 Homebrew（Intel / Apple Silicon）、nvm / fnm、pnpm、npm 全局目录及 Antigravity 用户安装目录扫描。
+- 在 macOS / Linux 上使用已找到的 npm 查询全局 prefix 作为额外兜底，不读取或执行 shell profile，避免 GUI 环境与终端环境差异造成“已安装但未接入”。
+
+### 验证范围
+
+- Go 全量测试、`go vet` 和 `git diff --check` 通过；保持 Windows 检测和安装流程不变。
+
 ## 1.6.3 - 2026-09-07
 
 ### 新增

@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.3: Configurable Google, custom API or current-provider translation, plus scrollable onboarding for short windows.</sub></p>
+<p align="center"><sub>v1.6.4: More reliable macOS CLI discovery from Finder/Dock, Homebrew, nvm, pnpm and Antigravity install locations.</sub></p>
 
 ## Why Nice Codex
 

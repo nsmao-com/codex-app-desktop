@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.3：翻译支持默认 Google、自定义接口和复用当前厂商 API 配置，修复短窗口引导页按钮不可见。</sub></p>
+<p align="center"><sub>v1.6.4：增强 macOS 从 Finder/Dock、Homebrew、nvm、pnpm 和 Antigravity 安装目录识别 CLI。</sub></p>
 
 ## 为什么是 Nice Codex
 
