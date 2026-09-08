@@ -3,10 +3,13 @@
 package codex
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // enrichProcessPath merges common Node / package-manager / CLI install directories
@@ -36,6 +39,13 @@ func enrichProcessPath() {
 		parts = append([]string{clean}, parts...)
 	}
 
+	// Finder/Dock applications do not run the user's login shell and therefore
+	// miss PATH entries initialized by .zprofile/.zshrc (nvm, fnm, asdf, pnpm).
+	// Read the shell's exported PATH once, without executing a CLI or install
+	// command, then merge it before the fixed known directories below.
+	for _, dir := range loginShellPath() {
+		appendUnique(dir)
+	}
 	for _, dir := range commonUnixCLIBinDirs() {
 		appendUnique(dir)
 	}
@@ -43,6 +53,28 @@ func enrichProcessPath() {
 	if len(parts) > 0 {
 		_ = os.Setenv("PATH", strings.Join(parts, string(os.PathListSeparator)))
 	}
+}
+
+func loginShellPath() []string {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return nil
+	}
+	shell := strings.TrimSpace(os.Getenv("SHELL"))
+	if shell == "" {
+		shell = "/bin/zsh"
+	}
+	if _, err := os.Stat(shell); err != nil {
+		shell = "/bin/sh"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	// `-ilc` loads the same interactive/login environment as a terminal. The
+	// command itself is a shell builtin and emits only PATH.
+	output, err := exec.CommandContext(ctx, shell, "-ilc", "printf '%s' \"$PATH\"").Output()
+	if err != nil {
+		return nil
+	}
+	return splitPathList(strings.TrimSpace(string(output)))
 }
 
 func persistentEnvironmentValue(string) string {

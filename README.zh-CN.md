@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.5：模型容量临时错误支持可配置次数和等待时间的自动重试。</sub></p>
+<p align="center"><sub>v1.6.6：macOS GUI 启动会读取登录 shell 的 CLI 路径，确保 Finder/Dock 也能识别。</sub></p>
 
 ## 为什么是 Nice Codex
 

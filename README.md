@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.5: Automatic retries for temporary model-capacity errors with configurable attempts and wait time.</sub></p>
+<p align="center"><sub>v1.6.6: macOS GUI launches now inherit login-shell CLI paths for reliable detection.</sub></p>
 
 ## Why Nice Codex
 

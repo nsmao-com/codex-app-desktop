@@ -2,6 +2,17 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.6.6 - 2026-09-08
+
+### 修复
+
+- macOS 从 Finder / Dock 启动时会读取用户默认登录 shell（zsh / bash 等）的导出 PATH，再合并 Homebrew、nvm、fnm、pnpm、npm 和 Antigravity 目录；终端里已安装的 CLI 不再因为 GUI 环境缺少 `.zprofile` / `.zshrc` 路径而显示未接入。
+- shell 读取只执行输出 PATH 的内建命令，不运行 CLI、安装命令或修改配置；找不到 shell 时安全回退到 `/bin/sh`。
+
+### 验证范围
+
+- Go 全量测试、vet 和 macOS arm64 交叉测试通过。
+
 ## 1.6.5 - 2026-09-08
 
 ### 修改
