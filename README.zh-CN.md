@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.4：增强 macOS 从 Finder/Dock、Homebrew、nvm、pnpm 和 Antigravity 安装目录识别 CLI。</sub></p>
+<p align="center"><sub>v1.6.5：模型容量临时错误支持可配置次数和等待时间的自动重试。</sub></p>
 
 ## 为什么是 Nice Codex
 

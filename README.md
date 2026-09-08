@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.4: More reliable macOS CLI discovery from Finder/Dock, Homebrew, nvm, pnpm and Antigravity install locations.</sub></p>
+<p align="center"><sub>v1.6.5: Automatic retries for temporary model-capacity errors with configurable attempts and wait time.</sub></p>
 
 ## Why Nice Codex
 

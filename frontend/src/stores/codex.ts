@@ -210,6 +210,9 @@ export const useCodexStore = defineStore('codex', () => {
   /** Serialize full preference snapshots so a stale model/effort write cannot win. */
   const sessionPreferenceWrites = new Map<string, Promise<void>>()
   const planOfferRetryTimers = new Map<string, number[]>()
+  // Capacity errors are returned as a rejected turn/start in some CLI builds
+  // (instead of an RPC error), so keep retry state on the queued row itself.
+  const capacityRetryAttempts = new Map<string, number>()
   const idleReconcileTimers = new Map<string, number>()
   const turnLivenessTimers = new Map<string, { timer: number, turnID: string }>()
   const submissionLivenessTimers = new Map<string, {
@@ -2378,6 +2381,32 @@ export const useCodexStore = defineStore('codex', () => {
       continueDraining = finished
     } catch (error) {
       const message = errorMessage(error)
+      const capacityError = /selected model is at capacity|model is at capacity|at capacity/i.test(message)
+      if (capacityError) {
+        const attempts = capacityRetryAttempts.get(queuedMessage.id) ?? 0
+        const maxRetries = Math.max(0, Math.min(20, Number(appStore.settings.codexRetryCount) || 0))
+        const waitSeconds = Math.max(0, Math.min(300, Number(appStore.settings.codexRetryWaitSeconds) || 0))
+        if (attempts < maxRetries && isPendingThreadSubmission(resolvedThreadID, submission)) {
+          capacityRetryAttempts.set(queuedMessage.id, attempts + 1)
+          pendingCollaborationModeByThread.delete(resolvedThreadID)
+          patchQueuedMessage(resolvedThreadID, queuedMessage.id, {
+            state: 'queued',
+            error: `${translate('chat.runtimeRetrying')} (${attempts + 1}/${maxRetries})`,
+            blockedByTurnId: undefined,
+          })
+          setTurnFeedback(resolvedThreadID, {
+            state: 'retrying',
+            message: `${translate('chat.runtimeRetrying')} ${waitSeconds}s (${attempts + 1}/${maxRetries})`,
+            turnId: '',
+          })
+          finishPendingThreadSubmission(resolvedThreadID, submission, false)
+          trackedTimeout(() => {
+            if (!threadIsBusy(resolvedThreadID)) void drainThreadQueue(resolvedThreadID)
+          }, waitSeconds * 1000)
+          return
+        }
+        capacityRetryAttempts.delete(queuedMessage.id)
+      }
       const currentSubmission = pendingThreadSubmissionOwner(submission)
       // External runtimes reject a second process-level send while the native
       // turn is still running. Treat that response as a queue admission race,
