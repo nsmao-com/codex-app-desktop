@@ -199,6 +199,8 @@ func resolveUnixExtraCommands() (commandSpec, bool) {
 		candidates = append(candidates,
 			filepath.Join(home, ".npm-global", "lib", "node_modules", "@openai", "codex", "bin", "codex.js"),
 			filepath.Join(home, ".local", "lib", "node_modules", "@openai", "codex", "bin", "codex.js"),
+			filepath.Join(home, ".local", "share", "pnpm", "global", "5", "node_modules", "@openai", "codex", "bin", "codex.js"),
+			filepath.Join(home, "Library", "pnpm", "global", "5", "node_modules", "@openai", "codex", "bin", "codex.js"),
 		)
 	}
 	// Homebrew node_modules (rare but seen).
@@ -219,11 +221,24 @@ func resolveUnixExtraCommands() (commandSpec, bool) {
 			}
 			return commandSpec{path: nodePath, prefixArgs: []string{path}}, true
 		}
-		// Ensure executable bit is present (best-effort).
-		if info.Mode()&0o111 == 0 {
+		// npm/pnpm shims are normally executable, but Finder-launched apps can
+		// encounter copied scripts without the executable bit. Accept a readable
+		// shebang script and run it through its interpreter so detection still
+		// works without changing the user's file permissions.
+		if info.Mode()&0o111 != 0 {
+			return commandSpec{path: path}, true
+		}
+		file, readErr := os.ReadFile(path)
+		if readErr != nil || !strings.HasPrefix(string(file), "#!") {
 			continue
 		}
-		return commandSpec{path: path}, true
+		line := strings.SplitN(string(file), "\n", 2)[0]
+		if strings.Contains(line, "node") {
+			nodePath, nodeErr := execLookPath("node")
+			if nodeErr == nil {
+				return commandSpec{path: nodePath, prefixArgs: []string{path}}, true
+			}
+		}
 	}
 	return commandSpec{}, false
 }
