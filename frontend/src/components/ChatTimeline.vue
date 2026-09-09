@@ -858,7 +858,8 @@ async function jumpToLatest(): Promise<void> {
   await waitFrame()
   // Keep the smooth-scroll events from being mistaken for manual navigation.
   markProgrammaticScroll(800)
-  container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+  const latestTop = Math.max(0, container.scrollHeight - container.clientHeight)
+  container.scrollTo({ top: latestTop, behavior: 'smooth' })
   showJumpBottom.value = false
   // After the smooth scroll, re-pin once in case layout grew mid-animation.
   window.setTimeout(() => {
@@ -1294,7 +1295,7 @@ onUnmounted(() => {
         v-if="showJumpBottom"
         type="button"
         class="jump-latest-button absolute bottom-4 left-1/2 z-20 flex h-8 items-center gap-1.5 rounded-full border border-border/70 bg-card/95 px-3 text-[11px] text-muted-foreground shadow-md backdrop-blur hover:text-foreground"
-        @click="jumpToLatest"
+        @click.stop="jumpToLatest"
       >
         <ArrowDown :size="12" class="jump-latest-arrow" />
         {{ $t('chat.jumpLatest', 'Latest') }}
@@ -1365,7 +1366,8 @@ onUnmounted(() => {
 
 <style scoped>
 .jump-latest-button {
-  transform: translateX(-50%);
+  transform: translate3d(-50%, 0, 0);
+  transform-origin: center center;
   transition: color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
 }
 
@@ -1379,13 +1381,12 @@ onUnmounted(() => {
 
 .jump-latest-enter-active,
 .jump-latest-leave-active {
-  transition: opacity 180ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity 180ms ease;
 }
 
 .jump-latest-enter-from,
 .jump-latest-leave-to {
   opacity: 0;
-  transform: translate(-50%, 8px) scale(0.96);
 }
 
 @media (prefers-reduced-motion: reduce) {
