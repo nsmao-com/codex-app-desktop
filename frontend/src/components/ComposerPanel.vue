@@ -17,6 +17,7 @@ import {
   Laptop,
   ListOrdered,
   ListTodo,
+  Languages,
   LoaderCircle,
   Maximize2,
   Minimize2,
@@ -49,6 +50,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import {
   Popover,
   PopoverContent,
@@ -146,6 +148,33 @@ const emit = defineEmits<{
 }>()
 const composer = useTemplateRef<HTMLElement>('composer')
 const composerInput = useTemplateRef<InstanceType<typeof Textarea>>('composerInput')
+const inputTranslationOpen = shallowRef(false)
+const inputTranslationTarget = shallowRef('en')
+const inputTranslationBusy = shallowRef(false)
+const inputTranslationResult = shallowRef('')
+const inputTranslationError = shallowRef('')
+const inputTranslationLanguages = [
+  { value: 'zh-CN', label: '简体中文' }, { value: 'zh-TW', label: '繁體中文' },
+  { value: 'en', label: 'English' }, { value: 'ja', label: '日本語' }, { value: 'ko', label: '한국어' },
+]
+async function translateComposerInput(): Promise<void> {
+  if (inputTranslationBusy.value || !modelValue.value.trim()) return
+  inputTranslationBusy.value = true
+  inputTranslationError.value = ''
+  try {
+    inputTranslationResult.value = String(await backend.TranslateConfiguredMessage(modelValue.value, inputTranslationTarget.value, paneRuntime.value))
+  } catch (error) {
+    inputTranslationError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    inputTranslationBusy.value = false
+  }
+}
+function applyInputTranslation(): void {
+  if (!inputTranslationResult.value) return
+  modelValue.value = inputTranslationResult.value
+  inputTranslationOpen.value = false
+  nextTick(() => focusComposerInput())
+}
 const composing = shallowRef(false)
 const attachmentPreviews = shallowRef<Record<string, string>>({})
 const slashIndex = shallowRef(0)
@@ -3028,6 +3057,13 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         @paste="onPaste"
         @pointerdown="resetSentHistoryNavigation"
       />
+      <div v-if="!isGoalComposer" class="flex items-center justify-end px-1">
+        <SimpleTooltip content="翻译输入内容">
+          <Button type="button" variant="ghost" size="icon-xs" class="size-6 text-muted-foreground" :disabled="!modelValue.trim()" aria-label="翻译输入内容" @click="inputTranslationOpen = true">
+            <Languages :size="13" />
+          </Button>
+        </SimpleTooltip>
+      </div>
       <div
         v-if="isGoalComposer"
         :id="goalComposerHelpId"
@@ -3041,6 +3077,22 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
           :class="goalDraftTooLong ? 'font-medium text-destructive' : 'text-muted-foreground'"
         >{{ goalDraftLength.toLocaleString() }} / {{ GOAL_MAX_LENGTH.toLocaleString() }}</span>
       </div>
+
+      <Dialog v-model:open="inputTranslationOpen">
+        <DialogContent class="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>翻译输入内容</DialogTitle>
+            <DialogDescription>翻译结果会替换输入框内容，确认后才会发送。</DialogDescription>
+          </DialogHeader>
+          <SearchableSelect v-model="inputTranslationTarget" :options="inputTranslationLanguages" aria-label="目标语言" />
+          <Button type="button" :disabled="inputTranslationBusy || !modelValue.trim()" @click="translateComposerInput">
+            <LoaderCircle v-if="inputTranslationBusy" :size="14" class="mr-2 animate-spin" />{{ inputTranslationBusy ? '翻译中…' : '翻译输入内容' }}
+          </Button>
+          <p v-if="inputTranslationError" class="text-sm text-destructive" role="alert">{{ inputTranslationError }}</p>
+          <div v-if="inputTranslationResult" class="max-h-60 overflow-auto rounded-xl border bg-muted/30 p-3 text-sm whitespace-pre-wrap">{{ inputTranslationResult }}</div>
+          <Button v-if="inputTranslationResult" type="button" variant="outline" @click="applyInputTranslation">替换输入框内容</Button>
+        </DialogContent>
+      </Dialog>
       <span
         v-if="!isGoalComposer"
         class="pointer-events-none absolute bottom-3 right-4 grid size-5 place-items-center text-muted-foreground/55"
