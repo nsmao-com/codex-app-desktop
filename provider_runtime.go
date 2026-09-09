@@ -1191,6 +1191,8 @@ func knownCLIRoots() []string {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		roots = append(roots,
 			filepath.Join(home, ".grok", "bin"),
+			filepath.Join(home, ".antigravity", "bin"),
+			filepath.Join(home, ".agy", "bin"),
 			filepath.Join(home, ".gemini", "antigravity-cli", "bin"),
 			filepath.Join(home, ".gemini", "bin"),
 			filepath.Join(home, "Library", "Application Support", "Antigravity", "bin"),
@@ -1202,6 +1204,8 @@ func knownCLIRoots() []string {
 			filepath.Join(home, ".volta", "bin"),
 			filepath.Join(home, ".yarn", "bin"),
 			filepath.Join(home, ".npm-global", "bin"),
+			filepath.Join(home, ".npm-global", "lib", "node_modules", ".bin"),
+			filepath.Join(home, ".local", "lib", "node_modules", ".bin"),
 			filepath.Join(home, ".local", "share", "pnpm"),
 			filepath.Join(home, "Library", "pnpm"), // macOS pnpm
 			filepath.Join(home, ".asdf", "shims"),
@@ -1254,6 +1258,9 @@ func knownCLIRoots() []string {
 		"/usr/local/bin",
 		"/usr/local/sbin",
 		"/usr/local/lib/node_modules/.bin",
+		"/usr/local/lib/node_modules/@google/gemini-cli/bin",
+		"/opt/homebrew/lib/node_modules/.bin",
+		"/opt/homebrew/lib/node_modules/@google/gemini-cli/bin",
 		"/usr/local/lib/node_modules/@openai/codex/bin",
 		"/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin",
 		"/usr/local/lib/node_modules/opencode-ai/bin",

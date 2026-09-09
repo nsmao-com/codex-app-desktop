@@ -2,6 +2,13 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.6.10 - 2026-09-09
+
+### 修复
+
+- 修复 macOS 从 Finder/Dock 启动时无法识别 Antigravity（agy）、Codex 等用户级 CLI 的问题。
+- 补充 Homebrew、npm/pnpm、Antigravity 常见安装目录探测。
+
 ## 1.6.9 - 2026-09-08
 
 ### 修改
