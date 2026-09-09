@@ -191,6 +191,14 @@ func resolveWindowsCodexShim(_ string) (commandSpec, bool) {
 func resolveUnixExtraCommands() (commandSpec, bool) {
 	home, _ := os.UserHomeDir()
 	candidates := []string{}
+	// Official OpenAI standalone installer installs the visible launcher into
+	// CODEX_INSTALL_DIR (default ~/.local/bin on macOS/Linux).
+	if installDir := strings.TrimSpace(os.Getenv("CODEX_INSTALL_DIR")); installDir != "" {
+		candidates = append(candidates, filepath.Join(installDir, "codex"))
+	}
+	if home != "" {
+		candidates = append(candidates, filepath.Join(home, ".local", "bin", "codex"))
+	}
 	for _, dir := range commonUnixCLIBinDirs() {
 		candidates = append(candidates, filepath.Join(dir, "codex"))
 	}

@@ -2,6 +2,12 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.6.12 - 2026-09-09
+
+### 修复
+
+- 按 OpenAI 官方 Codex CLI 文档补充 standalone installer 默认目录 `~/.local/bin` 与 `CODEX_INSTALL_DIR` 探测，修复 macOS GUI 启动时漏检 Codex。
+
 ## 1.6.11 - 2026-09-09
 
 ### 修复
