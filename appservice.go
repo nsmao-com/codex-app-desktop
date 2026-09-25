@@ -2541,6 +2541,9 @@ func ensureConfiguredModelInList(result map[string]any, configured string) map[s
 		if id == "" || id == "<nil>" {
 			id = strings.TrimSpace(fmt.Sprint(entry["id"]))
 		}
+		if id == "" || id == "<nil>" {
+			id = strings.TrimSpace(fmt.Sprint(entry["slug"]))
+		}
 		if strings.EqualFold(id, configured) {
 			result["data"] = data
 			return result

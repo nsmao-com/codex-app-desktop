@@ -2,6 +2,22 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.6.15 - 2026-09-25
+
+### 新增
+
+- 补充 Codex 官方公开目录中的 `gpt-5.3-codex-spark` 与 `gpt-5.3-codex` 兜底选项。
+- 补充当前 Codex 官方模型目录中的 `gpt-6-sol` 与 `gpt-6-luna`，并按模型能力限制 Luna 的 `ultra` 思考档。
+
+### 修改
+
+- 保留 Codex CLI 实时 `model/list` 返回的模型、思考程度和服务档位元数据。
+- 兼容旧版/新版目录中的 `slug`、`display_name`、`default_reasoning_level` 和 `reasoning_level` 字段。
+
+### 修复
+
+- 修复 Nice Codex 无条件把 Astra 标为默认模型、覆盖新版 Codex CLI 默认模型的问题。
+
 ## 1.6.13 - 2026-09-09
 
 ### 修改

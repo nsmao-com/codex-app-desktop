@@ -29,12 +29,16 @@ export function normalizeAntigravityModelEffort(model: string, effort: string): 
 /** Soft fallback when model/list is unavailable. */
 export const FALLBACK_CODEX_MODELS = [
   DEFAULT_CODEX_MODEL,
+  'gpt-6-sol',
+  'gpt-6-luna',
   'gpt-5.6-sol',
   'gpt-5.6-terra',
   'gpt-5.6-luna',
   'gpt-5.5',
   'gpt-5.4',
   'gpt-5.4-mini',
+  'gpt-5.3-codex-spark',
+  'gpt-5.3-codex',
   'gpt-5.2',
 ] as const
 
@@ -135,28 +139,39 @@ export function mergeCodexCatalog(
       options.push(stubCodexModel(id))
     }
   }
-  // model/list may be nonempty but older than the application's built-in model.
+  // Keep the built-in Astra fallback available for older CLIs, but preserve the
+  // live catalog's default when the current CLI advertises one.
   if (!options.some((item) => item.model.toLocaleLowerCase() === DEFAULT_CODEX_MODEL)) {
     options.unshift(stubCodexModel(DEFAULT_CODEX_MODEL))
   }
+  const liveDefault = options.find((item) => item.isDefault)?.model
+  const fallbackDefault = liveDefault || DEFAULT_CODEX_MODEL
   for (const option of options) {
-    option.isDefault = option.model.toLocaleLowerCase() === DEFAULT_CODEX_MODEL
+    option.isDefault = option.model.toLocaleLowerCase() === fallbackDefault.toLocaleLowerCase()
   }
   return options
 }
 
 function stubCodexModel(id: string): ModelOption {
+  const normalized = id.trim().toLowerCase()
+  const supportedReasoning = DEFAULT_CODEX_REASONING.filter((option) => {
+    // GPT-6 Luna and the current GPT-5.6 Luna catalog do not expose ultra.
+    if (option.effort === 'ultra' && normalized.endsWith('-luna')) return false
+    // The public GPT-5.5 catalog currently exposes low through xhigh.
+    if ((normalized === 'gpt-5.5' || normalized === 'gpt-5.4') && ['max', 'ultra'].includes(option.effort)) return false
+    return true
+  })
   return {
     id,
     model: id,
     displayName: cleanModelDisplayName(id, id),
     description: 'Codex model',
     isDefault: false,
-    defaultReasoningEffort: /sol$/i.test(id) ? 'low' : 'medium',
+    defaultReasoningEffort: /astra$/i.test(normalized) || /gpt-5\.6-sol$/i.test(normalized) ? 'low' : 'medium',
     defaultServiceTier: '',
     serviceTiers: [],
     supportsPersonality: false,
-    supportedReasoningEfforts: DEFAULT_CODEX_REASONING.map((option) => ({
+    supportedReasoningEfforts: supportedReasoning.map((option) => ({
       effort: option.effort,
       description: option.description,
     })),

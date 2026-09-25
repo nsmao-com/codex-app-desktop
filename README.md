@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.9: Refined Nice Codex branded Windows installer experience.</sub></p>
+<p align="center"><sub>v1.6.15: Keep the Codex model catalog current across CLI versions.</sub></p>
 
 ## Why Nice Codex
 

@@ -6174,7 +6174,7 @@ function normalizeModels(value: unknown): import('../types/codex').ModelOption[]
   return asArray(value)
     .map((model) => {
       const record = asRecord(model)
-      const id = asString(record.id, asString(record.model))
+      const id = asString(record.id, asString(record.model, asString(record.slug)))
       if (!id) return null
       const catalogTiers = asArray(record.serviceTiers).map((tier) => {
         const entry = asRecord(tier)
@@ -6194,17 +6194,17 @@ function normalizeModels(value: unknown): import('../types/codex').ModelOption[]
       return {
         id,
         model: asString(record.model, id),
-        displayName: asString(record.displayName, id),
+        displayName: asString(record.displayName, asString(record.display_name, id)),
         description: asString(record.description),
         isDefault: record.isDefault === true,
-        defaultReasoningEffort: asString(record.defaultReasoningEffort, 'high'),
+        defaultReasoningEffort: asString(record.defaultReasoningEffort, asString(record.default_reasoning_level, 'high')),
         defaultServiceTier: asString(record.defaultServiceTier),
         serviceTiers,
         supportsPersonality: record.supportsPersonality === true,
         supportedReasoningEfforts: asArray(record.supportedReasoningEfforts).map((option) => {
           const entry = asRecord(option)
           return {
-            effort: asString(entry.reasoningEffort, asString(entry.effort)),
+            effort: asString(entry.reasoningEffort, asString(entry.effort, asString(entry.reasoning_level))),
             description: asString(entry.description),
           }
         }).filter((option) => option.effort !== ''),
