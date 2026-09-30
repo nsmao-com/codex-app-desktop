@@ -44,7 +44,11 @@ func readGrokJSONFile(path string, target any) error {
 	if backupErr == nil {
 		if decodeErr := json.Unmarshal(backup, target); decodeErr == nil {
 			return nil
+		} else if os.IsNotExist(err) {
+			return decodeErr
 		}
+	} else if os.IsNotExist(err) && !os.IsNotExist(backupErr) {
+		return backupErr
 	}
 	return err
 }

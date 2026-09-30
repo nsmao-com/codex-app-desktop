@@ -102,13 +102,9 @@ func claudeSessionsPath(settingsPath string) string {
 	return filepath.Join(filepath.Dir(settingsPath), "claude-sessions.json")
 }
 
-func loadClaudeSessions(settingsPath string) map[string]*claudeStoredSession {
+func (s *AppService) loadClaudeSessions() map[string]*claudeStoredSession {
 	result := make(map[string]*claudeStoredSession)
-	payload, err := os.ReadFile(claudeSessionsPath(settingsPath))
-	if err != nil {
-		return result
-	}
-	if err := json.Unmarshal(payload, &result); err != nil {
+	if err := s.readLocalJSON("claude", claudeSessionsPath(s.settingsPath), &result); err != nil {
 		return make(map[string]*claudeStoredSession)
 	}
 	if result == nil {
@@ -117,14 +113,8 @@ func loadClaudeSessions(settingsPath string) map[string]*claudeStoredSession {
 	return result
 }
 
-func (s *AppService) persistClaudeSessionsLocked() {
-	path := claudeSessionsPath(s.settingsPath)
-	payload, err := json.MarshalIndent(s.claudeSessions, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o700)
-	_ = os.WriteFile(path, payload, 0o600)
+func (s *AppService) persistClaudeSessionsLocked() error {
+	return s.writeLocalJSON("claude", claudeSessionsPath(s.settingsPath), s.claudeSessions)
 }
 
 func resolveClaudeHome() string {
@@ -229,7 +219,7 @@ func (s *AppService) UseClaudeWorkspace(path string) (WorkspaceInfo, error) {
 	settings := cloneSettings(s.settings)
 	settings.ClaudeWorkspace = cleanPath
 	settings.ClaudeRecentWorkspaces = rememberWorkspace(settings.ClaudeRecentWorkspaces, cleanPath)
-	err = writeSettings(s.settingsPath, settings)
+	err = s.persistSettingsLocked(settings)
 	if err == nil {
 		s.settings = settings
 	}
@@ -1525,110 +1515,32 @@ func (s *AppService) ReadClaudeGlobalInstructions() GlobalInstructionsInfo {
 	if home == "" {
 		return GlobalInstructionsInfo{}
 	}
-	// Claude Code commonly uses CLAUDE.md or AGENTS.md under ~/.claude
-	candidates := []string{
-		filepath.Join(home, "CLAUDE.md"),
-		filepath.Join(home, "AGENTS.md"),
-		filepath.Join(home, "CLAUDE.local.md"),
-	}
-	for _, path := range candidates {
-		payload, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		text := string(payload)
-		return GlobalInstructionsInfo{
-			Content: text, Path: path, Source: filepath.Base(path),
-			Exists: true, EmptyFile: strings.TrimSpace(text) == "", Available: true,
-		}
-	}
-	return GlobalInstructionsInfo{
-		Path: filepath.Join(home, "CLAUDE.md"), Source: "CLAUDE.md", Available: true,
-	}
+	return claudeInstructionSource(home, true).read()
 }
 
-func (s *AppService) SaveClaudeGlobalInstructions(content string) (GlobalInstructionsInfo, error) {
+func (s *AppService) SaveClaudeGlobalInstructions(request InstructionsSaveRequest) (GlobalInstructionsInfo, error) {
 	home := resolveClaudeHome()
 	if home == "" {
 		return GlobalInstructionsInfo{}, os.ErrNotExist
 	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return GlobalInstructionsInfo{}, err
-	}
-	path := filepath.Join(home, "CLAUDE.md")
-	// Prefer updating an existing file if present.
-	for _, candidate := range []string{
-		filepath.Join(home, "CLAUDE.md"),
-		filepath.Join(home, "AGENTS.md"),
-	} {
-		if _, err := os.Stat(candidate); err == nil {
-			path = candidate
-			break
-		}
-	}
-	trimmed := sanitizeCustomInstructions(content)
-	if trimmed != "" && !strings.HasSuffix(trimmed, "\n") {
-		trimmed += "\n"
-	}
-	if err := os.WriteFile(path, []byte(trimmed), 0o600); err != nil {
-		return GlobalInstructionsInfo{}, err
-	}
-	return s.ReadClaudeGlobalInstructions(), nil
+	return claudeInstructionSource(home, true).save(request)
 }
 
 func (s *AppService) ReadClaudeProjectInstructions() ProjectInstructionsInfo {
-	workspace := strings.TrimSpace(s.Settings().ClaudeWorkspace)
-	if workspace == "" {
-		return ProjectInstructionsInfo{}
-	}
-	clean, err := validateWorkspace(workspace)
+	workspace, err := validateWorkspace(s.Settings().ClaudeWorkspace)
 	if err != nil {
 		return ProjectInstructionsInfo{}
 	}
-	// Prefer CLAUDE.md then AGENTS.md at project root.
-	for _, name := range []string{"CLAUDE.md", "AGENTS.md", "CLAUDE.local.md"} {
-		path := filepath.Join(clean, name)
-		payload, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		text := string(payload)
-		return ProjectInstructionsInfo{
-			Content: text, Workspace: clean, WorkspaceName: filepath.Base(clean),
-			Path: path, Source: name, Exists: true, EmptyFile: strings.TrimSpace(text) == "", Available: true,
-		}
-	}
-	return ProjectInstructionsInfo{
-		Workspace: clean, WorkspaceName: filepath.Base(clean),
-		Path: filepath.Join(clean, "CLAUDE.md"), Source: "CLAUDE.md", Available: true,
-	}
+	return projectInstructionInfo(claudeInstructionSource(workspace, false).read(), workspace)
 }
 
-func (s *AppService) SaveClaudeProjectInstructions(content string) (ProjectInstructionsInfo, error) {
-	workspace := strings.TrimSpace(s.Settings().ClaudeWorkspace)
-	if workspace == "" {
-		return ProjectInstructionsInfo{}, errors.New("choose a Claude workspace first")
-	}
-	clean, err := validateWorkspace(workspace)
+func (s *AppService) SaveClaudeProjectInstructions(request InstructionsSaveRequest) (ProjectInstructionsInfo, error) {
+	workspace, err := validateWorkspace(s.Settings().ClaudeWorkspace)
 	if err != nil {
 		return ProjectInstructionsInfo{}, err
 	}
-	path := filepath.Join(clean, "CLAUDE.md")
-	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
-		candidate := filepath.Join(clean, name)
-		if _, err := os.Stat(candidate); err == nil {
-			path = candidate
-			break
-		}
-	}
-	trimmed := sanitizeCustomInstructions(content)
-	if trimmed != "" && !strings.HasSuffix(trimmed, "\n") {
-		trimmed += "\n"
-	}
-	if err := os.WriteFile(path, []byte(trimmed), 0o644); err != nil {
-		return ProjectInstructionsInfo{}, err
-	}
-	return s.ReadClaudeProjectInstructions(), nil
+	info, err := claudeInstructionSource(workspace, false).save(request)
+	return projectInstructionInfo(info, workspace), err
 }
 
 func (s *AppService) OpenClaudeHome() error {

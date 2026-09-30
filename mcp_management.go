@@ -36,8 +36,8 @@ func (input MCPServerInput) normalizedTransport() string {
 
 func (input MCPServerInput) serverObject() (map[string]any, error) {
 	if payload := strings.TrimSpace(input.JSON); payload != "" {
-		var object map[string]any
-		if err := json.Unmarshal([]byte(payload), &object); err != nil || object == nil {
+		_, object, err := parseProviderJSON([]byte(payload))
+		if err != nil {
 			return nil, errors.New("MCP server JSON must be an object")
 		}
 		return object, nil
@@ -94,7 +94,7 @@ func (s *AppService) runProviderManagementCommand(provider string, args []string
 	if resolveErr != nil {
 		return "", resolveErr
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(s.serviceContext(), timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, commandPath, resolvedArgs...)
 	output, err := runManagedCombinedOutput(ctx, command)
@@ -230,24 +230,59 @@ func (s *AppService) UpsertExternalMCPServer(runtime, scope string, input MCPSer
 		return err
 	}
 	path := externalRuntimeConfigPath(runtime, scope, "")
-	config := map[string]any{}
-	_ = readLimitedJSON(path, &config)
 	key := "mcp"
 	if runtime == "gemini" {
 		key = "mcpServers"
 	}
-	existing, _ := config[key].(map[string]any)
-	next := make(map[string]any, len(existing)+1)
-	for serverName, value := range existing {
-		next[serverName] = value
+	return updateProviderJSONConfig(path, func(config map[string]any) error {
+		existing, err := providerJSONObject(config, key)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(input.JSON) != "" {
+			existing[name] = object // Advanced mode explicitly replaces the object.
+		} else {
+			existing[name] = mergeExternalMCPServers(existing, map[string]any{name: object})[name]
+			if runtime == "opencode" {
+				existing[name] = normalizeOpenCodeMCPServerObject(existing[name].(map[string]any))
+			}
+		}
+		return nil
+	})
+}
+
+// The shared form uses stdio/HTTP terminology. OpenCode's native schema uses
+// local/remote, a command array, and environment instead of env.
+func normalizeOpenCodeMCPServerObject(object map[string]any) map[string]any {
+	if command, ok := object["command"].(string); ok && strings.TrimSpace(command) != "" {
+		parts := []any{command}
+		switch args := object["args"].(type) {
+		case []string:
+			for _, arg := range args {
+				parts = append(parts, arg)
+			}
+		case []any:
+			parts = append(parts, args...)
+		}
+		object["command"] = parts
 	}
-	next[name] = object
-	config[key] = next
-	payload, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
+	if url, ok := object["url"].(string); ok && strings.TrimSpace(url) != "" {
+		object["type"] = "remote"
+		delete(object, "command")
+		delete(object, "environment")
+	} else if _, exists := object["command"]; exists {
+		object["type"] = "local"
+		if env, exists := object["env"]; exists {
+			object["environment"] = env
+		}
+		delete(object, "url")
+		delete(object, "headers")
+		delete(object, "oauth")
 	}
-	return writeTextFileAtomic(path, string(payload)+"\n")
+	delete(object, "args")
+	delete(object, "env")
+	delete(object, "transport")
+	return object
 }
 
 // RemoveExternalMCPServer deletes one MCP server from the Gemini / OpenCode
@@ -266,32 +301,24 @@ func (s *AppService) RemoveExternalMCPServer(runtime, scope, name string) error 
 		return err
 	}
 	path := externalRuntimeConfigPath(runtime, scope, "")
-	config := map[string]any{}
-	_ = readLimitedJSON(path, &config)
 	key := "mcp"
 	if runtime == "gemini" {
 		key = "mcpServers"
 	}
-	existing, _ := config[key].(map[string]any)
-	if existing == nil || existing[name] == nil {
-		return fmt.Errorf("MCP server %q was not found", name)
-	}
-	remaining := make(map[string]any, len(existing))
-	for serverName, value := range existing {
-		if serverName != name {
-			remaining[serverName] = value
+	return updateProviderJSONConfig(path, func(config map[string]any) error {
+		existing, err := providerJSONObject(config, key)
+		if err != nil {
+			return err
 		}
-	}
-	if len(remaining) == 0 {
-		delete(config, key)
-	} else {
-		config[key] = remaining
-	}
-	payload, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeTextFileAtomic(path, string(payload)+"\n")
+		if _, exists := existing[name]; !exists {
+			return fmt.Errorf("MCP server %q was not found", name)
+		}
+		delete(existing, name)
+		if len(existing) == 0 {
+			delete(config, key)
+		}
+		return nil
+	})
 }
 
 // externalMCPScopeAndWorkspace normalizes the scope value. Only the global

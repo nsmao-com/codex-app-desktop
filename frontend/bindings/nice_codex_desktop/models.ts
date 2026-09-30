@@ -53,6 +53,7 @@ export interface BootstrapData {
     "terminalProfiles": TerminalProfile[] | null;
     "appVersion": string;
     "updateRepo": string;
+    "storageHealth": LocalStorageHealth;
 }
 
 /**
@@ -311,6 +312,7 @@ export interface ComposerFileSelection {
 }
 
 export interface ExternalInstructionsSaveRequest {
+    "revision": string;
     "runtime": string;
     "workspace": string;
 
@@ -477,6 +479,8 @@ export interface GitHubIssueImportContext {
  * GlobalInstructionsInfo is the personal Codex AGENTS.md under CODEX_HOME.
  */
 export interface GlobalInstructionsInfo {
+    "revision": string;
+    "readError"?: string;
     "content": string;
     "path": string;
     "source": string;
@@ -602,6 +606,28 @@ export interface GrokTurnRef {
     "turnId": string;
 }
 
+export interface InstructionsSaveRequest {
+    "content": string;
+    "revision": string;
+}
+
+export interface LocalStorageHealth {
+    "revision": number;
+    "issues": LocalStorageIssue[] | null;
+}
+
+/**
+ * LocalStorageIssue describes a failed app-owned file operation without exposing
+ * file contents. Read failures block writes until the next application launch.
+ */
+export interface LocalStorageIssue {
+    "key": string;
+    "path": string;
+    "operation": string;
+    "message": string;
+    "canRetry": boolean;
+}
+
 /**
  * MCPServerInput is the provider-agnostic MCP server definition used by the
  * capability center add/edit dialog. Command holds the stdio launch command or
@@ -666,6 +692,8 @@ export interface PluginInstallRequest {
  * ProjectInstructionsInfo is the workspace-root AGENTS.md (project-scoped Codex guidance).
  */
 export interface ProjectInstructionsInfo {
+    "revision": string;
+    "readError"?: string;
     "content": string;
     "workspace": string;
     "workspaceName": string;
@@ -812,6 +840,7 @@ export interface ScheduledTask {
     "lastRunAt": number;
     "nextRunAt": number;
     "lastError"?: string;
+    "activeSessionId"?: string;
     "createdAt": number;
     "updatedAt": number;
 }

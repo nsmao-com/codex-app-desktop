@@ -5,8 +5,10 @@ import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import { notify } from '../utils/notify'
 import { friendlyErrorMessage } from '../utils/errorMessage'
 import { translate } from '../i18n'
+import { useAppStore } from './app'
 
 export const useTerminalStore = defineStore('terminal', () => {
+  const appStore = useAppStore()
   const terminalPanelOpen = shallowRef(false)
   const terminalStarting = shallowRef(false)
   const terminalRunning = shallowRef(false)
@@ -15,6 +17,7 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   let terminalDecoder = new TextDecoder()
   let terminalGeneration = 0
+  let exitedProcessId = ''
   let writeToTerminal: ((chunk: string) => void) | null = null
 
   function bindTerminalWriter(writer: ((chunk: string) => void) | null): void {
@@ -28,17 +31,24 @@ export const useTerminalStore = defineStore('terminal', () => {
     terminalPanelOpen.value = true
     if (terminalRunning.value || terminalStarting.value) return true
     const generation = ++terminalGeneration
+    const runtime = appStore.activeRuntime
+    const workspace = appStore.currentWorkspacePath
     const processID = `terminal-${crypto.randomUUID()}`
     terminalProcessId.value = processID
+    exitedProcessId = ''
     terminalOutput.value = ''
     terminalDecoder = new TextDecoder()
     terminalStarting.value = true
     try {
+      if (!await appStore.ensureActiveRuntimeSynced(runtime)
+        || appStore.currentWorkspacePath !== workspace
+        || generation !== terminalGeneration || !terminalPanelOpen.value) return false
       await backend.StartTerminalSession(processID)
       if (generation !== terminalGeneration || !terminalPanelOpen.value) {
         await backend.StopTerminalSession(processID).catch(() => undefined)
         return false
       }
+      if (exitedProcessId === processID) return false
       terminalRunning.value = true
       return true
     } catch (error) {
@@ -98,6 +108,7 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   function handleExit(processId: string, error?: string): void {
     if (processId !== terminalProcessId.value) return
+    exitedProcessId = processId
     terminalStarting.value = false
     terminalRunning.value = false
     if (error) {

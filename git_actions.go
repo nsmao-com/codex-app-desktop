@@ -205,7 +205,8 @@ func readPublicGitHubIssue(ownerRepo string, number int) (GitHubIssueContent, er
 }
 
 func (s *AppService) CreateGitBranch(request GitBranchRequest) (GitActionResult, error) {
-	workspace, err := validateWorkspace(s.Settings().Workspace)
+	settings := s.Settings()
+	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
 	if err != nil {
 		return GitActionResult{}, err
 	}
@@ -216,12 +217,15 @@ func (s *AppService) CreateGitBranch(request GitBranchRequest) (GitActionResult,
 	if strings.ContainsAny(name, " \t\n") || strings.Contains(name, "..") {
 		return GitActionResult{}, errors.New("invalid branch name")
 	}
-	prefix := strings.TrimSpace(s.Settings().GitBranchPrefix)
+	prefix := strings.TrimSpace(settings.GitBranchPrefix)
 	if prefix != "" && !strings.HasPrefix(name, prefix) {
 		name = prefix + name
 	}
 	if len(name) > 120 {
 		return GitActionResult{}, errors.New("branch name is too long")
+	}
+	if output, formatErr := runGit(workspace, 5*time.Second, "check-ref-format", "--branch", name); formatErr != nil {
+		return GitActionResult{}, fmt.Errorf("invalid branch name: %s", strings.TrimSpace(output))
 	}
 	output, err := runGit(workspace, 12*time.Second, "checkout", "-b", name)
 	if err != nil {
@@ -303,7 +307,8 @@ func listLocalGitBranches(workspace string) ([]string, error) {
 }
 
 func (s *AppService) CommitGitChanges(request GitCommitRequest) (GitActionResult, error) {
-	workspace, err := validateWorkspace(s.Settings().Workspace)
+	settings := s.Settings()
+	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
 	if err != nil {
 		return GitActionResult{}, err
 	}
@@ -311,7 +316,7 @@ func (s *AppService) CommitGitChanges(request GitCommitRequest) (GitActionResult
 	if message == "" {
 		return GitActionResult{}, errors.New("commit message is required")
 	}
-	prefix := strings.TrimSpace(s.Settings().GitCommitPrefix)
+	prefix := strings.TrimSpace(settings.GitCommitPrefix)
 	if prefix != "" && !strings.HasPrefix(message, strings.TrimSpace(prefix)) {
 		message = strings.TrimSpace(prefix) + " " + message
 		message = strings.TrimSpace(message)
@@ -331,7 +336,7 @@ func (s *AppService) CommitGitChanges(request GitCommitRequest) (GitActionResult
 }
 
 func (s *AppService) PushGitBranch() (GitActionResult, error) {
-	workspace, err := validateWorkspace(s.Settings().Workspace)
+	workspace, err := validateWorkspace(s.activeWorkspacePath())
 	if err != nil {
 		return GitActionResult{}, err
 	}
@@ -390,7 +395,11 @@ func (s *AppService) openPullRequest(workspace, branch string) (string, error) {
 }
 
 func runGit(workspace string, timeout time.Duration, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return runGitWithContext(context.Background(), workspace, timeout, args...)
+}
+
+func runGitWithContext(parent context.Context, workspace string, timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, "git", append([]string{"-C", workspace}, args...)...)
 	configureBackgroundProcess(command)

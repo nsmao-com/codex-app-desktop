@@ -1,6 +1,5 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 
-import SettingsView from '@/views/SettingsView.vue'
 import WorkbenchView from '@/views/WorkbenchView.vue'
 
 const router = createRouter({
@@ -14,7 +13,7 @@ const router = createRouter({
     {
       path: '/settings',
       name: 'settings',
-      component: SettingsView,
+      component: () => import('@/views/SettingsView.vue'),
     },
     {
       path: '/capabilities',

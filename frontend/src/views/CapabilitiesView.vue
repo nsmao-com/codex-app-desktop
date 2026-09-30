@@ -28,6 +28,7 @@ import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import GrokIcon from '@/components/icons/GrokIcon.vue'
 import GeminiIcon from '@/components/icons/GeminiIcon.vue'
 import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
+import ExternalInstructionsEditor from '@/components/ExternalInstructionsEditor.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -104,15 +105,16 @@ const claudeTab = shallowRef<ClaudeCapTab>('runtime')
 const externalTab = shallowRef<'runtime' | 'mcp' | 'skills' | 'instructions'>('runtime')
 const externalCatalog = shallowRef<ExternalRuntimeCatalog | null>(null)
 const externalCatalogLoading = shallowRef(false)
-const externalInstructionScope = shallowRef<'global' | 'project'>('global')
 const externalMcpScope = shallowRef<'global' | 'project'>('global')
 const externalMcpGlobalPath = computed(() => externalCatalog.value?.mcpConfigPath || externalCatalog.value?.configPath || '')
 const externalScopedMcpServers = computed(() => (externalCatalog.value?.mcp || []).filter((server) => externalMcpScope.value === 'global'
   ? server.configPath === externalMcpGlobalPath.value
   : server.configPath !== externalMcpGlobalPath.value))
-const externalInstructionDraft = shallowRef('')
 const externalMcpJSON = shallowRef('')
 const externalMcpSaving = shallowRef(false)
+const externalMcpDrafts = new Map<string, string>()
+const externalMcpDraftKey = computed(() => `${externalRuntimeID()}|${externalMcpScope.value}|${appStore.currentWorkspacePath || ''}`)
+const externalMcpDirty = computed(() => externalMcpDrafts.has(externalMcpDraftKey.value))
 const providerConfiguration = shallowRef<ProviderConfigurationView | null>(null)
 const providerConfigurationLoading = shallowRef(false)
 const providerRestarting = shallowRef(false)
@@ -342,9 +344,9 @@ async function loadGrokCatalog(): Promise<void> {
       mcp: [],
       skills: [],
       plugins: [],
-      globalInstructions: { content: '', path: '', source: '', exists: false, emptyFile: false, available: false },
+      globalInstructions: { revision: '', content: '', path: '', source: '', exists: false, emptyFile: false, available: false },
       projectInstructions: {
-        content: '', workspace: '', workspaceName: '', path: '', source: '',
+        revision: '', content: '', workspace: '', workspaceName: '', path: '', source: '',
         exists: false, emptyFile: false, available: false,
       },
     }
@@ -376,9 +378,9 @@ async function loadClaudeCatalog(): Promise<void> {
       agents: [],
       commands: [],
       hooks: [],
-      globalInstructions: { content: '', path: '', source: '', exists: false, emptyFile: false, available: false },
+      globalInstructions: { revision: '', content: '', path: '', source: '', exists: false, emptyFile: false, available: false },
       projectInstructions: {
-        content: '', workspace: '', workspaceName: '', path: '', source: '',
+        revision: '', content: '', workspace: '', workspaceName: '', path: '', source: '',
         exists: false, emptyFile: false, available: false,
       },
     }
@@ -394,10 +396,6 @@ function externalRuntimeID(): 'gemini' | 'opencode' {
 function hydrateExternalEditors(): void {
   const catalog = externalCatalog.value
   if (!catalog) return
-  const info = externalInstructionScope.value === 'global'
-    ? catalog.globalInstructions
-    : catalog.projectInstructions
-  externalInstructionDraft.value = info?.content || ''
   const key = isGeminiMode.value ? 'mcpServers' : 'mcp'
   const mcpServers = externalScopedMcpServers.value
   const servers = Object.fromEntries(mcpServers.map((server) => [server.name, {
@@ -408,7 +406,15 @@ function hydrateExternalEditors(): void {
     transport: server.transport || undefined,
     enabled: server.enabled,
   }]))
-  externalMcpJSON.value = JSON.stringify({ [key]: servers }, null, 2)
+  const draftKey = externalMcpDraftKey.value
+  const generated = JSON.stringify({ [key]: servers }, null, 2)
+  externalMcpJSON.value = externalMcpDrafts.get(draftKey) ?? generated
+}
+
+function markExternalMcpDraft(value: string | number): void {
+  const text = String(value)
+  externalMcpJSON.value = text
+  externalMcpDrafts.set(externalMcpDraftKey.value, text)
 }
 
 async function loadExternalCatalog(): Promise<void> {
@@ -431,26 +437,20 @@ async function loadExternalCatalog(): Promise<void> {
   }
 }
 
-async function saveExternalInstructions(): Promise<void> {
-  try {
-    await backend.SaveExternalRuntimeInstructions({
-      runtime: externalRuntimeID(), workspace: appStore.currentWorkspacePath || '',
-      scope: externalInstructionScope.value, content: externalInstructionDraft.value,
-    })
-    await loadExternalCatalog()
-    notify('success', t('capabilities.externalInstructionsSaved'), t('settings.externalInstructionsSaved'))
-  } catch (error) {
-    notify('error', t('capabilities.externalInstructions'), error instanceof Error ? error.message : String(error))
-  }
-}
 
 async function saveExternalMCP(): Promise<void> {
+  if (externalMcpSaving.value || !externalMcpJSON.value.trim()) return
+  const draftKey = externalMcpDraftKey.value
+  const runtime = externalRuntimeID()
+  const workspace = appStore.currentWorkspacePath || ''
+  const scope = externalMcpScope.value
   externalMcpSaving.value = true
   try {
     await backend.SaveExternalRuntimeMCP({
-      runtime: externalRuntimeID(), workspace: appStore.currentWorkspacePath || '', json: externalMcpJSON.value,
-      scope: externalMcpScope.value,
+      runtime, workspace, json: externalMcpJSON.value, scope,
     })
+    if (draftKey !== externalMcpDraftKey.value || runtime !== externalRuntimeID() || workspace !== (appStore.currentWorkspacePath || '') || scope !== externalMcpScope.value) return
+    externalMcpDrafts.delete(draftKey)
     await loadExternalCatalog()
     notify('success', t('capabilities.externalMcp'), t('capabilities.externalMcpSaved'))
   } catch (error) {
@@ -629,7 +629,7 @@ watch(() => appStore.activeRuntime, () => {
   externalCatalog.value = null
   loadWhenReady()
 })
-watch([externalInstructionScope, externalMcpScope], () => hydrateExternalEditors())
+watch(externalMcpScope, () => hydrateExternalEditors())
 watch(
   () => route.query.tab,
   applyRouteTab,
@@ -1954,8 +1954,14 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                     </div>
                      <p v-else class="rounded-md border border-dashed px-3 py-5 text-center text-[11px] text-muted-foreground">{{ t('capabilities.externalMcpEmpty', { runtime: externalRuntimeName }) }}</p>
                      <div v-if="externalMcpScope === 'global'" class="flex justify-start"><Button size="sm" variant="outline" @click="openRuntimeMcpDialog(externalRuntimeID())"><Plus :size="13" class="mr-1.5" />{{ t('capabilities.addMcp') }}</Button></div>
-                    <Textarea v-model="externalMcpJSON" class="min-h-52 font-mono text-[11px] leading-5" spellcheck="false" :placeholder="isGeminiMode ? '{ &quot;mcpServers&quot;: {} }' : '{ &quot;mcp&quot;: {} }'" />
-                     <div class="flex justify-end"><Button size="sm" :disabled="externalMcpSaving || !externalMcpJSON.trim()" @click="void saveExternalMCP()"><LoaderCircle v-if="externalMcpSaving" :size="13" class="mr-1.5 animate-spin" />{{ t('capabilities.saveNativeMcp') }}</Button></div>
+                    <details class="rounded-lg border bg-muted/10 px-3 py-2">
+                      <summary class="cursor-pointer text-[11px] font-medium">{{ t('capabilities.externalMcpAdvancedTitle') }} <span v-if="externalMcpDirty" class="ml-1 text-amber-600">· {{ t('capabilities.unsavedChanges') }}</span></summary>
+                      <div class="mt-2 space-y-2">
+                        <p class="text-[10px] leading-4 text-muted-foreground">{{ t('capabilities.externalMcpAdvancedHint') }}</p>
+                        <Textarea v-model="externalMcpJSON" @update:model-value="markExternalMcpDraft" class="min-h-52 font-mono text-[11px] leading-5" spellcheck="false" :disabled="externalMcpSaving" :placeholder="isGeminiMode ? '{ &quot;mcpServers&quot;: {} }' : '{ &quot;mcp&quot;: {} }'" />
+                        <div class="flex justify-end"><Button size="sm" :disabled="externalMcpSaving || !externalMcpJSON.trim()" @click="void saveExternalMCP()"><LoaderCircle v-if="externalMcpSaving" :size="13" class="mr-1.5 animate-spin" />{{ t('capabilities.saveNativeMcp') }}</Button></div>
+                      </div>
+                    </details>
                   </CardContent>
                 </Card>
               </template>
@@ -1989,18 +1995,8 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                 </Card>
               </template>
 
-              <template v-else>
-                <Card>
-                   <CardHeader class="pb-2"><CardTitle class="text-[13px]">{{ t('capabilities.externalInstructionsTitle', { runtime: externalRuntimeName }) }}</CardTitle></CardHeader>
-                  <CardContent class="space-y-3">
-                     <div class="grid grid-cols-2 rounded-md border bg-muted/40 p-0.5"><Button type="button" size="xs" :variant="externalInstructionScope === 'global' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'global'">{{ t('settings.instructionsGlobal') }}</Button><Button type="button" size="xs" :variant="externalInstructionScope === 'project' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'project'">{{ t('settings.instructionsProject') }}</Button></div>
-                    <p class="text-[10px] text-muted-foreground">{{ externalInstructionScope === 'global' ? externalCatalog?.globalInstructions?.path : externalCatalog?.projectInstructions?.path }}</p>
-                    <Textarea v-model="externalInstructionDraft" class="min-h-72 font-mono text-[11px] leading-5" spellcheck="false" :placeholder="isGeminiMode ? t('capabilities.geminiInstructionsPlaceholder', { runtime: externalRuntimeName }) : t('capabilities.openCodeInstructionsPlaceholder')" />
-                     <div class="flex justify-end"><Button size="sm" @click="void saveExternalInstructions()">{{ t('settings.saveNativeInstructions') }}</Button></div>
-                     <p v-if="externalCatalog?.configInstructions" class="rounded-md border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">{{ t('capabilities.openCodeConfigInstructions') }}: {{ externalCatalog.configInstructions }}</p>
-                  </CardContent>
-                </Card>
-              </template>
+              <ExternalInstructionsEditor :runtime="externalRuntimeID()" :workspace="appStore.currentWorkspacePath || ''" :active="externalTab === 'instructions'" />
+              <p v-if="externalTab === 'instructions' && externalCatalog?.configInstructions" class="rounded-md border bg-muted/20 px-3 py-2 text-[10px] leading-4 text-muted-foreground">{{ t('capabilities.openCodeConfigInstructions') }}: {{ externalCatalog.configInstructions }}</p>
             </div>
           </ScrollArea>
         </template>

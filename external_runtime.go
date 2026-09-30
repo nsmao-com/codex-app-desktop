@@ -273,6 +273,7 @@ func geminiProjectMCPConfigPath(workspace string) string {
 }
 
 type ExternalInstructionsSaveRequest struct {
+	Revision  string `json:"revision"`
 	Runtime   string `json:"runtime"`
 	Workspace string `json:"workspace"`
 	Scope     string `json:"scope"` // global | project
@@ -600,31 +601,20 @@ func (s *AppService) invalidateNativeHistoryCache(runtime, backendRef string) {
 	s.historyMu.Unlock()
 }
 
-func (s *AppService) SaveExternalRuntimeInstructions(request ExternalInstructionsSaveRequest) error {
-	runtime := normalizeExternalRuntime(request.Runtime)
-	if runtime == "" {
-		return errors.New("unsupported external runtime")
+func (s *AppService) ReadExternalRuntimeInstructions(runtime, scope, workspace string) (GlobalInstructionsInfo, error) {
+	source, err := externalInstructionSource(normalizeExternalRuntime(runtime), strings.ToLower(strings.TrimSpace(scope)), strings.TrimSpace(workspace))
+	if err != nil {
+		return GlobalInstructionsInfo{}, err
 	}
-	scope := strings.ToLower(strings.TrimSpace(request.Scope))
-	if scope != "global" && scope != "project" {
-		return errors.New("instruction scope must be global or project")
+	return source.read(), nil
+}
+
+func (s *AppService) SaveExternalRuntimeInstructions(request ExternalInstructionsSaveRequest) (GlobalInstructionsInfo, error) {
+	source, err := externalInstructionSource(normalizeExternalRuntime(request.Runtime), strings.ToLower(strings.TrimSpace(request.Scope)), strings.TrimSpace(request.Workspace))
+	if err != nil {
+		return GlobalInstructionsInfo{}, err
 	}
-	home, _ := os.UserHomeDir()
-	var path string
-	if scope == "global" {
-		if runtime == "gemini" {
-			path = geminiGlobalInstructionPath(resolveGeminiHome())
-		} else {
-			path = filepath.Join(openCodeConfigDir(home), "AGENTS.md")
-		}
-	} else {
-		workspace, err := validateWorkspace(strings.TrimSpace(request.Workspace))
-		if err != nil {
-			return err
-		}
-		path = externalProjectInstructionPath(runtime, workspace)
-	}
-	return writeTextFileAtomic(path, request.Content)
+	return source.save(InstructionsSaveRequest{Content: request.Content, Revision: request.Revision})
 }
 
 func (s *AppService) SaveExternalRuntimeMCP(request ExternalMCPJSONSaveRequest) error {
@@ -636,11 +626,11 @@ func (s *AppService) SaveExternalRuntimeMCP(request ExternalMCPJSONSaveRequest) 
 	if scope != "project" {
 		scope = "global"
 	}
-	var root map[string]any
 	if strings.TrimSpace(request.JSON) == "" {
 		return errors.New("MCP JSON is required")
 	}
-	if err := json.Unmarshal([]byte(request.JSON), &root); err != nil {
+	_, root, err := parseProviderJSON([]byte(request.JSON))
+	if err != nil {
 		return fmt.Errorf("invalid MCP JSON: %w", err)
 	}
 	var servers any
@@ -670,8 +660,6 @@ func (s *AppService) SaveExternalRuntimeMCP(request ExternalMCPJSONSaveRequest) 
 		}
 	}
 	path := externalRuntimeConfigPath(runtime, scope, workspace)
-	config := map[string]any{}
-	_ = readLimitedJSON(path, &config)
 	// Preserve fields that are not represented by the compact editor (for
 	// example env, headers and custom transport options). This keeps a normal
 	// load -> save cycle from silently deleting native MCP credentials.
@@ -679,50 +667,27 @@ func (s *AppService) SaveExternalRuntimeMCP(request ExternalMCPJSONSaveRequest) 
 	if runtime == "gemini" {
 		key = "mcpServers"
 	}
-	config[key] = mergeExternalMCPServers(config[key], servers)
-	payload, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeTextFileAtomic(path, string(payload)+"\n")
-}
-
-func instructionFileName(runtime string) string {
-	if runtime == "gemini" {
-		return "GEMINI.md"
-	}
-	return "AGENTS.md"
+	return updateProviderJSONConfig(path, func(config map[string]any) error {
+		existing, err := providerJSONObject(config, key)
+		if err != nil {
+			return err
+		}
+		config[key] = mergeExternalMCPServers(existing, servers)
+		if runtime == "opencode" {
+			for _, raw := range config[key].(map[string]any) {
+				if object, ok := raw.(map[string]any); ok {
+					normalizeOpenCodeMCPServerObject(object)
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // Antigravity always reads its global instructions from ~/.gemini/GEMINI.md.
 // Keep this separate from project selection so reads and writes cannot drift.
 func geminiGlobalInstructionPath(root string) string {
 	return filepath.Join(strings.TrimSpace(root), "GEMINI.md")
-}
-
-// Project instructions differ by runtime generation. Antigravity prefers an
-// existing AGENTS.md, then GEMINI.md, and creates AGENTS.md for new projects.
-// Legacy Gemini reverses that order and creates GEMINI.md.
-func geminiProjectInstructionPath(root string) string {
-	root = strings.TrimSpace(root)
-	agentsPath := filepath.Join(root, "AGENTS.md")
-	geminiPath := filepath.Join(root, "GEMINI.md")
-	if geminiPrefersAntigravityInstructions() {
-		if fileOrDirExists(agentsPath) {
-			return agentsPath
-		}
-		if fileOrDirExists(geminiPath) {
-			return geminiPath
-		}
-		return agentsPath
-	}
-	if fileOrDirExists(geminiPath) {
-		return geminiPath
-	}
-	if fileOrDirExists(agentsPath) {
-		return agentsPath
-	}
-	return geminiPath
 }
 
 func geminiPrefersAntigravityInstructions() bool {
@@ -737,11 +702,12 @@ func geminiPrefersAntigravityInstructions() bool {
 }
 
 func readInstructionFile(path, source, label string) GlobalInstructionsInfo {
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		return GlobalInstructionsInfo{Path: path, Source: source, Available: true}
+	info := (instructionSource{[]string{path}, path, false, 0o600}).read()
+	info.Source = source
+	if info.Exists {
+		info.Source = label
 	}
-	return GlobalInstructionsInfo{Content: string(payload), Path: path, Source: label, Exists: true, EmptyFile: len(strings.TrimSpace(string(payload))) == 0, Available: true}
+	return info
 }
 
 func hasYAMLFrontMatter(path string) bool {
@@ -859,60 +825,20 @@ func listExternalSkills(runtime, home, workspace string) []ExternalSkillView {
 	return result
 }
 
-func readProjectInstruction(workspace, name, source, label string) ProjectInstructionsInfo {
-	info := ProjectInstructionsInfo{Workspace: workspace, WorkspaceName: filepath.Base(workspace), Source: source, Available: workspace != ""}
-	if workspace == "" {
-		return info
-	}
-	path := filepath.Join(workspace, name)
-	global := readInstructionFile(path, source, label)
-	info.Content, info.Path, info.Source = global.Content, global.Path, global.Source
-	info.Exists, info.EmptyFile, info.Available = global.Exists, global.EmptyFile, global.Available
-	return info
-}
-
 func readGeminiProjectInstructions(workspace string) ProjectInstructionsInfo {
-	info := ProjectInstructionsInfo{Workspace: workspace, WorkspaceName: filepath.Base(workspace), Source: "gemini-project", Available: strings.TrimSpace(workspace) != ""}
-	if strings.TrimSpace(workspace) == "" {
-		return info
-	}
-	path := geminiProjectInstructionPath(workspace)
-	label := "Gemini CLI project GEMINI.md"
-	if strings.EqualFold(filepath.Base(path), "AGENTS.md") {
-		label = "Antigravity/Gemini project AGENTS.md"
-	}
-	loaded := readInstructionFile(path, "gemini-project", label)
-	info.Content, info.Path, info.Source = loaded.Content, loaded.Path, loaded.Source
-	info.Exists, info.EmptyFile = loaded.Exists, loaded.EmptyFile
-	return info
+	return readExternalProjectInstructions("gemini", workspace)
 }
 
 func readOpenCodeProjectInstructions(workspace string) ProjectInstructionsInfo {
-	path := externalProjectInstructionPath("opencode", workspace)
-	info := readInstructionFile(path, "opencode-project", "OpenCode project AGENTS.md")
-	return ProjectInstructionsInfo{
-		Content: info.Content, Workspace: workspace, WorkspaceName: filepath.Base(workspace), Path: info.Path,
-		Source: info.Source, Exists: info.Exists, EmptyFile: info.EmptyFile, Available: workspace != "",
-	}
+	return readExternalProjectInstructions("opencode", workspace)
 }
 
-func externalProjectInstructionPath(runtime, workspace string) string {
-	if runtime == "opencode" {
-		candidates := []string{
-			filepath.Join(workspace, ".opencode", "AGENTS.md"),
-			filepath.Join(workspace, "AGENTS.md"),
-		}
-		for _, candidate := range candidates {
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate
-			}
-		}
-		return candidates[0]
+func readExternalProjectInstructions(runtime, workspace string) ProjectInstructionsInfo {
+	source, err := externalInstructionSource(runtime, "project", workspace)
+	if err != nil {
+		return ProjectInstructionsInfo{Workspace: workspace, ReadError: err.Error()}
 	}
-	if runtime == "gemini" {
-		return geminiProjectInstructionPath(workspace)
-	}
-	return filepath.Join(workspace, instructionFileName(runtime))
+	return projectInstructionInfo(source.read(), workspace)
 }
 
 func geminiActiveProvider(configPath string) string {
@@ -998,10 +924,7 @@ func firstGeminiModel(models []AgentProviderModel) string {
 }
 
 func readOpenCodeConfig(path string) (activeProvider, defaultModel, instructions string) {
-	var config map[string]any
-	if !readLimitedJSON(path, &config) {
-		return "", "", ""
-	}
+	config := readOpenCodeMergedConfig(path)
 	if model, ok := config["model"].(string); ok {
 		defaultModel = strings.TrimSpace(model)
 		activeProvider = providerFromModelReference(defaultModel)
@@ -1044,8 +967,8 @@ func providerFromModelReference(model string) string {
 }
 
 func readGeminiMCP(path string) []ExternalMCPServerView {
-	var config map[string]any
-	if !readLimitedJSON(path, &config) {
+	config, err := readProviderJSONConfig(path)
+	if err != nil {
 		return []ExternalMCPServerView{}
 	}
 	servers := config["mcpServers"]
@@ -1096,11 +1019,37 @@ func normalizeAntigravityMCPServers(value any) any {
 }
 
 func readOpenCodeMCP(path string) []ExternalMCPServerView {
-	var config map[string]any
-	if !readLimitedJSON(path, &config) {
-		return []ExternalMCPServerView{}
-	}
+	config := readOpenCodeMergedConfig(path)
 	return mcpViewsFromMap(config["mcp"], path, "opencode")
+}
+
+// OpenCode loads opencode.json and then opencode.jsonc from the same directory;
+// the JSONC document overrides matching values. Keep catalog reads consistent
+// with the runtime while edits still target the overriding document only.
+func readOpenCodeMergedConfig(path string) map[string]any {
+	config := readProviderJSONMap(path)
+	if strings.EqualFold(filepath.Ext(path), ".jsonc") && strings.TrimSpace(os.Getenv("OPENCODE_CONFIG")) == "" {
+		base := readProviderJSONMap(strings.TrimSuffix(path, filepath.Ext(path)) + ".json")
+		config = mergeProviderConfigMaps(base, config)
+	}
+	return config
+}
+
+func mergeProviderConfigMaps(base, override map[string]any) map[string]any {
+	merged := make(map[string]any, len(base)+len(override))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range override {
+		baseObject, baseOK := merged[key].(map[string]any)
+		overrideObject, overrideOK := value.(map[string]any)
+		if baseOK && overrideOK {
+			merged[key] = mergeProviderConfigMaps(baseObject, overrideObject)
+		} else {
+			merged[key] = value
+		}
+	}
+	return merged
 }
 
 func externalRuntimeConfigPath(runtime, scope, workspace string) string {
@@ -1116,10 +1065,12 @@ func externalRuntimeConfigPath(runtime, scope, workspace string) string {
 		return geminiProjectMCPConfigPath(workspace)
 	}
 	for _, candidate := range []string{
+		filepath.Join(workspace, ".opencode", "opencode.jsonc"),
 		filepath.Join(workspace, ".opencode", "opencode.json"),
+		filepath.Join(workspace, "opencode.jsonc"),
 		filepath.Join(workspace, "opencode.json"),
 	} {
-		if _, err := os.Stat(candidate); err == nil {
+		if providerConfigCandidateExists(candidate) {
 			return candidate
 		}
 	}
@@ -1143,7 +1094,20 @@ func openCodeConfigPath(home string) string {
 	if configFile := strings.TrimSpace(os.Getenv("OPENCODE_CONFIG")); configFile != "" {
 		return configFile
 	}
-	return filepath.Join(openCodeConfigDir(home), "opencode.json")
+	directory := openCodeConfigDir(home)
+	// OpenCode loads JSONC after JSON. Edit the overriding file when present.
+	if candidate := filepath.Join(directory, "opencode.jsonc"); providerConfigCandidateExists(candidate) {
+		return candidate
+	}
+	return filepath.Join(directory, "opencode.json")
+}
+
+func providerConfigCandidateExists(path string) bool {
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		return true
+	}
+	_, err := os.Lstat(path + ".nicecodex-backup")
+	return !os.IsNotExist(err)
 }
 
 func readExternalMCPByScope(runtime, globalPath, workspace string) []ExternalMCPServerView {
@@ -1308,8 +1272,7 @@ func discoverOpenCodeCatalog(home string) ([]AgentProviderModel, []AgentProvider
 	}
 	openCodeCatalogCache.Unlock()
 	configPath := openCodeConfigPath(home)
-	var config map[string]any
-	readLimitedJSON(configPath, &config)
+	config := readOpenCodeMergedConfig(configPath)
 	executable := findCommand(commandCandidates("opencode"))
 	output := ""
 	if executable != "" {
@@ -3904,47 +3867,5 @@ func writeTextFileAtomic(path, content string) error {
 	if len(content) > 8*1024*1024 {
 		return errors.New("instruction/configuration file is too large")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".nice-codex-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err = tmp.WriteString(content); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Chmod(0600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err = tmp.Close(); err != nil {
-		return err
-	}
-	// Windows does not replace an existing file with os.Rename. Move the old
-	// file aside first and restore it if the replacement fails.
-	backupPath := path + ".nicecodex-backup"
-	_ = os.Remove(backupPath)
-	hadExisting := false
-	if _, statErr := os.Stat(path); statErr == nil {
-		if err := os.Rename(path, backupPath); err != nil {
-			return err
-		}
-		hadExisting = true
-	} else if !os.IsNotExist(statErr) {
-		return statErr
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		if hadExisting {
-			_ = os.Rename(backupPath, path)
-		}
-		return err
-	}
-	if hadExisting {
-		_ = os.Remove(backupPath)
-	}
-	return nil
+	return writeProviderFileAtomic(path, []byte(content))
 }

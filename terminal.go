@@ -49,7 +49,7 @@ func (s *AppService) RefreshTerminalProfiles() []TerminalProfile {
 
 func (s *AppService) OpenTerminal() error {
 	settings := s.Settings()
-	workspace, err := validateWorkspace(settings.Workspace)
+	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
 	if err != nil {
 		return err
 	}
@@ -68,7 +68,7 @@ func (s *AppService) StartTerminalSession(processID string) error {
 		return errors.New("a valid terminal process id is required")
 	}
 	settings := s.Settings()
-	workspace, err := validateWorkspace(settings.Workspace)
+	workspace, err := validateWorkspace(activeWorkspaceForRuntime(settings))
 	if err != nil {
 		return err
 	}

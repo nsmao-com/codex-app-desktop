@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/aymanbagabas/go-pty v0.2.3
+	github.com/tailscale/hujson v0.0.0-20250605163823-992244df8c5a
 	github.com/wailsapp/wails/v3 v3.0.0-alpha2.117
 	golang.org/x/sys v0.44.0
 )

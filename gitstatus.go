@@ -10,7 +10,7 @@ import (
 )
 
 func (s *AppService) ReadWorkspaceDiff(relativePath string) (string, error) {
-	workspace, err := validateWorkspace(s.Settings().Workspace)
+	workspace, err := validateWorkspace(s.activeWorkspacePath())
 	if err != nil {
 		return "", err
 	}

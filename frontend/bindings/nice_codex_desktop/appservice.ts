@@ -306,6 +306,10 @@ export function ListWorkspaceThreads(workspace: string, search: string): $Cancel
     return $Call.ByID(2536997788, workspace, search);
 }
 
+export function LocalStorageStatus(): $CancellablePromise<$models.LocalStorageHealth> {
+    return $Call.ByID(825395124);
+}
+
 export function LogoutAccount(): $CancellablePromise<void> {
     return $Call.ByID(2683059787);
 }
@@ -434,6 +438,10 @@ export function ReadExternalRuntimeCatalog(runtime: string, workspace: string): 
     return $Call.ByID(2982606466, runtime, workspace);
 }
 
+export function ReadExternalRuntimeInstructions(runtime: string, scope: string, workspace: string): $CancellablePromise<$models.GlobalInstructionsInfo> {
+    return $Call.ByID(503136970, runtime, scope, workspace);
+}
+
 /**
  * ReadGlobalInstructions returns personal Codex AGENTS.md content from disk.
  */
@@ -453,9 +461,6 @@ export function ReadGrokGlobalInstructions(): $CancellablePromise<$models.Global
     return $Call.ByID(324441159);
 }
 
-/**
- * ReadGrokProjectInstructions returns AGENTS.md for the active Grok workspace.
- */
 export function ReadGrokProjectInstructions(): $CancellablePromise<$models.ProjectInstructionsInfo> {
     return $Call.ByID(2285358151);
 }
@@ -621,16 +626,24 @@ export function ResumeThread(threadID: string): $CancellablePromise<{ [_ in stri
     return $Call.ByID(3830793425, threadID);
 }
 
+/**
+ * Retry only retained in-memory data. Preference saves commit memory after disk
+ * succeeds, so their caller must retry the original form to preserve its edits.
+ */
+export function RetryLocalStorageWrites(): $CancellablePromise<$models.LocalStorageHealth> {
+    return $Call.ByID(928211604);
+}
+
 export function RollbackThread(threadID: string, numTurns: number): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(4017068374, threadID, numTurns);
 }
 
-export function SaveClaudeGlobalInstructions(content: string): $CancellablePromise<$models.GlobalInstructionsInfo> {
-    return $Call.ByID(3048108819, content);
+export function SaveClaudeGlobalInstructions(request: $models.InstructionsSaveRequest): $CancellablePromise<$models.GlobalInstructionsInfo> {
+    return $Call.ByID(3048108819, request);
 }
 
-export function SaveClaudeProjectInstructions(content: string): $CancellablePromise<$models.ProjectInstructionsInfo> {
-    return $Call.ByID(4083074467, content);
+export function SaveClaudeProjectInstructions(request: $models.InstructionsSaveRequest): $CancellablePromise<$models.ProjectInstructionsInfo> {
+    return $Call.ByID(4083074467, request);
 }
 
 export function SaveCodexFeatureFlags(flags: $models.CodexFeatureFlags): $CancellablePromise<$models.CodexFeatureFlags> {
@@ -644,7 +657,7 @@ export function SaveComputerUseSetting(enabled: boolean): $CancellablePromise<vo
     return $Call.ByID(904667639, enabled);
 }
 
-export function SaveExternalRuntimeInstructions(request: $models.ExternalInstructionsSaveRequest): $CancellablePromise<void> {
+export function SaveExternalRuntimeInstructions(request: $models.ExternalInstructionsSaveRequest): $CancellablePromise<$models.GlobalInstructionsInfo> {
     return $Call.ByID(1994634985, request);
 }
 
@@ -655,16 +668,16 @@ export function SaveExternalRuntimeMCP(request: $models.ExternalMCPJSONSaveReque
 /**
  * SaveGlobalInstructions writes personal Codex AGENTS.md and mirrors settings cache.
  */
-export function SaveGlobalInstructions(content: string): $CancellablePromise<$models.GlobalInstructionsInfo> {
-    return $Call.ByID(4035646133, content);
+export function SaveGlobalInstructions(request: $models.InstructionsSaveRequest): $CancellablePromise<$models.GlobalInstructionsInfo> {
+    return $Call.ByID(4035646133, request);
 }
 
-export function SaveGrokGlobalInstructions(content: string): $CancellablePromise<$models.GlobalInstructionsInfo> {
-    return $Call.ByID(1655319778, content);
+export function SaveGrokGlobalInstructions(request: $models.InstructionsSaveRequest): $CancellablePromise<$models.GlobalInstructionsInfo> {
+    return $Call.ByID(1655319778, request);
 }
 
-export function SaveGrokProjectInstructions(content: string): $CancellablePromise<$models.ProjectInstructionsInfo> {
-    return $Call.ByID(363786212, content);
+export function SaveGrokProjectInstructions(request: $models.InstructionsSaveRequest): $CancellablePromise<$models.ProjectInstructionsInfo> {
+    return $Call.ByID(363786212, request);
 }
 
 export function SavePreferences(settings: $models.UserSettings): $CancellablePromise<$models.UserSettings> {
@@ -672,10 +685,10 @@ export function SavePreferences(settings: $models.UserSettings): $CancellablePro
 }
 
 /**
- * SaveProjectInstructions writes the current workspace AGENTS.md (project-scoped Codex guidance).
+ * SaveProjectInstructions validates the revision of the displayed project file.
  */
-export function SaveProjectInstructions(content: string): $CancellablePromise<$models.ProjectInstructionsInfo> {
-    return $Call.ByID(437632509, content);
+export function SaveProjectInstructions(request: $models.InstructionsSaveRequest): $CancellablePromise<$models.ProjectInstructionsInfo> {
+    return $Call.ByID(437632509, request);
 }
 
 export function SaveProviderRouterConfig(request: $models.ProviderRouterSaveRequest): $CancellablePromise<$models.ProviderRouterView> {

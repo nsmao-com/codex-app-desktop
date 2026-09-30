@@ -16,6 +16,7 @@ declare module "@wailsio/runtime" {
     namespace Events {
         interface CustomEvents {
             "codex:event": codex$0.Event;
+            "nice:storage": main$0.LocalStorageHealth;
             "nice:update": main$0.UpdateProgress;
         }
     }

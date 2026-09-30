@@ -44,9 +44,15 @@ func grokAPISessionsPath(settingsPath string) string {
 	return filepath.Join(filepath.Dir(settingsPath), "grok-api-sessions.json")
 }
 
-func loadGrokAPISessions(settingsPath string) map[string]*GrokAPISession {
+func (s *AppService) loadGrokAPISessions() map[string]*GrokAPISession {
 	result := make(map[string]*GrokAPISession)
-	if err := readGrokJSONFile(grokAPISessionsPath(settingsPath), &result); err != nil {
+	path := grokAPISessionsPath(s.settingsPath)
+	err := readGrokJSONFile(path, &result)
+	if os.IsNotExist(err) {
+		err = nil
+	}
+	s.recordLocalStorageResult("grok", path, "read", err)
+	if err != nil {
 		return make(map[string]*GrokAPISession)
 	}
 	if result == nil {
@@ -56,12 +62,16 @@ func loadGrokAPISessions(settingsPath string) map[string]*GrokAPISession {
 }
 
 func (s *AppService) persistGrokAPISessionsLocked() error {
-	path := grokAPISessionsPath(s.settingsPath)
-	payload, err := json.MarshalIndent(s.grokAPISessions, "", "  ")
-	if err != nil {
+	if err := s.localStorageReadError("grok"); err != nil {
 		return err
 	}
-	return writeGrokJSONFile(path, payload)
+	path := grokAPISessionsPath(s.settingsPath)
+	payload, err := json.MarshalIndent(s.grokAPISessions, "", "  ")
+	if err == nil {
+		err = writeGrokJSONFile(path, payload)
+	}
+	s.recordLocalStorageResult("grok", path, "write", err)
+	return err
 }
 
 func grokAPIKeyConfigured() bool {

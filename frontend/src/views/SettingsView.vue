@@ -42,6 +42,9 @@ import GeminiIcon from '@/components/icons/GeminiIcon.vue'
 import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
 import OpenAIIcon from '@/components/icons/OpenAIIcon.vue'
 import ProviderRouterSettings from '@/components/ProviderRouterSettings.vue'
+import ScheduledTasksSettings from '@/components/ScheduledTasksSettings.vue'
+import ExternalInstructionsEditor from '@/components/ExternalInstructionsEditor.vue'
+import { instructionBytes, instructionError, maxInstructionBytes } from '@/utils/instructions'
 import SearchableSelect from '@/components/SearchableSelect.vue'
 import UsageOverviewCard from '@/components/UsageOverviewCard.vue'
 import { Badge } from '@/components/ui/badge'
@@ -65,7 +68,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
-import type { ExternalRuntimeCatalog } from '../../bindings/nice_codex_desktop/models'
+import type { CodexFeatureFlags, ExternalRuntimeCatalog, GlobalInstructionsInfo, ProjectInstructionsInfo } from '../../bindings/nice_codex_desktop/models'
 import { supportedLocales } from '@/i18n'
 import { ACCENT_OPTIONS, type AppAccent } from '@/lib/accents'
 import type { AppTheme } from '@/composables/useAppearance'
@@ -155,7 +158,6 @@ const claudePermissionOptions = computed(() => [
 ])
 
 const saving = shallowRef(false)
-const saved = shallowRef(false)
 const settingsSearch = shallowRef('')
 const archivedSearch = shallowRef('')
 const DEFAULT_MODEL_VALUE = '__nice_codex_default_model__'
@@ -250,23 +252,6 @@ const memoriesEnabled = shallowRef(false)
 const memoriesGenerate = shallowRef(true)
 const memoriesUse = shallowRef(true)
 const memoriesDisableExternal = shallowRef(false)
-const scheduledTasks = shallowRef<Array<{
-  id: string
-  title: string
-  prompt: string
-  workspace: string
-  enabled: boolean
-  intervalMin: number
-  useWorktree: boolean
-  lastRunAt: number
-  nextRunAt: number
-  lastError?: string
-}>>([])
-const scheduledDraftTitle = shallowRef('')
-const scheduledDraftPrompt = shallowRef('')
-const scheduledDraftInterval = shallowRef(60)
-const scheduledDraftWorktree = shallowRef(true)
-const scheduledLoading = shallowRef(false)
 const customInstructions = shallowRef(appStore.settings.customInstructions ?? '')
 const globalInstructionsPath = shallowRef('')
 const globalInstructionsSource = shallowRef('AGENTS.md')
@@ -280,13 +265,37 @@ const projectInstructionsExists = shallowRef(false)
 const projectInstructionsEmptyFile = shallowRef(false)
 const projectInstructionsWorkspace = shallowRef('')
 const projectInstructionsWorkspaceName = shallowRef('')
-const instructionsLoading = shallowRef(false)
-const customInstructionsLength = computed(() => customInstructions.value.length)
-const projectInstructionsLength = computed(() => projectInstructions.value.length)
+const globalInstructionsLoading = shallowRef(false)
+const projectInstructionsLoading = shallowRef(false)
+const instructionsLoading = computed(() => globalInstructionsLoading.value || projectInstructionsLoading.value)
+const globalInstructionsError = shallowRef('')
+const projectInstructionsError = shallowRef('')
+const instructionsError = computed(() => [globalInstructionsError.value, projectInstructionsError.value].filter(Boolean).join('\n'))
+const featureFlagsLoading = shallowRef(false)
+const featureFlagsError = shallowRef('')
+const saveError = shallowRef('')
+const globalInstructionsBaseline = shallowRef<string | null>(null)
+const projectInstructionsBaseline = shallowRef<string | null>(null)
+const globalInstructionsRevision = shallowRef('')
+const projectInstructionsRevision = shallowRef('')
+let globalInstructionsRuntime: WorkspaceRuntime | '' = ''
+let projectInstructionsContext = ''
+let globalInstructionsSequence = 0
+let projectInstructionsSequence = 0
+let featureFlagsSequence = 0
+let externalCatalogSequence = 0
+const featureFlagsBaseline = shallowRef<CodexFeatureFlags | null>(null)
+let settingsDisposed = false
+
+function instructionContext(): string {
+  return JSON.stringify([appStore.activeRuntime, appStore.currentWorkspacePath])
+}
+const customInstructionsLength = computed(() => instructionBytes(customInstructions.value))
+const projectInstructionsLength = computed(() => instructionBytes(projectInstructions.value))
 
 function instructionsStatusLabel(exists: boolean, emptyFile: boolean): string {
-  if (exists) return t('settings.instructionsFileHasContent')
   if (emptyFile) return t('settings.instructionsFileEmpty')
+  if (exists) return t('settings.instructionsFileHasContent')
   return t('settings.instructionsFileMissing')
 }
 const activePanel = shallowRef<SettingsPanel>('general')
@@ -371,8 +380,6 @@ const externalApprovalPolicy = computed({
 const externalCustomModelDraft = shallowRef('')
 const externalCatalog = shallowRef<ExternalRuntimeCatalog | null>(null)
 const externalCatalogLoading = shallowRef(false)
-const externalInstructionScope = shallowRef<'global' | 'project'>('global')
-const externalInstructionDraft = shallowRef('')
 const externalCustomModels = computed(() => isGeminiSettings.value
   ? (appStore.settings.geminiCustomModels ?? [])
   : (appStore.settings.openCodeCustomModels ?? []))
@@ -442,6 +449,8 @@ const externalModelOptions = computed(() => {
 
 async function loadExternalSettingsCatalog(): Promise<void> {
   if (!isGeminiSettings.value && !isOpenCodeSettings.value) return
+  const sequence = ++externalCatalogSequence
+  const context = instructionContext()
   externalCatalogLoading.value = true
   externalCatalogError.value = ''
   try {
@@ -450,43 +459,19 @@ async function loadExternalSettingsCatalog(): Promise<void> {
       runtime,
       appStore.currentWorkspacePath || '',
     )
-    if (runtime !== (isGeminiSettings.value ? 'gemini' : 'opencode')) return
+    if (settingsDisposed || sequence !== externalCatalogSequence || context !== instructionContext()) return
     externalCatalog.value = catalog
     if (runtime === 'opencode') syncOpenCodeCatalogSelection(catalog)
-    const info = externalInstructionScope.value === 'global'
-      ? catalog.globalInstructions
-      : catalog.projectInstructions
-    externalInstructionDraft.value = info?.content || ''
   } catch (error) {
+    if (settingsDisposed || sequence !== externalCatalogSequence || context !== instructionContext()) return
     externalCatalogError.value = error instanceof Error ? error.message : String(error || t('common.unavailable'))
     // Keep the bootstrap runtime catalog as a usable fallback instead of
     // turning a transient CLI/configuration error into an empty form.
   } finally {
-    externalCatalogLoading.value = false
+    if (sequence === externalCatalogSequence) externalCatalogLoading.value = false
   }
 }
 
-watch(externalInstructionScope, () => {
-  const catalog = externalCatalog.value
-  if (!catalog) return
-  const info = externalInstructionScope.value === 'global' ? catalog.globalInstructions : catalog.projectInstructions
-  externalInstructionDraft.value = info?.content || ''
-})
-
-async function saveExternalInstructionsSettings(): Promise<void> {
-  try {
-    await backend.SaveExternalRuntimeInstructions({
-      runtime: isGeminiSettings.value ? 'gemini' : 'opencode',
-      workspace: appStore.currentWorkspacePath || '',
-      scope: externalInstructionScope.value,
-      content: externalInstructionDraft.value,
-    })
-    await loadExternalSettingsCatalog()
-    notify('success', t('settings.externalInstructionsTitle'), t('settings.externalInstructionsSaved'))
-  } catch (error) {
-    notify('error', t('settings.externalInstructionsTitle'), error instanceof Error ? error.message : String(error))
-  }
-}
 
 function addExternalCustomModel(): void {
   const value = externalCustomModelDraft.value.trim()
@@ -1023,7 +1008,6 @@ watch(activePanel, (panel) => {
     void loadAgentsInstructions()
     void loadFeatureFlags()
   }
-  if (panel === 'scheduled') void loadScheduledTasks()
   if (panel === 'browser') void loadFeatureFlags()
   if (panel === 'archived') loadArchivedForActiveRuntime()
   if (panel === 'environment') void refreshCLITools({ silent: true })
@@ -1041,6 +1025,18 @@ onMounted(() => {
 })
 
 watch([isGrokSettings, isClaudeSettings, isGeminiSettings, isOpenCodeSettings], ([grok, _claude, gemini, openCode]) => {
+  globalInstructionsSequence++
+  projectInstructionsSequence++
+  featureFlagsSequence++
+  globalInstructionsLoading.value = false
+  projectInstructionsLoading.value = false
+  featureFlagsLoading.value = false
+  globalInstructionsError.value = ''
+  projectInstructionsError.value = ''
+  featureFlagsError.value = ''
+  globalInstructionsBaseline.value = null
+  projectInstructionsBaseline.value = null
+  featureFlagsBaseline.value = null
   syncFromStore()
   clampPanelForRuntime()
   if (activePanel.value === 'archived') loadArchivedForActiveRuntime()
@@ -1058,7 +1054,7 @@ function clampPanelForRuntime(): void {
 }
 
 async function switchSettingsRuntime(runtime: WorkspaceRuntime): Promise<void> {
-  if (runtimeSwitching.value || appStore.activeRuntime === runtime) return
+  if (saving.value || runtimeSwitching.value || appStore.activeRuntime === runtime) return
   runtimeSwitching.value = true
   try {
     const ok = await appStore.setActiveRuntime(runtime)
@@ -1079,8 +1075,12 @@ async function switchSettingsRuntime(runtime: WorkspaceRuntime): Promise<void> {
 }
 
 onUnmounted(() => {
+  settingsDisposed = true
+  globalInstructionsSequence++
+  projectInstructionsSequence++
+  featureFlagsSequence++
   window.clearTimeout(wslCopyResetTimer)
-  if (!saved.value) appStore.restoreAppearance()
+  appStore.restoreAppearance()
 })
 
 const showingCapabilities = computed(() => route.query.section === 'capabilities')
@@ -1141,7 +1141,7 @@ function syncFromStore(): void {
   geminiApprovalPolicy.value = settings.geminiApprovalPolicy || 'on-request'
   openCodeSandbox.value = settings.openCodeSandbox || 'workspace-write'
   openCodeApprovalPolicy.value = settings.openCodeApprovalPolicy || 'on-request'
-  grokWebSearch.value = settings.grokWebSearch !== false
+  grokWebSearch.value = Boolean(settings.grokWebSearch)
   grokXSearch.value = Boolean(settings.grokXSearch)
   grokAPIKey.value = settings.grokAPIKey || ''
   grokAPIBaseURL.value = settings.grokAPIBaseURL || ''
@@ -1173,7 +1173,7 @@ function syncFromStore(): void {
   browserAllowedHostsText.value = (settings.browserAllowedHosts ?? []).join('\n')
   browserBlockedHostsText.value = (settings.browserBlockedHosts ?? []).join('\n')
   browserDownloadDir.value = settings.browserDownloadDir ?? ''
-  browserFullCDP.value = Boolean(settings.browserFullCDP)
+  if (!isCodexSettings.value || !featureFlagsBaseline.value) browserFullCDP.value = Boolean(settings.browserFullCDP)
   shortcutCommandPalette.value = settings.shortcutCommandPalette || 'Ctrl+K'
   shortcutNewThread.value = settings.shortcutNewThread || 'Ctrl+N'
   shortcutTerminal.value = settings.shortcutTerminal || 'Ctrl+`'
@@ -1220,87 +1220,37 @@ function parseHostList(text: string): string[] {
 }
 
 async function loadFeatureFlags(): Promise<void> {
+  if (!isCodexSettings.value || featureFlagsBaseline.value) return
+  const sequence = ++featureFlagsSequence
+  featureFlagsLoading.value = true
+  featureFlagsError.value = ''
   try {
     const flags = await backend.ReadCodexFeatureFlags()
-    memoriesEnabled.value = Boolean(flags?.memoriesEnabled)
-    memoriesGenerate.value = flags?.memoriesGenerate !== false
-    memoriesUse.value = flags?.memoriesUse !== false
-    memoriesDisableExternal.value = Boolean(flags?.memoriesDisableExternalContext)
-    browserFullCDP.value = Boolean(flags?.browserUseFullCDP || appStore.settings.browserFullCDP)
-  } catch {
-    // Keep local defaults when Codex home is unavailable.
-  }
-}
-
-async function loadScheduledTasks(): Promise<void> {
-  scheduledLoading.value = true
-  try {
-    const list = await backend.ListScheduledTasks()
-    scheduledTasks.value = Array.isArray(list) ? list : []
-  } catch {
-    scheduledTasks.value = []
-  } finally {
-    scheduledLoading.value = false
-  }
-}
-
-async function saveScheduledDraft(): Promise<void> {
-  if (!scheduledDraftTitle.value.trim() || !scheduledDraftPrompt.value.trim()) return
-  try {
-    await backend.SaveScheduledTask({
-      id: '',
-      title: scheduledDraftTitle.value.trim(),
-      prompt: scheduledDraftPrompt.value.trim(),
-      workspace: appStore.currentWorkspacePath || '',
-      enabled: true,
-      intervalMin: Math.max(5, Number(scheduledDraftInterval.value) || 60),
-      useWorktree: scheduledDraftWorktree.value,
-      lastRunAt: 0,
-      nextRunAt: 0,
-      createdAt: 0,
-      updatedAt: 0,
-    })
-    scheduledDraftTitle.value = ''
-    scheduledDraftPrompt.value = ''
-    scheduledDraftInterval.value = 60
-    await loadScheduledTasks()
+    if (settingsDisposed || sequence !== featureFlagsSequence || !isCodexSettings.value) return
+    memoriesEnabled.value = Boolean(flags.memoriesEnabled)
+    memoriesGenerate.value = flags.memoriesGenerate !== false
+    memoriesUse.value = flags.memoriesUse !== false
+    memoriesDisableExternal.value = Boolean(flags.memoriesDisableExternalContext)
+    browserFullCDP.value = Boolean(flags.browserUseFullCDP)
+    featureFlagsBaseline.value = flags
   } catch (error) {
-    notify('error', t('settings.scheduledSaveFailed'), error instanceof Error ? error.message : String(error))
+    if (settingsDisposed || sequence !== featureFlagsSequence || !isCodexSettings.value) return
+    featureFlagsError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (sequence === featureFlagsSequence) featureFlagsLoading.value = false
   }
 }
 
-async function toggleScheduledTask(task: {
-  id: string
-  title: string
-  prompt: string
-  workspace: string
-  enabled: boolean
-  intervalMin: number
-  useWorktree: boolean
-  lastRunAt: number
-  nextRunAt: number
-  lastError?: string
-}, enabled: boolean): Promise<void> {
-  await backend.SaveScheduledTask({
-    id: task.id,
-    title: task.title,
-    prompt: task.prompt,
-    workspace: task.workspace,
-    enabled,
-    intervalMin: task.intervalMin,
-    useWorktree: task.useWorktree,
-    lastRunAt: task.lastRunAt,
-    nextRunAt: task.nextRunAt,
-    lastError: task.lastError || '',
-    createdAt: 0,
-    updatedAt: 0,
-  })
-  await loadScheduledTasks()
-}
-
-async function removeScheduledTask(id: string): Promise<void> {
-  await backend.DeleteScheduledTask(id)
-  await loadScheduledTasks()
+function featureFlagsDraft(): CodexFeatureFlags | null {
+  if (!isCodexSettings.value || !featureFlagsBaseline.value) return null
+  return {
+    ...featureFlagsBaseline.value,
+    memoriesEnabled: memoriesEnabled.value,
+    memoriesGenerate: memoriesGenerate.value,
+    memoriesUse: memoriesUse.value,
+    memoriesDisableExternalContext: memoriesDisableExternal.value,
+    browserUseFullCDP: browserFullCDP.value,
+  }
 }
 
 function openEmbeddedBrowser(): void {
@@ -1308,80 +1258,144 @@ function openEmbeddedBrowser(): void {
 }
 
 async function loadAgentsInstructions(): Promise<void> {
-  instructionsLoading.value = true
-  try {
-    await Promise.all([loadGlobalInstructions(), loadProjectInstructions()])
-  } finally {
-    instructionsLoading.value = false
-  }
+  await Promise.all([loadGlobalInstructions(), loadProjectInstructions()])
 }
 
-async function loadGlobalInstructions(): Promise<void> {
+async function confirmInstructionsReload(dirty: boolean): Promise<boolean> {
+  return !dirty || await dialogStore.confirm({
+    title: t('settings.instructionsReload'),
+    description: t('settings.instructionsReloadConfirm'),
+    confirmLabel: t('settings.instructionsReload'),
+    destructive: true,
+  })
+}
+
+async function loadGlobalInstructions(force = false): Promise<void> {
+  const runtime = appStore.activeRuntime
+  if (runtime === 'gemini' || runtime === 'opencode') return
+  if (!force && globalInstructionsRuntime === runtime && globalInstructionsBaseline.value !== null) return
+  if (force && !await confirmInstructionsReload(
+    globalInstructionsBaseline.value !== null && customInstructions.value !== globalInstructionsBaseline.value,
+  )) return
+  if (runtime !== appStore.activeRuntime || settingsDisposed) return
+  const sequence = ++globalInstructionsSequence
+  globalInstructionsLoading.value = true
+  globalInstructionsBaseline.value = null
+  globalInstructionsError.value = ''
   try {
-    const info = isGrokSettings.value
+    const info: GlobalInstructionsInfo = runtime === 'grok'
       ? await (await import('@/utils/grokBindings')).readGrokGlobalInstructions()
-      : isClaudeSettings.value
-        ? await readClaudeGlobalInstructions() as any
+      : runtime === 'claude'
+        ? await readClaudeGlobalInstructions() as GlobalInstructionsInfo
         : await backend.ReadGlobalInstructions()
-    customInstructions.value = info?.content ?? ''
-    globalInstructionsPath.value = info?.path ?? ''
-    globalInstructionsSource.value = info?.source
-      || (isGrokSettings.value
-        ? 'AGENTS.md (~/.grok)'
-        : isClaudeSettings.value
-          ? 'CLAUDE.md (~/.claude)'
-          : 'AGENTS.md')
-    globalInstructionsExists.value = Boolean(info?.exists)
-    globalInstructionsEmptyFile.value = Boolean(info?.emptyFile)
-    if (!isGrokSettings.value && !isClaudeSettings.value) {
-      appStore.settings = {
-        ...appStore.settings,
-        customInstructions: customInstructions.value,
-      }
-    }
-  } catch {
-    customInstructions.value = (isGrokSettings.value || isClaudeSettings.value)
-      ? ''
-      : (appStore.settings.customInstructions ?? '')
-    globalInstructionsPath.value = ''
-    globalInstructionsSource.value = isGrokSettings.value
-      ? 'AGENTS.md (~/.grok)'
-      : isClaudeSettings.value
-        ? 'CLAUDE.md (~/.claude)'
-        : 'AGENTS.md'
-    globalInstructionsExists.value = false
-    globalInstructionsEmptyFile.value = false
+    if (settingsDisposed || sequence !== globalInstructionsSequence || runtime !== appStore.activeRuntime) return
+    customInstructions.value = info.content
+    globalInstructionsPath.value = info.path
+    globalInstructionsSource.value = info.source || (runtime === 'claude' ? 'CLAUDE.md' : 'AGENTS.md')
+    globalInstructionsExists.value = info.exists
+    globalInstructionsEmptyFile.value = info.emptyFile
+    globalInstructionsRuntime = runtime
+    globalInstructionsBaseline.value = info.available ? info.content : null
+    globalInstructionsRevision.value = info.revision
+    if (!info.available) globalInstructionsError.value = info.readError ? instructionError(info.readError) : t('settings.instructionsLoadFailed')
+  } catch (error) {
+    if (settingsDisposed || sequence !== globalInstructionsSequence || runtime !== appStore.activeRuntime) return
+    globalInstructionsError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (sequence === globalInstructionsSequence) globalInstructionsLoading.value = false
   }
 }
 
-async function loadProjectInstructions(): Promise<void> {
+async function loadProjectInstructions(force = false): Promise<void> {
+  const runtime = appStore.activeRuntime
+  const context = instructionContext()
+  if (runtime === 'gemini' || runtime === 'opencode') return
+  if (!force && projectInstructionsContext === context && projectInstructionsBaseline.value !== null) return
+  if (force && !await confirmInstructionsReload(
+    projectInstructionsBaseline.value !== null && projectInstructions.value !== projectInstructionsBaseline.value,
+  )) return
+  if (context !== instructionContext() || settingsDisposed) return
+  const sequence = ++projectInstructionsSequence
+  projectInstructionsLoading.value = true
+  projectInstructionsBaseline.value = null
+  projectInstructionsAvailable.value = false
+  projectInstructionsError.value = ''
   try {
-    const info = isGrokSettings.value
+    const info: ProjectInstructionsInfo = runtime === 'grok'
       ? await (await import('@/utils/grokBindings')).readGrokProjectInstructions()
-      : isClaudeSettings.value
-        ? await readClaudeProjectInstructions() as any
+      : runtime === 'claude'
+        ? await readClaudeProjectInstructions() as ProjectInstructionsInfo
         : await backend.ReadProjectInstructions()
-    projectInstructionsAvailable.value = Boolean(info?.available)
-    projectInstructionsPath.value = info?.path ?? ''
-    projectInstructionsSource.value = info?.source || (isClaudeSettings.value ? 'CLAUDE.md' : 'AGENTS.md')
-    projectInstructionsExists.value = Boolean(info?.exists)
-    projectInstructionsEmptyFile.value = Boolean(info?.emptyFile)
-    projectInstructionsWorkspace.value = info?.workspace ?? ''
-    projectInstructionsWorkspaceName.value = info?.workspaceName ?? ''
-    projectInstructions.value = info?.content ?? ''
-  } catch {
-    projectInstructionsAvailable.value = false
-    projectInstructionsPath.value = ''
-    projectInstructionsSource.value = isClaudeSettings.value ? 'CLAUDE.md' : 'AGENTS.md'
-    projectInstructionsExists.value = false
-    projectInstructionsEmptyFile.value = false
-    projectInstructionsWorkspace.value = isGrokSettings.value
-      ? (appStore.settings.grokWorkspace || '')
-      : isClaudeSettings.value
-        ? (appStore.settings.claudeWorkspace || '')
-        : (appStore.currentWorkspacePath || '')
-    projectInstructionsWorkspaceName.value = ''
-    projectInstructions.value = ''
+    if (settingsDisposed || sequence !== projectInstructionsSequence || context !== instructionContext()) return
+    projectInstructionsAvailable.value = info.available
+    projectInstructionsPath.value = info.path
+    projectInstructionsSource.value = info.source || (runtime === 'claude' ? 'CLAUDE.md' : 'AGENTS.md')
+    projectInstructionsExists.value = info.exists
+    projectInstructionsEmptyFile.value = info.emptyFile
+    projectInstructionsWorkspace.value = info.workspace
+    projectInstructionsWorkspaceName.value = info.workspaceName
+    projectInstructions.value = info.content
+    projectInstructionsContext = context
+    projectInstructionsBaseline.value = info.available ? info.content : null
+    projectInstructionsRevision.value = info.revision
+    if (!info.available && appStore.currentWorkspacePath) projectInstructionsError.value = info.readError ? instructionError(info.readError) : t('settings.instructionsLoadFailed')
+  } catch (error) {
+    if (settingsDisposed || sequence !== projectInstructionsSequence || context !== instructionContext()) return
+    projectInstructionsError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (sequence === projectInstructionsSequence) projectInstructionsLoading.value = false
+  }
+}
+
+async function saveChangedInstructions(runtime: WorkspaceRuntime, context: string): Promise<void> {
+  const assertCurrent = () => {
+    if (settingsDisposed || runtime !== appStore.activeRuntime || context !== instructionContext()) {
+      throw new Error(t('settings.contextChanged'))
+    }
+  }
+  assertCurrent()
+  if (runtime === 'gemini' || runtime === 'opencode') return
+  if (customInstructionsLength.value > maxInstructionBytes || projectInstructionsLength.value > maxInstructionBytes) {
+    throw new Error(t('settings.instructionsTooLarge'))
+  }
+  if (globalInstructionsRuntime === runtime && globalInstructionsBaseline.value !== null
+    && customInstructions.value !== globalInstructionsBaseline.value) {
+    const content = customInstructions.value
+    const request = { content, revision: globalInstructionsRevision.value }
+    const grok = runtime === 'grok' ? await import('@/utils/grokBindings') : null
+    assertCurrent()
+    const info: GlobalInstructionsInfo = grok
+      ? await grok.saveGrokGlobalInstructions(request)
+      : runtime === 'claude'
+        ? await saveClaudeGlobalInstructions(request) as GlobalInstructionsInfo
+        : await backend.SaveGlobalInstructions(request)
+    assertCurrent()
+    globalInstructionsBaseline.value = info.content
+    globalInstructionsRevision.value = info.revision
+    if (customInstructions.value === content) customInstructions.value = info.content
+    globalInstructionsPath.value = info.path
+    globalInstructionsExists.value = info.exists
+    globalInstructionsEmptyFile.value = info.emptyFile
+  }
+  assertCurrent()
+  if (projectInstructionsContext === context && projectInstructionsBaseline.value !== null
+    && projectInstructions.value !== projectInstructionsBaseline.value) {
+    const content = projectInstructions.value
+    const request = { content, revision: projectInstructionsRevision.value }
+    const grok = runtime === 'grok' ? await import('@/utils/grokBindings') : null
+    assertCurrent()
+    const info: ProjectInstructionsInfo = grok
+      ? await grok.saveGrokProjectInstructions(request)
+      : runtime === 'claude'
+        ? await saveClaudeProjectInstructions(request) as ProjectInstructionsInfo
+        : await backend.SaveProjectInstructions(request)
+    assertCurrent()
+    projectInstructionsBaseline.value = info.content
+    projectInstructionsRevision.value = info.revision
+    if (projectInstructions.value === content) projectInstructions.value = info.content
+    projectInstructionsPath.value = info.path
+    projectInstructionsExists.value = info.exists
+    projectInstructionsEmptyFile.value = info.emptyFile
   }
 }
 
@@ -1727,6 +1741,7 @@ function selectNav(item: NavItem): void {
 }
 
 function closeSettings(): void {
+  if (saving.value) return
   const from = typeof route.query.from === 'string' ? route.query.from : ''
   void router.replace(from === 'capabilities' ? { name: 'capabilities' } : { name: 'workbench' })
 }
@@ -1764,7 +1779,9 @@ async function runPush(): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (saving.value) return
+  if (saving.value || runtimeSwitching.value || instructionsLoading.value || featureFlagsLoading.value) return
+  const runtime = appStore.activeRuntime
+  const context = instructionContext()
 
   const grokBackendChanged = isGrokSettings.value
     && grokBackend.value !== (appStore.settings.grokBackend === 'api' ? 'api' : 'build')
@@ -1786,83 +1803,29 @@ async function save(): Promise<void> {
   const proxyChanged = networkProxyChanged()
   const codexServerRunning = Boolean(codexStore.connection.running)
   let reconnectAfterSave = false
-  if (identityChanged) {
-    reconnectAfterSave = await dialogStore.confirm({
-      title: t('settings.codexClientRestartTitle'),
-      description: t('settings.codexClientRestartDesc'),
-      confirmLabel: t('settings.codexClientRestartConfirm'),
-      cancelLabel: t('settings.codexClientRestartLater'),
-      destructive: true,
-    })
-    // confirm → save + restart; cancel → save only (user was already on Save).
-  } else if (proxyChanged && isCodexSettings.value && codexServerRunning) {
-    reconnectAfterSave = await dialogStore.confirm({
-      title: t('settings.networkProxyRestartTitle'),
-      description: t('settings.networkProxyRestartDesc'),
-      confirmLabel: t('settings.networkProxyRestartConfirm'),
-      cancelLabel: t('settings.networkProxyRestartLater'),
-      destructive: false,
-    })
-  }
-
   saving.value = true
+  saveError.value = ''
   try {
-    // Persist instruction files first (Codex / Claude / Grok homes).
-    if (isGrokSettings.value) {
-      const grok = await import('@/utils/grokBindings')
-      const globalInfo = await grok.saveGrokGlobalInstructions(customInstructions.value)
-      customInstructions.value = globalInfo?.content ?? customInstructions.value
-      globalInstructionsPath.value = globalInfo?.path ?? globalInstructionsPath.value
-      globalInstructionsSource.value = globalInfo?.source || globalInstructionsSource.value
-      globalInstructionsExists.value = Boolean(globalInfo?.exists)
-      globalInstructionsEmptyFile.value = Boolean(globalInfo?.emptyFile)
-      if (projectInstructionsAvailable.value) {
-        const info = await grok.saveGrokProjectInstructions(projectInstructions.value)
-        projectInstructions.value = info?.content ?? projectInstructions.value
-        projectInstructionsPath.value = info?.path ?? projectInstructionsPath.value
-        projectInstructionsSource.value = info?.source || projectInstructionsSource.value
-        projectInstructionsExists.value = Boolean(info?.exists)
-        projectInstructionsEmptyFile.value = Boolean(info?.emptyFile)
-        projectInstructionsWorkspace.value = info?.workspace ?? projectInstructionsWorkspace.value
-        projectInstructionsWorkspaceName.value = info?.workspaceName ?? projectInstructionsWorkspaceName.value
-      }
-    } else if (isClaudeSettings.value) {
-      const globalInfo = await saveClaudeGlobalInstructions(customInstructions.value) as any
-      customInstructions.value = globalInfo?.content ?? customInstructions.value
-      globalInstructionsPath.value = globalInfo?.path ?? globalInstructionsPath.value
-      globalInstructionsSource.value = globalInfo?.source || globalInstructionsSource.value
-      globalInstructionsExists.value = Boolean(globalInfo?.exists)
-      globalInstructionsEmptyFile.value = Boolean(globalInfo?.emptyFile)
-      if (projectInstructionsAvailable.value) {
-        const info = await saveClaudeProjectInstructions(projectInstructions.value) as any
-        projectInstructions.value = info?.content ?? projectInstructions.value
-        projectInstructionsPath.value = info?.path ?? projectInstructionsPath.value
-        projectInstructionsSource.value = info?.source || projectInstructionsSource.value
-        projectInstructionsExists.value = Boolean(info?.exists)
-        projectInstructionsEmptyFile.value = Boolean(info?.emptyFile)
-        projectInstructionsWorkspace.value = info?.workspace ?? projectInstructionsWorkspace.value
-        projectInstructionsWorkspaceName.value = info?.workspaceName ?? projectInstructionsWorkspaceName.value
-      }
-    } else if (isGeminiSettings.value || isOpenCodeSettings.value) {
-      // Gemini/OpenCode instructions are saved by their native runtime card.
-    } else {
-      const globalInfo = await backend.SaveGlobalInstructions(customInstructions.value)
-      customInstructions.value = globalInfo?.content ?? customInstructions.value
-      globalInstructionsPath.value = globalInfo?.path ?? globalInstructionsPath.value
-      globalInstructionsSource.value = globalInfo?.source || globalInstructionsSource.value
-      globalInstructionsExists.value = Boolean(globalInfo?.exists)
-      globalInstructionsEmptyFile.value = Boolean(globalInfo?.emptyFile)
-      if (projectInstructionsAvailable.value) {
-        const info = await backend.SaveProjectInstructions(projectInstructions.value)
-        projectInstructions.value = info?.content ?? projectInstructions.value
-        projectInstructionsPath.value = info?.path ?? projectInstructionsPath.value
-        projectInstructionsSource.value = info?.source || projectInstructionsSource.value
-        projectInstructionsExists.value = Boolean(info?.exists)
-        projectInstructionsEmptyFile.value = Boolean(info?.emptyFile)
-        projectInstructionsWorkspace.value = info?.workspace ?? projectInstructionsWorkspace.value
-        projectInstructionsWorkspaceName.value = info?.workspaceName ?? projectInstructionsWorkspaceName.value
-      }
+    if (identityChanged) {
+      reconnectAfterSave = await dialogStore.confirm({
+        title: t('settings.codexClientRestartTitle'),
+        description: t('settings.codexClientRestartDesc'),
+        confirmLabel: t('settings.codexClientRestartConfirm'),
+        cancelLabel: t('settings.codexClientRestartLater'),
+        destructive: true,
+      })
+      // confirm → save + restart; cancel → save only (user was already on Save).
+    } else if (proxyChanged && isCodexSettings.value && codexServerRunning) {
+      reconnectAfterSave = await dialogStore.confirm({
+        title: t('settings.networkProxyRestartTitle'),
+        description: t('settings.networkProxyRestartDesc'),
+        confirmLabel: t('settings.networkProxyRestartConfirm'),
+        cancelLabel: t('settings.networkProxyRestartLater'),
+        destructive: false,
+      })
     }
+
+    await saveChangedInstructions(runtime, context)
     await appStore.savePreferences({
       ...appStore.settings,
       activeRuntime: appStore.settings.activeRuntime,
@@ -1942,18 +1905,15 @@ async function save(): Promise<void> {
       codexClientVersion: codexClientVersion.value.trim(),
       customInstructions: customInstructions.value,
       onboardingCompleted: true,
-    })
-    if (isCodexSettings.value) {
-      await backend.SaveCodexFeatureFlags({
-        memoriesEnabled: memoriesEnabled.value,
-        memoriesGenerate: memoriesGenerate.value,
-        memoriesUse: memoriesUse.value,
-        memoriesDisableExternalContext: memoriesDisableExternal.value,
-        browserUseFullCDP: browserFullCDP.value,
-        inAppBrowser: true,
-      })
+    }, { silent: true })
+    if (runtime !== appStore.activeRuntime || context !== instructionContext()) {
+      throw new Error(t('settings.contextChanged'))
     }
-    saved.value = true
+    const flags = featureFlagsDraft()
+    if (flags && JSON.stringify(flags) !== JSON.stringify(featureFlagsBaseline.value)) {
+      featureFlagsBaseline.value = await backend.SaveCodexFeatureFlags(flags)
+    }
+    notify('success', t('notifications.preferencesSaved'), t('notifications.preferencesSavedHint'))
     if (isCodexSettings.value || isGeminiSettings.value || isOpenCodeSettings.value) await codexStore.loadModels()
 
     if (isCodexSettings.value && (identityChanged || proxyChanged) && reconnectAfterSave) {
@@ -1979,8 +1939,8 @@ async function save(): Promise<void> {
       notify('info', t('settings.networkProxySavedExternal'), t('settings.networkProxySavedExternalHint', { runtime: activeRuntimeName.value }))
     }
     // Stay on settings after save; user can leave via back/close.
-  } catch {
-    saved.value = false
+  } catch (error) {
+    saveError.value = instructionError(error)
   } finally {
     saving.value = false
   }
@@ -2005,7 +1965,7 @@ async function refreshActiveRuntime(options: { silent?: boolean } = {}): Promise
 }
 
 function submitSettings(): void {
-  if (activePanel.value === 'routing' || activePanel.value === 'translation' || activePanel.value === 'computer-use') return
+  if (activePanel.value === 'scheduled' || activePanel.value === 'routing' || activePanel.value === 'translation' || activePanel.value === 'computer-use') return
   void save()
 }
 
@@ -2033,6 +1993,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
             v-model="settingsSearch"
             type="search"
             :placeholder="t('settings.searchPlaceholder')"
+            :aria-label="t('settings.searchPlaceholder')"
             class="h-8 rounded-lg border-border/70 bg-background pl-9 pr-3 text-xs shadow-none focus-visible:border-ring/45 focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-ring/15"
           />
         </div>
@@ -2075,7 +2036,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
             <div class="min-w-0 flex-1">
               <h1 class="text-[15px] font-semibold tracking-tight">{{ activeNavItem?.label || t('settings.title') }}</h1>
             </div>
-            <Button v-if="!showingCapabilities && activePanel !== 'translation' && activePanel !== 'computer-use' && activePanel !== 'usage' && activePanel !== 'archived' && activePanel !== 'routing'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching">
+            <Button v-if="!showingCapabilities && activePanel !== 'translation' && activePanel !== 'computer-use' && activePanel !== 'usage' && activePanel !== 'archived' && activePanel !== 'routing' && activePanel !== 'scheduled'" form="settings-form" type="submit" size="sm" :disabled="saving || runtimeSwitching || instructionsLoading || featureFlagsLoading">
               {{ saving ? t('common.saving') : t('settings.save') }}
             </Button>
             <SimpleTooltip :content="t('settings.close')">
@@ -2085,6 +2046,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                 size="icon-xs"
                 class="size-8 rounded-lg text-foreground/80 hover:bg-muted"
                 :aria-label="t('settings.close')"
+                :disabled="saving"
                 @click="closeSettings"
               >
                 <X :size="18" />
@@ -2117,7 +2079,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                         : 'text-muted-foreground hover:text-foreground'"
                       :aria-selected="appStore.activeRuntime === tab.id"
                       :aria-label="tab.label"
-                      :disabled="runtimeSwitching"
+                      :disabled="runtimeSwitching || saving"
                       @click="void switchSettingsRuntime(tab.id)"
                     >
                       <component :is="tab.icon" :size="13" class="shrink-0 opacity-90" />
@@ -2135,7 +2097,20 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
           <CapabilitiesView embedded />
         </main>
         <main v-else class="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-5">
-          <form id="settings-form" class="mx-auto max-w-3xl space-y-5" @submit.prevent="submitSettings">
+          <form id="settings-form" class="mx-auto max-w-3xl space-y-5" :aria-busy="saving" :inert="saving" @submit.prevent="submitSettings">
+            <div v-if="saveError" role="alert" class="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              <p class="font-medium">{{ t('notifications.preferencesFailed') }}</p>
+              <p class="mt-1 break-words">{{ saveError }}</p>
+            </div>
+            <div v-if="activePanel === 'personalization' && instructionsError" role="alert" class="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              <p>{{ t('settings.instructionsLoadFailed') }}</p>
+              <p class="mt-1 break-words">{{ instructionsError }}</p>
+              <Button type="button" variant="outline" size="sm" class="mt-2" :disabled="instructionsLoading" @click="loadAgentsInstructions">{{ t('common.retry') }}</Button>
+            </div>
+            <div v-if="isCodexSettings && featureFlagsError && (activePanel === 'personalization' || activePanel === 'browser')" role="alert" class="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              <p class="break-words">{{ featureFlagsError }}</p>
+              <Button type="button" variant="outline" size="sm" class="mt-2" :disabled="featureFlagsLoading" @click="loadFeatureFlags">{{ t('common.retry') }}</Button>
+            </div>
             <ComputerUseSettings v-if="activePanel === 'computer-use'" />
             <TranslationSettings v-if="activePanel === 'translation'" />
             <!-- General -->
@@ -3138,21 +3113,6 @@ wsl --update</code></pre>
                   </div>
                 </div>
               </section>
-              <section v-if="isGeminiSettings || isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
-                <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
-                  <div class="min-w-0">
-                   <h2 class="text-[13px] font-semibold">{{ isGeminiSettings ? t('settings.geminiNativeInstructions', { runtime: externalRuntimeName }) : t('settings.openCodeNativeInstructions') }}</h2>
-                   <p class="mt-0.5 text-[11px] text-muted-foreground">{{ isGeminiSettings ? t('settings.geminiNativeInstructionsHint', { runtime: externalRuntimeName }) : t('settings.openCodeNativeInstructionsHint') }}</p>
-                  </div>
-                  <Badge v-if="externalCatalogLoading" variant="outline" class="text-[9px]">{{ t('common.loading') }}</Badge>
-                </div>
-                <div class="space-y-3 p-4">
-                   <div class="grid grid-cols-2 rounded-md border bg-muted/40 p-0.5"><Button type="button" size="xs" :variant="externalInstructionScope === 'global' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'global'">{{ t('settings.instructionsGlobal') }}</Button><Button type="button" size="xs" :variant="externalInstructionScope === 'project' ? 'secondary' : 'ghost'" @click="externalInstructionScope = 'project'">{{ t('settings.instructionsProject') }}</Button></div>
-                  <p class="truncate font-mono text-[10px] text-muted-foreground">{{ externalInstructionScope === 'global' ? externalCatalog?.globalInstructions?.path : externalCatalog?.projectInstructions?.path }}</p>
-                  <Textarea v-model="externalInstructionDraft" class="min-h-[180px] font-mono text-xs leading-5" maxlength="16000" spellcheck="false" />
-                   <div class="flex justify-end"><Button type="button" size="sm" @click="void saveExternalInstructionsSettings()">{{ t('settings.saveNativeInstructions') }}</Button></div>
-                </div>
-              </section>
               <section v-if="!isGeminiSettings && !isOpenCodeSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-start justify-between gap-3 border-b px-4 py-3">
                   <div class="min-w-0">
@@ -3171,7 +3131,7 @@ wsl --update</code></pre>
                           : t('settings.customInstructionsHint') }}
                     </p>
                   </div>
-                  <Button type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-[11px]" :disabled="instructionsLoading" @click="loadGlobalInstructions">
+                  <Button type="button" variant="ghost" size="sm" class="h-7 shrink-0 px-2 text-[11px]" :disabled="instructionsLoading || saving" @click="loadGlobalInstructions(true)">
                     <RefreshCw :size="12" class="mr-1" :class="instructionsLoading ? 'animate-spin' : ''" />
                     {{ t('settings.instructionsReload') }}
                   </Button>
@@ -3182,15 +3142,18 @@ wsl --update</code></pre>
                     <Badge variant="outline" class="text-[10px]">
                       {{ instructionsStatusLabel(globalInstructionsExists, globalInstructionsEmptyFile) }}
                     </Badge>
-                    <span class="tabular-nums">{{ customInstructionsLength }} / 16000</span>
+                    <span class="tabular-nums">{{ t('settings.instructionsSize', { size: (customInstructionsLength / 1024).toFixed(1) }) }}</span>
                     <SimpleTooltip v-if="globalInstructionsPath" :content="globalInstructionsPath"><span class="min-w-0 truncate">{{ globalInstructionsPath }}</span></SimpleTooltip>
                   </div>
                   <Textarea
                     v-model="customInstructions"
+                    :disabled="globalInstructionsBaseline === null || globalInstructionsLoading || saving"
                     :placeholder="isGrokSettings ? t('settings.grokGlobalInstructionsPlaceholder') : t('settings.customInstructionsPlaceholder')"
                     class="min-h-[120px] resize-y text-xs leading-5"
-                    maxlength="16000"
+                    :aria-invalid="customInstructionsLength > maxInstructionBytes"
                   />
+                  <p v-if="customInstructionsLength > maxInstructionBytes" role="alert" class="text-xs text-destructive">{{ t('settings.instructionsTooLarge') }}</p>
+                  <p class="text-[10px] text-muted-foreground">{{ t('settings.instructionsClearHint') }}</p>
                   <p class="text-[10px] text-muted-foreground">
                     {{ isGrokSettings
                       ? t('settings.grokGlobalInstructionsSync')
@@ -3219,7 +3182,7 @@ wsl --update</code></pre>
                     </p>
                   </div>
                   <div class="flex shrink-0">
-                    <Button type="button" variant="ghost" size="sm" class="h-7 px-2 text-[11px]" :disabled="instructionsLoading" @click="loadProjectInstructions">
+                    <Button type="button" variant="ghost" size="sm" class="h-7 px-2 text-[11px]" :disabled="instructionsLoading || saving" @click="loadProjectInstructions(true)">
                       <RefreshCw :size="12" class="mr-1" :class="instructionsLoading ? 'animate-spin' : ''" />
                       {{ t('settings.instructionsReload') }}
                     </Button>
@@ -3250,7 +3213,7 @@ wsl --update</code></pre>
                       <Badge variant="outline" class="text-[10px]">
                         {{ instructionsStatusLabel(projectInstructionsExists, projectInstructionsEmptyFile) }}
                       </Badge>
-                      <span class="tabular-nums">{{ projectInstructionsLength }} / 16000</span>
+                      <span class="tabular-nums">{{ t('settings.instructionsSize', { size: (projectInstructionsLength / 1024).toFixed(1) }) }}</span>
                       <SimpleTooltip v-if="projectInstructionsPath" :content="projectInstructionsPath"><span class="min-w-0 truncate">{{ projectInstructionsPath }}</span></SimpleTooltip>
                     </div>
                   </div>
@@ -3259,9 +3222,11 @@ wsl --update</code></pre>
                     v-model="projectInstructions"
                     :placeholder="projectInstructionsAvailable ? t('settings.projectInstructionsPlaceholder') : t('settings.projectInstructionsUnavailable')"
                     class="min-h-[120px] resize-y text-xs leading-5"
-                    maxlength="16000"
-                    :disabled="!projectInstructionsAvailable"
+                    :aria-invalid="projectInstructionsLength > maxInstructionBytes"
+                    :disabled="!projectInstructionsAvailable || projectInstructionsBaseline === null || projectInstructionsLoading || saving"
                   />
+                  <p v-if="projectInstructionsLength > maxInstructionBytes" role="alert" class="text-xs text-destructive">{{ t('settings.instructionsTooLarge') }}</p>
+                  <p class="text-[10px] text-muted-foreground">{{ t('settings.instructionsClearHint') }}</p>
                   <p class="text-[10px] text-muted-foreground">
                     {{
                       isGrokSettings
@@ -3307,28 +3272,28 @@ wsl --update</code></pre>
                       <p class="text-[13px]">{{ t('settings.memoriesEnable') }}</p>
                       <p class="text-[11px] text-muted-foreground">{{ t('settings.memoriesEnableHint') }}</p>
                     </div>
-                    <Switch :checked="memoriesEnabled" @update:checked="memoriesEnabled = $event" />
+                    <Switch :disabled="!featureFlagsBaseline || featureFlagsLoading || saving" :checked="memoriesEnabled" @update:checked="memoriesEnabled = $event" />
                   </div>
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
                       <p class="text-[13px]">{{ t('settings.memoriesUse') }}</p>
                       <p class="text-[11px] text-muted-foreground">{{ t('settings.memoriesUseHint') }}</p>
                     </div>
-                    <Switch :checked="memoriesUse" :disabled="!memoriesEnabled" @update:checked="memoriesUse = $event" />
+                    <Switch :checked="memoriesUse" :disabled="!featureFlagsBaseline || featureFlagsLoading || saving || !memoriesEnabled" @update:checked="memoriesUse = $event" />
                   </div>
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
                       <p class="text-[13px]">{{ t('settings.memoriesGenerate') }}</p>
                       <p class="text-[11px] text-muted-foreground">{{ t('settings.memoriesGenerateHint') }}</p>
                     </div>
-                    <Switch :checked="memoriesGenerate" :disabled="!memoriesEnabled" @update:checked="memoriesGenerate = $event" />
+                    <Switch :checked="memoriesGenerate" :disabled="!featureFlagsBaseline || featureFlagsLoading || saving || !memoriesEnabled" @update:checked="memoriesGenerate = $event" />
                   </div>
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
                       <p class="text-[13px]">{{ t('settings.memoriesDisableExternal') }}</p>
                       <p class="text-[11px] text-muted-foreground">{{ t('settings.memoriesDisableExternalHint') }}</p>
                     </div>
-                    <Switch :checked="memoriesDisableExternal" :disabled="!memoriesEnabled" @update:checked="memoriesDisableExternal = $event" />
+                    <Switch :checked="memoriesDisableExternal" :disabled="!featureFlagsBaseline || featureFlagsLoading || saving || !memoriesEnabled" @update:checked="memoriesDisableExternal = $event" />
                   </div>
                 </div>
               </section>
@@ -3810,7 +3775,7 @@ wsl --update</code></pre>
                       <p class="text-[13px]">{{ t('settings.browserFullCDP') }}</p>
                       <p class="text-[11px] text-muted-foreground">{{ t('settings.browserFullCDPHint') }}</p>
                     </div>
-                    <Switch :checked="browserFullCDP" @update:checked="browserFullCDP = $event" />
+                    <Switch :disabled="isCodexSettings && (!featureFlagsBaseline || featureFlagsLoading)" :checked="browserFullCDP" @update:checked="browserFullCDP = $event" />
                   </div>
                   <div class="space-y-1.5 px-4 py-3">
                     <p class="text-[13px]">{{ t('settings.browserDownloadDir') }}</p>
@@ -3845,58 +3810,13 @@ wsl --update</code></pre>
               <ProviderRouterSettings />
             </template>
 
-            <template v-else-if="activePanel === 'scheduled'">
-              <section class="overflow-hidden rounded-xl border bg-card">
-                <div class="border-b px-4 py-3">
-                  <h2 class="text-[13px] font-semibold">{{ t('settings.scheduledTitle') }}</h2>
-                  <p class="mt-0.5 text-[11px] text-muted-foreground">{{ t('settings.scheduledHint') }}</p>
-                </div>
-                <div class="space-y-3 p-4">
-                  <Input v-model="scheduledDraftTitle" class="h-8 text-xs" :placeholder="t('settings.scheduledTitlePlaceholder')" maxlength="120" />
-                  <Textarea v-model="scheduledDraftPrompt" class="min-h-[88px] resize-y text-xs" :placeholder="t('settings.scheduledPromptPlaceholder')" maxlength="8000" />
-                  <div class="flex flex-wrap items-center gap-3">
-                    <label class="flex items-center gap-2 text-[11px] text-muted-foreground">
-                      {{ t('settings.scheduledInterval') }}
-                      <Input v-model.number="scheduledDraftInterval" type="number" min="5" class="h-8 w-24 text-xs" />
-                    </label>
-                    <label class="flex min-w-0 flex-col gap-1 text-[11px] text-muted-foreground sm:flex-row sm:items-center">
-                      <span class="inline-flex items-center gap-2">
-                        <Switch :checked="scheduledDraftWorktree" @update:checked="scheduledDraftWorktree = $event" />
-                        {{ t('settings.scheduledWorktree') }}
-                      </span>
-                      <span class="text-[10px]">{{ t('settings.scheduledWorktreeHint') }}</span>
-                    </label>
-                    <Button type="button" size="sm" class="h-8 text-xs" :disabled="!scheduledDraftTitle.trim() || !scheduledDraftPrompt.trim()" @click="saveScheduledDraft">
-                      <Plus :size="12" class="mr-1" />
-                      {{ t('settings.scheduledAdd') }}
-                    </Button>
-                  </div>
-                </div>
-              </section>
-              <section class="overflow-hidden rounded-xl border bg-card">
-                <div class="border-b px-4 py-3">
-                  <h2 class="text-[13px] font-semibold">{{ t('settings.scheduledList') }}</h2>
-                </div>
-                <div v-if="scheduledLoading" class="px-4 py-6 text-center text-[11px] text-muted-foreground">{{ t('common.loading') }}</div>
-                <div v-else-if="scheduledTasks.length === 0" class="px-4 py-6 text-center text-[11px] text-muted-foreground">{{ t('settings.scheduledEmpty') }}</div>
-                <div v-else class="divide-y">
-                  <div v-for="task in scheduledTasks" :key="task.id" class="flex items-start gap-3 px-4 py-3">
-                    <div class="min-w-0 flex-1">
-                      <p class="text-[13px] font-medium">{{ task.title }}</p>
-                      <p class="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{{ task.prompt }}</p>
-                      <p class="mt-1 text-[10px] text-muted-foreground">
-                        {{ t('settings.scheduledMeta', { minutes: task.intervalMin }) }}
-                        <span v-if="task.lastError" class="text-destructive"> · {{ task.lastError }}</span>
-                      </p>
-                    </div>
-                    <Switch :checked="task.enabled" @update:checked="(enabled: boolean) => toggleScheduledTask(task, enabled)" />
-                    <Button type="button" variant="ghost" size="icon-xs" @click="removeScheduledTask(task.id)">
-                      <Trash2 :size="12" />
-                    </Button>
-                  </div>
-                </div>
-              </section>
-            </template>
+            <ScheduledTasksSettings :active="isCodexSettings && activePanel === 'scheduled'" />
+            <ExternalInstructionsEditor
+              :active="(isGeminiSettings || isOpenCodeSettings) && activePanel === 'personalization'"
+              :runtime="isGeminiSettings ? 'gemini' : 'opencode'"
+              :workspace="appStore.currentWorkspacePath || ''"
+              :disabled="saving"
+            />
           </form>
         </main>
       </section>

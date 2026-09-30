@@ -18,6 +18,7 @@ var assets embed.FS
 func init() {
 	application.RegisterEvent[codex.Event]("codex:event")
 	application.RegisterEvent[UpdateProgress]("nice:update")
+	application.RegisterEvent[LocalStorageHealth]("nice:storage")
 }
 
 func main() {

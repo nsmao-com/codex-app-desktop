@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.15: Keep the Codex model catalog current across CLI versions.</sub></p>
+<p align="center"><sub>v1.6.16: Safer native configuration editing and stronger multi-runtime workspace reliability.</sub></p>
 
 ## Why Nice Codex
 

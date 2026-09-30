@@ -5,6 +5,7 @@
 import { Call } from '@wailsio/runtime'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
+import type { InstructionsSaveRequest } from '../../bindings/nice_codex_desktop/models'
 
 const SERVICE = 'nice_codex_desktop.AppService'
 
@@ -158,6 +159,8 @@ export interface ClaudeCapabilitiesCatalog {
   commands: ClaudeCommandView[] | null
   hooks: ClaudeHookView[] | null
   globalInstructions: {
+    revision: string
+    readError?: string
     content: string
     path: string
     source: string
@@ -166,6 +169,8 @@ export interface ClaudeCapabilitiesCatalog {
     available: boolean
   }
   projectInstructions: {
+    revision: string
+    readError?: string
     content: string
     workspace: string
     workspaceName: string
@@ -316,16 +321,16 @@ export function readClaudeGlobalInstructions() {
   return byIdOrName('ReadClaudeGlobalInstructions', () => (backend as any).ReadClaudeGlobalInstructions())
 }
 
-export function saveClaudeGlobalInstructions(content: string) {
-  return byIdOrName('SaveClaudeGlobalInstructions', () => (backend as any).SaveClaudeGlobalInstructions(content), content)
+export function saveClaudeGlobalInstructions(request: InstructionsSaveRequest) {
+  return byIdOrName('SaveClaudeGlobalInstructions', () => backend.SaveClaudeGlobalInstructions(request), request)
 }
 
 export function readClaudeProjectInstructions() {
   return byIdOrName('ReadClaudeProjectInstructions', () => (backend as any).ReadClaudeProjectInstructions())
 }
 
-export function saveClaudeProjectInstructions(content: string) {
-  return byIdOrName('SaveClaudeProjectInstructions', () => (backend as any).SaveClaudeProjectInstructions(content), content)
+export function saveClaudeProjectInstructions(request: InstructionsSaveRequest) {
+  return byIdOrName('SaveClaudeProjectInstructions', () => backend.SaveClaudeProjectInstructions(request), request)
 }
 
 export function openClaudeHome(): Promise<void> {

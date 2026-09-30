@@ -1,7 +1,7 @@
 {
   "name": "nice-codex-frontend",
   "private": true,
-  "version": "1.6.15",
+  "version": "1.6.16",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -20,7 +20,7 @@
     "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.15",
     "marked": "^18.0.6",
     "motion-v": "^2.3.0",
     "pinia": "^3.0.4",
@@ -42,5 +42,11 @@
     "vite": "^8.1.4",
     "vue-tsc": "^3.3.7"
   },
-  "packageManager": "pnpm@10.18.3"
+  "packageManager": "pnpm@10.18.3",
+  "pnpm": {
+    "overrides": {
+      "postcss@<8.5.19": "^8.5.19",
+      "nanoid@<3.3.18": "^3.3.18"
+    }
+  }
 }

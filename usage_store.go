@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -81,13 +80,9 @@ func emptyRuntimeBucket() *localRuntimeBucket {
 	return &localRuntimeBucket{Days: make(map[string]localDayStats)}
 }
 
-func loadLocalUsage(settingsPath string) *localUsageFile {
+func (s *AppService) loadLocalUsage() *localUsageFile {
 	result := emptyLocalUsage()
-	payload, err := os.ReadFile(usagePath(settingsPath))
-	if err != nil {
-		return result
-	}
-	if err := json.Unmarshal(payload, result); err != nil {
+	if err := s.readLocalJSON("usage", usagePath(s.settingsPath), result); err != nil {
 		return emptyLocalUsage()
 	}
 	if result.Turns == nil {
@@ -99,7 +94,7 @@ func loadLocalUsage(settingsPath string) *localUsageFile {
 	if migrateLocalUsage(result) {
 		// Persist the one-time repair immediately so a restart cannot reintroduce
 		// the legacy runtime mismatch or stale aggregate buckets.
-		persistLocalUsage(settingsPath, result)
+		_ = s.persistLocalUsage(result)
 	}
 	return result
 }
@@ -425,20 +420,12 @@ func normalizeUsageRuntime(value string) string {
 	}
 }
 
-func persistLocalUsage(settingsPath string, usage *localUsageFile) {
+func (s *AppService) persistLocalUsage(usage *localUsageFile) error {
 	if usage == nil {
-		return
+		return nil
 	}
 	usage.Version = localUsageVersion
-	payload, err := json.MarshalIndent(usage, "", "  ")
-	if err != nil {
-		return
-	}
-	path := usagePath(settingsPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return
-	}
-	_ = os.WriteFile(path, payload, 0o600)
+	return s.writeLocalJSON("usage", usagePath(s.settingsPath), usage)
 }
 
 func localDayKey(at time.Time) string {
@@ -544,16 +531,20 @@ func (s *AppService) persistTurnUsage(runtime, threadID, turnID string, b tokenB
 
 func (s *AppService) localUsageLocked() *localUsageFile {
 	if s.usageCache == nil {
-		s.usageCache = loadLocalUsage(s.settingsPath)
+		s.usageCache = s.loadLocalUsage()
 	}
 	return s.usageCache
 }
 
 func (s *AppService) scheduleLocalUsagePersistLocked() {
+	if s.serviceContext().Err() != nil {
+		return
+	}
 	if s.usageFlushTimer != nil {
 		s.usageFlushTimer.Stop()
 	}
 	s.usageFlushGen++
+	s.usageRetryCount = 0
 	generation := s.usageFlushGen
 	s.usageFlushTimer = time.AfterFunc(localUsagePersistDelay, func() {
 		s.flushLocalUsageGeneration(generation)
@@ -561,6 +552,8 @@ func (s *AppService) scheduleLocalUsagePersistLocked() {
 }
 
 func (s *AppService) flushLocalUsage() {
+	s.usagePersistMu.Lock()
+	defer s.usagePersistMu.Unlock()
 	s.usageMu.Lock()
 	s.usageFlushGen++
 	if s.usageFlushTimer != nil {
@@ -570,15 +563,15 @@ func (s *AppService) flushLocalUsage() {
 	snapshot := cloneLocalUsage(s.usageCache)
 	s.usageMu.Unlock()
 	if snapshot != nil {
-		s.usagePersistMu.Lock()
-		persistLocalUsage(s.settingsPath, snapshot)
-		s.usagePersistMu.Unlock()
+		_ = s.persistLocalUsage(snapshot)
 	}
 }
 
 func (s *AppService) flushLocalUsageGeneration(generation uint64) {
+	s.usagePersistMu.Lock()
+	defer s.usagePersistMu.Unlock()
 	s.usageMu.Lock()
-	if generation != s.usageFlushGen {
+	if generation != s.usageFlushGen || s.serviceContext().Err() != nil {
 		s.usageMu.Unlock()
 		return
 	}
@@ -586,14 +579,15 @@ func (s *AppService) flushLocalUsageGeneration(generation uint64) {
 	snapshot := cloneLocalUsage(s.usageCache)
 	s.usageMu.Unlock()
 	if snapshot != nil {
-		s.usagePersistMu.Lock()
+		err := s.persistLocalUsage(snapshot)
 		s.usageMu.Lock()
-		stillCurrent := generation == s.usageFlushGen
-		s.usageMu.Unlock()
-		if stillCurrent {
-			persistLocalUsage(s.settingsPath, snapshot)
+		if err != nil && generation == s.usageFlushGen && s.usageRetryCount < 3 &&
+			s.serviceContext().Err() == nil && s.localStorageReadError("usage") == nil {
+			s.usageRetryCount++
+			delay := time.Second * time.Duration(1<<s.usageRetryCount)
+			s.usageFlushTimer = time.AfterFunc(delay, func() { s.flushLocalUsageGeneration(generation) })
 		}
-		s.usagePersistMu.Unlock()
+		s.usageMu.Unlock()
 	}
 }
 

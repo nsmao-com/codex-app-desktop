@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, shallowRef } from 'vue'
+import { computed, shallowRef, watch } from 'vue'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type { WorkspaceInfo } from '../../bindings/nice_codex_desktop/models'
@@ -32,6 +32,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   let workspaceSwitchSequence = 0
   let workspaceRefreshSequence = 0
   let gitBranchesSequence = 0
+  let diffInspectionSequence = 0
   let gitBranchesWorkspace = ''
   let workspaceSwitchSync: Promise<void> = Promise.resolve()
 
@@ -39,6 +40,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const changes = computed(() => workspace.value?.changes ?? [])
   const isGit = computed(() => workspace.value?.isGit ?? false)
   const branch = computed(() => workspace.value?.branch ?? '')
+
+  watch([() => appStore.activeRuntime, () => appStore.currentWorkspacePath], clearDiff)
+
+  async function activeWorkspaceReady(): Promise<boolean> {
+    const runtime = appStore.activeRuntime
+    const path = appStore.currentWorkspacePath
+    await workspaceSwitchSync.catch(() => undefined)
+    if (!path || !await appStore.ensureActiveRuntimeSynced(runtime)) return false
+    return appStore.activeRuntime === runtime && sameWorkspace(path, appStore.currentWorkspacePath)
+      && sameWorkspace(path, currentPath.value) && !switchingWorkspace.value
+  }
 
   async function selectWorkspace(): Promise<string> {
     const runtime = appStore.activeRuntime
@@ -228,23 +240,31 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   async function inspectWorkspaceDiff(path: string): Promise<void> {
-    if (!path || diffInspectionLoading.value) return
+    if (!path) return
+    const sequence = ++diffInspectionSequence
     diffInspectionLoading.value = true
+    inspectedDiff.value = ''
     inspectedDiffPath.value = path
     diffSource.value = 'file'
     diffSidebarOpen.value = true
     try {
-      inspectedDiff.value = await backend.ReadWorkspaceDiff(path)
+      if (!await activeWorkspaceReady() || sequence !== diffInspectionSequence) return
+      const diff = await backend.ReadWorkspaceDiff(path)
+      if (sequence !== diffInspectionSequence) return
+      inspectedDiff.value = diff
       if (!inspectedDiff.value) notify('info', translate('inspector.noFileDiff'), path)
     } catch (error) {
+      if (sequence !== diffInspectionSequence) return
       inspectedDiff.value = ''
       notify('error', translate('inspector.diffLoadFailed'), errorMessage(error))
     } finally {
-      diffInspectionLoading.value = false
+      if (sequence === diffInspectionSequence) diffInspectionLoading.value = false
     }
   }
 
   function inspectInlineDiff(path: string, diff: string): void {
+    diffInspectionSequence++
+    diffInspectionLoading.value = false
     inspectedDiffPath.value = path
     inspectedDiff.value = diff
     diffSource.value = 'file'
@@ -252,6 +272,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function openLiveTurnDiff(diff: string, label = ''): void {
+    diffInspectionSequence++
+    diffInspectionLoading.value = false
     inspectedDiffPath.value = label || translate('inspector.currentTurn')
     inspectedDiff.value = diff
     diffSource.value = 'turn'
@@ -259,6 +281,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function clearDiff(): void {
+    diffInspectionSequence++
+    diffInspectionLoading.value = false
     inspectedDiff.value = ''
     inspectedDiffPath.value = ''
     diffSource.value = 'file'
@@ -273,6 +297,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const branchName = name.trim()
     if (!branchName) return false
     try {
+      if (!await activeWorkspaceReady()) return false
       const result = await backend.CreateGitBranch({ name: branchName })
       notify('success', translate('git.branchCreated'), result.branch || branchName)
       await refreshWorkspace()
@@ -341,6 +366,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const text = message.trim()
     if (!text) return false
     try {
+      if (!await activeWorkspaceReady()) return false
       const result = await backend.CommitGitChanges({ message: text })
       notify('success', translate('git.committed'), result.branch || '')
       await refreshWorkspace()
@@ -353,6 +379,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function pushBranch(): Promise<boolean> {
     try {
+      if (!await activeWorkspaceReady()) return false
       const result = await backend.PushGitBranch()
       notify('success', translate('git.pushed'), result.prUrl || result.message || '')
       await refreshWorkspace()

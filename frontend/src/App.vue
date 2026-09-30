@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { MotionConfig } from 'motion-v'
-import { computed, onMounted, onUnmounted, shallowRef, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, shallowRef, watch } from 'vue'
 import { RouterView } from 'vue-router'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -9,16 +9,19 @@ import CommandPalette from '@/components/CommandPalette.vue'
 import MemoriesDialog from '@/components/MemoriesDialog.vue'
 import AppPromptDialog from '@/components/AppPromptDialog.vue'
 import TitleBar from '@/components/TitleBar.vue'
+import LocalStorageNotice from '@/components/LocalStorageNotice.vue'
 import UpdateCheckDialog from '@/components/UpdateCheckDialog.vue'
 import OnboardingView from '@/views/OnboardingView.vue'
-import SettingsView from '@/views/SettingsView.vue'
 import WorkbenchView from '@/views/WorkbenchView.vue'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Toaster } from '@/components/ui/sonner'
 import { useNavigationHistory } from '@/composables/useNavigationHistory'
+import { useAppearance } from '@/composables/useAppearance'
 import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useSubagentsStore, useTerminalStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
 
+const SettingsView = defineAsyncComponent(() => import('@/views/SettingsView.vue'))
+const { reduceMotion } = useAppearance()
 const appStore = useAppStore()
 const route = useRoute()
 const router = useRouter()
@@ -197,6 +200,7 @@ watch(
 )
 
 onUnmounted(() => {
+  appStore.disposeAppEvents()
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('nice-codex:open-memories', openMemoriesDialog)
   void backend.SetPreventSleepActive(false).catch(() => undefined)
@@ -278,9 +282,10 @@ function onGlobalKeydown(event: KeyboardEvent): void {
 </script>
 
 <template>
-  <MotionConfig :reducedMotion="'user'">
+  <MotionConfig :reducedMotion="reduceMotion ? 'always' : 'user'">
     <div class="app-shell flex h-screen w-screen flex-col overflow-hidden text-foreground">
       <TitleBar v-if="!showOnboarding" />
+      <LocalStorageNotice />
       <div class="relative min-h-0 flex-1 overflow-hidden">
         <OnboardingView v-if="showOnboarding" />
         <template v-else>

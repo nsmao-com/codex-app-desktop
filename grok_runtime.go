@@ -300,7 +300,7 @@ func (s *AppService) SetActiveRuntime(runtimeID string) (map[string]any, error) 
 	s.mu.Lock()
 	settings := cloneSettings(s.settings)
 	settings.ActiveRuntime = runtimeID
-	if err := writeSettings(s.settingsPath, settings); err != nil {
+	if err := s.persistSettingsLocked(settings); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
@@ -350,7 +350,7 @@ func (s *AppService) UseGrokWorkspace(path string) (WorkspaceInfo, error) {
 	settings := cloneSettings(s.settings)
 	settings.GrokWorkspace = cleanPath
 	settings.GrokRecentWorkspaces = rememberWorkspace(settings.GrokRecentWorkspaces, cleanPath)
-	err = writeSettings(s.settingsPath, settings)
+	err = s.persistSettingsLocked(settings)
 	if err == nil {
 		s.settings = settings
 	}

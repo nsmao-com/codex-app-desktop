@@ -28,14 +28,20 @@ func codexConfigPath() string {
 }
 
 func (s *AppService) ReadComputerUseSetting() (bool, error) {
-	payload, err := os.ReadFile(codexConfigPath())
-	if os.IsNotExist(err) {
-		return true, nil
-	}
+	path := codexConfigPath()
+	providerFileMu.Lock()
+	snapshot, err := readProviderConfigLocked(path)
+	providerFileMu.Unlock()
 	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
 		return false, err
 	}
-	body := extractTOMLSection(string(payload), "features")
+	if !snapshot.exists {
+		return true, nil
+	}
+	body := extractTOMLSection(string(snapshot.payload), "features")
 	match := regexp.MustCompile(`(?m)^\s*computer_use\s*=\s*(true|false)\s*(?:#.*)?$`).FindStringSubmatch(body)
 	return len(match) < 2 || match[1] == "true", nil
 }
@@ -46,17 +52,17 @@ func (s *AppService) SaveComputerUseSetting(enabled bool) error {
 	if path == "" {
 		return os.ErrNotExist
 	}
-	payload, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	return writeTextFileAtomic(path, upsertTOMLScalar(string(payload), "features", "computer_use", strconv.FormatBool(enabled)))
+	return updateProviderTextConfig(path, func(text string) (string, error) {
+		return upsertTOMLScalar(text, "features", "computer_use", strconv.FormatBool(enabled)), nil
+	})
 }
 
 func readCodexFeatureFlags() CodexFeatureFlags {
+	flags, _ := readCodexFeatureFlagsChecked()
+	return flags
+}
+
+func readCodexFeatureFlagsChecked() (CodexFeatureFlags, error) {
 	flags := CodexFeatureFlags{
 		MemoriesGenerate: true,
 		MemoriesUse:      true,
@@ -64,11 +70,14 @@ func readCodexFeatureFlags() CodexFeatureFlags {
 	}
 	path := codexConfigPath()
 	if path == "" {
-		return flags
+		return flags, os.ErrNotExist
 	}
-	payload, err := os.ReadFile(path)
+	payload, err := readProviderFileRecoverable(path)
 	if err != nil {
-		return flags
+		if os.IsNotExist(err) {
+			return flags, nil
+		}
+		return flags, err
 	}
 	text := string(payload)
 	flags.MemoriesEnabled = readTOMLBool(text, "features", "memories", false)
@@ -77,7 +86,7 @@ func readCodexFeatureFlags() CodexFeatureFlags {
 	flags.MemoriesGenerate = readTOMLBool(text, "memories", "generate_memories", true)
 	flags.MemoriesUse = readTOMLBool(text, "memories", "use_memories", true)
 	flags.MemoriesDisableExternalContext = readTOMLBool(text, "memories", "disable_on_external_context", false)
-	return flags
+	return flags, nil
 }
 
 func writeCodexFeatureFlags(flags CodexFeatureFlags) error {
@@ -85,23 +94,14 @@ func writeCodexFeatureFlags(flags CodexFeatureFlags) error {
 	if path == "" {
 		return os.ErrNotExist
 	}
-	payload, err := os.ReadFile(path)
-	text := ""
-	if err == nil {
-		text = string(payload)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	text = upsertTOMLBool(text, "features", "memories", flags.MemoriesEnabled)
-	text = upsertTOMLBool(text, "features", "browser_use_full_cdp_access", flags.BrowserUseFullCDP)
-	text = upsertTOMLBool(text, "features", "in_app_browser", flags.InAppBrowser)
-	text = upsertTOMLBool(text, "memories", "generate_memories", flags.MemoriesGenerate)
-	text = upsertTOMLBool(text, "memories", "use_memories", flags.MemoriesUse)
-	text = upsertTOMLBool(text, "memories", "disable_on_external_context", flags.MemoriesDisableExternalContext)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(text), 0o600)
+	return updateProviderTextConfig(path, func(text string) (string, error) {
+		text = upsertTOMLBool(text, "features", "memories", flags.MemoriesEnabled)
+		text = upsertTOMLBool(text, "features", "browser_use_full_cdp_access", flags.BrowserUseFullCDP)
+		text = upsertTOMLBool(text, "features", "in_app_browser", flags.InAppBrowser)
+		text = upsertTOMLBool(text, "memories", "generate_memories", flags.MemoriesGenerate)
+		text = upsertTOMLBool(text, "memories", "use_memories", flags.MemoriesUse)
+		return upsertTOMLBool(text, "memories", "disable_on_external_context", flags.MemoriesDisableExternalContext), nil
+	})
 }
 
 func readTOMLBool(text, section, key string, fallback bool) bool {
@@ -109,7 +109,7 @@ func readTOMLBool(text, section, key string, fallback bool) bool {
 	if sectionBody == "" {
 		return fallback
 	}
-	re := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*(true|false)\s*$`)
+	re := regexp.MustCompile(`(?m)^[\t ]*` + regexp.QuoteMeta(key) + `[\t ]*=[\t ]*(true|false)[\t ]*(?:#[^\r\n]*)?\r?$`)
 	match := re.FindStringSubmatch(sectionBody)
 	if len(match) < 2 {
 		return fallback
@@ -118,7 +118,7 @@ func readTOMLBool(text, section, key string, fallback bool) bool {
 }
 
 func extractTOMLSection(text, section string) string {
-	re := regexp.MustCompile(`(?ms)^\[` + regexp.QuoteMeta(section) + `\]\s*\n(.*?)(?:\n\[|\z)`)
+	re := regexp.MustCompile(`(?ms)^[\t ]*\[` + regexp.QuoteMeta(section) + `\][\t ]*(?:#[^\r\n]*)?\r?\n(.*?)(?:\n[\t ]*\[|\z)`)
 	match := re.FindStringSubmatch(text)
 	if len(match) < 2 {
 		return ""
@@ -130,10 +130,10 @@ func upsertTOMLBool(text, section, key string, value bool) string {
 	literal := strconv.FormatBool(value)
 	sectionHeader := "[" + section + "]"
 	keyLine := key + " = " + literal
-	keyRe := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*(true|false)\s*$`)
+	keyRe := regexp.MustCompile(`(?m)^[\t ]*` + regexp.QuoteMeta(key) + `[\t ]*=[\t ]*(true|false)([\t ]*(?:#[^\r\n]*)?)\r?$`)
 
 	if strings.Contains(text, sectionHeader) {
-		re := regexp.MustCompile(`(?ms)(\[` + regexp.QuoteMeta(section) + `\]\s*\n)(.*?)(\n\[|\z)`)
+		re := regexp.MustCompile(`(?ms)(^[\t ]*\[` + regexp.QuoteMeta(section) + `\][\t ]*(?:#[^\r\n]*)?\r?\n)(.*?)(\n[\t ]*\[|\z)`)
 		return re.ReplaceAllStringFunc(text, func(block string) string {
 			parts := re.FindStringSubmatch(block)
 			if len(parts) < 4 {
@@ -141,7 +141,7 @@ func upsertTOMLBool(text, section, key string, value bool) string {
 			}
 			header, body, tail := parts[1], parts[2], parts[3]
 			if keyRe.MatchString(body) {
-				body = keyRe.ReplaceAllString(body, keyLine)
+				body = keyRe.ReplaceAllString(body, keyLine+"${2}")
 			} else {
 				body = strings.TrimRight(body, "\n")
 				if body != "" {
@@ -174,31 +174,17 @@ func ensureCodexProviderUserAgent(clientName, clientTitle, clientVersion, cliVer
 	if path == "" {
 		return nil
 	}
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	return updateProviderTextConfig(path, func(text string) (string, error) {
+		providerID := readTOMLString(text, "", "model_provider")
+		if providerID == "" || providerID == "openai" {
+			return text, nil
 		}
-		return err
-	}
-	text := string(payload)
-	providerID := readTOMLString(text, "", "model_provider")
-	if providerID == "" || providerID == "openai" {
-		return nil
-	}
-	section := "model_providers." + providerID
-	if extractTOMLSection(text, section) == "" {
-		// Provider table may live only as nested tables; still try to write headers.
-	}
-	ua := buildCodexStyleUserAgent(clientName, clientTitle, clientVersion, cliVersion)
-	if ua == "" {
-		return nil
-	}
-	next := upsertProviderUserAgent(text, providerID, ua)
-	if next == text {
-		return nil
-	}
-	return os.WriteFile(path, []byte(next), 0o600)
+		ua := buildCodexStyleUserAgent(clientName, clientTitle, clientVersion, cliVersion)
+		if ua == "" {
+			return text, nil
+		}
+		return upsertProviderUserAgent(text, providerID, ua), nil
+	})
 }
 
 func buildCodexStyleUserAgent(clientName, clientTitle, clientVersion, cliVersion string) string {

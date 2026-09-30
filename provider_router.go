@@ -1008,10 +1008,7 @@ func providerRouterConfigPath(settingsPath string) string {
 func loadProviderRouterConfig(settingsPath string) (ProviderRouterConfig, error) {
 	config := defaultProviderRouterConfig()
 	path := providerRouterConfigPath(settingsPath)
-	if err := recoverProviderFileBackup(path); err != nil {
-		return config, err
-	}
-	payload, err := os.ReadFile(path)
+	payload, err := readProviderFileRecoverable(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return config, nil
@@ -1264,33 +1261,26 @@ func (s *AppService) ApplyProviderRouterToCodex() (ProviderRouterView, error) {
 	if path == "" {
 		return view, errors.New("Codex config path is unavailable")
 	}
-	if err := recoverProviderFileBackup(path); err != nil {
-		return view, err
-	}
-	payload, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return view, err
-	}
-	hadConfig := err == nil
-	originalPayload := append([]byte(nil), payload...)
-	text := string(payload)
-	previousProvider := readTOMLString(text, "", "model_provider")
-	if previousProvider == providerRouterID {
-		previousProvider = config.PreviousCodexProvider
-	}
-	text = upsertProviderRouterTOMLValue(text, "", "model_provider", strconv.Quote(providerRouterID))
-	section := "model_providers." + providerRouterID
-	text = upsertProviderRouterTOMLValue(text, section, "name", strconv.Quote("NiceCodex Local Router"))
-	text = upsertProviderRouterTOMLValue(text, section, "base_url", strconv.Quote(providerRouterListenURL(config.Port)+"/v1"))
-	text = upsertProviderRouterTOMLValue(text, section, "wire_api", strconv.Quote("responses"))
-	text = upsertProviderRouterTOMLValue(text, section, "requires_openai_auth", "false")
-	if err := writeProviderFileAtomic(path, []byte(text)); err != nil {
+	var previousProvider string
+	snapshot, routePayload, hadConfig, err := transformProviderTextConfig(path, func(text string) (string, error) {
+		previousProvider = readTOMLString(text, "", "model_provider")
+		if previousProvider == providerRouterID {
+			previousProvider = config.PreviousCodexProvider
+		}
+		text = upsertProviderRouterTOMLValue(text, "", "model_provider", strconv.Quote(providerRouterID))
+		section := "model_providers." + providerRouterID
+		text = upsertProviderRouterTOMLValue(text, section, "name", strconv.Quote("NiceCodex Local Router"))
+		text = upsertProviderRouterTOMLValue(text, section, "base_url", strconv.Quote(providerRouterListenURL(config.Port)+"/v1"))
+		text = upsertProviderRouterTOMLValue(text, section, "wire_api", strconv.Quote("responses"))
+		return upsertProviderRouterTOMLValue(text, section, "requires_openai_auth", "false"), nil
+	})
+	if err != nil {
 		return view, err
 	}
 	config.CodexApplied = true
 	config.PreviousCodexProvider = previousProvider
 	if err := writeProviderRouterConfig(s.settingsPath, config); err != nil {
-		rollbackErr := restoreProviderFile(path, originalPayload, hadConfig)
+		rollbackErr := restoreProviderFileIfUnchanged(path, routePayload, snapshot.payload, hadConfig)
 		if rollbackErr != nil {
 			return view, fmt.Errorf("save route metadata: %v (restore Codex config: %v)", err, rollbackErr)
 		}
@@ -1309,9 +1299,6 @@ func (s *AppService) RestoreCodexProviderRoute() (ProviderRouterView, error) {
 	if path == "" {
 		return s.providerRouter.view(), errors.New("Codex config path is unavailable")
 	}
-	if err := recoverProviderFileBackup(path); err != nil {
-		return s.providerRouter.view(), err
-	}
 	persistRestoredMetadata := func() (ProviderRouterView, error) {
 		config.CodexApplied = false
 		config.PreviousCodexProvider = ""
@@ -1321,29 +1308,26 @@ func (s *AppService) RestoreCodexProviderRoute() (ProviderRouterView, error) {
 		s.providerRouter.updateCodexMetadata(false, "")
 		return s.providerRouter.view(), nil
 	}
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return persistRestoredMetadata()
+	var originalPayload []byte
+	snapshot, routePayload, hadConfig, err := transformProviderTextConfig(path, func(text string) (string, error) {
+		if readTOMLString(text, "", "model_provider") != providerRouterID {
+			return text, nil
 		}
+		originalPayload = []byte(text)
+		if config.PreviousCodexProvider == "" {
+			return removeProviderRouterRootTOMLKey(text, "model_provider"), nil
+		}
+		return upsertProviderRouterTOMLValue(text, "", "model_provider", strconv.Quote(config.PreviousCodexProvider)), nil
+	})
+	if err != nil {
 		return s.providerRouter.view(), err
 	}
-	if readTOMLString(string(payload), "", "model_provider") != providerRouterID {
+	if bytes.Equal(routePayload, snapshot.payload) {
 		return persistRestoredMetadata()
-	}
-	originalPayload := append([]byte(nil), payload...)
-	text := string(payload)
-	if config.PreviousCodexProvider == "" {
-		text = removeProviderRouterRootTOMLKey(text, "model_provider")
-	} else {
-		text = upsertProviderRouterTOMLValue(text, "", "model_provider", strconv.Quote(config.PreviousCodexProvider))
-	}
-	if err := writeProviderFileAtomic(path, []byte(text)); err != nil {
-		return s.providerRouter.view(), err
 	}
 	view, metadataErr := persistRestoredMetadata()
 	if metadataErr != nil {
-		rollbackErr := writeProviderFileAtomic(path, originalPayload)
+		rollbackErr := restoreProviderFileIfUnchanged(path, routePayload, originalPayload, hadConfig)
 		if rollbackErr != nil {
 			return s.providerRouter.view(), fmt.Errorf("save route metadata: %v (restore Codex config: %v)", metadataErr, rollbackErr)
 		}
@@ -1413,8 +1397,27 @@ func removeProviderRouterRootTOMLKey(text, key string) string {
 	return strings.TrimRight(root, "\r\n") + "\n\n" + strings.TrimLeft(text[rootEnd:], "\r\n")
 }
 
+// Serialize recovery and replacement so concurrent readers cannot observe the
+// brief Windows rename gap or restore a backup while a writer is committing.
+var providerFileMu sync.Mutex
+
+func readProviderFileRecoverable(path string) ([]byte, error) {
+	providerFileMu.Lock()
+	defer providerFileMu.Unlock()
+	if err := recoverProviderFileBackupLocked(path); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+}
+
 func writeProviderFileAtomic(path string, payload []byte) error {
-	if err := recoverProviderFileBackup(path); err != nil {
+	providerFileMu.Lock()
+	defer providerFileMu.Unlock()
+	return writeProviderFileAtomicLocked(path, payload, 0o600, nil)
+}
+
+func writeProviderFileAtomicLocked(path string, payload []byte, mode os.FileMode, beforeReplace func() error) error {
+	if err := recoverProviderFileBackupLocked(path); err != nil {
 		return err
 	}
 	directory := filepath.Dir(path)
@@ -1427,7 +1430,7 @@ func writeProviderFileAtomic(path string, payload []byte) error {
 	}
 	tempPath := temp.Name()
 	defer os.Remove(tempPath)
-	if err := temp.Chmod(0o600); err != nil {
+	if err := temp.Chmod(mode); err != nil {
 		temp.Close()
 		return err
 	}
@@ -1443,6 +1446,11 @@ func writeProviderFileAtomic(path string, payload []byte) error {
 		return err
 	}
 
+	if beforeReplace != nil {
+		if err := beforeReplace(); err != nil {
+			return err
+		}
+	}
 	backupPath := path + ".nicecodex-backup"
 	_ = os.Remove(backupPath)
 	hadExisting := false
@@ -1467,6 +1475,12 @@ func writeProviderFileAtomic(path string, payload []byte) error {
 }
 
 func recoverProviderFileBackup(path string) error {
+	providerFileMu.Lock()
+	defer providerFileMu.Unlock()
+	return recoverProviderFileBackupLocked(path)
+}
+
+func recoverProviderFileBackupLocked(path string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {

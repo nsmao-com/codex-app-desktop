@@ -33,9 +33,12 @@ const pointerCursor = ref(false)
 const reduceMotion = ref(false)
 const runtime = ref<AppRuntime>('codex')
 const initialized = ref(false)
+const systemTheme = ref<'light' | 'dark'>('light')
+let stopSystemThemeListener: (() => void) | undefined
 
-function readSystemTheme(): 'light' | 'dark' {
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+function onSystemThemeChange(event: MediaQueryListEvent): void {
+  systemTheme.value = event.matches ? 'dark' : 'light'
+  if (theme.value === 'system') applyAttributes()
 }
 
 function isBuiltinFont(value: string): value is BuiltinFont {
@@ -70,7 +73,7 @@ function applyAttributes(): void {
 }
 
 const resolvedTheme = computed<'light' | 'dark'>(() => {
-  if (theme.value === 'system') return readSystemTheme()
+  if (theme.value === 'system') return systemTheme.value
   return theme.value === 'dark' ? 'dark' : 'light'
 })
 
@@ -109,9 +112,13 @@ function initAppearance(initial: AppearanceState = {}): void {
   initialized.value = true
 
   const media = window.matchMedia('(prefers-color-scheme: dark)')
-  media.addEventListener('change', () => {
-    if (theme.value === 'system') applyAttributes()
-  })
+  systemTheme.value = media.matches ? 'dark' : 'light'
+  media.addEventListener('change', onSystemThemeChange)
+  stopSystemThemeListener = () => media.removeEventListener('change', onSystemThemeChange)
+}
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => stopSystemThemeListener?.())
 }
 
 function normalizeRuntime(value: string | undefined | null): AppRuntime {

@@ -5,6 +5,8 @@ import { Events } from '@wailsio/runtime'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type {
   BootstrapData,
+  LocalStorageHealth,
+  LocalStorageIssue,
   AgentProviderRuntime,
   TerminalProfile,
   UserSettings,
@@ -27,7 +29,7 @@ import { translate } from '../i18n'
 import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
 
-const AppVersionFallback = '1.6.15'
+const AppVersionFallback = '1.6.16'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -50,7 +52,7 @@ const defaultSettings: UserSettings = {
   grokEffort: 'high',
   grokSandbox: 'workspace-write',
   grokApprovalPolicy: 'on-request',
-  grokWebSearch: true,
+  grokWebSearch: false,
   grokXSearch: false,
   grokAPIKey: '',
   grokAPIBaseURL: '',
@@ -152,12 +154,15 @@ export const useAppStore = defineStore('app', () => {
   const { initAppearance, setTheme, setAccent, setFont, setUiPrefs, setRuntime } = useAppearance()
 
   const bootstrapping = shallowRef(true)
+  const storageHealth = shallowRef<LocalStorageHealth>({ revision: 0, issues: [] })
+  const storageRetrying = shallowRef(false)
+  let storageEventUnsub: (() => void) | null = null
   const settings = shallowRef<UserSettings>({ ...defaultSettings })
   const workspaceOrderByRuntime = shallowRef<WorkspaceOrderByRuntime>(loadWorkspaceOrder())
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.6.15')
+  const appVersion = shallowRef('1.6.16')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -192,8 +197,8 @@ export const useAppStore = defineStore('app', () => {
   const agentProviders = shallowRef<AgentProviderRuntime[]>([])
 
   const currentWorkspacePath = computed(() => {
-    if (isGrokMode.value) return settings.value.grokWorkspace || settings.value.workspace
-    if (isClaudeMode.value) return settings.value.claudeWorkspace || settings.value.workspace
+    if (isGrokMode.value) return settings.value.grokWorkspace || ''
+    if (isClaudeMode.value) return settings.value.claudeWorkspace || ''
     if (isGeminiMode.value) return settings.value.geminiWorkspace || settings.value.workspace
     if (isOpenCodeMode.value) return settings.value.openCodeWorkspace || settings.value.workspace
     return settings.value.workspace
@@ -251,6 +256,7 @@ export const useAppStore = defineStore('app', () => {
 
   async function bootstrap(): Promise<void> {
     bootstrapping.value = true
+    bindStorageEvents()
     try {
       const data = await backend.Bootstrap()
       applyBootstrap(data)
@@ -279,6 +285,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function applyBootstrap(data: BootstrapData): void {
+    applyStorageHealth(data.storageHealth)
     codexAvailable.value = data.codex.available
     codexVersion.value = data.codex.version
     appVersion.value = asString(data.appVersion, AppVersionFallback)
@@ -298,7 +305,7 @@ export const useAppStore = defineStore('app', () => {
       grokEffort: data.settings.grokEffort || 'high',
       grokSandbox: data.settings.grokSandbox || 'workspace-write',
       grokApprovalPolicy: data.settings.grokApprovalPolicy || 'on-request',
-      grokWebSearch: data.settings.grokWebSearch !== false,
+      grokWebSearch: Boolean(data.settings.grokWebSearch),
       grokXSearch: Boolean(data.settings.grokXSearch),
       grokAPIKey: data.settings.grokAPIKey ?? '',
       grokAPIBaseURL: data.settings.grokAPIBaseURL ?? '',
@@ -439,13 +446,13 @@ export const useAppStore = defineStore('app', () => {
       recentWorkspaces: saved.recentWorkspaces ?? next.recentWorkspaces ?? [],
       grokWorkspace: saved.grokWorkspace ?? next.grokWorkspace ?? '',
       grokRecentWorkspaces: saved.grokRecentWorkspaces ?? next.grokRecentWorkspaces ?? [],
-      grokBackend: saved.grokBackend === 'api' || next.grokBackend === 'api' ? 'api' : 'build',
+      grokBackend: (saved.grokBackend ?? next.grokBackend) === 'api' ? 'api' : 'build',
       grokBuildModel: saved.grokBuildModel ?? next.grokBuildModel ?? '',
       grokAPIModel: saved.grokAPIModel ?? next.grokAPIModel ?? '',
       grokEffort: saved.grokEffort || next.grokEffort || 'high',
       grokSandbox: saved.grokSandbox || next.grokSandbox || 'workspace-write',
       grokApprovalPolicy: saved.grokApprovalPolicy || next.grokApprovalPolicy || 'on-request',
-      grokWebSearch: saved.grokWebSearch !== undefined ? saved.grokWebSearch : next.grokWebSearch !== false,
+      grokWebSearch: saved.grokWebSearch ?? Boolean(next.grokWebSearch),
       grokXSearch: saved.grokXSearch !== undefined ? Boolean(saved.grokXSearch) : Boolean(next.grokXSearch),
       grokAPIKey: saved.grokAPIKey ?? next.grokAPIKey ?? '',
       grokAPIBaseURL: saved.grokAPIBaseURL ?? next.grokAPIBaseURL ?? '',
@@ -540,6 +547,47 @@ export const useAppStore = defineStore('app', () => {
     } catch (error) {
       notify('error', translate('updates.openFailed'), errorMessage(error))
     }
+  }
+
+  function applyStorageHealth(health: LocalStorageHealth | undefined): void {
+    if (health && health.revision >= storageHealth.value.revision) {
+      storageHealth.value = { revision: health.revision, issues: health.issues ?? [] }
+    }
+  }
+
+  function bindStorageEvents(): void {
+    if (storageEventUnsub) return
+    storageEventUnsub = Events.On('nice:storage', (event) => {
+      const data = asRecord(event?.data)
+      const issues: LocalStorageIssue[] = Array.isArray(data.issues) ? data.issues.map((item) => {
+        const issue = asRecord(item)
+        return {
+          key: asString(issue.key), path: asString(issue.path),
+          operation: asString(issue.operation), message: asString(issue.message),
+          canRetry: issue.canRetry === true,
+        }
+      }) : []
+      applyStorageHealth({ revision: asNumber(data.revision), issues })
+    }) as unknown as () => void
+  }
+
+  async function retryLocalStorageWrites(): Promise<void> {
+    if (storageRetrying.value) return
+    storageRetrying.value = true
+    try {
+      applyStorageHealth(await backend.RetryLocalStorageWrites())
+    } catch (error) {
+      notify('error', translate('storage.retryFailed'), errorMessage(error))
+    } finally {
+      storageRetrying.value = false
+    }
+  }
+
+  function disposeAppEvents(): void {
+    storageEventUnsub?.()
+    storageEventUnsub = null
+    updateEventUnsub?.()
+    updateEventUnsub = null
   }
 
   function bindUpdateEvents(): void {
@@ -739,19 +787,20 @@ export const useAppStore = defineStore('app', () => {
   async function loadLocalUsage(): Promise<void> {
     const sequence = ++usageLoadSequence
     const requestedRuntime = activeRuntime.value
+    const requestedWorkspace = currentWorkspacePath.value
     try {
-      const usage = await backend.ReadAccountUsage()
+      const usage = await backend.ReadRuntimeAccountUsage(requestedRuntime)
       if (sequence !== usageLoadSequence || requestedRuntime !== activeRuntime.value) return
       let normalized = normalizeAccountUsage(usage)
       // Keep a second read path for packaged builds where the generated
-      // ReadAccountUsage bridge can return an empty snapshot while the native
+      // usage bridge can return an empty snapshot while the native
       // Gemini/OpenCode catalog is already available. This is deliberately a
       // fallback; Codex/Claude/Grok continue to use their normal usage store.
       if (!normalized && (requestedRuntime === 'gemini' || requestedRuntime === 'opencode')) {
         try {
           const catalog = await backend.ReadExternalRuntimeCatalog(
             requestedRuntime,
-            requestedRuntime === activeRuntime.value ? currentWorkspacePath.value : '',
+            requestedWorkspace,
           )
           const native = asRecord(catalog.usage)
           normalized = normalizeAccountUsage({
@@ -769,6 +818,7 @@ export const useAppStore = defineStore('app', () => {
           // The native CLI/database is optional; keep the empty state.
         }
       }
+      if (sequence !== usageLoadSequence || requestedRuntime !== activeRuntime.value) return
       const responseRuntime = normalized?.runtime
       // A request issued just before SetActiveRuntime completes can return the
       // previous provider's usage. Do not show it under the new provider.
@@ -924,6 +974,10 @@ export const useAppStore = defineStore('app', () => {
 
   return {
     bootstrapping,
+    storageHealth,
+    storageRetrying,
+    retryLocalStorageWrites,
+    disposeAppEvents,
     settings,
     workspaceOrderByRuntime,
     workspace,

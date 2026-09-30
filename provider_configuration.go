@@ -368,19 +368,17 @@ func validateProviderConfigurationFile(providerID string) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("provider configuration path is unavailable")
 	}
-	payload, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
+	providerFileMu.Lock()
+	snapshot, err := readProviderConfigLocked(path)
+	providerFileMu.Unlock()
 	if err != nil {
 		return err
 	}
-	if len(payload) > providerConfigurationMaxBytes {
-		return errors.New("provider configuration file is too large")
+	if !snapshot.exists {
+		return nil
 	}
 	if providerID == "claude" || providerID == "gemini" || providerID == "opencode" {
-		var root map[string]any
-		if err := json.Unmarshal(payload, &root); err != nil {
+		if _, _, err := parseProviderJSON(snapshot.payload); err != nil {
 			return fmt.Errorf("invalid %s JSON configuration: %w", providerID, err)
 		}
 	}
@@ -496,42 +494,44 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 				threshold = model.ContextWindow - 1_024
 			}
 		}
-		text, err := readProviderText(path)
-		if err != nil {
-			return ProviderApplyResult{}, err
-		}
-		text = upsertTOMLScalar(text, "", "model_context_window", optionalIntegerLiteral(tokens))
-		text = upsertTOMLScalar(text, "", "model_auto_compact_token_limit", optionalIntegerLiteral(threshold))
-		quotedScope := ""
-		if thresholdScope != "" {
-			quotedScope = strconv.Quote(thresholdScope)
-		}
-		text = upsertTOMLScalar(text, "", "model_auto_compact_token_limit_scope", quotedScope)
-		if err := writeTextFileAtomic(path, text); err != nil {
+		if err := updateProviderTextConfig(path, func(text string) (string, error) {
+			text = upsertTOMLScalar(text, "", "model_context_window", optionalIntegerLiteral(tokens))
+			text = upsertTOMLScalar(text, "", "model_auto_compact_token_limit", optionalIntegerLiteral(threshold))
+			quotedScope := ""
+			if thresholdScope != "" {
+				quotedScope = strconv.Quote(thresholdScope)
+			}
+			return upsertTOMLScalar(text, "", "model_auto_compact_token_limit_scope", quotedScope), nil
+		}); err != nil {
 			return ProviderApplyResult{}, err
 		}
 	case "claude":
 		if threshold > 0 && (threshold < 100_000 || threshold > 1_000_000) {
 			return ProviderApplyResult{}, errors.New("Claude auto-compact window must be between 100000 and 1000000 tokens")
 		}
-		config := readProviderJSONMap(path)
-		config["autoCompactEnabled"] = autoCompactEnabled
-		if threshold > 0 {
-			config["autoCompactWindow"] = threshold
-		} else {
-			delete(config, "autoCompactWindow")
-		}
-		if env := mapFromAny(config["env"]); env != nil {
-			if _, exists := env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]; exists {
-				if threshold > 0 {
-					env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = strconv.FormatInt(threshold, 10)
-				} else {
-					delete(env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW")
-				}
+		if err := updateProviderJSONConfig(path, func(config map[string]any) error {
+			config["autoCompactEnabled"] = autoCompactEnabled
+			if threshold > 0 {
+				config["autoCompactWindow"] = threshold
+			} else {
+				delete(config, "autoCompactWindow")
 			}
-			delete(env, "DISABLE_COMPACT")
-		}
-		if err := writeProviderJSONMap(path, config); err != nil {
+			if _, exists := config["env"]; exists {
+				env, err := providerJSONObject(config, "env")
+				if err != nil {
+					return err
+				}
+				if _, exists := env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]; exists {
+					if threshold > 0 {
+						env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = strconv.FormatInt(threshold, 10)
+					} else {
+						delete(env, "CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+					}
+				}
+				delete(env, "DISABLE_COMPACT")
+			}
+			return nil
+		}); err != nil {
 			return ProviderApplyResult{}, err
 		}
 	case "grok":
@@ -541,26 +541,24 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 		if threshold < 0 || threshold > 100 {
 			return ProviderApplyResult{}, errors.New("Grok auto-compact percentage must be between 0 and 100")
 		}
-		text, err := readProviderText(path)
-		if err != nil {
-			return ProviderApplyResult{}, err
-		}
-		thresholdLiteral := strconv.FormatInt(threshold, 10)
-		if thresholdUnset {
-			thresholdLiteral = ""
-		}
-		text = upsertTOMLScalar(text, "session", "auto_compact_threshold_percent", thresholdLiteral)
-		if current.Context.Writable {
-			section := findGrokModelSection(text, selectedProviderModel(s.Settings(), "grok"))
-			if section == "" {
-				return ProviderApplyResult{}, errors.New("selected Grok model is not declared as a custom model")
+		if err := updateProviderTextConfig(path, func(text string) (string, error) {
+			thresholdLiteral := strconv.FormatInt(threshold, 10)
+			if thresholdUnset {
+				thresholdLiteral = ""
 			}
-			if tokens > 0 && tokens < 16_384 {
-				return ProviderApplyResult{}, errors.New("Grok custom model context must be at least 16384 tokens")
+			text = upsertTOMLScalar(text, "session", "auto_compact_threshold_percent", thresholdLiteral)
+			if current.Context.Writable {
+				section := findGrokModelSection(text, selectedProviderModel(s.Settings(), "grok"))
+				if section == "" {
+					return "", errors.New("selected Grok model is not declared as a custom model")
+				}
+				if tokens > 0 && tokens < 16_384 {
+					return "", errors.New("Grok custom model context must be at least 16384 tokens")
+				}
+				text = upsertTOMLScalar(text, section, "context_window", optionalIntegerLiteral(tokens))
 			}
-			text = upsertTOMLScalar(text, section, "context_window", optionalIntegerLiteral(tokens))
-		}
-		if err := writeTextFileAtomic(path, text); err != nil {
+			return text, nil
+		}); err != nil {
 			return ProviderApplyResult{}, err
 		}
 	case "gemini":
@@ -580,31 +578,38 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 		if effectiveContext > 0 && threshold >= effectiveContext {
 			return ProviderApplyResult{}, errors.New("OpenCode reserved context must be smaller than the selected model context window")
 		}
-		config := readProviderJSONMap(path)
-		compaction := ensureMap(config, "compaction")
-		compaction["auto"] = autoCompactEnabled
-		compaction["prune"] = pruneEnabled
-		if threshold > 0 {
-			compaction["reserved"] = threshold
-		} else {
-			delete(compaction, "reserved")
-		}
-		if current.Context.Writable {
-			model := openCodeModelConfig(config, selectedProviderModel(s.Settings(), "opencode"))
-			if model == nil {
-				return ProviderApplyResult{}, errors.New("selected OpenCode model is not declared in opencode.json")
+		if err := updateProviderJSONConfig(path, func(config map[string]any) error {
+			compaction, err := providerJSONObject(config, "compaction")
+			if err != nil {
+				return err
 			}
-			limit := ensureMap(model, "limit")
-			if tokens > 0 {
-				if tokens < 16_384 {
-					return ProviderApplyResult{}, errors.New("OpenCode model context must be at least 16384 tokens")
-				}
-				limit["context"] = tokens
+			compaction["auto"] = autoCompactEnabled
+			compaction["prune"] = pruneEnabled
+			if threshold > 0 {
+				compaction["reserved"] = threshold
 			} else {
-				delete(limit, "context")
+				delete(compaction, "reserved")
 			}
-		}
-		if err := writeProviderJSONMap(path, config); err != nil {
+			if current.Context.Writable {
+				model := openCodeModelConfig(config, selectedProviderModel(s.Settings(), "opencode"))
+				if model == nil {
+					return errors.New("selected OpenCode model is not declared in opencode.json")
+				}
+				limit, err := providerJSONObject(model, "limit")
+				if err != nil {
+					return err
+				}
+				if tokens > 0 {
+					if tokens < 16_384 {
+						return errors.New("OpenCode model context must be at least 16384 tokens")
+					}
+					limit["context"] = tokens
+				} else {
+					delete(limit, "context")
+				}
+			}
+			return nil
+		}); err != nil {
 			return ProviderApplyResult{}, err
 		}
 	}
@@ -664,31 +669,20 @@ func (s *AppService) RestartProvider(providerID string) (ProviderApplyResult, er
 }
 
 func readProviderText(path string) (string, error) {
-	payload, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return "", nil
-	}
+	providerFileMu.Lock()
+	defer providerFileMu.Unlock()
+	snapshot, err := readProviderConfigLocked(path)
 	if err != nil {
 		return "", err
 	}
-	if len(payload) > providerConfigurationMaxBytes {
-		return "", errors.New("provider configuration file is too large")
-	}
-	return string(payload), nil
+	return string(snapshot.payload), nil
 }
 
+// Read-only catalog fallback. Mutations must use updateProviderJSONConfig so
+// an unreadable file is never interpreted as an empty writable configuration.
 func readProviderJSONMap(path string) map[string]any {
-	result := map[string]any{}
-	_ = readLimitedJSON(path, &result)
+	result, _ := readProviderJSONConfig(path)
 	return result
-}
-
-func writeProviderJSONMap(path string, config map[string]any) error {
-	payload, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeTextFileAtomic(path, string(payload)+"\n")
 }
 
 func mapFromAny(value any) map[string]any {

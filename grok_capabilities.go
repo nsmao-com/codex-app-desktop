@@ -11,12 +11,12 @@ import (
 
 // GrokMCPServerView is a server entry from ~/.grok/config.toml [mcp_servers.*].
 type GrokMCPServerView struct {
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`
-	Command string `json:"command"`
-	Args    string `json:"args"`
+	Name      string `json:"name"`
+	Enabled   bool   `json:"enabled"`
+	Command   string `json:"command"`
+	Args      string `json:"args"`
 	Transport string `json:"transport"`
-	URL     string `json:"url"`
+	URL       string `json:"url"`
 }
 
 // GrokSkillView is a discovered Grok skill (SKILL.md).
@@ -36,13 +36,13 @@ type GrokPluginView struct {
 
 // GrokCapabilitiesCatalog is the Grok-mode capability center payload.
 type GrokCapabilitiesCatalog struct {
-	Runtime   GrokRuntimeStatus  `json:"runtime"`
-	ConfigPath string            `json:"configPath"`
-	GrokHome  string             `json:"grokHome"`
-	MCP       []GrokMCPServerView `json:"mcp"`
-	Skills    []GrokSkillView    `json:"skills"`
-	Plugins   []GrokPluginView   `json:"plugins"`
-	GlobalInstructions GlobalInstructionsInfo `json:"globalInstructions"`
+	Runtime             GrokRuntimeStatus       `json:"runtime"`
+	ConfigPath          string                  `json:"configPath"`
+	GrokHome            string                  `json:"grokHome"`
+	MCP                 []GrokMCPServerView     `json:"mcp"`
+	Skills              []GrokSkillView         `json:"skills"`
+	Plugins             []GrokPluginView        `json:"plugins"`
+	GlobalInstructions  GlobalInstructionsInfo  `json:"globalInstructions"`
 	ProjectInstructions ProjectInstructionsInfo `json:"projectInstructions"`
 }
 
@@ -50,13 +50,13 @@ func (s *AppService) ReadGrokCapabilities() GrokCapabilitiesCatalog {
 	home := resolveGrokHome()
 	configPath := filepath.Join(home, "config.toml")
 	catalog := GrokCapabilitiesCatalog{
-		Runtime:    detectGrokRuntime(),
-		ConfigPath: configPath,
-		GrokHome:   home,
-		MCP:        listGrokMCPServers(configPath),
-		Skills:     listGrokSkills(home, s.Settings().GrokWorkspace),
-		Plugins:    listGrokPlugins(home),
-		GlobalInstructions: s.ReadGrokGlobalInstructions(),
+		Runtime:             detectGrokRuntime(),
+		ConfigPath:          configPath,
+		GrokHome:            home,
+		MCP:                 listGrokMCPServers(configPath),
+		Skills:              listGrokSkills(home, s.Settings().GrokWorkspace),
+		Plugins:             listGrokPlugins(home),
+		GlobalInstructions:  s.ReadGrokGlobalInstructions(),
 		ProjectInstructions: s.ReadGrokProjectInstructions(),
 	}
 	if catalog.MCP == nil {
@@ -78,78 +78,32 @@ func (s *AppService) ReadGrokGlobalInstructions() GlobalInstructionsInfo {
 	if home == "" {
 		return GlobalInstructionsInfo{}
 	}
-	path, source, content, exists, emptyFile := resolveGrokHomeAgentsDoc(home)
-	return GlobalInstructionsInfo{
-		Content: content, Path: path, Source: source,
-		Exists: exists, EmptyFile: emptyFile, Available: true,
-	}
+	return grokHomeInstructionSource(home).read()
 }
 
-func (s *AppService) SaveGrokGlobalInstructions(content string) (GlobalInstructionsInfo, error) {
+func (s *AppService) SaveGrokGlobalInstructions(request InstructionsSaveRequest) (GlobalInstructionsInfo, error) {
 	home := resolveGrokHome()
 	if home == "" {
 		return GlobalInstructionsInfo{}, os.ErrNotExist
 	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return GlobalInstructionsInfo{}, err
-	}
-	path := filepath.Join(home, "AGENTS.md")
-	trimmed := sanitizeCustomInstructions(content)
-	if err := os.WriteFile(path, []byte(trimmed), 0o600); err != nil {
-		return GlobalInstructionsInfo{}, err
-	}
-	return s.ReadGrokGlobalInstructions(), nil
+	return grokHomeInstructionSource(home).save(request)
 }
 
-// ReadGrokProjectInstructions returns AGENTS.md for the active Grok workspace.
 func (s *AppService) ReadGrokProjectInstructions() ProjectInstructionsInfo {
-	workspace := strings.TrimSpace(s.Settings().GrokWorkspace)
-	if workspace == "" {
-		return ProjectInstructionsInfo{}
-	}
-	clean, err := validateWorkspace(workspace)
+	workspace, err := validateWorkspace(s.Settings().GrokWorkspace)
 	if err != nil {
 		return ProjectInstructionsInfo{}
 	}
-	path, source, content, exists, emptyFile := resolveAgentsDoc(clean)
-	return ProjectInstructionsInfo{
-		Content: content, Workspace: clean, WorkspaceName: filepath.Base(clean),
-		Path: path, Source: source, Exists: exists, EmptyFile: emptyFile, Available: true,
-	}
+	return projectInstructionInfo(agentsInstructionSource(workspace, false).read(), workspace)
 }
 
-func (s *AppService) SaveGrokProjectInstructions(content string) (ProjectInstructionsInfo, error) {
-	workspace := strings.TrimSpace(s.Settings().GrokWorkspace)
-	if workspace == "" {
-		return ProjectInstructionsInfo{}, errors.New("no Grok workspace is selected")
-	}
-	clean, err := validateWorkspace(workspace)
+func (s *AppService) SaveGrokProjectInstructions(request InstructionsSaveRequest) (ProjectInstructionsInfo, error) {
+	workspace, err := validateWorkspace(s.Settings().GrokWorkspace)
 	if err != nil {
 		return ProjectInstructionsInfo{}, err
 	}
-	if _, err := writeAgentsDoc(clean, content); err != nil {
-		return ProjectInstructionsInfo{}, err
-	}
-	return s.ReadGrokProjectInstructions(), nil
-}
-
-func resolveGrokHomeAgentsDoc(home string) (path, source, content string, exists, emptyFile bool) {
-	candidates := []string{
-		filepath.Join(home, "AGENTS.md"),
-		filepath.Join(home, "AGENTS.override.md"),
-		filepath.Join(home, "Agents.md"),
-		filepath.Join(home, "AGENT.md"),
-	}
-	for _, candidate := range candidates {
-		payload, err := os.ReadFile(candidate)
-		if err != nil {
-			continue
-		}
-		text := string(payload)
-		return candidate, filepath.Base(candidate), text, true, strings.TrimSpace(text) == ""
-	}
-	// Prefer writing AGENTS.md next save.
-	return filepath.Join(home, "AGENTS.md"), "AGENTS.md", "", false, false
+	info, err := agentsInstructionSource(workspace, false).save(request)
+	return projectInstructionInfo(info, workspace), err
 }
 
 func listGrokMCPServers(configPath string) []GrokMCPServerView {

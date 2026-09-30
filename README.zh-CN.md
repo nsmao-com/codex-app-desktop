@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.15：同步新版 Codex CLI 模型目录与默认模型能力。</sub></p>
+<p align="center"><sub>v1.6.16：加强原生配置安全、跨运行时工作区可靠性与设置体验。</sub></p>
 
 ## 为什么是 Nice Codex
 
@@ -170,7 +170,7 @@ Nice Codex 正在快速迭代。README 不写死容易过期的虚假繁荣数�
 
 - 5 个相互独立集成的 Agent 运行时。
 - 最多 8 个同时工作的竞技场分栏。
-- 每版自动发布 3 个桌面平台产物。
+- 每版自动发布 4 个桌面产物：Windows 安装包、Windows 便携包、macOS Apple Silicon 和 Intel 安装包。
 - 按运行时恢复原生会话、上下文、用量与能力配置。
 - 中英文界面与文档。
 

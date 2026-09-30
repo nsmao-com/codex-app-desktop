@@ -1,8 +1,6 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -57,13 +55,10 @@ func sessionsPath(settingsPath string) string {
 	return filepath.Join(filepath.Dir(settingsPath), "sessions.json")
 }
 
-func loadSessions(settingsPath string) map[string]*SessionRecord {
+func (s *AppService) loadSessions() map[string]*SessionRecord {
 	result := make(map[string]*SessionRecord)
-	payload, err := os.ReadFile(sessionsPath(settingsPath))
-	if err == nil {
-		if err := json.Unmarshal(payload, &result); err != nil {
-			result = make(map[string]*SessionRecord)
-		}
+	if err := s.readLocalJSON("sessions", sessionsPath(s.settingsPath), &result); err != nil {
+		return make(map[string]*SessionRecord)
 	}
 	// A valid JSON `null` decodes without error but leaves a nil map. Every
 	// session import/read path expects this registry to be writable.
@@ -71,7 +66,7 @@ func loadSessions(settingsPath string) map[string]*SessionRecord {
 		result = make(map[string]*SessionRecord)
 	}
 	// One-time migration from legacy external-threads.json
-	legacy := loadExternalThreads(settingsPath)
+	legacy := loadExternalThreads(s.settingsPath)
 	changed := false
 	for id, record := range legacy {
 		if record == nil || id == "" {
@@ -84,7 +79,7 @@ func loadSessions(settingsPath string) map[string]*SessionRecord {
 		changed = true
 	}
 	if changed {
-		persistSessionsMap(settingsPath, result)
+		_ = s.writeLocalJSON("sessions", sessionsPath(s.settingsPath), result)
 	}
 	return result
 }
@@ -111,20 +106,8 @@ func sessionFromExternal(record *externalThreadRecord) *SessionRecord {
 	}
 }
 
-func persistSessionsMap(settingsPath string, sessions map[string]*SessionRecord) {
-	payload, err := json.MarshalIndent(sessions, "", "  ")
-	if err != nil {
-		return
-	}
-	path := sessionsPath(settingsPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return
-	}
-	_ = os.WriteFile(path, payload, 0o600)
-}
-
-func (s *AppService) persistSessionsLocked() {
-	persistSessionsMap(s.settingsPath, s.sessions)
+func (s *AppService) persistSessionsLocked() error {
+	return s.writeLocalJSON("sessions", sessionsPath(s.settingsPath), s.sessions)
 }
 
 func cloneSession(record *SessionRecord) *SessionRecord {

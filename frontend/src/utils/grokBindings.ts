@@ -7,6 +7,7 @@ import { Call } from '@wailsio/runtime'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type {
+  InstructionsSaveRequest,
   GrokRuntimeStatus,
   GrokSendRequest,
   GrokSessionDetail,
@@ -251,6 +252,8 @@ export interface GrokCapabilitiesCatalog {
   skills: GrokSkillView[] | null
   plugins: GrokPluginView[] | null
   globalInstructions: {
+    revision: string
+    readError?: string
     content: string
     path: string
     source: string
@@ -259,6 +262,8 @@ export interface GrokCapabilitiesCatalog {
     available: boolean
   }
   projectInstructions: {
+    revision: string
+    readError?: string
     content: string
     workspace: string
     workspaceName: string
@@ -285,11 +290,11 @@ export function readGrokGlobalInstructions() {
   )
 }
 
-export function saveGrokGlobalInstructions(content: string) {
+export function saveGrokGlobalInstructions(request: InstructionsSaveRequest) {
   return withNameFallback(
     'SaveGrokGlobalInstructions',
-    () => backend.SaveGrokGlobalInstructions(content) as Promise<GrokCapabilitiesCatalog['globalInstructions']>,
-    content,
+    () => backend.SaveGrokGlobalInstructions(request) as Promise<GrokCapabilitiesCatalog['globalInstructions']>,
+    request,
   )
 }
 
@@ -300,11 +305,11 @@ export function readGrokProjectInstructions() {
   )
 }
 
-export function saveGrokProjectInstructions(content: string) {
+export function saveGrokProjectInstructions(request: InstructionsSaveRequest) {
   return withNameFallback(
     'SaveGrokProjectInstructions',
-    () => backend.SaveGrokProjectInstructions(content) as Promise<GrokCapabilitiesCatalog['projectInstructions']>,
-    content,
+    () => backend.SaveGrokProjectInstructions(request) as Promise<GrokCapabilitiesCatalog['projectInstructions']>,
+    request,
   )
 }
 

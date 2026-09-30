@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { AnimatePresence, Motion } from 'motion-v'
-import { onMounted, onUnmounted, shallowRef, watch } from 'vue'
+import { defineAsyncComponent, onMounted, onUnmounted, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 defineOptions({ name: 'WorkbenchView' })
@@ -13,12 +13,12 @@ import ChatWorkspace from '@/components/ChatWorkspace.vue'
 import ConnectionBanner from '@/components/ConnectionBanner.vue'
 import InspectorPanel from '@/components/InspectorPanel.vue'
 import LiveDiffPanel from '@/components/LiveDiffPanel.vue'
-import TerminalPanel from '@/components/TerminalPanel.vue'
 import { overlayFade, springSoft } from '@/lib/motion'
 import { useAppStore, useArenaStore, useBrowserStore, useClaudeStore, useCodexStore, useGrokStore, useShellStore, useTerminalStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
 import { sameWorkspacePath } from '@/utils/workspacePath'
 
+const TerminalPanel = defineAsyncComponent(() => import('@/components/TerminalPanel.vue'))
 const route = useRoute()
 const router = useRouter()
 const appStore = useAppStore()
