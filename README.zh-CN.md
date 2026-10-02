@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.16：加强原生配置安全、跨运行时工作区可靠性与设置体验。</sub></p>
+<p align="center"><sub>v1.6.17：内置 Codex FastCtx、运行时配置重载，修复自定义模型并增加一键 1M 上下文设置。</sub></p>
 
 ## 为什么是 Nice Codex
 
@@ -129,6 +129,18 @@ Nice Codex 不使用一套通用公式硬套所有模型商。应用会标准化
 - 为应用及其子 CLI 注入的可选 HTTP/HTTPS/SOCKS 代理。
 - 仅监听回环地址的本地模型商路由，支持顺序故障切换、熔断、健康状态与 Codex 配置安全恢复。
 - CLI 检测/更新、工作区重连、通知、浏览器黑白名单、Git 默认值、定时任务与 AGENTS.md 管理。
+- 左下角提供当前服务商的“重新加载配置”：重新读取 API Key / OAuth 登录、官方配置和模型目录；Codex 会重启 app-server，Claude Code、Grok、Gemini CLI 与 OpenCode 会在下一轮使用重新加载后的原生配置。正在运行任务时会阻止重载，避免中断或串用凭据。
+
+### FastCtx（仅 Codex）
+
+在 **设置 → 环境 → FastCtx** 管理 [yc-duan/fastctx](https://github.com/yc-duan/fastctx)：
+
+- 打开卡片时检测安装版本、Codex 使用的版本、应用状态及上游最新发布版；离线时可选择“仅检测本地”。
+- “安装并应用”或“同步上游更新并应用”通过 pnpm 安装官方发布包，再调用上游 `apply`，同步程序副本、MCP 配置、工具输出预算与全局 AGENTS 指令块，最后复检。跟随上游发布版，不需要随 NiceCodex 发版才能更新 FastCtx。
+- 区分未安装、未应用、需要重新应用及检测异常；更新安装包后仍使用旧副本、配置或指令被改动都会提示处理。
+- 默认提供文件读取、搜索、匹配和替换；可开启命令执行及后台任务工具，Windows 需要 Git Bash。
+
+安装和更新需要 Node.js 18+ 与 pnpm。应用后重启 Codex 连接或 NiceCodex，并在新会话调用一次 FastCtx 工具确认模型侧可用。检测与应用仅针对当前 `CODEX_HOME`，不修改 Claude 等其他运行时。上游更新由用户点击同步，不在后台静默升级。
 
 ## 安全边界
 

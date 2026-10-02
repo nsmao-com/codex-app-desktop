@@ -772,6 +772,11 @@ func (s *AppService) runExternalTurn(threadID, provider, workspace string, setti
 	started := time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
+	if s.providerReloading[normalizeProviderID(provider)] {
+		s.mu.Unlock()
+		cancel()
+		return nil, errors.New("服务商配置正在重新加载，请稍后发送")
+	}
 	if s.externalRuns == nil {
 		s.externalRuns = make(map[string]*externalRun)
 	}
@@ -1981,6 +1986,7 @@ func externalCommandArgsForExecutable(provider, executable, sessionID, workspace
 
 func appendClaudeCompatibilityArgs(args []string, model string) []string {
 	model = strings.ToLower(strings.TrimSpace(model))
+	model = strings.TrimSuffix(model, "[1m]")
 	if model == "" || model == "sonnet" || model == "opus" || model == "haiku" || model == "fable" || strings.HasPrefix(model, "claude-") {
 		return args
 	}

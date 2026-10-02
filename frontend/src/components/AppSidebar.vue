@@ -37,6 +37,7 @@ import GrokIcon from '@/components/icons/GrokIcon.vue'
 import GeminiIcon from '@/components/icons/GeminiIcon.vue'
 import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
 import OpenAIIcon from '@/components/icons/OpenAIIcon.vue'
+import RuntimeReloadButton from '@/components/RuntimeReloadButton.vue'
 import { springPanel, springSnappy } from '@/lib/motion'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
@@ -1932,6 +1933,7 @@ function formatGrokUpdated(value?: number | null): string {
     </ScrollArea>
 
     <div class="border-t border-sidebar-border/40 p-2">
+      <RuntimeReloadButton :runtime="sidebarActionRuntime" />
       <div class="flex items-center gap-1">
         <!-- Grok: same token usage popover as Codex (today / 7d / 14d / 30d). -->
         <div v-if="sidebarIsGrokMode" class="flex min-w-0 flex-1 items-center gap-1">

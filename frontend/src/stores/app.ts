@@ -28,8 +28,13 @@ import {
 import { translate } from '../i18n'
 import { DEFAULT_CODEX_MODEL } from '../utils/runtimeProviders'
 import { workspaceKey } from '../utils/workspacePath'
+import {
+  applyCachedModelMetadata,
+  modelMetadataCacheInfo,
+  syncModelMetadata,
+} from '../utils/modelMetadata'
 
-const AppVersionFallback = '1.6.16'
+const AppVersionFallback = '1.6.17'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -162,7 +167,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.6.16')
+  const appVersion = shallowRef('1.6.17')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -195,6 +200,9 @@ export const useAppStore = defineStore('app', () => {
   const models = shallowRef<import('../types/codex').ModelOption[]>([])
   const modelProviders = shallowRef<import('../types/codex').ModelProviderOption[]>([])
   const agentProviders = shallowRef<AgentProviderRuntime[]>([])
+  const modelMetadataSyncing = shallowRef(false)
+  const modelMetadataLastUpdated = shallowRef('')
+  const modelMetadataError = shallowRef('')
 
   const currentWorkspacePath = computed(() => {
     if (isGrokMode.value) return settings.value.grokWorkspace || ''
@@ -260,6 +268,7 @@ export const useAppStore = defineStore('app', () => {
     try {
       const data = await backend.Bootstrap()
       applyBootstrap(data)
+      void refreshModelMetadata()
     } catch (error) {
       notify('error', translate('notifications.unableStart'), errorMessage(error))
     } finally {
@@ -273,8 +282,9 @@ export const useAppStore = defineStore('app', () => {
       const data = await backend.Bootstrap()
       codexAvailable.value = data.codex.available
       codexVersion.value = data.codex.version
-      agentProviders.value = data.agentProviders ?? []
+      agentProviders.value = applyCachedModelMetadata(data.agentProviders ?? [])
       terminalProfiles.value = data.terminalProfiles ?? terminalProfiles.value
+      void refreshModelMetadata()
     } catch {
       // best-effort
     }
@@ -290,7 +300,7 @@ export const useAppStore = defineStore('app', () => {
     codexVersion.value = data.codex.version
     appVersion.value = asString(data.appVersion, AppVersionFallback)
     updateRepo.value = asString(data.updateRepo, 'nsmao-com/codex-app-desktop')
-    agentProviders.value = data.agentProviders ?? []
+    agentProviders.value = applyCachedModelMetadata(data.agentProviders ?? [])
     settings.value = {
       ...defaultSettings,
       ...data.settings,
@@ -384,6 +394,25 @@ export const useAppStore = defineStore('app', () => {
     applyLocale(settings.value.language)
     void loadSystemFonts()
     void checkForUpdates(true)
+  }
+
+  async function refreshModelMetadata(force = false): Promise<void> {
+    const cached = modelMetadataCacheInfo()
+    if (cached.savedAt) modelMetadataLastUpdated.value = cached.savedAt
+    modelMetadataError.value = ''
+    agentProviders.value = applyCachedModelMetadata(agentProviders.value)
+    modelMetadataSyncing.value = true
+    try {
+      const result = await syncModelMetadata(agentProviders.value, force)
+      if (result) {
+        agentProviders.value = result.providers
+        modelMetadataLastUpdated.value = result.cache.savedAt
+      }
+    } catch (error) {
+      modelMetadataError.value = error instanceof Error ? error.message : String(error)
+    } finally {
+      modelMetadataSyncing.value = false
+    }
   }
 
   async function setActiveRuntime(runtimeID: WorkspaceRuntime): Promise<boolean> {
@@ -999,6 +1028,9 @@ export const useAppStore = defineStore('app', () => {
     models,
     modelProviders,
     agentProviders,
+    modelMetadataSyncing,
+    modelMetadataLastUpdated,
+    modelMetadataError,
     currentWorkspacePath,
     currentTheme,
     activeRuntime,
@@ -1011,6 +1043,7 @@ export const useAppStore = defineStore('app', () => {
     setWorkspaceOrder,
     bootstrap,
     refreshRuntimes,
+    refreshModelMetadata,
     refreshTerminalProfiles,
     setActiveRuntime,
     ensureActiveRuntimeSynced,

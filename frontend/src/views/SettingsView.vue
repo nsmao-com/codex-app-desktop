@@ -68,7 +68,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
-import type { CodexFeatureFlags, ExternalRuntimeCatalog, GlobalInstructionsInfo, ProjectInstructionsInfo } from '../../bindings/nice_codex_desktop/models'
+import type { CodexFeatureFlags, ExternalRuntimeCatalog, GlobalInstructionsInfo, ProjectInstructionsInfo, ProviderConfigurationView } from '../../bindings/nice_codex_desktop/models'
 import { supportedLocales } from '@/i18n'
 import { ACCENT_OPTIONS, type AppAccent } from '@/lib/accents'
 import type { AppTheme } from '@/composables/useAppearance'
@@ -76,6 +76,8 @@ import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import CapabilitiesView from '@/views/CapabilitiesView.vue'
 import ComputerUseSettings from '@/components/ComputerUseSettings.vue'
 import TranslationSettings from '@/components/TranslationSettings.vue'
+import FastCtxSettings from '@/components/FastCtxSettings.vue'
+import SettingsCard from '@/components/SettingsCard.vue'
 import ReasoningSlider from '@/components/ReasoningSlider.vue'
 import { useAppStore, useArenaStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
@@ -94,7 +96,7 @@ import {
   type CLIToolStatus,
   type CLIToolsReport,
 } from '@/utils/cliTools'
-import { antigravityModelEfforts, normalizeAntigravityModelEffort, DEFAULT_GROK_REASONING, modelsForClaudeRuntime, modelsForGrokRuntime, modelsForRuntime } from '@/utils/runtimeProviders'
+import { antigravityModelEfforts, normalizeAntigravityModelEffort, DEFAULT_GROK_REASONING, CUSTOM_MODEL_LIMIT, normalizeCustomModels, claudeLongContextModel, modelsForClaudeRuntime, modelsForGrokRuntime, modelsForRuntime } from '@/utils/runtimeProviders'
 
 type SettingsPanel =
   | 'general'
@@ -169,6 +171,7 @@ const claudeCustomModels = shallowRef<string[]>([...(appStore.settings.claudeCus
 const claudeCustomModelDraft = shallowRef('')
 const grokCustomModels = shallowRef<string[]>([...(appStore.settings.grokCustomModels ?? [])])
 const grokCustomModelDraft = shallowRef('')
+let modelDraftBaseline = appStore.settings
 const effort = shallowRef(appStore.settings.effort)
 const serviceTier = shallowRef(appStore.settings.serviceTier)
 const collaborationMode = shallowRef(appStore.settings.collaborationMode)
@@ -321,6 +324,63 @@ const agentSettingsIcon = computed(() => {
 })
 const activeRuntimeName = computed(() => appStore.runtimeDisplayName(appStore.activeRuntime))
 const activeRuntimeProvider = computed(() => appStore.providerForRuntime(appStore.activeRuntime))
+const contextConfiguration = shallowRef<ProviderConfigurationView | null>(null)
+const contextPresetBusy = shallowRef(false)
+const contextPresetLoading = shallowRef(false)
+const contextPresetError = shallowRef('')
+let contextPresetSequence = 0
+const claude1MModel = computed(() => claudeLongContextModel(claudeModel.value))
+const claude1MBlocked = computed(() => contextConfiguration.value?.warnings?.some((warning) => warning.includes('CLAUDE_CODE_DISABLE_1M_CONTEXT')) ?? false)
+const context1MSelected = computed(() => isClaudeSettings.value
+  ? Boolean(claude1MModel.value && claude1MModel.value === claudeModel.value && !claude1MBlocked.value)
+  : contextConfiguration.value?.context.configuredTokens === 1_000_000
+    && contextConfiguration.value?.context.autoCompactThreshold === 900_000)
+
+async function loadContextPreset(): Promise<void> {
+  const runtime = appStore.activeRuntime
+  const sequence = ++contextPresetSequence
+  contextConfiguration.value = null
+  contextPresetError.value = ''
+  contextPresetLoading.value = runtime === 'codex' || runtime === 'claude'
+  if (!contextPresetLoading.value) return
+  try {
+    const result = await backend.CheckProviderConfiguration(runtime, false)
+    if (settingsDisposed || sequence !== contextPresetSequence || runtime !== appStore.activeRuntime) return
+    contextConfiguration.value = result
+  } catch (error) {
+    if (settingsDisposed || sequence !== contextPresetSequence) return
+    contextPresetError.value = instructionError(error)
+  } finally {
+    if (sequence === contextPresetSequence) contextPresetLoading.value = false
+  }
+}
+
+async function applyContextPreset(enabled: boolean): Promise<void> {
+  if (saving.value || runtimeSwitching.value || instructionsLoading.value || featureFlagsLoading.value || contextPresetBusy.value || contextPresetLoading.value || !contextConfiguration.value) return
+  const runtime = appStore.activeRuntime
+  if (runtime !== 'codex' && runtime !== 'claude') return
+  if (runtime === 'claude') {
+    if (enabled && (!claude1MModel.value || claude1MBlocked.value)) return
+    claudeModel.value = enabled ? claude1MModel.value! : claudeModel.value.replace(/\[1m\]$/i, '')
+    // Persist through the existing form flow, including model drafts in other tabs.
+    await save()
+    if (saveError.value || settingsDisposed || appStore.activeRuntime !== runtime) return
+  }
+  contextPresetBusy.value = true
+  try {
+    const result = await backend.UpdateProviderContextPolicy(runtime,
+      runtime === 'codex' && enabled ? 1_000_000 : 0,
+      runtime === 'codex' && enabled ? 900_000 : -1,
+      true, false, runtime === 'codex' && enabled ? 'total' : '')
+    if (settingsDisposed || appStore.activeRuntime !== runtime) return
+    contextConfiguration.value = result.configuration
+    notify('success', t('providerConfig.contextSaved'), t(runtime === 'codex' ? 'providerConfig.applyReconnect' : 'providerConfig.applyNewSession'))
+  } catch (error) {
+    if (!settingsDisposed) notify('error', t(runtime === 'claude' ? 'providerConfig.modelSavedContextFailed' : 'providerConfig.contextSaveFailed'), instructionError(error))
+  } finally {
+    contextPresetBusy.value = false
+  }
+}
 const externalRuntimeName = computed(() => isGeminiSettings.value
   ? appStore.runtimeDisplayName('gemini')
   : appStore.runtimeDisplayName('opencode'))
@@ -416,13 +476,15 @@ function syncOpenCodeCatalogSelection(catalog: ExternalRuntimeCatalog): void {
   const currentProvider = appStore.settings.openCodeProvider.trim()
   const activeProvider = catalog.activeProvider?.trim() || ''
   const defaultProvider = catalog.models?.find((item) => item.isDefault)?.providerId?.trim() || ''
-  const nextProvider = currentProvider && providerIDs.has(currentProvider)
+  const hasCustomProvider = (appStore.settings.openCodeCustomModels ?? []).some((model) => model.startsWith(`${currentProvider}/`))
+  const nextProvider = currentProvider && (providerIDs.has(currentProvider) || hasCustomProvider)
     ? currentProvider
     : [activeProvider, defaultProvider, providers[0]?.id || ''].find((value) => value && providerIDs.has(value)) || ''
   const models = (catalog.models?.length ? catalog.models : (externalRuntimeProvider.value?.models || []))
     .filter((item) => !nextProvider || item.providerId === nextProvider || item.model.startsWith(`${nextProvider}/`))
   const currentModel = appStore.settings.openCodeModel.trim()
-  const nextModel = models.some((item) => item.model === currentModel)
+  const nextModel = currentModel && (models.some((item) => item.model === currentModel)
+    || (appStore.settings.openCodeCustomModels ?? []).includes(currentModel))
     ? currentModel
     : (models.find((item) => item.isDefault)?.model || models[0]?.model || '')
   if (nextProvider !== currentProvider || nextModel !== currentModel) {
@@ -439,7 +501,8 @@ const externalModelOptions = computed(() => {
     ? fullCatalog.filter((item) => item.providerId === selectedProvider || item.model.startsWith(`${selectedProvider}/`))
     : fullCatalog
   const options = catalog.map((item) => ({ value: item.model, label: item.displayName || item.model, description: item.description, badge: item.isDefault ? t('common.recommended') : '' }))
-  for (const model of externalCustomModels.value) {
+  for (const model of [...externalCustomModels.value, externalModel.value].filter(Boolean)) {
+    if (selectedProvider && model.includes('/') && !model.startsWith(`${selectedProvider}/`)) continue
     if (!options.some((item) => item.value.toLocaleLowerCase() === model.toLocaleLowerCase())) {
       options.push({ value: model, label: model, description: t('settings.externalCustomModel'), badge: '' })
     }
@@ -475,15 +538,19 @@ async function loadExternalSettingsCatalog(): Promise<void> {
 
 function addExternalCustomModel(): void {
   const value = externalCustomModelDraft.value.trim()
-  if (!value || value.length > 160 || externalCustomModels.value.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) return
-  const next = [...externalCustomModels.value, value].slice(0, 64)
+  const next = appendCustomModel(externalCustomModels.value, value)
+  if (!next) return
   appStore.patchSettings(isGeminiSettings.value ? { geminiCustomModels: next } : { openCodeCustomModels: next })
+  externalModel.value = next[next.length - 1]!
   externalCustomModelDraft.value = ''
 }
 
 function removeExternalCustomModel(value: string): void {
   const next = externalCustomModels.value.filter((item) => item !== value)
   appStore.patchSettings(isGeminiSettings.value ? { geminiCustomModels: next } : { openCodeCustomModels: next })
+  if (externalModel.value.toLowerCase() === value.toLowerCase()) {
+    externalModel.value = externalModelOptions.value.find((item) => item.value !== value)?.value || ''
+  }
 }
 const claudeStatus = computed(() => {
   const fromProviders = appStore.agentProviders.find((provider) => provider.kind === 'claude')
@@ -521,13 +588,13 @@ const grokStatus = computed(() => {
 })
 
 const modelOptions = computed<SelectOption[]>(() => {
-  const catalog = modelsForRuntime(appStore.models, customModels.value)
+  const catalog = modelsForRuntime(appStore.models, customModels.value, model.value)
   return [
     { value: DEFAULT_MODEL_VALUE, label: t('settings.defaultModel'), description: t('settings.defaultModelDescription') },
     ...catalog.map((option) => ({
       value: option.model,
       label: option.displayName,
-      description: '',
+      description: option.model,
       badge: option.isDefault ? t('common.recommended') : '',
     })),
   ]
@@ -1015,6 +1082,7 @@ watch(activePanel, (panel) => {
 
 onMounted(() => {
   syncFromStore()
+  void loadContextPreset()
   void loadCollaborationModes()
   if (!isGrokSettings.value) void appStore.refreshAccountData().catch(() => undefined)
   else void grokStore.refreshRuntime()
@@ -1025,6 +1093,12 @@ onMounted(() => {
 })
 
 watch([isGrokSettings, isClaudeSettings, isGeminiSettings, isOpenCodeSettings], ([grok, _claude, gemini, openCode]) => {
+  void loadContextPreset()
+  externalCatalogSequence++
+  externalCatalog.value = null
+  externalCatalogLoading.value = false
+  externalCatalogError.value = ''
+  externalCustomModelDraft.value = ''
   globalInstructionsSequence++
   projectInstructionsSequence++
   featureFlagsSequence++
@@ -1054,7 +1128,7 @@ function clampPanelForRuntime(): void {
 }
 
 async function switchSettingsRuntime(runtime: WorkspaceRuntime): Promise<void> {
-  if (saving.value || runtimeSwitching.value || appStore.activeRuntime === runtime) return
+  if (saving.value || contextPresetBusy.value || runtimeSwitching.value || appStore.activeRuntime === runtime) return
   runtimeSwitching.value = true
   try {
     const ok = await appStore.setActiveRuntime(runtime)
@@ -1076,6 +1150,7 @@ async function switchSettingsRuntime(runtime: WorkspaceRuntime): Promise<void> {
 
 onUnmounted(() => {
   settingsDisposed = true
+  contextPresetSequence++
   globalInstructionsSequence++
   projectInstructionsSequence++
   featureFlagsSequence++
@@ -1120,10 +1195,7 @@ async function loadCollaborationModes(): Promise<void> {
 
 function syncFromStore(): void {
   const settings = appStore.settings
-  model.value = settings.model
-  customModels.value = [...(settings.customModels ?? [])].filter((item) => !item.includes('·') && !/claude|gemini|grok/i.test(item))
-  claudeCustomModels.value = [...(settings.claudeCustomModels ?? [])]
-  grokCustomModels.value = [...(settings.grokCustomModels ?? [])]
+  syncModelDrafts()
   effort.value = settings.effort
   serviceTier.value = settings.serviceTier
   collaborationMode.value = settings.collaborationMode
@@ -1132,8 +1204,6 @@ function syncFromStore(): void {
   sandbox.value = settings.sandbox
   approvalPolicy.value = settings.approvalPolicy
   grokBackend.value = settings.grokBackend === 'api' ? 'api' : 'build'
-  grokBuildModel.value = settings.grokBuildModel || ''
-  grokAPIModel.value = settings.grokAPIModel || 'grok-4.6'
   grokEffort.value = settings.grokEffort || 'high'
   grokSandbox.value = settings.grokSandbox || 'workspace-write'
   grokApprovalPolicy.value = settings.grokApprovalPolicy || 'on-request'
@@ -1145,7 +1215,6 @@ function syncFromStore(): void {
   grokXSearch.value = Boolean(settings.grokXSearch)
   grokAPIKey.value = settings.grokAPIKey || ''
   grokAPIBaseURL.value = settings.grokAPIBaseURL || ''
-  claudeModel.value = settings.claudeModel || 'sonnet'
   claudeEffort.value = settings.claudeEffort || 'high'
   claudeSandbox.value = settings.claudeSandbox || 'workspace-write'
   claudeApprovalPolicy.value = settings.claudeApprovalPolicy || 'on-request'
@@ -1186,6 +1255,21 @@ function syncFromStore(): void {
   networkProxyNoProxy.value = settings.networkProxyNoProxy || 'localhost,127.0.0.1,::1'
   void loadAgentsInstructions()
   void loadFeatureFlags()
+}
+
+function syncModelDrafts(): void {
+  const settings = appStore.settings
+  // Runtime switching refreshes the store; retain edits made in every model tab.
+  if (model.value === modelDraftBaseline.model) model.value = settings.model
+  if (claudeModel.value === (modelDraftBaseline.claudeModel || 'sonnet')) claudeModel.value = settings.claudeModel || 'sonnet'
+  if (grokBuildModel.value === (modelDraftBaseline.grokBuildModel || '')) grokBuildModel.value = settings.grokBuildModel || ''
+  if (grokAPIModel.value === (modelDraftBaseline.grokAPIModel || 'grok-4.6')) grokAPIModel.value = settings.grokAPIModel || 'grok-4.6'
+  for (const [draft, key] of [[customModels, 'customModels'], [claudeCustomModels, 'claudeCustomModels'], [grokCustomModels, 'grokCustomModels']] as const) {
+    if (JSON.stringify(draft.value) === JSON.stringify(modelDraftBaseline[key] ?? [])) {
+      draft.value = normalizeCustomModels(settings[key] ?? [])
+    }
+  }
+  modelDraftBaseline = settings
 }
 
 function networkProxySnapshot(source: {
@@ -1417,43 +1501,60 @@ function onModelChange(): void {
 
 function addCustomModel(): void {
   const value = customModelDraft.value.trim()
-  if (!value || value.length > 160 || customModels.value.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) return
-  customModels.value = [...customModels.value, value].slice(0, 24)
+  const next = appendCustomModel(customModels.value, value)
+  if (!next) return
+  customModels.value = next
   model.value = value
+  onModelChange()
   customModelDraft.value = ''
 }
 
 function removeCustomModel(value: string): void {
   customModels.value = customModels.value.filter((item) => item !== value)
-  if (model.value === value) model.value = ''
+  if (model.value.toLowerCase() === value.toLowerCase()) model.value = ''
 }
 
 function addClaudeCustomModel(): void {
   const value = claudeCustomModelDraft.value.trim()
-  if (!value || value.length > 160 || claudeCustomModels.value.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) return
-  claudeCustomModels.value = [...claudeCustomModels.value, value].slice(0, 24)
+  const next = appendCustomModel(claudeCustomModels.value, value)
+  if (!next) return
+  claudeCustomModels.value = next
   claudeModel.value = value
   claudeCustomModelDraft.value = ''
 }
 
 function removeClaudeCustomModel(value: string): void {
   claudeCustomModels.value = claudeCustomModels.value.filter((item) => item !== value)
-  if (claudeModel.value === value) claudeModel.value = 'sonnet'
+  if (claudeModel.value.toLowerCase() === value.toLowerCase()) claudeModel.value = 'sonnet'
 }
 
 function addGrokCustomModel(): void {
   const value = grokCustomModelDraft.value.trim()
-  if (!value || value.length > 160 || grokCustomModels.value.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) return
-  grokCustomModels.value = [...grokCustomModels.value, value].slice(0, 24)
+  const next = appendCustomModel(grokCustomModels.value, value)
+  if (!next) return
+  grokCustomModels.value = next
   if (grokBackend.value === 'api') grokAPIModel.value = value
   else grokBuildModel.value = value
   grokCustomModelDraft.value = ''
 }
 
+function appendCustomModel(items: string[], value: string): string[] | null {
+  if (!value) return null
+  const duplicate = items.some((item) => item.trim().toLowerCase() === value.toLowerCase())
+  const reason = duplicate ? 'modelDuplicate'
+    : items.length >= CUSTOM_MODEL_LIMIT ? 'modelLimit'
+      : new TextEncoder().encode(value).length > 160 ? 'modelTooLong' : ''
+  if (reason) {
+    notify('warning', t('settings.customModel'), t(`settings.${reason}`, { count: CUSTOM_MODEL_LIMIT }))
+    return null
+  }
+  return normalizeCustomModels([...items, value])
+}
+
 function removeGrokCustomModel(value: string): void {
   grokCustomModels.value = grokCustomModels.value.filter((item) => item !== value)
-  if (grokAPIModel.value === value) grokAPIModel.value = 'grok-4.6'
-  if (grokBuildModel.value === value) grokBuildModel.value = ''
+  if (grokAPIModel.value.toLowerCase() === value.toLowerCase()) grokAPIModel.value = 'grok-4.6'
+  if (grokBuildModel.value.toLowerCase() === value.toLowerCase()) grokBuildModel.value = ''
 }
 
 function toggleFast(value?: boolean): void {
@@ -1779,9 +1880,10 @@ async function runPush(): Promise<void> {
 }
 
 async function save(): Promise<void> {
-  if (saving.value || runtimeSwitching.value || instructionsLoading.value || featureFlagsLoading.value) return
+  if (saving.value || contextPresetBusy.value || runtimeSwitching.value || instructionsLoading.value || featureFlagsLoading.value) return
   const runtime = appStore.activeRuntime
   const context = instructionContext()
+  syncModelDrafts()
 
   const grokBackendChanged = isGrokSettings.value
     && grokBackend.value !== (appStore.settings.grokBackend === 'api' ? 'api' : 'build')
@@ -1830,9 +1932,9 @@ async function save(): Promise<void> {
       ...appStore.settings,
       activeRuntime: appStore.settings.activeRuntime,
       recentWorkspaces: appStore.settings.recentWorkspaces ?? [],
-      model: isCodexSettings.value ? model.value : appStore.settings.model,
+      model: model.value,
       modelProvider: appStore.settings.modelProvider,
-      customModels: isCodexSettings.value ? customModels.value : (appStore.settings.customModels ?? []),
+      customModels: customModels.value,
       effort: isCodexSettings.value ? effort.value : appStore.settings.effort,
       serviceTier: isCodexSettings.value ? serviceTier.value : appStore.settings.serviceTier,
       collaborationMode: isCodexSettings.value ? collaborationMode.value : appStore.settings.collaborationMode,
@@ -1841,8 +1943,8 @@ async function save(): Promise<void> {
       sandbox: isCodexSettings.value ? sandbox.value : appStore.settings.sandbox,
       approvalPolicy: isCodexSettings.value ? approvalPolicy.value : appStore.settings.approvalPolicy,
       grokBackend: isGrokSettings.value ? (grokBackend.value === 'api' ? 'api' : 'build') : appStore.settings.grokBackend,
-      grokBuildModel: isGrokSettings.value ? grokBuildModel.value.trim() : appStore.settings.grokBuildModel,
-      grokAPIModel: isGrokSettings.value ? (grokAPIModel.value.trim() || 'grok-4.6') : appStore.settings.grokAPIModel,
+      grokBuildModel: grokBuildModel.value.trim(),
+      grokAPIModel: grokAPIModel.value.trim() || 'grok-4.6',
       grokAPIKey: isGrokSettings.value ? grokAPIKey.value.trim() : appStore.settings.grokAPIKey,
       grokAPIBaseURL: isGrokSettings.value ? grokAPIBaseURL.value.trim() : appStore.settings.grokAPIBaseURL,
       grokEffort: isGrokSettings.value ? (grokEffort.value || 'high') : appStore.settings.grokEffort,
@@ -1850,13 +1952,13 @@ async function save(): Promise<void> {
       grokApprovalPolicy: isGrokSettings.value ? (grokApprovalPolicy.value || 'on-request') : appStore.settings.grokApprovalPolicy,
       grokWebSearch: isGrokSettings.value ? grokWebSearch.value : appStore.settings.grokWebSearch,
       grokXSearch: isGrokSettings.value ? grokXSearch.value : appStore.settings.grokXSearch,
-      claudeModel: isClaudeSettings.value ? (claudeModel.value.trim() || 'sonnet') : appStore.settings.claudeModel,
+      claudeModel: claudeModel.value.trim() || 'sonnet',
       claudeEffort: isClaudeSettings.value ? (claudeEffort.value || 'high') : appStore.settings.claudeEffort,
       claudeSandbox: isClaudeSettings.value ? (claudeSandbox.value || 'workspace-write') : appStore.settings.claudeSandbox,
       claudeApprovalPolicy: isClaudeSettings.value ? (claudeApprovalPolicy.value || 'on-request') : appStore.settings.claudeApprovalPolicy,
       claudePermissionMode: isClaudeSettings.value ? (claudePermissionMode.value || 'acceptEdits') : appStore.settings.claudePermissionMode,
-      claudeCustomModels: isClaudeSettings.value ? claudeCustomModels.value : (appStore.settings.claudeCustomModels ?? []),
-      grokCustomModels: isGrokSettings.value ? grokCustomModels.value : (appStore.settings.grokCustomModels ?? []),
+      claudeCustomModels: claudeCustomModels.value,
+      grokCustomModels: grokCustomModels.value,
 	      geminiModel: appStore.settings.geminiModel || '',
 	      geminiEffort: appStore.settings.geminiEffort || 'high',
       geminiSandbox: isGeminiSettings.value ? (geminiSandbox.value || 'workspace-write') : appStore.settings.geminiSandbox,
@@ -2170,10 +2272,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
                 </p>
               </section>
 
-              <section class="overflow-hidden rounded-xl border bg-card">
-                <div class="border-b px-4 py-3">
-                  <h2 class="text-[13px] font-semibold">{{ t('settings.navGeneral') }}</h2>
-                </div>
+              <SettingsCard :title="t('settings.navGeneral')">
                 <div class="divide-y">
                   <div class="flex items-center justify-between gap-4 px-4 py-3">
                     <div class="min-w-0">
@@ -2359,7 +2458,7 @@ wsl --update</code></pre>
                     </div>
                   </div>
                 </div>
-              </section>
+              </SettingsCard>
 
               <section class="overflow-hidden rounded-xl border bg-card">
                 <div class="border-b px-4 py-3">
@@ -2458,7 +2557,7 @@ wsl --update</code></pre>
 
             <!-- Appearance -->
             <template v-else-if="activePanel === 'appearance'">
-              <section class="overflow-hidden rounded-xl border bg-card">
+              <SettingsCard :title="t('settings.navAppearance')">
                 <div class="divide-y">
                   <div class="space-y-2.5 px-4 py-3.5">
                     <p class="text-[13px]">{{ t('settings.theme') }}</p>
@@ -2601,11 +2700,34 @@ wsl --update</code></pre>
                     <Switch :checked="reduceMotion" :aria-label="t('settings.reduceMotion')" @update:checked="reduceMotion = $event" />
                   </div>
                 </div>
-              </section>
+              </SettingsCard>
             </template>
 
             <!-- Agent / config (Codex / Claude / Grok) -->
             <template v-else-if="activePanel === 'agent'">
+              <section v-if="isCodexSettings || isClaudeSettings" class="space-y-3 rounded-xl border bg-card p-4">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <p class="text-[13px] font-medium">{{ t('providerConfig.longContextTitle') }}</p>
+                  <Badge v-if="context1MSelected" variant="secondary">{{ t('providerConfig.presetSelected') }}</Badge>
+                </div>
+                <p class="truncate font-mono text-[11px] text-muted-foreground">{{ isClaudeSettings ? claudeModel : model }}</p>
+                <p class="text-[11px] leading-5 text-muted-foreground">{{ t(isClaudeSettings ? 'providerConfig.claude1MHint' : 'providerConfig.codex1MHint') }}</p>
+                <p v-if="isClaudeSettings && !claude1MModel" class="text-[11px] text-muted-foreground">{{ t('providerConfig.unknown1MModel') }}</p>
+                <p v-if="claude1MBlocked && isClaudeSettings" class="text-[11px] text-amber-700 dark:text-amber-300">{{ t('providerConfig.claude1MBlocked') }}</p>
+                <div class="flex flex-wrap items-center gap-2">
+                  <Button type="button" variant="outline" size="sm"
+                    :disabled="saving || contextPresetBusy || contextPresetLoading || runtimeSwitching || instructionsLoading || featureFlagsLoading || !contextConfiguration || (isClaudeSettings && (!claude1MModel || claude1MBlocked))"
+                    @click="applyContextPreset(true)">
+                    <LoaderCircle v-if="contextPresetBusy || contextPresetLoading" :size="13" class="mr-1.5 animate-spin" />
+                    {{ t(isClaudeSettings ? 'providerConfig.enable1M' : 'providerConfig.apply1MPreset') }}
+                  </Button>
+                  <Button v-if="isCodexSettings || /\[1m\]$/i.test(claudeModel)" type="button" variant="ghost" size="sm"
+                    :disabled="saving || contextPresetBusy || contextPresetLoading || runtimeSwitching || instructionsLoading || featureFlagsLoading || !contextConfiguration"
+                    @click="applyContextPreset(false)">{{ t('providerConfig.resetNative') }}</Button>
+                  <Button v-if="contextPresetError" type="button" variant="ghost" size="sm" @click="loadContextPreset">{{ t('common.retry') }}</Button>
+                </div>
+                <p v-if="contextPresetError" role="alert" class="text-[11px] text-destructive">{{ contextPresetError }}</p>
+              </section>
               <section v-if="isClaudeSettings" class="overflow-hidden rounded-xl border bg-card">
                 <div class="flex items-center gap-3 border-b px-4 py-3">
                   <div class="grid size-8 place-items-center rounded-md border bg-muted/40">
@@ -3414,6 +3536,7 @@ wsl --update</code></pre>
 
             <!-- Environment -->
             <template v-else-if="activePanel === 'environment'">
+              <FastCtxSettings />
               <section class="overflow-hidden rounded-xl border bg-card">
                 <div class="border-b px-4 py-3">
                   <div class="flex items-start gap-2">
@@ -3691,7 +3814,7 @@ wsl --update</code></pre>
 
             <!-- Git -->
             <template v-else-if="activePanel === 'git'">
-              <section class="overflow-hidden rounded-xl border bg-card">
+              <SettingsCard :title="t('settings.navGit')">
                 <div class="divide-y">
                   <div class="flex items-center justify-between gap-3 px-4 py-3">
                     <p class="text-[13px]">{{ t('settings.gitWorkspace') }}</p>
@@ -3754,7 +3877,7 @@ wsl --update</code></pre>
                     </Button>
                   </div>
                 </div>
-              </section>
+              </SettingsCard>
             </template>
 
             <!-- Browser -->

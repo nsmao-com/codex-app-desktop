@@ -1,5 +1,6 @@
 import DOMPurify from 'dompurify'
-import { marked, type Tokens } from 'marked'
+import katex from 'katex'
+import { marked, Marked, type TokenizerAndRendererExtension, type Tokens } from 'marked'
 
 import { escapeHTML, highlightCode } from './highlight'
 
@@ -85,11 +86,58 @@ renderer.code = ({ text, lang }: Tokens.Code): string => {
   ].join('')
 }
 
-marked.use({
-  breaks: true,
-  gfm: true,
-  renderer,
-})
+function mathExtensions(render: (source: string, display: boolean, raw: string) => string): TokenizerAndRendererExtension[] {
+  return [
+    {
+      name: 'mathBlock',
+      level: 'block',
+      start: (source) => source.search(/^ {0,3}(?:\\\[|\$\$)/m),
+      tokenizer(source) {
+        const match = /^ {0,3}(?:\\\[([\s\S]+?)\\\]|\$\$([\s\S]+?)\$\$)[ \t]*(?:\n|$)/.exec(source)
+        if (match) return { type: 'mathBlock', raw: match[0], text: (match[1] ?? match[2] ?? '').trim() }
+      },
+      renderer: (token) => render(String(token.text), true, token.raw),
+    },
+    {
+      name: 'mathInline',
+      level: 'inline',
+      start: (source) => source.search(/\\[([]|\$/),
+      tokenizer(source) {
+        // Run before Markdown escapes consume the backslashes in TeX delimiters.
+        const display = /^(?:\\\[([\s\S]+?)\\\]|\$\$([\s\S]+?)\$\$)/.exec(source)
+        if (display) return { type: 'mathInline', raw: display[0], text: (display[1] ?? display[2] ?? '').trim(), display: true }
+        const inline = /^\\\(([\s\S]+?)\\\)/.exec(source)
+        if (inline) return { type: 'mathInline', raw: inline[0], text: (inline[1] ?? '').trim() }
+        const dollar = /^\$(?!\$)((?:\\[^\n]|[^\\$\n])+?)\$(?![\d$])/.exec(source)
+        // Whitespace at either edge usually indicates currency: "$5 and $10".
+        if (dollar && !/^\s|\s$/.test(dollar[1] ?? '')) {
+          return { type: 'mathInline', raw: dollar[0], text: dollar[1] }
+        }
+      },
+      renderer: (token) => render(String(token.text), token.display === true, token.raw),
+    },
+  ]
+}
+
+function renderMath(source: string, display: boolean, raw: string): string {
+  const className = display ? 'markdown-math markdown-math-display' : 'markdown-math'
+  if (source.length > 20_000) return `<span class="markdown-math-fallback">${escapeHTML(raw)}</span>`
+  try {
+    const html = katex.renderToString(source, {
+      displayMode: display,
+      output: 'htmlAndMathml',
+      trust: false,
+      strict: 'ignore',
+      throwOnError: true,
+      maxExpand: 1000,
+      maxSize: 20,
+    })
+    return `<span class="${className}">${html}</span>`
+  } catch {
+    // Incomplete or unsupported TeX must never hide the rest of a reply.
+    return `<span class="markdown-math-fallback">${escapeHTML(raw)}</span>`
+  }
+}
 
 export type RenderMarkdownOptions = {
   /**
@@ -114,6 +162,7 @@ const PURIFY_ATTR = [
   'href', 'target', 'rel', 'class', 'type', 'title',
   'aria-label', 'aria-expanded',
   'data-copy-code', 'data-collapse-code', 'data-open-path',
+  'data-math-slot',
 ] as const
 
 function sanitizeMarkdownHTML(html: string): string {
@@ -161,16 +210,33 @@ export function renderMarkdown(
   }
 
   installPurifyHooks()
+  // Only generated KaTeX markup bypasses the Markdown whitelist: its inline
+  // layout styles/MathML are needed, while arbitrary message HTML stays filtered.
+  const mathSlots = new Map<string, string>()
+  const mathPrefix = crypto.randomUUID()
+  const parser = new Marked({
+    breaks: true,
+    gfm: true,
+    renderer,
+    extensions: mathExtensions((text, display, raw) => {
+      const slot = `${mathPrefix}:${mathSlots.size}`
+      mathSlots.set(slot, renderMath(text, display, raw))
+      return `<span data-math-slot="${slot}"></span>`
+    }),
+  })
   let raw = ''
   try {
-    raw = marked.parse(source, { async: false }) as string
+    raw = parser.parse(source, { async: false }) as string
   } catch {
     return renderMarkdownPlain(source)
   }
   const withLabels = raw
     .replaceAll('__COPY_LABEL__', escapeHTML(copyLabel))
     .replaceAll('__EXPAND_LABEL__', escapeHTML(expandLabel))
-  const sanitized = sanitizeMarkdownHTML(withLabels)
+  const sanitized = sanitizeMarkdownHTML(withLabels).replace(
+    /<span data-math-slot="([^"]+)"><\/span>/g,
+    (placeholder, slot: string) => mathSlots.get(slot) ?? placeholder,
+  )
   cacheMarkdown(key, sanitized)
   return sanitized
 }

@@ -12,6 +12,27 @@ export const DEFAULT_CODEX_REASONING = [
 
 export const DEFAULT_CODEX_MODEL = 'gpt-6-astra'
 
+export const CUSTOM_MODEL_LIMIT = 24
+
+/** Match the persisted list: keep the first spelling and the user's order. */
+export function normalizeCustomModels(items: string[]): string[] {
+  const seen = new Set<string>()
+  return items.map((item) => item.trim()).filter((item) => {
+    const key = item.toLowerCase()
+    if (!item || new TextEncoder().encode(item).length > 160 || seen.has(key)) return false
+    seen.add(key)
+    return true
+  }).slice(0, CUSTOM_MODEL_LIMIT)
+}
+
+/** Only known Claude families get an automatic suffix; gateway IDs stay intact. */
+export function claudeLongContextModel(model: string): string | null {
+  const base = model.trim().replace(/\[1m\]$/i, '')
+  if (/^(sonnet|opus)$/i.test(base) || /^claude-(sonnet-4-[56]|opus-4-6)(?:-\d{8})?$/i.test(base)) return `${base}[1m]`
+  if (/^(fable|claude-(?:fable-5|sonnet-5|opus-(?:4-[78]|5))(?:[-.].*)?)$/i.test(base)) return base
+  return null
+}
+
 /** agy models: Gemini 3.1 Pro exposes low/high, not the Flash medium variant. */
 export function antigravityModelEfforts<T extends { effort: string }>(model: string, options: T[]): T[] {
   const id = model.trim().toLowerCase()
@@ -80,6 +101,11 @@ export function cleanModelDisplayName(model: string, displayName = ''): string {
 export function formatModelLabel(id: string): string {
   const raw = id.trim()
   if (!raw) return raw
+  const officialClaude = raw.match(/^claude-(opus|sonnet|fable|haiku)-(\d+)-(\d+)(?:-\d{8})?$/i)
+  if (officialClaude) {
+    const family = officialClaude[1]!
+    return `Claude ${family[0]!.toUpperCase()}${family.slice(1).toLowerCase()} ${officialClaude[2]}.${officialClaude[3]}`
+  }
   // Already human-authored (contains spaces + capitals) — keep.
   if (/\s/.test(raw) && /[A-Z]/.test(raw)) return raw
 
@@ -123,16 +149,23 @@ export function mergeCodexCatalog(
   codexModels: ModelOption[],
   customModels: string[] = [],
 ): ModelOption[] {
-  const options = selectCodexCatalog(codexModels).map((item) => ({
-    ...item,
-    displayName: cleanModelDisplayName(item.model, item.displayName),
-  }))
-  for (const custom of customModels) {
-    const id = custom.trim()
-    if (!id) continue
-    if (looksLikeOtherRuntime(id.toLowerCase()) && !looksLikeOpenAI(id.toLowerCase())) continue
-    if (options.some((item) => item.model.toLocaleLowerCase() === id.toLocaleLowerCase())) continue
-    options.push(stubCodexModel(id))
+  const custom = normalizeCustomModels(customModels)
+  const customIDs = new Set(custom.map((id) => id.toLowerCase()))
+  const seen = new Set<string>()
+  const options: ModelOption[] = []
+  for (const item of codexModels) {
+    const id = item.model.trim()
+    const key = id.toLowerCase()
+    if (!id || seen.has(key)) continue
+    if (item.isCustom && !customIDs.has(key)) continue
+    if (!customIDs.has(key) && !selectCodexCatalog([item]).length) continue
+    seen.add(key)
+    options.push({ ...item, model: id, displayName: customIDs.has(key) ? id : cleanModelDisplayName(id, item.displayName) })
+  }
+  for (const id of custom) {
+    if (seen.has(id.toLowerCase())) continue
+    seen.add(id.toLowerCase())
+    options.push({ ...stubCodexModel(id), displayName: id, isCustom: true })
   }
   if (!options.length) {
     for (const id of FALLBACK_CODEX_MODELS) {
@@ -181,8 +214,16 @@ function stubCodexModel(id: string): ModelOption {
 export function modelsForRuntime(
   codexModels: ModelOption[],
   customModels: string[] = [],
+  preferredModel = '',
 ): Array<{ model: string; displayName: string; isDefault: boolean }> {
-  return mergeCodexCatalog(codexModels, customModels).map((item) => ({
+  const catalog = mergeCodexCatalog(codexModels, customModels)
+  // A saved/session model can be absent while the native catalog is refreshing.
+  if (preferredModel.trim() && !catalog.some((item) => item.model === preferredModel.trim())) {
+    const index = catalog.findIndex((item) => item.model.toLowerCase() === preferredModel.trim().toLowerCase())
+    if (index >= 0) catalog[index] = { ...catalog[index]!, model: preferredModel.trim() }
+    else catalog.push({ ...stubCodexModel(preferredModel.trim()), displayName: preferredModel.trim() })
+  }
+  return catalog.map((item) => ({
     model: item.model,
     displayName: item.displayName,
     isDefault: item.isDefault,
@@ -205,7 +246,7 @@ export function modelsForGrokRuntime(
       isDefault,
     })
   }
-  for (const item of providerModels) {
+  for (const item of providerModels.length ? providerModels : FALLBACK_GROK_MODELS.map((model, index) => ({ model, isDefault: index === 0, displayName: formatModelLabel(model) }))) {
     push(item.model, item.displayName || item.model, item.isDefault === true)
   }
   for (const custom of customModels) {
@@ -218,18 +259,22 @@ export function modelsForGrokRuntime(
     }
   }
   if (preferredModel.trim()) {
-    for (const option of options) {
-      option.isDefault = option.model.toLocaleLowerCase() === preferredModel.trim().toLocaleLowerCase()
-    }
-    if (!options.some((item) => item.isDefault) && options[0]) options[0].isDefault = true
-  } else if (!options.some((item) => item.isDefault) && options[0]) {
+    const selected = options.find((item) => item.model.toLowerCase() === preferredModel.trim().toLowerCase())
+    if (selected) selected.model = preferredModel.trim()
+  }
+  if (!options.some((item) => item.isDefault) && options[0]) {
     options[0].isDefault = true
   }
   return options
 }
 
 const FALLBACK_CLAUDE_MODELS = [
-  { model: 'sonnet', displayName: 'Claude Sonnet', description: 'alias `sonnet` → latest Sonnet', isDefault: true },
+  { model: 'default', displayName: 'Claude Code Default', description: 'Recommended model for the current account and provider', isDefault: true },
+  { model: 'claude-opus-5-5', displayName: 'Claude Opus 5.5', description: 'claude-opus-5-5', isDefault: false },
+  { model: 'claude-sonnet-5-5', displayName: 'Claude Sonnet 5.5', description: 'claude-sonnet-5-5', isDefault: false },
+  { model: 'claude-fable-5-1', displayName: 'Claude Fable 5.1', description: 'claude-fable-5-1', isDefault: false },
+  { model: 'claude-haiku-4-5-20251001', displayName: 'Claude Haiku 4.5', description: 'claude-haiku-4-5-20251001', isDefault: false },
+  { model: 'sonnet', displayName: 'Claude Sonnet', description: 'CLI alias `sonnet`; resolved by Claude Code', isDefault: false },
   { model: 'opus', displayName: 'Claude Opus', description: 'alias `opus` → latest Opus', isDefault: false },
   { model: 'haiku', displayName: 'Claude Haiku', description: 'alias `haiku` → latest Haiku', isDefault: false },
   { model: 'fable', displayName: 'Claude Fable', description: 'alias `fable` → latest Fable', isDefault: false },
@@ -253,7 +298,7 @@ export function modelsForClaudeRuntime(
       isDefault,
     })
   }
-  for (const item of providerModels) {
+  for (const item of providerModels.length ? providerModels : FALLBACK_CLAUDE_MODELS) {
     push(
       item.model,
       item.displayName || item.model,
@@ -262,7 +307,7 @@ export function modelsForClaudeRuntime(
     )
   }
   for (const custom of customModels) {
-    push(custom, formatModelLabel(custom), custom, false)
+    push(custom, custom, custom, false)
   }
   if (preferredModel.trim()) {
     push(preferredModel.trim(), formatModelLabel(preferredModel.trim()), preferredModel.trim(), options.length === 0)
@@ -273,11 +318,10 @@ export function modelsForClaudeRuntime(
     }
   }
   if (preferredModel.trim()) {
-    for (const option of options) {
-      option.isDefault = option.model.toLocaleLowerCase() === preferredModel.trim().toLocaleLowerCase()
-    }
-    if (!options.some((item) => item.isDefault) && options[0]) options[0].isDefault = true
-  } else if (!options.some((item) => item.isDefault) && options[0]) {
+    const selected = options.find((item) => item.model.toLowerCase() === preferredModel.trim().toLowerCase())
+    if (selected) selected.model = preferredModel.trim()
+  }
+  if (!options.some((item) => item.isDefault) && options[0]) {
     options[0].isDefault = true
   }
   return options

@@ -488,17 +488,27 @@ func discoverProviderCatalog(kind string) ([]AgentProviderModel, []AgentProvider
 	return models, fallbackReasoningEfforts(kind)
 }
 
+// Fixed API IDs verified against the individual official model pages. CLI
+// aliases are separate: their resolution depends on the account and provider.
+func officialClaudeModels() []AgentProviderModel {
+	return []AgentProviderModel{
+		{Model: "claude-opus-5-5", DisplayName: "Claude Opus 5.5", Description: "Anthropic model ID: claude-opus-5-5", ContextWindow: 1_000_000},
+		{Model: "claude-sonnet-5-5", DisplayName: "Claude Sonnet 5.5", Description: "Anthropic model ID: claude-sonnet-5-5", ContextWindow: 1_000_000},
+		{Model: "claude-fable-5-1", DisplayName: "Claude Fable 5.1", Description: "Anthropic model ID: claude-fable-5-1", ContextWindow: 1_000_000},
+		{Model: "claude-haiku-4-5-20251001", DisplayName: "Claude Haiku 4.5", Description: "Anthropic model ID: claude-haiku-4-5-20251001", ContextWindow: 200_000},
+	}
+}
+
 func fallbackProviderModels(kind string) []AgentProviderModel {
 	switch kind {
 	case "claude":
-		// Official Claude Code short aliases (--model sonnet|opus|haiku|fable).
-		// Description always states the typical resolved model id for the workbench UI.
-		return []AgentProviderModel{
-			{Model: "sonnet", DisplayName: "Claude Sonnet", Description: "alias `sonnet` → latest Sonnet (e.g. claude-sonnet-4-6)", IsDefault: true, ContextWindow: 1_000_000},
-			{Model: "opus", DisplayName: "Claude Opus", Description: "alias `opus` → latest Opus (e.g. claude-opus-4-6 / claude-opus-4-8)", ContextWindow: 1_000_000},
+		return append([]AgentProviderModel{
+			{Model: "default", DisplayName: "Claude Code Default", Description: "Recommended model for the current account and provider", IsDefault: true},
+			{Model: "sonnet", DisplayName: "Claude Sonnet", Description: "CLI alias: sonnet; resolved by Claude Code"},
+			{Model: "opus", DisplayName: "Claude Opus", Description: "CLI alias: opus; resolved by Claude Code"},
 			{Model: "haiku", DisplayName: "Claude Haiku", Description: "alias `haiku` → latest Haiku (e.g. claude-haiku-4-5)", ContextWindow: 200_000},
 			{Model: "fable", DisplayName: "Claude Fable", Description: "alias `fable` → latest Fable (e.g. claude-fable-5)", ContextWindow: 1_000_000},
-		}
+		}, officialClaudeModels()...)
 	case "gemini":
 		// Antigravity owns its current model defaults. If no legacy Gemini binary
 		// is actually selected, an empty catalog means "use the native default"
@@ -553,11 +563,17 @@ func knownProviderContextWindow(kind, model string) int64 {
 			return 1_048_576
 		}
 	case "claude":
-		switch lower {
-		case "sonnet", "opus", "fable":
+		if strings.HasSuffix(lower, "[1m]") {
 			return 1_000_000
-		case "haiku":
+		}
+		switch lower {
+		case "fable":
+			return 1_000_000
+		case "sonnet", "opus", "haiku":
 			return 200_000
+		}
+		if !strings.HasPrefix(lower, "claude-") {
+			return 0
 		}
 		if strings.Contains(lower, "haiku") {
 			return 200_000
@@ -565,12 +581,10 @@ func knownProviderContextWindow(kind, model string) int64 {
 		if strings.Contains(lower, "fable-5") || strings.Contains(lower, "fable.5") {
 			return 1_000_000
 		}
-		if strings.Contains(lower, "sonnet-5") || strings.Contains(lower, "sonnet.5") ||
-			strings.Contains(lower, "sonnet-4-6") || strings.Contains(lower, "sonnet-4.6") {
+		if strings.Contains(lower, "sonnet-5") || strings.Contains(lower, "sonnet.5") {
 			return 1_000_000
 		}
 		if strings.Contains(lower, "opus-5") || strings.Contains(lower, "opus.5") ||
-			strings.Contains(lower, "opus-4-6") || strings.Contains(lower, "opus-4.6") ||
 			strings.Contains(lower, "opus-4-7") || strings.Contains(lower, "opus-4.7") ||
 			strings.Contains(lower, "opus-4-8") || strings.Contains(lower, "opus-4.8") {
 			return 1_000_000
@@ -744,8 +758,8 @@ func discoverClaudeModels(_ string) []AgentProviderModel {
 		prefix    string
 		defaultID string
 	}{
-		{alias: "sonnet", family: "Sonnet", prefix: "ANTHROPIC_DEFAULT_SONNET_MODEL", defaultID: "claude-sonnet-4-6"},
-		{alias: "opus", family: "Opus", prefix: "ANTHROPIC_DEFAULT_OPUS_MODEL", defaultID: "claude-opus-4-6"},
+		{alias: "sonnet", family: "Sonnet", prefix: "ANTHROPIC_DEFAULT_SONNET_MODEL"},
+		{alias: "opus", family: "Opus", prefix: "ANTHROPIC_DEFAULT_OPUS_MODEL"},
 		{alias: "haiku", family: "Haiku", prefix: "ANTHROPIC_DEFAULT_HAIKU_MODEL", defaultID: "claude-haiku-4-5"},
 		{alias: "fable", family: "Fable", prefix: "ANTHROPIC_DEFAULT_FABLE_MODEL", defaultID: "claude-fable-5"},
 	} {
@@ -760,6 +774,9 @@ func discoverClaudeModels(_ string) []AgentProviderModel {
 		displayName := "Claude " + definition.family
 		if description == "" {
 			description = "alias `" + definition.alias + "` → " + model
+			if model == "" {
+				description = "CLI alias `" + definition.alias + "`; resolved by Claude Code for the current account and provider"
+			}
 			if name != "" && !strings.EqualFold(name, model) {
 				description += " (" + name + ")"
 			}
@@ -819,92 +836,50 @@ func discoverClaudeModels(_ string) []AgentProviderModel {
 		})
 	}
 	presentation := func(model string) (string, string) {
+		for _, official := range officialClaudeModels() {
+			if model == official.Model {
+				return official.DisplayName, official.Description
+			}
+		}
 		for _, alias := range aliases {
 			if strings.EqualFold(model, alias.alias) {
 				return alias.displayName, alias.description
 			}
-			if alias.model != "" && strings.EqualFold(model, alias.model) {
-				return alias.displayName, alias.description
-			}
 		}
-		return claudeFamilyDisplayName(model), ""
+		return model, ""
 	}
-	keepClaudeModel := func(model string) bool {
-		lower := strings.ToLower(strings.TrimSpace(model))
-		if lower == "" {
-			return false
-		}
-		// Never keep Codex-proxy mashups like "gpt-5.6-sol · claude-opus-4-8".
-		if strings.ContainsAny(lower, "·•|") || strings.Contains(lower, " gpt") {
-			return false
-		}
-		if lower == "sonnet" || lower == "opus" || lower == "haiku" || lower == "fable" {
-			return true
-		}
-		if strings.Contains(lower, "claude") || strings.Contains(lower, "sonnet") || strings.Contains(lower, "opus") || strings.Contains(lower, "haiku") || strings.Contains(lower, "fable") {
-			// Drop OpenAI-style proxy nicknames that pollute the Claude Code catalog.
-			if strings.HasPrefix(lower, "gpt-") || strings.HasPrefix(lower, "o1") || strings.HasPrefix(lower, "o3") || strings.HasPrefix(lower, "o4") || strings.Contains(lower, "codex") {
-				return false
-			}
-			return true
-		}
-		return false
+	addModel("default", "Claude Code Default", "Recommended model for the current account and provider", effectiveModel == "" || effectiveModel == "default")
+	// Keep full API IDs distinct from aliases and gateway overrides.
+	for _, official := range officialClaudeModels() {
+		addModel(official.Model, official.DisplayName, official.Description, official.Model == effectiveModel)
 	}
-
-	coveredByAlias := func(model string) bool {
-		lower := strings.ToLower(strings.TrimSpace(model))
-		for _, alias := range aliases {
-			if strings.EqualFold(alias.alias, model) || (alias.model != "" && strings.EqualFold(alias.model, model)) {
-				return true
-			}
-			family := strings.ToLower(alias.family)
-			if family != "" && strings.Contains(lower, family) {
-				return true
-			}
-		}
-		return false
-	}
-
-	// Prefer clean Claude Code aliases first.
+	// Preserve Claude Code aliases alongside exact versions.
 	for _, alias := range aliases {
-		addModel(alias.alias, alias.displayName, alias.description, strings.EqualFold(alias.alias, effectiveModel) || (alias.model != "" && strings.EqualFold(alias.model, effectiveModel)))
+		addModel(alias.alias, alias.displayName, alias.description, strings.EqualFold(alias.alias, effectiveModel))
 		if index, ok := seen[strings.ToLower(alias.alias)]; ok {
 			models[index].ContextWindow = knownProviderContextWindow("claude", alias.model)
 		}
 	}
-	if effectiveModel != "" && keepClaudeModel(effectiveModel) {
-		if coveredByAlias(effectiveModel) {
-			// Prefer the short Claude Code alias instead of duplicating full model IDs.
-			for _, alias := range aliases {
-				if strings.EqualFold(alias.alias, effectiveModel) || (alias.model != "" && strings.EqualFold(alias.model, effectiveModel)) || strings.Contains(strings.ToLower(effectiveModel), strings.ToLower(alias.family)) {
-					addModel(alias.alias, alias.displayName, alias.description, true)
-					break
-				}
-			}
-		} else {
-			displayName, _ := presentation(effectiveModel)
-			addModel(effectiveModel, displayName, defaultDescription, true)
-		}
+	if effectiveModel != "" {
+		displayName, _ := presentation(effectiveModel)
+		addModel(effectiveModel, displayName, defaultDescription, true)
 	}
 	for _, model := range settings.AvailableModels {
-		if !keepClaudeModel(model) || coveredByAlias(model) {
-			continue
-		}
 		displayName, description := presentation(model)
 		if description == "" {
 			description = "Allowed by Claude Code availableModels configuration"
 		}
 		addModel(model, displayName, description, strings.EqualFold(model, effectiveModel))
 	}
-	if settings.Model != "" && keepClaudeModel(settings.Model) && !coveredByAlias(settings.Model) {
+	if settings.Model != "" {
 		displayName, description := presentation(settings.Model)
 		if description == "" {
 			description = "Configured in Claude Code settings.json"
 		}
 		addModel(settings.Model, displayName, description, strings.EqualFold(settings.Model, effectiveModel))
 	}
-	if provider.Model != "" && keepClaudeModel(provider.Model) && !coveredByAlias(provider.Model) {
-		addModel(provider.Model, claudeFamilyDisplayName(provider.Model), "Configured by the local Claude provider", strings.EqualFold(provider.Model, effectiveModel))
+	if provider.Model != "" {
+		addModel(provider.Model, provider.Model, "Configured by the local Claude provider", strings.EqualFold(provider.Model, effectiveModel))
 	}
 	overrideModels := make([]string, 0, len(settings.ModelOverrides))
 	for model := range settings.ModelOverrides {
@@ -912,15 +887,12 @@ func discoverClaudeModels(_ string) []AgentProviderModel {
 	}
 	sort.Strings(overrideModels)
 	for _, model := range overrideModels {
-		if !keepClaudeModel(model) || coveredByAlias(model) {
-			continue
-		}
 		target := strings.TrimSpace(settings.ModelOverrides[model])
 		description := "Configured in Claude Code modelOverrides"
 		if target != "" {
 			description += " → " + target
 		}
-		addModel(model, claudeFamilyDisplayName(model), description, strings.EqualFold(model, effectiveModel))
+		addModel(model, model, description, strings.EqualFold(model, effectiveModel))
 	}
 	if len(models) == 0 {
 		return fallbackProviderModels("claude")

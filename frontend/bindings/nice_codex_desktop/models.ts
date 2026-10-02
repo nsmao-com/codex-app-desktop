@@ -12,6 +12,19 @@ export interface AgentProviderModel {
     "description": string;
     "isDefault": boolean;
     "contextWindow": number;
+    "contextSource"?: string;
+    "pricing"?: ModelPricing;
+    "metadataSource"?: string;
+    "metadataUpdatedAt"?: string;
+}
+
+export interface ModelPricing {
+    "inputPerMillion": number;
+    "outputPerMillion": number;
+    "cacheReadPerMillion": number;
+    "currency": string;
+    "source": string;
+    "updatedAt": string;
 }
 
 export interface AgentProviderReasoningEffort {
@@ -433,6 +446,33 @@ export interface ExternalUsageSummary {
     "source": string;
 }
 
+export interface FastCtxActionResult {
+    "ok": boolean;
+    "restartRequired": boolean;
+    "message": string;
+    "output": string;
+    "status": FastCtxStatus;
+}
+
+/**
+ * FastCtx is a Codex integration, not an agent runtime. Keep it out of cliPackages.
+ */
+export interface FastCtxStatus {
+    "installed": boolean;
+    "executable": string;
+    "version": string;
+    "managedVersion": string;
+    "latestVersion": string;
+    "updateAvailable": boolean;
+    "updateError": string;
+    "canInstall": boolean;
+    "codexHome": string;
+    "state": string;
+    "shellEnabled": boolean;
+    "message": string;
+    "output": string;
+}
+
 export interface GitActionResult {
     "ok": boolean;
     "message": string;
@@ -829,6 +869,14 @@ export interface ReviewStartRequest {
     "delivery": string;
 }
 
+export interface RuntimeReloadResult {
+    "configuration": ProviderConfigurationView;
+    "model": string;
+    "modelProvider": string;
+    "effort": string;
+    "codexModels": { [_ in string]?: any } | null;
+}
+
 export interface ScheduledTask {
     "id": string;
     "title": string;
@@ -865,6 +913,8 @@ export interface SessionMemoriesRequest {
 export interface SessionPreferencesRequest {
     "sessionId": string;
     "model": string;
+    "resetModel"?: boolean;
+    "modelProvider"?: string | null;
     "effort": string;
     "collaborationMode": string;
 

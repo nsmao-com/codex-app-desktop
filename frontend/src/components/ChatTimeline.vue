@@ -1371,6 +1371,11 @@ onUnmounted(() => {
   transition: color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
 }
 
+/* Keep the centered hit target while the global press feedback scales buttons. */
+button.jump-latest-button:not(:disabled):active {
+  transform: translate3d(-50%, 0, 0) scale(0.97);
+}
+
 .jump-latest-arrow {
   transition: transform 180ms ease;
 }

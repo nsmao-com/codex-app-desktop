@@ -351,6 +351,24 @@ const turnFileTotals = computed(() => {
   return { count: resolvedFileChanges.value.length, add, del }
 })
 
+const turnFilesDiff = computed(() => props.turnDiff?.trim()
+  || [...new Set(resolvedFileChanges.value.map((change) => {
+    const diff = change.diff.trim()
+    if (!diff || /^diff --git /m.test(diff)) return diff
+    // Per-file events can contain only hunks; retain their file boundaries in the combined viewer.
+    const path = change.path.replace(/\\/g, '/')
+    return `diff --git a/${path} b/${path}\n${diff}`
+  }).filter(Boolean))].join('\n'))
+
+function turnFileDisplayPath(path: string): string {
+  const fullPath = fullDisplayPath(path, displayWorkspacePath.value)
+  const root = fullDisplayPath(displayWorkspacePath.value).replace(/\/+$/, '')
+  if (root && workspaceKey(fullPath).startsWith(`${workspaceKey(root)}/`)) {
+    return fullPath.slice(root.length + 1)
+  }
+  return fullPath
+}
+
 /** Caret only on actively streaming text; never stick to completed text above tools. */
 const liveTextId = computed(() => {
   if (!props.streaming) return ''
@@ -534,7 +552,7 @@ const turnFilesOpen = computed(() => {
   if (Object.prototype.hasOwnProperty.call(openRows.value, 'turn-files')) {
     return openRows.value['turn-files'] === true
   }
-  return false
+  return true
 })
 
 /** Official Codex keeps patch steps expanded so file +/- stay visible. */
@@ -1451,29 +1469,38 @@ function diffStats(diff: string): { add: number; del: number } {
       <!-- Consolidated file change list — only after the turn finishes (not live mid-run). -->
       <div
         v-if="resolvedFileChanges.length && !streaming"
-        class="mt-1 space-y-0.5 border-t border-border/50 pt-2"
+        class="turn-files-card"
         :class="animateEnter ? 'timeline-step-item--enter' : ''"
       >
-        <button
-          type="button"
-          :aria-expanded="turnFilesOpen"
-          class="inline-flex max-w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-          @click="toggleTurnFiles"
-        >
-          <FileDiff :size="12" class="shrink-0 opacity-50" />
-          <span>{{ t('timeline.filesChanged') }}</span>
-          <span class="tabular-nums opacity-70">{{ turnFileTotals.count }}</span>
-          <span class="tabular-nums text-[11px] text-positive">+{{ turnFileTotals.add }}</span>
-          <span class="tabular-nums text-[11px] text-destructive">-{{ turnFileTotals.del }}</span>
-          <ChevronRight
-            :size="11"
-            class="timeline-chevron opacity-40"
-            :class="turnFilesOpen ? 'is-open' : ''"
-          />
-        </button>
+        <div class="turn-files-header">
+          <button
+            type="button"
+            :aria-expanded="turnFilesOpen"
+            class="turn-files-summary"
+            @click="toggleTurnFiles"
+          >
+            <span class="turn-files-icon"><FileDiff :size="20" /></span>
+            <span class="turn-files-heading">
+              <span class="turn-files-title">{{ t('timeline.changedFilesSummary', { count: turnFileTotals.count }) }}</span>
+              <span class="turn-files-stats">
+                <span class="text-positive">+{{ turnFileTotals.add }}</span>
+                <span class="text-destructive">-{{ turnFileTotals.del }}</span>
+              </span>
+            </span>
+            <ChevronRight :size="13" class="timeline-chevron shrink-0 text-muted-foreground/60" :class="turnFilesOpen ? 'is-open' : ''" />
+          </button>
+          <button
+            type="button"
+            class="turn-files-view"
+            :disabled="!turnFilesDiff"
+            @click="emit('inspect-diff', { path: t('timeline.filesChanged'), diff: turnFilesDiff })"
+          >
+            {{ t('timeline.viewChanges') }}
+          </button>
+        </div>
         <div class="timeline-collapse" :class="turnFilesOpen ? 'is-open' : ''">
           <div class="timeline-collapse-inner">
-            <div v-if="turnFilesOpen" class="space-y-0.5 pl-2 pt-0.5">
+            <div v-if="turnFilesOpen" class="turn-files-list">
               <SimpleTooltip
                 v-for="change in visibleResolvedFileChanges"
                 :key="change.path"
@@ -1482,23 +1509,24 @@ function diffStats(diff: string): { add: number; del: number } {
               >
                 <button
                   type="button"
-                  class="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 text-left text-[12px] text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+                  class="turn-file-row"
+                  :aria-label="`${fileActionLabel(change.kind)} ${turnFileDisplayPath(change.path)}`"
                   @click="emit('inspect-diff', { path: change.path, diff: change.diff })"
                 >
-                  <Pencil :size="12" class="shrink-0 opacity-50" />
-                  <span class="shrink-0">{{ fileActionLabel(change.kind) }}</span>
-                  <span class="min-w-0 flex-1 truncate font-medium text-foreground/80 underline decoration-dotted decoration-muted-foreground/50 underline-offset-2">
-                    {{ compactDisplayPath(change.path, displayWorkspacePath) }}
+                  <span class="turn-file-path">
+                    {{ turnFileDisplayPath(change.path) }}
                   </span>
-                  <span class="shrink-0 tabular-nums text-[11px] text-positive">+{{ change.add }}</span>
-                  <span class="shrink-0 tabular-nums text-[11px] text-destructive">-{{ change.del }}</span>
+                  <span class="turn-files-stats">
+                    <span class="text-positive">+{{ change.add }}</span>
+                    <span class="text-destructive">-{{ change.del }}</span>
+                  </span>
                 </button>
               </SimpleTooltip>
               <Button
                 v-if="hiddenFileChangeCount"
                 variant="ghost"
                 size="sm"
-                class="h-6 px-1.5 text-[11px] text-muted-foreground"
+                class="mx-2 my-1 h-7 px-2 text-[11px] text-muted-foreground"
                 @click="showMoreFileChanges"
               >
                 {{ t('timeline.showMoreFiles', { count: Math.min(FILE_CHANGE_PAGE, hiddenFileChangeCount) }) }}
@@ -1511,11 +1539,11 @@ function diffStats(diff: string): { add: number; del: number } {
       <div class="flex min-h-5 items-center gap-2 pt-0.5">
         <!-- Token/duration footer belongs on agent turns only (not user bubbles). -->
         <div
-          v-if="kind === 'agent' && (metrics?.tokenUsage || metrics?.durationMs || (!streaming && turnFileTotals.count))"
+          v-if="kind === 'agent' && (metrics?.tokenUsage || metrics?.durationMs)"
           class="flex items-center gap-1.5 text-[11px] tabular-nums text-muted-foreground/65"
         >
           <span v-if="metrics?.durationMs">{{ t('timeline.processed', { value: formatDuration(metrics.durationMs) }) }}</span>
-          <span v-if="metrics?.durationMs && (metrics?.tokenUsage || (!streaming && turnFileTotals.count))">·</span>
+          <span v-if="metrics?.durationMs && metrics?.tokenUsage">·</span>
           <span v-if="metrics?.tokenUsage" class="inline-flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5">
             <span>
               {{ (
@@ -1545,12 +1573,6 @@ function diffStats(diff: string): { add: number; del: number } {
               </template>
               )
             </span>
-          </span>
-          <span v-if="metrics?.tokenUsage && !streaming && turnFileTotals.count">·</span>
-          <span v-if="!streaming && turnFileTotals.count" class="inline-flex items-center gap-1">
-            <span>{{ t('timeline.fileCount', { count: turnFileTotals.count }) }}</span>
-            <span class="text-positive">+{{ turnFileTotals.add }}</span>
-            <span class="text-destructive">-{{ turnFileTotals.del }}</span>
           </span>
         </div>
         <div class="ml-auto flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
@@ -1609,3 +1631,88 @@ function diffStats(diff: string): { add: number; del: number } {
     </div>
   </div>
 </template>
+
+<style scoped>
+.turn-files-card {
+  margin-top: 0.75rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--card);
+}
+
+.turn-files-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  padding: 0.75rem;
+}
+
+.turn-files-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.65rem;
+  border-radius: 0.5rem;
+  text-align: left;
+}
+
+.turn-files-icon {
+  display: grid;
+  width: 2.5rem;
+  height: 2.5rem;
+  flex: none;
+  place-items: center;
+  border-radius: 0.7rem;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.turn-files-heading { display: grid; min-width: 0; gap: 0.25rem; }
+.turn-files-title { font-size: 0.8125rem; font-weight: 600; color: var(--foreground); }
+.turn-files-stats { display: inline-flex; flex: none; gap: 0.35rem; font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+
+.turn-files-view {
+  min-height: 1.875rem;
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  padding: 0.25rem 0.65rem;
+  color: var(--foreground);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.turn-files-view:disabled { opacity: 0.45; cursor: not-allowed; }
+.turn-files-list { border-top: 1px solid var(--border); padding: 0.25rem 0; }
+.turn-file-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 2.125rem;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.4rem 0.85rem;
+  text-align: left;
+}
+
+.turn-file-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 0.8125rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-files-view:not(:disabled):hover,
+.turn-file-row:hover { background: var(--muted); }
+.turn-files-summary:focus-visible,
+.turn-files-view:focus-visible,
+.turn-file-row:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+/* File rows are navigation targets; keep their text and counts stationary on press. */
+.turn-files-card button:not(:disabled):active { transform: none; }
+</style>

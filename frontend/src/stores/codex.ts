@@ -787,15 +787,31 @@ export const useCodexStore = defineStore('codex', () => {
     })
   }
 
+  let modelsLoadSequence = 0
+  async function acceptReloadedCodexConfiguration(catalog: Record<string, unknown>): Promise<void> {
+    ++modelsLoadSequence
+    loadedThreadIDs.clear()
+    if (transportReconnectTimer) clearTrackedTimeout(transportReconnectTimer)
+    transportReconnectTimer = 0
+    connection.value = await backend.CodexStatus()
+    appStore.models = mergeCodexCatalog(normalizeModels(catalog.data), appStore.settings.customModels ?? [])
+    await appStore.loadAccount()
+    await loadModelProviders()
+  }
+
   async function loadModels(): Promise<void> {
+    const sequence = ++modelsLoadSequence
     const requestedRuntime = appStore.activeRuntime
+    const requestedWorkspace = appStore.currentWorkspacePath || ''
+    const isCurrent = () => sequence === modelsLoadSequence && requestedRuntime === appStore.activeRuntime
+      && requestedWorkspace === (appStore.currentWorkspacePath || '')
     if (requestedRuntime === 'gemini' || requestedRuntime === 'opencode') {
       let provider = appStore.providerForRuntime(requestedRuntime)
       let catalog = provider?.models ?? []
       let nativeActiveProvider = ''
       try {
-        const nativeCatalog = await backend.ReadExternalRuntimeCatalog(requestedRuntime, appStore.currentWorkspacePath || '')
-        if (requestedRuntime !== appStore.activeRuntime) return
+        const nativeCatalog = await backend.ReadExternalRuntimeCatalog(requestedRuntime, requestedWorkspace)
+        if (!isCurrent()) return
         if (nativeCatalog.models?.length) catalog = nativeCatalog.models
         nativeActiveProvider = nativeCatalog.activeProvider || ''
         if (provider && nativeCatalog.models?.length) {
@@ -807,12 +823,13 @@ export const useCodexStore = defineStore('codex', () => {
             nextProviders[index] = { ...nextProviders[index], models: catalog }
             appStore.agentProviders = nextProviders
             provider = nextProviders[index]
+            void appStore.refreshModelMetadata()
           }
         }
       } catch {
         // Bootstrap catalog remains a usable offline fallback.
       }
-      if (requestedRuntime !== appStore.activeRuntime) return
+      if (!isCurrent()) return
       const custom = requestedRuntime === 'gemini'
         ? (appStore.settings.geminiCustomModels ?? [])
         : (appStore.settings.openCodeCustomModels ?? [])
@@ -859,7 +876,7 @@ export const useCodexStore = defineStore('codex', () => {
     } catch {
       response = null
     }
-    if (requestedRuntime !== appStore.activeRuntime) return
+    if (!isCurrent()) return
 
     const customModels = appStore.settings.customModels ?? []
     const raw = response ? normalizeModels(asRecord(response).data) : []
@@ -870,8 +887,7 @@ export const useCodexStore = defineStore('codex', () => {
       (model) => model.model.toLocaleLowerCase() === configuredModel.toLocaleLowerCase(),
     )
     const configuredInCatalog = Boolean(configuredCatalogModel)
-    const configuredCustom = customModels.some((model) => model.toLocaleLowerCase() === configuredModel.toLocaleLowerCase())
-    if (configuredModel && !configuredInCatalog && configuredCustom) return
+    if (configuredModel && !configuredInCatalog) return
 
     const preferred = configuredCatalogModel
       ?? appStore.models.find((model) => model.isDefault)
@@ -3864,6 +3880,7 @@ export const useCodexStore = defineStore('codex', () => {
     effort = '',
     provider?: string,
     collaborationMode?: string,
+    resetModel = false,
   ): void {
     const id = resolveThreadID(threadID) || threadID.trim()
     const thread = findThreadSummary(id)
@@ -3871,7 +3888,7 @@ export const useCodexStore = defineStore('codex', () => {
     if (!thread) return
     const next: ThreadSummary = {
       ...thread,
-      model: model || thread.model,
+      model: resetModel ? model : model || thread.model,
       effort: effort || thread.effort,
       modelProvider: provider === undefined ? thread.modelProvider : provider,
       collaborationMode: collaborationMode === undefined
@@ -6103,6 +6120,7 @@ export const useCodexStore = defineStore('codex', () => {
     loadRecentProjectThreads,
     reloadProject,
     loadModels,
+    acceptReloadedCodexConfiguration,
     loadModelProviders,
     createThread,
     newThread,

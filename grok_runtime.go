@@ -619,6 +619,11 @@ func (s *AppService) SendGrokMessage(request GrokSendRequest) (GrokTurnRef, erro
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	key := grokRunKey(request.Backend, request.SessionID)
 	s.mu.Lock()
+	if s.providerReloading["grok"] {
+		s.mu.Unlock()
+		cancel()
+		return GrokTurnRef{}, errors.New("Grok 配置正在重新加载，请稍后发送")
+	}
 	if s.externalRuns == nil {
 		s.externalRuns = make(map[string]*externalRun)
 	}

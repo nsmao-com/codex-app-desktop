@@ -54,7 +54,7 @@ import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
-import type { ExternalRuntimeCatalog, ProviderConfigurationView } from '../../bindings/nice_codex_desktop/models'
+import type { AgentProviderModel, ExternalRuntimeCatalog, ProviderConfigurationView } from '../../bindings/nice_codex_desktop/models'
 import { useAppStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore } from '@/stores'
 import {
   openClaudeConfigFile,
@@ -96,6 +96,17 @@ const externalRuntimeName = computed(() => isGeminiMode.value
 const externalProvider = computed(() => appStore.providerForRuntime(appStore.activeRuntime))
 const grokProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'grok'))
 const claudeProvider = computed(() => appStore.agentProviders.find((item) => item.kind === 'claude'))
+const modelMetadataUpdatedLabel = computed(() => appStore.modelMetadataLastUpdated
+  ? new Date(appStore.modelMetadataLastUpdated).toLocaleString()
+  : t('capabilities.metadataNever'))
+const modelMetadataSummary = computed(() => {
+  const models = appStore.agentProviders.flatMap((provider) => provider.models || [])
+  return {
+    total: models.length,
+    priced: models.filter((model) => model.pricing).length,
+    contextualized: models.filter((model) => model.contextWindow > 0).length,
+  }
+})
 const grokCatalog = shallowRef<GrokCapabilitiesCatalog | null>(null)
 const grokCatalogLoading = shallowRef(false)
 const grokTab = shallowRef<GrokCapTab>('runtime')
@@ -708,6 +719,26 @@ function grokScopeLabel(scope: string): string {
   return t('capabilities.grokScopeUser')
 }
 
+function formatContextWindow(value: number | undefined): string {
+  if (!value || value <= 0) return ''
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value % 1_000_000 ? 1 : 0)}M`
+  return `${Math.round(value / 1000)}K`
+}
+
+function formatModelPrice(model: { pricing?: { inputPerMillion: number; outputPerMillion: number } }): string {
+  const pricing = model.pricing
+  if (!pricing) return ''
+  return `$${pricing.inputPerMillion.toFixed(2)} / $${pricing.outputPerMillion.toFixed(2)} / 1M`
+}
+
+function displayModelMetadata(model: AgentProviderModel): AgentProviderModel {
+  const runtimeProvider = appStore.providerForRuntime(appStore.activeRuntime)
+  const local = runtimeProvider?.models?.find((candidate) => candidate.model === model.model
+    || candidate.model.endsWith(`/${model.model}`)
+    || model.model.endsWith(`/${candidate.model}`))
+  return local ? { ...model, ...local, contextWindow: model.contextWindow || local.contextWindow } : model
+}
+
 function openMcpEditor(server?: MCPServerView): void {
   mcpImportOpen.value = false
   const env = Object.entries(server?.env ?? {}).map(([key, value]) => ({
@@ -1255,6 +1286,10 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
               </p>
             </div>
             <div class="flex shrink-0 flex-wrap items-center gap-1.5">
+              <Button variant="outline" size="sm" class="h-7 px-2 text-[10px]" :disabled="appStore.modelMetadataSyncing" @click="void appStore.refreshModelMetadata(true)">
+                <RefreshCw :size="11" class="mr-1.5" :class="{ 'animate-spin': appStore.modelMetadataSyncing }" />
+                {{ t('capabilities.syncModelMetadata') }}
+              </Button>
               <Button variant="outline" size="sm" class="h-7 px-2 text-[10px]" :disabled="providerConfigurationLoading" @click="void checkProviderConfiguration(true)">
                 <RefreshCw :size="11" class="mr-1.5" :class="{ 'animate-spin': providerConfigurationLoading }" />
                 {{ t('providerConfig.check') }}
@@ -1428,6 +1463,9 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
           </div>
           <p v-if="providerConfiguration?.warnings?.length" class="mt-2 text-[9px] leading-4 text-amber-700 dark:text-amber-300">
             {{ providerConfiguration.warnings.join(' · ') }}
+          </p>
+          <p class="mt-2 text-[9px] text-muted-foreground">
+            {{ t('capabilities.metadataSummary', { total: modelMetadataSummary.total, priced: modelMetadataSummary.priced, contextualized: modelMetadataSummary.contextualized, updatedAt: modelMetadataUpdatedLabel }) }}
           </p>
         </div>
 
@@ -1741,15 +1779,21 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                       </p>
                     </div>
                     <div v-if="grokProvider?.models?.length" class="rounded-lg border px-3 py-2">
-                      <p class="text-[10px] uppercase tracking-wide text-muted-foreground">Model catalog</p>
-                      <div class="mt-2 flex flex-wrap gap-1.5">
+                      <div class="flex items-center justify-between gap-2">
+                        <p class="text-[10px] uppercase tracking-wide text-muted-foreground">{{ t('capabilities.modelCatalog') }}</p>
+                        <span class="text-[9px] text-muted-foreground">{{ t('capabilities.metadataSourceShort') }}</span>
+                      </div>
+                      <div class="mt-2 space-y-1">
                         <Badge
                           v-for="model in grokProvider.models"
                           :key="model.model"
                           variant="secondary"
-                          class="text-[10px] font-normal"
+                          class="flex w-full items-center justify-between gap-2 text-[10px] font-normal"
                         >
-                          {{ model.displayName || model.model }}
+                          <span class="min-w-0 truncate">{{ model.displayName || model.model }}</span>
+                          <span class="shrink-0 text-[9px] opacity-70">
+                            {{ formatContextWindow(model.contextWindow) }}<template v-if="model.pricing"> · {{ formatModelPrice(model) }}</template>
+                          </span>
                         </Badge>
                       </div>
                     </div>
@@ -1909,7 +1953,7 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                        <div class="mb-2 flex items-center justify-between"><p class="text-[11px] font-medium">{{ isOpenCodeMode ? t('capabilities.externalProviderCatalog') : t('capabilities.geminiModels', { runtime: externalRuntimeName }) }}</p><span class="text-[10px] text-muted-foreground">{{ externalCatalog?.models?.length || 0 }} {{ t('capabilities.models') }}</span></div>
                       <div class="max-h-64 space-y-1 overflow-y-auto rounded-lg border p-1.5">
                         <div v-for="model in (externalCatalog?.models || [])" :key="model.model" class="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted/40">
-                           <span class="min-w-0 flex-1 truncate font-mono text-[11px]">{{ model.model }}</span><Badge v-if="model.isDefault" variant="secondary" class="text-[9px]">{{ t('common.default') }}</Badge><span v-if="model.contextWindow" class="text-[9px] tabular-nums text-muted-foreground">{{ Math.round(model.contextWindow / 1000) }}K {{ t('capabilities.context') }}</span>
+                           <span class="min-w-0 flex-1 truncate font-mono text-[11px]">{{ model.model }}</span><Badge v-if="model.isDefault" variant="secondary" class="text-[9px]">{{ t('common.default') }}</Badge><span v-if="displayModelMetadata(model).contextWindow" class="text-[9px] tabular-nums text-muted-foreground">{{ formatContextWindow(displayModelMetadata(model).contextWindow) }} {{ t('capabilities.context') }}</span><span v-if="displayModelMetadata(model).pricing" class="text-[9px] tabular-nums text-muted-foreground">{{ formatModelPrice(displayModelMetadata(model)) }}</span>
                         </div>
                       </div>
                     </div>

@@ -92,10 +92,14 @@ func selectedCatalogModel(provider AgentProviderRuntime, settings UserSettings) 
 			return model, true
 		}
 	}
-	// An explicit model that is absent from the native catalog has an unknown
-	// window. Falling back to an unrelated default would present a precise but
-	// incorrect context percentage for custom gateways and model aliases.
+	// Known Claude variants can use family metadata. An unknown gateway model
+	// must never inherit the window of an unrelated catalog default.
 	if selected != "" {
+		if provider.Kind == "claude" {
+			if window := knownProviderContextWindow(provider.Kind, selected); window > 0 {
+				return AgentProviderModel{Model: selected, ContextWindow: window, Description: "Model family fallback"}, true
+			}
+		}
 		return AgentProviderModel{}, false
 	}
 	for _, model := range provider.Models {
@@ -166,6 +170,10 @@ func providerContextPolicy(provider AgentProviderRuntime, settings UserSettings)
 	case "claude":
 		config := readProviderJSONMap(path)
 		env := mapFromAny(config["env"])
+		if claude1MContextDisabled(env) && policy.Tokens > 200_000 {
+			policy.Tokens = 200_000
+			policy.Source = "claude-environment"
+		}
 		autoCompact, hasAutoCompact := boolFromConfig(config["autoCompactEnabled"])
 		if !hasAutoCompact {
 			autoCompact = true
@@ -332,6 +340,9 @@ func providerConfigurationView(provider AgentProviderRuntime, settings UserSetti
 		view.PermissionModes = []string{"acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"}
 		config := readProviderJSONMap(providerConfigPath("claude"))
 		env := mapFromAny(config["env"])
+		if claude1MContextDisabled(env) {
+			view.Warnings = append(view.Warnings, "CLAUDE_CODE_DISABLE_1M_CONTEXT disables extended context in the Claude launch environment.")
+		}
 		if _, ok := integerFromConfig(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]); ok {
 			view.Warnings = append(view.Warnings, "CLAUDE_CODE_MAX_CONTEXT_TOKENS is a gateway/model-ID correction, not a general model context limit; the displayed window remains fixed by the resolved model.")
 		}
@@ -439,6 +450,10 @@ func (s *AppService) ReloadProviderConfiguration(providerID string) (ProviderApp
 func (s *AppService) providerHasActiveWork(providerID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.providerHasActiveWorkLocked(providerID)
+}
+
+func (s *AppService) providerHasActiveWorkLocked(providerID string) bool {
 	if providerID == "codex" {
 		return len(s.codexActiveTurns) > 0 || len(s.codexPendingDispatches) > 0
 	}
@@ -452,8 +467,14 @@ func (s *AppService) providerHasActiveWork(providerID string) bool {
 		if providerID == "grok" && strings.HasPrefix(key, "grok:") {
 			return true
 		}
-		if session := s.sessions[key]; session != nil && normalizeExternalRuntime(session.Provider) == providerID {
-			return true
+		if session := s.sessions[key]; session != nil {
+			kind := normalizeProviderID(session.Provider)
+			if kind == "" {
+				kind = externalProviderKind(session.ProviderID)
+			}
+			if kind == providerID {
+				return true
+			}
 		}
 	}
 	return false
@@ -624,6 +645,14 @@ func (s *AppService) UpdateProviderContextPolicy(providerID string, tokens, thre
 		RestartRequired: providerID == "codex", Configuration: configuration,
 		Warnings: configuration.Warnings,
 	}, nil
+}
+
+func claude1MContextDisabled(env map[string]any) bool {
+	value := os.Getenv("CLAUDE_CODE_DISABLE_1M_CONTEXT")
+	if configured, exists := env["CLAUDE_CODE_DISABLE_1M_CONTEXT"]; exists {
+		value = fmt.Sprint(configured)
+	}
+	return value == "1" || strings.EqualFold(value, "true")
 }
 
 func validCodexAutoCompactScope(value string) bool {

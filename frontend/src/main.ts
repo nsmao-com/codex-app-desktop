@@ -1,5 +1,6 @@
 import '@fontsource-variable/jetbrains-mono/index.css'
 import '@fontsource-variable/manrope/index.css'
+import 'katex/dist/katex.min.css'
 
 import { createPinia } from 'pinia'
 import { createApp } from 'vue'

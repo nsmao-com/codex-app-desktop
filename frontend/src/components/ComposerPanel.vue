@@ -774,7 +774,7 @@ const selectableModels = computed(() => {
   if (isGeminiMode.value || isOpenCodeMode.value) {
     return externalModelCatalog.value
   }
-  return modelsForRuntime(appStore.models, appStore.settings.customModels ?? []) ?? []
+  return modelsForRuntime(appStore.models, appStore.settings.customModels ?? [], displayModel.value)
 })
 const composerModelOptions = computed(() => (selectableModels.value ?? []).map((model) => {
   const description = 'description' in model && typeof model.description === 'string'
@@ -897,11 +897,11 @@ const selectedEffortLabel = computed(() => {
   return effort.charAt(0).toUpperCase() + effort.slice(1)
 })
 
-const EFFORT_ORDER = ['auto', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+const EFFORT_ORDER = ['auto', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
 const effortOptions = computed(() => {
   const options = reasoningOptions.value.map((item) => ({
     value: item.effort,
-    label: 'displayName' in item && item.displayName ? String(item.displayName) : item.effort,
+    label: 'displayName' in item && item.displayName ? String(item.displayName) : item.effort.charAt(0).toUpperCase() + item.effort.slice(1),
   }))
   const current = displayEffort.value.trim()
   if (current && !options.some((item) => item.value === current)) {
@@ -919,6 +919,17 @@ const effortOptions = computed(() => {
 const effortCurrentIndex = computed(() => Math.max(0, effortOptions.value.findIndex((item) => item.value === displayEffort.value)))
 const effortDisplayIndex = computed(() => effortPreviewIndex.value >= 0 ? effortPreviewIndex.value : effortCurrentIndex.value)
 const effortPopoverLabel = computed(() => effortOptions.value[effortDisplayIndex.value]?.label || selectedEffortLabel.value)
+const effortModelLabel = computed(() => composerModelOptions.value.find((model) => model.value === displayModel.value)?.label || formatModelLabel(displayModel.value))
+const effortDefaultIndex = computed(() => {
+  const provider = isGrokMode.value ? grokProvider.value : isClaudeMode.value ? claudeProvider.value : externalProvider.value
+  const preferred = (isGrokMode.value || isClaudeMode.value)
+    ? provider?.reasoningEfforts?.find((option) => option.isDefault)?.effort
+    : selectedModel.value?.defaultReasoningEffort
+  const supported = reasoningOptions.value
+  const fallback = supported.find((option) => option.effort === 'high')?.effort || supported[0]?.effort
+  const value = supported.some((option) => option.effort === preferred) ? preferred : fallback
+  return Math.max(0, effortOptions.value.findIndex((option) => option.value === value))
+})
 
 function effortMarkerPosition(index: number): string {
   if (effortOptions.value.length <= 1) return '0%'
@@ -1323,7 +1334,8 @@ watch(
     const models = selectableModels.value ?? []
     if (!models.length) return
     const current = displayModel.value.trim()
-    if (current && models.some((model) => model.model === current)) return
+    // Catalog discovery must never silently replace an explicit session model.
+    if (current) return
     const preferred = models.find((model) => model.isDefault)?.model || models[0]?.model
     if (preferred && preferred !== current) void applyModelSelection(preferred)
   },
@@ -3048,7 +3060,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         :aria-description="isGoalComposer ? undefined : composerShortcutHint"
         class="resize-none border-0 bg-transparent px-1.5 py-2 text-[15px] leading-6 shadow-none placeholder:text-muted-foreground/65 focus-visible:border-0 focus-visible:ring-0 focus-visible:outline-none"
         :class="[
-          isGoalComposer ? 'min-h-28 pr-1' : 'min-h-12 pr-9',
+          isGoalComposer ? 'min-h-28 pr-1' : 'min-h-12 pr-1',
           composerExpanded ? 'overflow-y-auto' : 'overflow-y-hidden',
         ]"
         @compositionend="composing = false"
@@ -3057,7 +3069,10 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         @paste="onPaste"
         @pointerdown="resetSentHistoryNavigation"
       />
-      <div v-if="!isGoalComposer" class="flex items-center justify-end px-1">
+      <div v-if="!isGoalComposer" class="flex items-center justify-between px-1">
+        <span class="grid size-6 place-items-center text-muted-foreground/55" aria-hidden="true">
+          <CornerDownLeft :size="15" stroke-width="1.7" />
+        </span>
         <SimpleTooltip content="翻译输入内容">
           <Button type="button" variant="ghost" size="icon-xs" class="size-6 text-muted-foreground" :disabled="!modelValue.trim()" aria-label="翻译输入内容" @click="inputTranslationOpen = true">
             <Languages :size="13" />
@@ -3093,13 +3108,6 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
           <Button v-if="inputTranslationResult" type="button" variant="outline" @click="applyInputTranslation">替换输入框内容</Button>
         </DialogContent>
       </Dialog>
-      <span
-        v-if="!isGoalComposer"
-        class="pointer-events-none absolute bottom-3 right-4 grid size-5 place-items-center text-muted-foreground/55"
-        aria-hidden="true"
-      >
-        <CornerDownLeft :size="15" stroke-width="1.7" />
-      </span>
       </div>
 
       <div v-if="isGoalComposer" class="flex min-h-9 flex-wrap items-center justify-between gap-2 px-1">
@@ -3327,35 +3335,42 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                 <span class="truncate">{{ effortPopoverLabel }}</span>
               </Button>
             </PopoverTrigger>
-            <PopoverContent align="end" side="top" :side-offset="12" class="w-80 rounded-2xl p-5 shadow-xl">
-              <div class="mb-5 flex items-start justify-between gap-3">
-                <div>
-                  <p class="text-[15px] font-medium">{{ t('chat.reasoning') }} · {{ effortPopoverLabel }}</p>
-                  <p class="mt-1 text-[11px] leading-5 text-muted-foreground">{{ t('chat.effortSliderHint') }}</p>
+            <PopoverContent align="end" side="top" :side-offset="10" class="effort-popover w-64 max-w-[calc(100vw-2rem)] rounded-2xl p-3 shadow-lg">
+              <div class="effort-popover-header">
+                <div class="effort-popover-heading">
+                  <p class="effort-popover-value">{{ effortPopoverLabel }}</p>
+                  <p class="effort-popover-model" :title="effortModelLabel">{{ effortModelLabel }}</p>
                 </div>
-                <span class="grid size-8 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
-                  <Zap :size="16" />
-                </span>
+                <button
+                  type="button"
+                  class="effort-reset"
+                  :aria-label="t('chat.resetReasoning')"
+                  :title="t('chat.resetReasoning')"
+                  :disabled="effortCurrentIndex === effortDefaultIndex && !effortDragging"
+                  @click="chooseEffort(effortDefaultIndex)"
+                >
+                  <RotateCcw :size="14" />
+                </button>
               </div>
               <div
                 class="effort-scale"
                 :class="effortDragging ? 'is-dragging' : ''"
+                :style="{ '--effort-progress': effortOptions.length > 1 ? effortDisplayIndex / (effortOptions.length - 1) : 0 }"
               >
                 <div class="effort-scale-track" aria-hidden="true">
-                  <span
-                    class="effort-scale-progress"
-                    :style="{ width: effortMarkerPosition(effortDisplayIndex) }"
-                  />
-                  <span
-                    v-for="(_, index) in effortOptions"
-                    :key="`effort-marker-${index}`"
-                    class="effort-scale-marker"
-                    :class="{
-                      'is-passed': index <= effortDisplayIndex,
-                      'is-current': index === effortDisplayIndex,
-                    }"
-                    :style="{ left: effortMarkerPosition(index) }"
-                  />
+                  <span class="effort-scale-progress" />
+                  <span class="effort-scale-markers">
+                    <span
+                      v-for="(_, index) in effortOptions"
+                      :key="`effort-marker-${index}`"
+                      class="effort-scale-marker"
+                      :class="{
+                        'is-passed': index <= effortDisplayIndex,
+                        'is-current': index === effortDisplayIndex,
+                      }"
+                      :style="{ left: effortMarkerPosition(index) }"
+                    />
+                  </span>
                 </div>
                 <input
                   type="range"
@@ -3366,31 +3381,13 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
                   class="effort-slider-input"
                   :aria-label="t('chat.reasoning')"
                   :aria-valuetext="effortPopoverLabel"
+                  :aria-description="t('chat.effortSliderHint')"
                   @input="previewEffort"
                   @change="commitEffort"
                   @pointerdown="effortDragging = true"
                   @pointercancel="cancelEffortPreview"
                   @blur="cancelEffortPreview"
                 >
-              </div>
-              <div
-                class="effort-scale-labels"
-                :style="{ gridTemplateColumns: `repeat(${effortOptions.length}, minmax(0, 1fr))` }"
-              >
-                <button
-                  v-for="(option, index) in effortOptions"
-                  :key="`effort-choice-${option.value}`"
-                  type="button"
-                  class="effort-scale-label"
-                  :class="{
-                    'is-current': index === effortDisplayIndex,
-                    'is-first': index === 0,
-                    'is-last': index === effortOptions.length - 1,
-                  }"
-                  @click="chooseEffort(index)"
-                >
-                  {{ option.label }}
-                </button>
               </div>
             </PopoverContent>
           </Popover>

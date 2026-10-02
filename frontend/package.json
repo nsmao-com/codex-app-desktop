@@ -1,7 +1,7 @@
 {
   "name": "nice-codex-frontend",
   "private": true,
-  "version": "1.6.16",
+  "version": "1.6.17",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -21,6 +21,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dompurify": "^3.4.15",
+    "katex": "^0.18.9",
     "marked": "^18.0.6",
     "motion-v": "^2.3.0",
     "pinia": "^3.0.4",

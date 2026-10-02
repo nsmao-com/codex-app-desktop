@@ -11,7 +11,7 @@ import SearchableSelect from '@/components/SearchableSelect.vue'
 const props = defineProps<{ text: string; disabled?: boolean; runtime?: string }>()
 const app = useAppStore()
 const router = useRouter()
-const service = computed(() => app.settings.translationProvider === 'custom' ? '自定义模型接口' : app.settings.translationProvider === 'current' ? `${app.runtimeDisplayName(props.runtime || app.activeRuntime)} 当前配置` : 'Google Cloud Translation')
+const service = computed(() => app.settings.translationProvider === 'custom' ? '自定义模型接口' : app.settings.translationProvider === 'current' ? `${app.runtimeDisplayName(props.runtime || app.activeRuntime)} 当前配置` : 'Google 翻译（免 Key）')
 const open = shallowRef(false)
 const target = shallowRef('zh-CN')
 const busy = shallowRef(false)

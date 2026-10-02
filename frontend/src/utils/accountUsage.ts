@@ -54,12 +54,11 @@ export function resolveProviderModelContextWindow(
   if (exactWindow > 0) return exactWindow
 
   if (runtimeID === 'claude') {
-    const family = ['fable', 'opus', 'sonnet', 'haiku']
-      .find((name) => normalizedModel.includes(name))
-    if (family) {
-      const alias = runtimeCatalog?.models?.find((item) => item.model.trim().toLowerCase() === family)
-      return Math.max(0, Number(alias?.contextWindow) || 0)
-    }
+    // Full model versions and [1m] variants must not inherit another version's
+    // window from the family's mutable alias.
+    if (normalizedModel.endsWith('[1m]')) return 1_000_000
+    if (/^claude-(fable-5|sonnet-5|opus-(4-[78]|5))($|[-.])/.test(normalizedModel)) return 1_000_000
+    if (/^claude-(sonnet|opus|haiku)-/.test(normalizedModel)) return 200_000
   }
   if (runtimeID === 'gemini') {
     return normalizedModel.includes('gemma-4') || normalizedModel.includes('gemma_4')

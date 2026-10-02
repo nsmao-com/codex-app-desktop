@@ -60,6 +60,7 @@ type AppService struct {
 	nativeSessionsSyncedAt map[string]time.Time
 	updateState            updateDownloadState
 	codexLifecycleMu       sync.Mutex
+	providerReloading      map[string]bool
 	codexThreadStartMu     sync.Mutex
 	codexActiveTurns       map[string]string
 	codexPendingDispatches map[string]bool
@@ -299,10 +300,12 @@ type TurnLivenessView struct {
 }
 
 type SessionPreferencesRequest struct {
-	SessionID         string `json:"sessionId"`
-	Model             string `json:"model"`
-	Effort            string `json:"effort"`
-	CollaborationMode string `json:"collaborationMode"`
+	SessionID         string  `json:"sessionId"`
+	Model             string  `json:"model"`
+	ResetModel        bool    `json:"resetModel,omitempty"`
+	ModelProvider     *string `json:"modelProvider,omitempty"`
+	Effort            string  `json:"effort"`
+	CollaborationMode string  `json:"collaborationMode"`
 	// Goal is a pointer so ordinary model/mode updates preserve an existing
 	// session objective; an explicit empty value clears it.
 	Goal               *string `json:"goal,omitempty"`
@@ -998,6 +1001,13 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 		s.mu.Unlock()
 		return errors.New("session not found")
 	}
+	if request.ModelProvider != nil {
+		provider := strings.TrimSpace(*request.ModelProvider)
+		if isExternalSession(record) || provider == "" || len(provider) > 160 || externalProviderKind(provider) != "" {
+			s.mu.Unlock()
+			return errors.New("invalid Codex model provider")
+		}
+	}
 	previousGoalSession := cloneSession(record)
 	effectiveGoal := normalizeSessionGoal(record.Goal)
 	if request.Goal != nil {
@@ -1007,8 +1017,11 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 		s.mu.Unlock()
 		return errors.New("set a session goal before changing its status or budget")
 	}
-	if model != "" {
+	if model != "" || request.ResetModel {
 		record.Model = model
+	}
+	if request.ModelProvider != nil {
+		record.ProviderID = strings.TrimSpace(*request.ModelProvider)
 	}
 	if effort != "" {
 		record.Effort = effort
@@ -1074,7 +1087,11 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 		}
 	}
 	record.UpdatedAt = now
-	s.persistSessionsLocked()
+	if err := s.persistSessionsLocked(); err != nil {
+		s.sessions[sessionID] = previousGoalSession
+		s.mu.Unlock()
+		return err
+	}
 	goalSession := cloneSession(record)
 	s.mu.Unlock()
 	if goalChanged && !isExternalSession(goalSession) && strings.TrimSpace(goalSession.BackendRef) != "" {
@@ -2515,11 +2532,18 @@ func (s *AppService) resolveInterruptBackendID(threadID string) string {
 }
 
 func (s *AppService) ListModels() (map[string]any, error) {
+	return s.listModels(false)
+}
+
+func (s *AppService) listModels(strict bool) (map[string]any, error) {
 	configured := readCodexConfiguredModel()
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
 	if client == nil {
+		if strict {
+			return nil, errors.New("Codex is not connected")
+		}
 		return ensureConfiguredModelInList(map[string]any{"data": []any{}}, configured), nil
 	}
 
@@ -2532,6 +2556,9 @@ func (s *AppService) ListModels() (map[string]any, error) {
 		}
 		result, err := s.call("model/list", params)
 		if err != nil {
+			if strict {
+				return nil, err
+			}
 			if len(merged) == 0 {
 				return ensureConfiguredModelInList(map[string]any{"data": []any{}}, configured), nil
 			}
@@ -3560,7 +3587,7 @@ func (s *AppService) claimCodexDispatch(threadID string) bool {
 	if s.codexPendingDispatches == nil {
 		s.codexPendingDispatches = make(map[string]bool)
 	}
-	if s.codexPendingDispatches[threadID] {
+	if s.codexPendingDispatches[threadID] || s.providerReloading["codex"] {
 		return false
 	}
 	s.codexPendingDispatches[threadID] = true

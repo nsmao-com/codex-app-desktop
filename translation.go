@@ -148,7 +148,9 @@ func (s *AppService) TranslateConfiguredMessage(text, target, runtime string) (s
 		return "", err
 	}
 	if settings.TranslationProvider == "google" {
-		return s.TranslateMessage(text, target, settings.TranslationGoogleKey)
+		// Google is intentionally keyless by default. Ignore any legacy key that
+		// may still exist in local preferences after upgrading from Cloud mode.
+		return s.TranslateMessage(text, target, "")
 	}
 	api := translationAPI{base: settings.TranslationBaseURL, model: settings.TranslationModel, key: settings.TranslationAPIKey, protocol: "chat"}
 	if settings.TranslationProvider == "current" {
@@ -274,8 +276,10 @@ func validateTranslationText(text, target string) error {
 	return nil
 }
 
-// TranslateMessage sends only the explicitly selected text to Google Cloud.
-// Keys are request-scoped (or provided by the environment), never logged/stored.
+// TranslateMessage sends only the explicitly selected text to Google Translate.
+// When a legacy Cloud Translation key is supplied, the Cloud endpoint remains
+// available for backwards compatibility. The default path uses Google's
+// public translate endpoint and does not require an API key.
 func (s *AppService) TranslateMessage(text, target, apiKey string) (string, error) {
 	if err := validateTranslationText(text, target); err != nil {
 		return "", err
@@ -285,7 +289,7 @@ func (s *AppService) TranslateMessage(text, target, apiKey string) (string, erro
 		apiKey = strings.TrimSpace(os.Getenv("GOOGLE_TRANSLATE_API_KEY"))
 	}
 	if apiKey == "" {
-		return "", errors.New("请填写 Google Cloud Translation API Key，或设置 GOOGLE_TRANSLATE_API_KEY 环境变量")
+		return translateWithGooglePublicEndpoint(text, target)
 	}
 	if len(apiKey) > 512 || strings.ContainsAny(apiKey, "\r\n") {
 		return "", errors.New("翻译 API Key 格式无效")
@@ -322,4 +326,81 @@ func (s *AppService) TranslateMessage(text, target, apiKey string) (string, erro
 		return "", errors.New("Google 未返回有效译文，请稍后重试")
 	}
 	return html.UnescapeString(result.Data.Translations[0].Text), nil
+}
+
+// translateWithGooglePublicEndpoint uses the same endpoint as Google's web
+// translator. It is intentionally keyless so the built-in translation feature
+// works out of the box. Requests are split to stay below common URL limits.
+func translateWithGooglePublicEndpoint(text, target string) (string, error) {
+	const maxChunkRunes = 4500
+	runes := []rune(text)
+	var translated strings.Builder
+	for start := 0; start < len(runes); {
+		end := start + maxChunkRunes
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunk := string(runes[start:end])
+		if result, err := translateGooglePublicChunk(chunk, target); err != nil {
+			return "", err
+		} else {
+			translated.WriteString(result)
+		}
+		start = end
+	}
+	if strings.TrimSpace(translated.String()) == "" {
+		return "", errors.New("Google 未返回有效译文，请稍后重试")
+	}
+	return translated.String(), nil
+}
+
+func translateGooglePublicChunk(text, target string) (string, error) {
+	query := url.Values{}
+	query.Set("client", "gtx")
+	query.Set("sl", "auto")
+	query.Set("tl", target)
+	query.Set("dt", "t")
+	query.Set("q", text)
+	requestURL := "https://translate.googleapis.com/translate_a/single?" + query.Encode()
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return "", errors.New("无法创建 Google 翻译请求")
+	}
+	req.Header.Set("Accept", "application/json")
+	client := &http.Client{Timeout: 35 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(req)
+	if err != nil {
+		return "", errors.New("无法连接 Google 翻译，请检查网络或代理后重试")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Google 翻译请求失败（HTTP %d），请稍后重试", response.StatusCode)
+	}
+	var payload []any
+	if err := json.NewDecoder(io.LimitReader(response.Body, 2*1024*1024)).Decode(&payload); err != nil {
+		return "", errors.New("Google 翻译返回格式无效，请稍后重试")
+	}
+	if len(payload) == 0 {
+		return "", errors.New("Google 未返回有效译文，请稍后重试")
+	}
+	segments, ok := payload[0].([]any)
+	if !ok {
+		return "", errors.New("Google 翻译返回格式无效，请稍后重试")
+	}
+	var translated strings.Builder
+	for _, rawSegment := range segments {
+		segment, ok := rawSegment.([]any)
+		if !ok || len(segment) == 0 {
+			continue
+		}
+		if value, ok := segment[0].(string); ok {
+			translated.WriteString(value)
+		}
+	}
+	if strings.TrimSpace(translated.String()) == "" {
+		return "", errors.New("Google 未返回有效译文，请稍后重试")
+	}
+	return html.UnescapeString(translated.String()), nil
 }

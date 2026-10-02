@@ -128,6 +128,8 @@ export interface ModelOption {
   displayName: string
   description: string
   isDefault: boolean
+  /** Synthetic entry from the saved custom list, not the native model catalog. */
+  isCustom?: boolean
   defaultReasoningEffort: string
   defaultServiceTier: string
   serviceTiers: Array<{

@@ -892,6 +892,11 @@ func (s *AppService) SendClaudeMessage(request ClaudeSendRequest) (ClaudeTurnRef
 	ctx, cancel := context.WithCancel(context.Background())
 	key := claudeRunKey(request.SessionID)
 	s.mu.Lock()
+	if s.providerReloading["claude"] {
+		s.mu.Unlock()
+		cancel()
+		return ClaudeTurnRef{}, errors.New("Claude 配置正在重新加载，请稍后发送")
+	}
 	if s.externalRuns == nil {
 		s.externalRuns = make(map[string]*externalRun)
 	}

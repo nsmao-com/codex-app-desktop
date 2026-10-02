@@ -396,6 +396,12 @@ const messages = {
       sameProvider4: '同厂商 · 四栏',
     },
     sidebar: {
+      reloadConfig: '重新加载配置',
+      reloadingConfig: '正在重新加载 {name}…',
+      reloadHint: '重新加载 {name} 的认证配置与模型；Codex 会重启连接。请先停止该服务商正在运行的任务。',
+      reloadDone: '{name} 配置已重新加载',
+      reloadDoneHint: '认证状态、模型列表和当前会话的模型选择已刷新。',
+      reloadFailed: '{name} 配置重新加载未完成',
       reorderProject: '拖拽调整“{name}”的项目顺序，也可使用上下方向键',
       workspace: '工作区',
       chooseFolder: '选择项目文件夹',
@@ -1606,6 +1612,12 @@ const messages = {
       sameProvider4: 'Same provider · 4 panes',
     },
     sidebar: {
+      reloadConfig: 'Reload configuration',
+      reloadingConfig: 'Reloading {name}…',
+      reloadHint: 'Reload {name} authentication and models; Codex reconnects. Stop running tasks for this provider first.',
+      reloadDone: '{name} configuration reloaded',
+      reloadDoneHint: 'Authentication, model catalog and current conversation model selections have been refreshed.',
+      reloadFailed: '{name} configuration reload incomplete',
       reorderProject: 'Drag to reorder “{name}”; the Up and Down arrow keys also work',
       workspace: 'Workspace', chooseFolder: 'Choose a folder', chooseAnother: 'Choose another folder', newTask: 'New task', threads: 'Threads', searchLabel: 'Search threads', searchPlaceholder: 'Search tasks', noSearchResults: 'No tasks match your search.', firstTask: 'Your workspace is ready for its first task.', switchToCodeHint: 'You are in Cowork mode. Past chats are usually under Code.', switchToCoworkHint: 'You are in Code mode. Switch to Cowork to see chats from that mode.', noPreview: 'No message preview', signIn: 'Sign in to Codex', chatgptAccount: 'Use your ChatGPT account', codexAccount: 'Codex account', openSettings: 'Open settings', now: 'now', projectLoadFailed: 'Project conversations could not be loaded', retryProject: 'Reload', toggle: 'Toggle sidebar', loadMore: 'Show {count} more', runningInBackground: 'This conversation is running in the background', customize: 'Capabilities', recents: 'Recent conversations', code: 'Code', cowork: 'Cowork', runtimeCodex: 'Switch to Codex', runtimeClaude: 'Switch to Claude', runtimeGrok: 'Switch to Grok', runtimeSwitchFailed: 'Could not switch runtime', claudeEmpty: 'Claude Code', claudeEmptyHint: 'Claude Code detected. In-app chat will expand later; use the claude CLI in a terminal for now.', claudeRuntimeMissing: 'Claude Code CLI (claude) not found. Install it, then restart Nice Codex.', claudeReady: 'Claude Code ready', grokEmpty: 'No Grok sessions yet.', grokEmptyHint: 'Start a new task to chat via Grok Build or the Grok API.', grokRuntimeMissing: 'No usable Grok Build / API configuration detected.', grokBindingsStale: 'Backend bindings are stale. Fully quit and restart NiceCodex (or restart wails dev), then switch to Grok again.', archived: 'Archived', archivedEmpty: 'No archived conversations.', restore: 'Restore', signOut: 'Sign out', newTaskInProject: 'New chat in this project', pin: 'Pin conversation', unpin: 'Unpin conversation', renameHint: 'Double-click to rename', usageHint: 'View token usage', usageTitle: 'Token usage', usageSubtitle: 'Local stats from ~/.codex session history, then accumulates new turns.', usageSubtitleGrok: 'Local stats: accumulates Grok turns from NiceCodex (Build CLI / API).', usageSubtitleClaude: 'Local stats: accumulates Claude Code turns from NiceCodex.', usageSubtitleGemini: 'Local stats from cumulative Gemini CLI native session usage.', usageSubtitleOpenCode: 'Local stats from cumulative OpenCode native session database usage.', usageToday: 'Today', usageWeek: '7 days', usageTwoWeeks: '14 days', usageMonth: '30 days', usageCumulative: 'Cumulative', usageRangeTotal: 'Range total', usageRangeMeta: '{days} days · avg {avg}/day · {count} active days', usageAggregateMeta: 'Lifetime total {count} tokens (daily detail may be unavailable)', usageEmpty: 'No usage data in this range', usagePeakDaily: 'Peak daily', usageLifetimeShort: 'Lifetime {count}', usageInput: 'Input', usageCached: 'Cached', usageOutput: 'Output', usageReasoning: 'Reasoning', usageBreakdown: 'Breakdown',
     },
@@ -2075,6 +2087,11 @@ Object.assign(messages['en-US'].chat, {
   geminiUnderstandCodebasePrompt: 'Use {runtime} to map this project\'s folders, entry points, and most important execution paths.',
 })
 Object.assign(messages['zh-CN'].capabilities, {
+  syncModelMetadata: '同步模型元数据',
+  metadataSummary: '模型 {total} 个 · 已有价格 {priced} 个 · 已有上下文 {contextualized} 个 · 更新于 {updatedAt}',
+  metadataSourceShort: '价格 / 上下文同步',
+  metadataNever: '尚未同步',
+  modelCatalog: '模型目录',
   externalKicker: '原生运行时能力',
   externalModeBanner: '{runtime} 能力中心：读取原生 CLI、模型、历史、用量、MCP 和提示词配置。',
   externalOpenSettings: '打开运行时设置',
@@ -2134,7 +2151,22 @@ Object.assign(messages['zh-CN'].capabilities, {
   externalSkillsHint: '读取全局、项目和插件中的 Skills；Antigravity 同时识别带 frontmatter 的 .md，仅展示元数据，不会修改原生文件。',
   externalSkillsEmpty: '{runtime} 当前没有发现 Skills。',
 })
+Object.assign(messages['zh-CN'].settings, {
+  modelDuplicate: '这个模型已在列表中。',
+  modelLimit: '每个运行时最多保存 {count} 个自定义模型，请先删除不需要的项目。',
+  modelTooLong: '模型 ID 太长，请控制在 160 字节以内。',
+})
+Object.assign(messages['en-US'].settings, {
+  modelDuplicate: 'This model is already in the list.',
+  modelLimit: 'Each runtime supports up to {count} custom models. Remove an unused entry first.',
+  modelTooLong: 'The model ID must be no longer than 160 bytes.',
+})
 Object.assign(messages['en-US'].capabilities, {
+  syncModelMetadata: 'Sync model metadata',
+  metadataSummary: '{total} models · {priced} priced · {contextualized} with context · updated {updatedAt}',
+  metadataSourceShort: 'price / context sync',
+  metadataNever: 'not synced',
+  modelCatalog: 'Model catalog',
   externalKicker: 'NATIVE RUNTIME CAPABILITIES',
   externalModeBanner: '{runtime} capability center: native CLI, models, history, usage, MCP, and instruction configuration.',
   externalOpenSettings: 'Open runtime settings',
@@ -2278,15 +2310,25 @@ Object.assign(messages['en-US'].slash, {
 })
 Object.assign(messages['zh-CN'].chat, {
   effortSliderHint: '拖动选择推理强度，释放后应用到当前会话与后续回合。',
+  resetReasoning: '恢复模型默认推理强度',
   imageTooLarge: '图片过大，单张不能超过 {size}。',
   openImagePreview: '放大查看 {name}',
   imagePreview: '图片预览',
 })
 Object.assign(messages['en-US'].chat, {
   effortSliderHint: 'Drag to choose reasoning effort; release to apply it to this session and future turns.',
+  resetReasoning: 'Reset to model default effort',
   imageTooLarge: 'The image is too large. Each image must be under {size}.',
   openImagePreview: 'Enlarge {name}',
   imagePreview: 'Image preview',
+})
+Object.assign(messages['zh-CN'].timeline, {
+  changedFilesSummary: '已改动 {count} 个文件',
+  viewChanges: '查看改动',
+})
+Object.assign(messages['en-US'].timeline, {
+  changedFilesSummary: 'Changed {count} file | Changed {count} files',
+  viewChanges: 'View changes',
 })
 Object.assign(messages['zh-CN'].slash, {
   goalQueued: '目标命令已加入队列',
@@ -2375,6 +2417,12 @@ Object.assign(messages['en-US'].settings, {
 Object.assign(messages['zh-CN'], {
   providerConfig: {
     title: '模型商原生配置', detecting: '正在读取 CLI 与配置文件…',
+    modelSavedContextFailed: '模型已保存，但自动压缩策略恢复失败',
+    longContextTitle: '1M 长上下文', enable1M: '启用 1M 并保存', apply1MPreset: '应用 1M 预设', presetSelected: '已选择 1M',
+    codex1MHint: '立即保存 1,000,000 Token 窗口与 900,000 Token 自动压缩阈值，重连 Codex 后生效。此预设用于支持 1M 的模型；实际容量取决于模型和服务商，切换到较小窗口模型前请恢复原生。',
+    claude1MHint: '为当前模型选择原生 [1m] 变体并保存当前设置；原生支持 1M 的模型保持原名。新会话使用此选择，已有会话可在输入框模型菜单切换。同时恢复原生自动压缩阈值，可用性取决于账户和服务商。',
+    unknown1MModel: '当前模型的 1M 能力未确认。请选择支持的 Sonnet / Opus 模型；自定义网关请按服务商提供的完整模型名添加。',
+    claude1MBlocked: '原生环境设置 CLAUDE_CODE_DISABLE_1M_CONTEXT 禁用了长上下文，请先在 Claude 配置或启动环境中取消该限制。',
     check: '检查', reload: '重新读取', restart: '重启', reconnect: '重连 Codex',
     applyImmediate: '立即生效', applyNextTurn: '下一回合生效', applyNewSession: '新会话生效', applyReconnect: '重连后生效',
     contextUnknown: '上下文未知', checkFailed: '配置检查失败', reloadFailed: '配置重载失败', restartFailed: '运行时重启失败',
@@ -2399,6 +2447,12 @@ Object.assign(messages['zh-CN'], {
 Object.assign(messages['en-US'], {
   providerConfig: {
     title: 'Native provider configuration', detecting: 'Reading the CLI and configuration file…',
+    modelSavedContextFailed: 'Model saved, but restoring native compaction failed',
+    longContextTitle: '1M context', enable1M: 'Enable 1M and save', apply1MPreset: 'Apply 1M preset', presetSelected: '1M selected',
+    codex1MHint: 'Saves a 1,000,000-token window and a 900,000-token auto-compact threshold. Reconnect Codex to apply. Use with a model and provider that support 1M; restore native defaults before switching to a smaller model.',
+    claude1MHint: 'Selects the native [1m] variant and saves the current settings. Models with native 1M support keep their name. New chats use this choice; switch existing chats from the composer model menu. Also restores native auto-compaction. Account and provider access still apply.',
+    unknown1MModel: '1M support is unconfirmed for this model. Select a supported Sonnet / Opus model, or add the exact model ID supplied by your gateway.',
+    claude1MBlocked: 'CLAUDE_CODE_DISABLE_1M_CONTEXT disables extended context. Remove the restriction in Claude settings or the launch environment first.',
     check: 'Check', reload: 'Read again', restart: 'Restart', reconnect: 'Reconnect Codex',
     applyImmediate: 'Applies immediately', applyNextTurn: 'Applies next turn', applyNewSession: 'Applies to new sessions', applyReconnect: 'Applies after reconnect',
     contextUnknown: 'Context unknown', checkFailed: 'Configuration check failed', reloadFailed: 'Configuration reload failed', restartFailed: 'Runtime restart failed',

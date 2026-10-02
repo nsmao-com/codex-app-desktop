@@ -723,13 +723,13 @@ body {
   }
 }
 
-button:not(:disabled),
+button:not(:disabled):not([role='switch']),
 [role='button']:not([aria-disabled='true']) {
   transition: transform 140ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  button:not(:disabled):active,
+  button:not(:disabled):not([role='switch']):active,
   [role='button']:not([aria-disabled='true']):active {
     transform: scale(0.97);
   }
@@ -800,12 +800,26 @@ kbd {
 
 .scrollbar-thin {
   scrollbar-width: thin;
-  scrollbar-color: rgb(0 0 0 / 18%) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-color: transparent transparent;
 }
 
-.scrollbar-thin::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+/* Scrollbars stay transparent until the scroll container is hovered. A
+   stable gutter keeps content width from changing when the thumb appears. */
+* {
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  scrollbar-color: transparent transparent;
+}
+
+*:hover {
+  scrollbar-color: rgb(0 0 0 / 24%) transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
 
 .scrollbar-thin::-webkit-scrollbar-track {
@@ -815,14 +829,16 @@ kbd {
 }
 
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background-color: rgb(0 0 0 / 16%);
+  background-color: transparent;
   background-clip: padding-box;
   border: 2px solid transparent;
   border-radius: 999px;
+  transition: background-color 160ms ease;
 }
 
-.scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background-color: rgb(0 0 0 / 28%);
+*:hover::-webkit-scrollbar-thumb,
+.scrollbar-thin:hover::-webkit-scrollbar-thumb {
+  background-color: rgb(0 0 0 / 24%);
 }
 
 .scrollbar-thin::-webkit-scrollbar-corner {
@@ -830,15 +846,32 @@ kbd {
 }
 
 :root[data-theme='dark'] .scrollbar-thin {
-  scrollbar-color: rgb(255 255 255 / 22%) transparent;
+  scrollbar-color: transparent transparent;
 }
 
-:root[data-theme='dark'] .scrollbar-thin::-webkit-scrollbar-thumb {
-  background-color: rgb(255 255 255 / 22%);
+:root[data-theme='dark'] * {
+  scrollbar-color: transparent transparent;
 }
 
-:root[data-theme='dark'] .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+:root[data-theme='dark'] *:hover {
+  scrollbar-color: rgb(255 255 255 / 32%) transparent;
+}
+
+:root[data-theme='dark'] *:hover::-webkit-scrollbar-thumb,
+:root[data-theme='dark'] .scrollbar-thin:hover::-webkit-scrollbar-thumb {
   background-color: rgb(255 255 255 / 36%);
+}
+
+/* reka-ui scroll areas render their scrollbar as a sibling of the viewport;
+   keep that layer absolute and reveal it without reserving layout width. */
+[data-slot='scroll-area-scrollbar'] {
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+[data-slot='scroll-area']:hover > [data-slot='scroll-area-scrollbar'],
+[data-slot='scroll-area-scrollbar']:hover {
+  opacity: 1;
 }
 
 /* shadcn-vue base overrides */
@@ -1029,6 +1062,39 @@ kbd {
 
 .claude-prose .prose table {
   font-size: 0.9em;
+}
+
+/* Math follows chat typography; wide display formulas scroll within the message. */
+.markdown-math .katex {
+  font-size: 1.08em;
+  line-height: normal;
+  letter-spacing: normal;
+  text-indent: 0;
+}
+
+.markdown-math-display {
+  display: block;
+  max-width: 100%;
+  margin: 0.65em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  overscroll-behavior-x: contain;
+  padding: 0.2em 0;
+}
+
+.markdown-math-display .katex-display {
+  margin: 0;
+  text-align: left;
+}
+
+.markdown-math-display .katex-display > .katex {
+  text-align: left;
+}
+
+.markdown-math-fallback {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Live stream: plain fallback + incomplete tail (unclosed ` / fence body). */

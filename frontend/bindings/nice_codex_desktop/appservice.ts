@@ -17,6 +17,18 @@ export function AppVersion(): $CancellablePromise<string> {
     return $Call.ByID(257367811);
 }
 
+export function ReloadRuntimeConfiguration(providerID: string): $CancellablePromise<$models.RuntimeReloadResult> {
+    return $Call.ByID(721305853, providerID);
+}
+
+export function CheckFastCtx(checkUpdates: boolean): $CancellablePromise<$models.FastCtxStatus> {
+    return $Call.ByID(845705117, checkUpdates);
+}
+
+export function SyncFastCtx(update: boolean, shellEnabled: boolean): $CancellablePromise<$models.FastCtxActionResult> {
+    return $Call.ByID(4153920932, update, shellEnabled);
+}
+
 export function ApplyProviderRouterToCodex(): $CancellablePromise<$models.ProviderRouterView> {
     return $Call.ByID(231535978);
 }
@@ -826,8 +838,8 @@ export function TranslateConfiguredMessage(text: string, target: string, runtime
 }
 
 /**
- * TranslateMessage sends only the explicitly selected text to Google Cloud.
- * Keys are request-scoped (or provided by the environment), never logged/stored.
+ * TranslateMessage sends only the explicitly selected text to Google Translate.
+ * The API key is optional and retained for backwards compatibility with Cloud Translation.
  */
 export function TranslateMessage(text: string, target: string, apiKey: string): $CancellablePromise<string> {
     return $Call.ByID(930304815, text, target, apiKey);

@@ -23,9 +23,6 @@ func TestTranslationAndComputerUseSettings(t *testing.T) {
 	t.Setenv("GOOGLE_TRANSLATE_API_KEY", "")
 	t.Setenv("CODEX_HOME", t.TempDir())
 	s := &AppService{}
-	if _, err := s.TranslateMessage("hello", "zh-CN", ""); err == nil {
-		t.Fatal("missing key accepted")
-	}
 	if _, err := s.TranslateMessage("hello", "invalid", "key"); err == nil {
 		t.Fatal("invalid target accepted")
 	}
@@ -34,6 +31,15 @@ func TestTranslationAndComputerUseSettings(t *testing.T) {
 	}
 	original := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = original })
+	http.DefaultTransport = translationRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "translate.googleapis.com" || r.URL.Path != "/translate_a/single" || r.URL.Query().Get("client") != "gtx" || r.URL.Query().Get("q") != "hello" {
+			t.Fatal("unsafe keyless translation request")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`[[["你好", "hello", null, null, 1]] ]`)), Header: make(http.Header)}, nil
+	})
+	if result, err := s.TranslateMessage("hello", "zh-CN", ""); err != nil || result != "你好" {
+		t.Fatalf("keyless translation: %q %v", result, err)
+	}
 	http.DefaultTransport = translationRoundTrip(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Host != "translation.googleapis.com" || r.Header.Get("X-Goog-Api-Key") != "test-key" || r.URL.RawQuery != "" {
 			t.Fatal("unsafe translation request")
