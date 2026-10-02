@@ -1,4 +1,25 @@
-import type { AgentProviderModel, AgentProviderRuntime, ModelPricing } from '../../bindings/nice_codex_desktop/models'
+import type { AgentProviderModel as NativeProviderModel, AgentProviderRuntime as NativeProviderRuntime } from '../../bindings/nice_codex_desktop/models'
+
+// Metadata is fetched by the frontend; keep its types outside generated bindings.
+export interface ModelPricing {
+  inputPerMillion: number
+  outputPerMillion: number
+  cacheReadPerMillion: number
+  currency: string
+  source: string
+  updatedAt: string
+}
+
+export interface AgentProviderModel extends NativeProviderModel {
+  contextSource?: string
+  pricing?: ModelPricing
+  metadataSource?: string
+  metadataUpdatedAt?: string
+}
+
+export interface AgentProviderRuntime extends Omit<NativeProviderRuntime, 'models'> {
+  models: AgentProviderModel[] | null
+}
 
 export type ModelMetadataSource = 'openrouter' | 'models.dev' | 'litellm'
 

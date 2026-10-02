@@ -54,7 +54,8 @@ import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
-import type { AgentProviderModel, ExternalRuntimeCatalog, ProviderConfigurationView } from '../../bindings/nice_codex_desktop/models'
+import type { ExternalRuntimeCatalog, ProviderConfigurationView } from '../../bindings/nice_codex_desktop/models'
+import type { AgentProviderModel } from '@/utils/modelMetadata'
 import { useAppStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore } from '@/stores'
 import {
   openClaudeConfigFile,

@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.17: Codex FastCtx integration, runtime configuration reload, reliable custom models and one-click 1M context settings.</sub></p>
+<p align="center"><sub>v1.6.18: Codex FastCtx integration, runtime configuration reload, reliable custom models and one-click 1M context settings.</sub></p>
 
 ## Why Nice Codex
 

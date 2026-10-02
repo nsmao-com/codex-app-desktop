@@ -17,18 +17,6 @@ export function AppVersion(): $CancellablePromise<string> {
     return $Call.ByID(257367811);
 }
 
-export function ReloadRuntimeConfiguration(providerID: string): $CancellablePromise<$models.RuntimeReloadResult> {
-    return $Call.ByID(721305853, providerID);
-}
-
-export function CheckFastCtx(checkUpdates: boolean): $CancellablePromise<$models.FastCtxStatus> {
-    return $Call.ByID(845705117, checkUpdates);
-}
-
-export function SyncFastCtx(update: boolean, shellEnabled: boolean): $CancellablePromise<$models.FastCtxActionResult> {
-    return $Call.ByID(4153920932, update, shellEnabled);
-}
-
 export function ApplyProviderRouterToCodex(): $CancellablePromise<$models.ProviderRouterView> {
     return $Call.ByID(231535978);
 }
@@ -85,6 +73,10 @@ export function CancelUpdateDownload(): $CancellablePromise<void> {
  */
 export function CheckCLITools(): $CancellablePromise<$models.CLIToolsReport> {
     return $Call.ByID(4153243591);
+}
+
+export function CheckFastCtx(checkUpdates: boolean): $CancellablePromise<$models.FastCtxStatus> {
+    return $Call.ByID(845705117, checkUpdates);
 }
 
 export function CheckForUpdates(): $CancellablePromise<$models.UpdateInfo> {
@@ -582,6 +574,14 @@ export function ReloadProviderConfiguration(providerID: string): $CancellablePro
 }
 
 /**
+ * ReloadRuntimeConfiguration is an explicit reconnect, unlike the read-only
+ * configuration inspector. Other CLIs launch fresh processes for each turn.
+ */
+export function ReloadRuntimeConfiguration(providerID: string): $CancellablePromise<$models.RuntimeReloadResult> {
+    return $Call.ByID(721305853, providerID);
+}
+
+/**
  * RemoveClaudeMCPServer removes a user-scope MCP server.
  */
 export function RemoveClaudeMCPServer(name: string): $CancellablePromise<void> {
@@ -831,6 +831,14 @@ export function SwitchGitBranch(request: $models.GitBranchSwitchRequest): $Cance
 }
 
 /**
+ * SyncFastCtx follows the published upstream package; Apply owns the Codex
+ * configuration, managed binary and AGENTS block so upgrades follow its contract.
+ */
+export function SyncFastCtx(update: boolean, shellEnabled: boolean): $CancellablePromise<$models.FastCtxActionResult> {
+    return $Call.ByID(4153920932, update, shellEnabled);
+}
+
+/**
  * TranslateConfiguredMessage never joins a CLI conversation or enables model tools.
  */
 export function TranslateConfiguredMessage(text: string, target: string, runtime: string): $CancellablePromise<string> {
@@ -839,7 +847,9 @@ export function TranslateConfiguredMessage(text: string, target: string, runtime
 
 /**
  * TranslateMessage sends only the explicitly selected text to Google Translate.
- * The API key is optional and retained for backwards compatibility with Cloud Translation.
+ * When a legacy Cloud Translation key is supplied, the Cloud endpoint remains
+ * available for backwards compatibility. The default path uses Google's
+ * public translate endpoint and does not require an API key.
  */
 export function TranslateMessage(text: string, target: string, apiKey: string): $CancellablePromise<string> {
     return $Call.ByID(930304815, text, target, apiKey);

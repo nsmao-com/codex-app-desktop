@@ -12,19 +12,6 @@ export interface AgentProviderModel {
     "description": string;
     "isDefault": boolean;
     "contextWindow": number;
-    "contextSource"?: string;
-    "pricing"?: ModelPricing;
-    "metadataSource"?: string;
-    "metadataUpdatedAt"?: string;
-}
-
-export interface ModelPricing {
-    "inputPerMillion": number;
-    "outputPerMillion": number;
-    "cacheReadPerMillion": number;
-    "currency": string;
-    "source": string;
-    "updatedAt": string;
 }
 
 export interface AgentProviderReasoningEffort {
