@@ -34,13 +34,14 @@ import {
   syncModelMetadata,
 } from '../utils/modelMetadata'
 
-const AppVersionFallback = '1.6.20'
+const AppVersionFallback = '1.6.21'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
 type WorkspaceOrderByRuntime = Record<WorkspaceRuntime, string[]>
 
 const defaultSettings: UserSettings = {
+  vision: { defaultEnabled: false, baseURL: '', model: '', apiKey: '', protocol: 'chat' },
   translationProvider: 'google',
   translationBaseURL: '',
   translationModel: '',
@@ -167,7 +168,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.6.20')
+  const appVersion = shallowRef('1.6.21')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -473,6 +474,11 @@ export const useAppStore = defineStore('app', () => {
     return {
       ...defaultSettings,
       ...saved,
+      vision: {
+        ...defaultSettings.vision,
+        ...(saved.vision ?? next.vision ?? {}),
+        protocol: saved.vision?.protocol || next.vision?.protocol || defaultSettings.vision.protocol,
+      },
       activeRuntime: runtime,
       recentWorkspaces: saved.recentWorkspaces ?? next.recentWorkspaces ?? [],
       grokWorkspace: saved.grokWorkspace ?? next.grokWorkspace ?? '',

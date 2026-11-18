@@ -3,12 +3,18 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"nice_codex_desktop/internal/codex"
@@ -17,6 +23,12 @@ import (
 // Smoke-checks the same Bootstrap / ListModelProviders contracts the UI uses,
 // without needing the Wails window or WebView bindings.
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--vision" {
+		if err := verifyVisionContracts(); err != nil {
+			fail("vision: %v", err)
+		}
+		return
+	}
 	if os.Getenv("NICE_CODEX_VERIFY_CHILD") == "1" && len(os.Args) == 2 && os.Args[1] == "--version" {
 		fmt.Println("codex-cli 0.169.1")
 		return
@@ -156,6 +168,197 @@ func main() {
 	if len(problems) > 0 {
 		os.Exit(1)
 	}
+}
+
+func verifyVisionContracts() error {
+	image, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
+	if err != nil {
+		return err
+	}
+	responses := map[string]string{
+		"chat":      `{"choices":[{"finish_reason":"stop","message":{"content":"图片文字"}}]}`,
+		"responses": `{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"图片文字"}]}]}`,
+		"anthropic": `{"stop_reason":"end_turn","content":[{"type":"text","text":"图片文字"}]}`,
+	}
+	for _, protocol := range []string{"chat", "responses", "anthropic"} {
+		var payload map[string]any
+		var requestPath, auth, key, version string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestPath, auth, key, version = r.URL.Path, r.Header.Get("Authorization"), r.Header.Get("x-api-key"), r.Header.Get("anthropic-version")
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			_, _ = io.WriteString(w, responses[protocol])
+		}))
+		config := VisionConfiguration{BaseURL: server.URL + "/v1", Model: "vision-id", APIKey: "verify-secret", Protocol: protocol}
+		analysis, analysisErr := analyzeVisionImages(context.Background(), config, "识别数字", [][]byte{image}, visionClient())
+		server.Close()
+		if analysisErr != nil || analysis.Text != "图片文字" || analysis.Model != "vision-id" || analysis.ImageCount != 1 {
+			return fmt.Errorf("%s analysis contract: %v", protocol, analysisErr)
+		}
+		wantPath, field := "/v1/chat/completions", "messages"
+		if protocol == "responses" {
+			wantPath, field = "/v1/responses", "input"
+		}
+		if protocol == "anthropic" {
+			wantPath = "/v1/messages"
+		}
+		if requestPath != wantPath || payload["model"] != "vision-id" || payload["stream"] != false {
+			return fmt.Errorf("%s request route/model mismatch", protocol)
+		}
+		if protocol == "anthropic" {
+			if key != "verify-secret" || auth != "" || version != "2023-06-01" || payload["max_tokens"] != float64(8192) {
+				return fmt.Errorf("anthropic headers/limit mismatch")
+			}
+		} else if auth != "Bearer verify-secret" || key != "" {
+			return fmt.Errorf("%s auth mismatch", protocol)
+		}
+		if protocol == "responses" && payload["store"] != false {
+			return fmt.Errorf("responses store must be false")
+		}
+		messages, ok := payload[field].([]any)
+		if !ok || len(messages) != 1 {
+			return fmt.Errorf("%s missing messages", protocol)
+		}
+		message, ok := messages[0].(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s malformed message", protocol)
+		}
+		content, ok := message["content"].([]any)
+		if !ok || len(content) != 3 {
+			return fmt.Errorf("%s missing image content", protocol)
+		}
+		encoded, _ := json.Marshal(content)
+		if !strings.Contains(string(encoded), base64.StdEncoding.EncodeToString(image)) || !strings.Contains(string(encoded), "识别数字") {
+			return fmt.Errorf("%s image/question missing", protocol)
+		}
+		imagePart := content[2].(map[string]any)
+		if protocol == "anthropic" {
+			source, ok := imagePart["source"].(map[string]any)
+			if !ok || source["media_type"] != "image/png" || imagePart["type"] != "image" {
+				return fmt.Errorf("anthropic image shape")
+			}
+		} else if protocol == "responses" {
+			if imagePart["type"] != "input_image" {
+				return fmt.Errorf("responses image shape")
+			}
+		} else if imagePart["type"] != "image_url" {
+			return fmt.Errorf("chat image shape")
+		}
+	}
+	for _, invalid := range []struct{ protocol, body string }{
+		{"chat", `{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}`},
+		{"chat", `{"choices":[{"finish_reason":"stop","message":{"content":" "}}]}`},
+		{"chat", `{"error":{"message":"private secret"}}`},
+		{"chat", `not-json`},
+		{"responses", `{"status":"incomplete","output":[]}`},
+		{"anthropic", `{"stop_reason":"max_tokens","content":[]}`},
+		{"chat", `{"choices":[{"finish_reason":"stop","message":{"content":"` + strings.Repeat("a", 64001) + `"}}]}`},
+	} {
+		if _, err := parseVisionAnalysis([]byte(invalid.body), invalid.protocol); err == nil {
+			return fmt.Errorf("accepted incomplete/invalid %s response", invalid.protocol)
+		}
+	}
+	for _, address := range []string{"https://user:secret@example.com/v1", "https://example.com/v1?key=secret", "http://example.com/v1"} {
+		config := VisionConfiguration{BaseURL: address}
+		if validateVisionConfiguration(&config, false) == nil {
+			return fmt.Errorf("accepted unsafe vision address")
+		}
+	}
+	root, err := os.MkdirTemp("", "nice-vision-verify-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(root)
+	path := filepath.Join(root, "picture.png")
+	if err := os.WriteFile(path, image, 0600); err != nil {
+		return err
+	}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"b"},{"id":"a"},{"id":"a"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, responses["chat"])
+	}))
+	defer server.Close()
+	service := &AppService{settings: defaultSettings(), settingsPath: filepath.Join(root, "settings.json"), allowedImages: map[string]struct{}{}}
+	service.settings.Vision = VisionConfiguration{BaseURL: server.URL + "/v1", Model: "vision-id", Protocol: "chat"}
+	if _, err := service.AnalyzeComposerImages(context.Background(), "", []string{path}); err == nil {
+		return fmt.Errorf("accepted unauthorized attachment")
+	}
+	if requests.Load() != 0 {
+		return fmt.Errorf("unauthorized image sent")
+	}
+	service.allowedImages[imageAttachmentKey(path)] = struct{}{}
+	if _, err := service.AnalyzeComposerImages(context.Background(), "", []string{path}); err != nil {
+		return err
+	}
+	for _, images := range [][]string{nil, {path, path, path, path, path, path, path, path, path}} {
+		if _, err := service.AnalyzeComposerImages(context.Background(), "", images); err == nil {
+			return fmt.Errorf("image count not enforced")
+		}
+	}
+	if _, err := service.AnalyzeComposerImages(context.Background(), strings.Repeat("x", 32001), []string{path}); err == nil {
+		return fmt.Errorf("question limit not enforced")
+	}
+	if err := os.WriteFile(path, []byte("not an image"), 0600); err != nil {
+		return err
+	}
+	if _, err := service.AnalyzeComposerImages(context.Background(), "", []string{path}); err == nil {
+		return fmt.Errorf("accepted spoofed image")
+	}
+	if requests.Load() != 1 {
+		return fmt.Errorf("invalid image sent")
+	}
+	models, err := service.ListVisionModels(context.Background(), service.settings.Vision)
+	if err != nil || strings.Join(models, ",") != "a,b" {
+		return fmt.Errorf("model catalog mismatch: %v", err)
+	}
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	cancelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(started)
+		<-r.Context().Done()
+		close(cancelled)
+	}))
+	defer cancelServer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := analyzeVisionImages(ctx, VisionConfiguration{BaseURL: cancelServer.URL, Model: "vision-id", Protocol: "chat"}, "", [][]byte{image}, visionClient())
+		result <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("cancel request not started")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			return fmt.Errorf("cancel ignored")
+		}
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("cancel did not stop client")
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("cancel did not reach HTTP server")
+	}
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, server.URL+"/v1/models", http.StatusFound)
+	}))
+	defer redirect.Close()
+	before := requests.Load()
+	if _, err := service.ListVisionModels(context.Background(), VisionConfiguration{BaseURL: redirect.URL, APIKey: "verify-secret"}); err == nil || before != requests.Load() {
+		return fmt.Errorf("redirect followed")
+	}
+	fmt.Println(`{"ok":true,"vision":"three protocols, complete responses, attachment allowlist, limits, model catalog, HTTP cancellation and redirects"}`)
+	return nil
 }
 
 func verifyCapabilityContracts() error {

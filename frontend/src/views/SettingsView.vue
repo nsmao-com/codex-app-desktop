@@ -12,6 +12,7 @@ import {
   Download,
   FolderOpen,
   GitBranch,
+  Image as ImageIcon,
   Laptop,
   Languages,
   LogIn,
@@ -76,6 +77,7 @@ import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import CapabilitiesView from '@/views/CapabilitiesView.vue'
 import ComputerUseSettings from '@/components/ComputerUseSettings.vue'
 import TranslationSettings from '@/components/TranslationSettings.vue'
+import VisionSettings from '@/components/VisionSettings.vue'
 import FastCtxSettings from '@/components/FastCtxSettings.vue'
 import SettingsCard from '@/components/SettingsCard.vue'
 import ReasoningSlider from '@/components/ReasoningSlider.vue'
@@ -118,6 +120,7 @@ type SettingsPanel =
   | 'routing'
   | 'computer-use'
   | 'translation'
+  | 'vision'
 
 type NavItem = {
   id: SettingsPanel
@@ -881,6 +884,7 @@ const navGroups = computed<NavGroup[]>(() => [
       { id: 'appearance', label: t('settings.navAppearance'), icon: Palette, keywords: 'appearance theme font 外观 主题 字体' },
       { id: 'shortcuts', label: t('settings.navShortcuts'), icon: Keyboard, keywords: 'keyboard shortcuts hotkeys 快捷键' },
       { id: 'translation', label: '消息翻译', icon: Languages, keywords: 'translation google 翻译 谷歌 baseurl key 模型' },
+      { id: 'vision', label: '独立视觉模型', icon: ImageIcon, keywords: 'vision image visual 图片 视觉模型 多模态 看图' },
       { id: 'agent', label: t('settings.navAgent'), icon: agentSettingsIcon.value, keywords: 'agent model codex claude gemini grok opencode 配置 模型' },
       { id: 'personalization', label: t('settings.navPersonalization'), icon: Smile, keywords: 'personality collaboration instructions AGENTS memories 个性化 记忆 全局提示词 项目提示词' },
       { id: 'usage', label: t('settings.navUsage'), icon: BarChart3, keywords: 'usage tokens chart models analytics 用量 token 图表 模型 统计' },
@@ -1169,7 +1173,7 @@ watch(() => route.query.section, (section) => {
 function isSettingsPanel(value: string): value is SettingsPanel {
   return [
     'general', 'appearance', 'shortcuts', 'agent', 'personalization', 'usage', 'account', 'archived',
-    'browser', 'environment', 'git', 'scheduled', 'routing', 'computer-use', 'translation',
+    'browser', 'environment', 'git', 'scheduled', 'routing', 'computer-use', 'translation', 'vision',
   ].includes(value)
 }
 
@@ -2227,6 +2231,7 @@ async function onNotifyToggle(enabled: boolean): Promise<void> {
             </div>
             <ComputerUseSettings v-if="activePanel === 'computer-use'" />
             <TranslationSettings v-if="activePanel === 'translation'" />
+            <VisionSettings v-if="activePanel === 'vision'" />
             <!-- General -->
             <template v-if="activePanel === 'general'">
               <section class="overflow-hidden rounded-xl border bg-card">

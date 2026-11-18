@@ -13,6 +13,10 @@ import * as codex$0 from "./internal/codex/models.js";
 // @ts-ignore: Unused imports
 import * as $models from "./models.js";
 
+export function AnalyzeComposerImages(text: string, images: string[] | null): $CancellablePromise<$models.VisionAnalysis> {
+    return $Call.ByID(2994192586, text, images);
+}
+
 export function AppVersion(): $CancellablePromise<string> {
     return $Call.ByID(257367811);
 }
@@ -304,6 +308,13 @@ export function ListSystemFonts(): $CancellablePromise<$models.SystemFont[] | nu
 
 export function ListThreads(search: string): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3185449219, search);
+}
+
+/**
+ * ListVisionModels loads the user's draft endpoint without persisting it.
+ */
+export function ListVisionModels(config: $models.VisionConfiguration): $CancellablePromise<string[] | null> {
+    return $Call.ByID(2952705384, config);
 }
 
 export function ListWorkspaceThreads(workspace: string, search: string): $CancellablePromise<{ [_ in string]?: any } | null> {

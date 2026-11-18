@@ -978,6 +978,7 @@ export interface UpdateProgress {
 }
 
 export interface UserSettings {
+    "vision": VisionConfiguration;
     "translationProvider": string;
     "translationBaseURL": string;
     "translationModel": string;
@@ -1112,6 +1113,24 @@ export interface UserSettings {
     "networkProxyUrl": string;
     "networkProxyNoProxy": string;
     "onboardingCompleted": boolean;
+}
+
+export interface VisionAnalysis {
+    "text": string;
+    "model": string;
+    "imageCount": number;
+}
+
+/**
+ * Vision is separate from CLI authentication: only this explicitly configured
+ * endpoint receives images. OAuth credentials are never reused here.
+ */
+export interface VisionConfiguration {
+    "defaultEnabled": boolean;
+    "baseURL": string;
+    "model": string;
+    "apiKey": string;
+    "protocol": string;
 }
 
 export interface WorkspaceInfo {

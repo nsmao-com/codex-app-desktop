@@ -128,24 +128,25 @@ type BootstrapData struct {
 }
 
 type UserSettings struct {
-	TranslationProvider  string   `json:"translationProvider"`
-	TranslationBaseURL   string   `json:"translationBaseURL"`
-	TranslationModel     string   `json:"translationModel"`
-	TranslationAPIKey    string   `json:"translationAPIKey"`
-	TranslationGoogleKey string   `json:"translationGoogleKey"`
-	ActiveRuntime        string   `json:"activeRuntime"`
-	Workspace            string   `json:"workspace"`
-	RecentWorkspaces     []string `json:"recentWorkspaces"`
-	GrokWorkspace        string   `json:"grokWorkspace"`
-	GrokRecentWorkspaces []string `json:"grokRecentWorkspaces"`
-	GrokBackend          string   `json:"grokBackend"`
-	GrokBuildModel       string   `json:"grokBuildModel"`
-	GrokAPIModel         string   `json:"grokAPIModel"`
-	GrokEffort           string   `json:"grokEffort"`
-	GrokSandbox          string   `json:"grokSandbox"`
-	GrokApprovalPolicy   string   `json:"grokApprovalPolicy"`
-	GrokWebSearch        bool     `json:"grokWebSearch"`
-	GrokXSearch          bool     `json:"grokXSearch"`
+	Vision               VisionConfiguration `json:"vision"`
+	TranslationProvider  string              `json:"translationProvider"`
+	TranslationBaseURL   string              `json:"translationBaseURL"`
+	TranslationModel     string              `json:"translationModel"`
+	TranslationAPIKey    string              `json:"translationAPIKey"`
+	TranslationGoogleKey string              `json:"translationGoogleKey"`
+	ActiveRuntime        string              `json:"activeRuntime"`
+	Workspace            string              `json:"workspace"`
+	RecentWorkspaces     []string            `json:"recentWorkspaces"`
+	GrokWorkspace        string              `json:"grokWorkspace"`
+	GrokRecentWorkspaces []string            `json:"grokRecentWorkspaces"`
+	GrokBackend          string              `json:"grokBackend"`
+	GrokBuildModel       string              `json:"grokBuildModel"`
+	GrokAPIModel         string              `json:"grokAPIModel"`
+	GrokEffort           string              `json:"grokEffort"`
+	GrokSandbox          string              `json:"grokSandbox"`
+	GrokApprovalPolicy   string              `json:"grokApprovalPolicy"`
+	GrokWebSearch        bool                `json:"grokWebSearch"`
+	GrokXSearch          bool                `json:"grokXSearch"`
 	// GrokAPIKey / GrokAPIBaseURL configure NiceCodex Grok API mode (OpenAI-compatible).
 	// Empty key falls back to XAI_API_KEY / GROK_API_KEY env; empty base uses https://api.x.ai/v1.
 	GrokAPIKey     string `json:"grokAPIKey"`
@@ -458,6 +459,9 @@ func (s *AppService) SavePreferences(settings UserSettings) (UserSettings, error
 	settings.Effort = strings.TrimSpace(settings.Effort)
 	settings.ActiveRuntime = normalizeRuntime(settings.ActiveRuntime)
 	if err := validateTranslationSettings(&settings); err != nil {
+		return UserSettings{}, err
+	}
+	if err := validateVisionConfiguration(&settings.Vision, settings.Vision.DefaultEnabled); err != nil {
 		return UserSettings{}, err
 	}
 	settings.GrokBackend = normalizeGrokBackend(settings.GrokBackend)
@@ -3971,6 +3975,7 @@ func defaultSettings() UserSettings {
 		}
 	}
 	return UserSettings{
+		Vision:                    VisionConfiguration{Protocol: "chat"},
 		ActiveRuntime:             "codex",
 		GrokBackend:               "build",
 		GrokBuildModel:            "",

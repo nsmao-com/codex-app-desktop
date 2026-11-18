@@ -33,7 +33,7 @@ import {
   X,
   Zap,
 } from '@lucide/vue'
-import { computed, nextTick, onMounted, shallowRef, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, shallowRef, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 
@@ -1796,7 +1796,7 @@ function consumeSubmittedDraft(draftKey: string): void {
   emit('consume-draft', { draftKey })
 }
 
-async function performSend(submission: ComposerSubmission): Promise<void> {
+async function performSend(submission: ComposerSubmission, prepared?: { message: string; images: string[] }): Promise<void> {
   const {
     message,
     images,
@@ -1806,19 +1806,28 @@ async function performSend(submission: ComposerSubmission): Promise<void> {
     targetRuntime,
     targetWorkspace,
   } = submission
+  const outgoingMessage = prepared?.message ?? message
+  const outgoingImages = prepared?.images ?? images
   if (!message && !images.length) return
   const targetSessionId = arena && !submission.targetSessionId
     ? await prepareArenaSession(targetPaneId, targetRuntime)
     : submission.targetSessionId
   if (targetSessionId === null) return
+  const draftIsCurrent = (): boolean => !prepared || (
+    props.draftKey === draftKey && paneRuntime.value === targetRuntime && paneId.value === targetPaneId
+    && composerSessionId.value === (targetSessionId || '')
+    && composerTargetWorkspace(targetRuntime, composerSessionId.value) === targetWorkspace
+    && modelValue.value.trim() === message && JSON.stringify(attachedImages.value) === JSON.stringify(images)
+  )
+  if (!draftIsCurrent()) return
   if (targetRuntime === 'grok') {
     // Do not gate on sending — busy turns enqueue like Codex.
     if (!grokStore.isReady) return
     resetSentHistoryNavigation()
     consumeSubmittedDraft(draftKey)
     const sendPromise = grokStore.sendMessage(
-      message,
-      images,
+      outgoingMessage,
+      outgoingImages,
       targetSessionId || '',
       targetWorkspace,
     )
@@ -1845,8 +1854,8 @@ async function performSend(submission: ComposerSubmission): Promise<void> {
     resetSentHistoryNavigation()
     consumeSubmittedDraft(draftKey)
     const sendPromise = claudeStore.sendMessage(
-      message,
-      images,
+      outgoingMessage,
+      outgoingImages,
       targetSessionId || '',
       targetWorkspace,
     )
@@ -1882,11 +1891,12 @@ async function performSend(submission: ComposerSubmission): Promise<void> {
   }
   const codexTargetWorkspace = targetThread?.cwd || targetWorkspace
   if (!codexTargetWorkspace) return
+  if (!draftIsCurrent()) return
   resetSentHistoryNavigation()
   consumeSubmittedDraft(draftKey)
   const sendPromise = codexStore.sendMessage(
-    message,
-    images,
+    outgoingMessage,
+    outgoingImages,
     targetSessionId || '',
     targetRuntime,
     codexTargetWorkspace,
@@ -1935,9 +1945,34 @@ function canAdmitSubmissionSynchronously(submission: ComposerSubmission): boolea
     )
 }
 
+const useVision = shallowRef(Boolean(appStore.settings.vision?.defaultEnabled))
+const visionBusy = shallowRef(false)
+const visionError = shallowRef('')
+let visionRequest: ReturnType<typeof backend.AnalyzeComposerImages> | null = null
+let visionRevision = 0
+function cancelVision(): void {
+  visionRevision++
+  visionRequest?.cancel()
+  visionRequest = null
+  visionBusy.value = false
+}
+function visionDraftSignature(): string {
+  return JSON.stringify([props.draftKey, modelValue.value, attachedImages.value, paneRuntime.value,
+    paneId.value, composerSessionId.value, composerTargetWorkspace(paneRuntime.value, composerSessionId.value),
+    composerMode.value, useVision.value, appStore.settings.vision])
+}
+watch(visionDraftSignature, () => {
+  if (visionRequest) cancelVision()
+  visionError.value = ''
+}, { flush: 'sync' })
+watch(() => [props.draftKey, appStore.settings.vision?.defaultEnabled], () => {
+  useVision.value = Boolean(appStore.settings.vision?.defaultEnabled)
+})
+onBeforeUnmount(cancelVision)
+
 async function send(): Promise<void> {
   const draftKey = props.draftKey
-  if (sendAdmissionPending.value) return
+  if (sendAdmissionPending.value || visionBusy.value) return
   if (attachingImages.value) return
   if (!isArenaPane.value && workspaceStore.switchingWorkspace && !canSendDuringWorkspaceSwitch.value) return
   if (isArenaPane.value && workspaceStore.switchingWorkspace && !composerSessionId.value) return
@@ -1961,9 +1996,31 @@ async function send(): Promise<void> {
   }
   const requestId = `composer-send-${Date.now()}-${++sendAdmissionSequence}`
   try {
+    let prepared: { message: string; images: string[] } | undefined
+    if (useVision.value && submission.images.length) {
+      visionError.value = ''
+      const signature = visionDraftSignature()
+      const revision = ++visionRevision
+      visionBusy.value = true
+      const request = backend.AnalyzeComposerImages(submission.message, submission.images)
+      visionRequest = request
+      try {
+        const analysis = await request
+        if (revision !== visionRevision || signature !== visionDraftSignature()) return
+        prepared = {
+          message: `${submission.message}\n\n[独立视觉模型 ${analysis.model} 对 ${analysis.imageCount} 张图片的分析，仅供参考，可能存在识别错误]\n${analysis.text}`.trim(),
+          images: [],
+        }
+      } catch (reason) {
+        if (revision === visionRevision) visionError.value = reason instanceof Error ? reason.message : String(reason)
+        return
+      } finally {
+        if (revision === visionRevision) { visionRequest = null; visionBusy.value = false }
+      }
+    }
     // Start admission first: provider stores synchronously append the user row
     // before their first RPC await, so the first painted order is user -> thinking.
-    const sendPromise = performSend(submission)
+    const sendPromise = performSend(submission, prepared)
     if (showOptimisticThinking) {
       emit('send-pending-change', { requestId, draftKey, pending: true })
       await nextTick()
@@ -2768,6 +2825,17 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
             <X :size="11" />
           </Button>
         </div>
+      </div>
+
+      <div v-if="!isGoalComposer && attachedImages.length" class="min-w-0 space-y-2 rounded-lg border border-border/60 p-2 text-xs">
+        <div class="flex flex-wrap items-center gap-2">
+          <Button type="button" size="sm" :variant="!useVision ? 'secondary' : 'ghost'" :aria-pressed="!useVision" @click="useVision = false">原图直传</Button>
+          <Button type="button" size="sm" :variant="useVision ? 'secondary' : 'ghost'" :aria-pressed="useVision" @click="useVision = true">视觉模型转文字</Button>
+          <Button type="button" size="sm" variant="ghost" @click="router.push({ name: 'settings', query: { section: 'vision' } })">视觉设置</Button>
+        </div>
+        <p v-if="useVision" class="break-all leading-5 text-muted-foreground">{{ appStore.settings.vision?.model || '请先配置视觉模型' }} · {{ appStore.settings.vision?.baseURL || '尚未设置接口' }}。发送时该接口会收到本条问题和图片；主模型只收到分析文字。</p>
+        <div v-if="visionBusy" role="status" class="flex flex-wrap items-center gap-2"><LoaderCircle :size="14" class="animate-spin" /><span>正在分析图片，草稿会保留…</span><Button type="button" size="sm" variant="outline" @click="cancelVision">取消分析</Button></div>
+        <p v-if="visionError" role="alert" class="break-words text-destructive">{{ visionError }}</p>
       </div>
 
       <div

@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.20：新增原生插件启停，完整读取能力目录，修复 Computer Use 状态误报与刷新竞态。</sub></p>
+<p align="center"><sub>v1.6.21：新增独立视觉模型预处理、可取消图片分析与多服务商安全图片发送。</sub></p>
 
 ## 为什么是 Nice Codex
 

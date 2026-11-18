@@ -93,5 +93,7 @@ export type {
     UpdateInfo,
     UpdateProgress,
     UserSettings,
+    VisionAnalysis,
+    VisionConfiguration,
     WorkspaceInfo
 } from "./models.js";
