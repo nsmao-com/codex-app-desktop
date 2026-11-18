@@ -12,6 +12,7 @@ const SERVICE = 'nice_codex_desktop.AppService'
 export interface ClaudeRuntimeStatus {
   available: boolean
   authenticated: boolean
+  status?: string
   version: string
   executable: string
   message: string

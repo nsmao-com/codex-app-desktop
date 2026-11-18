@@ -67,6 +67,20 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--claude-health" {
+		if err := verifyClaudeHealth(); err != nil {
+			fail("Claude health: %v", err)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--claude-detect" {
+		status := detectClaudeRuntime()
+		_ = json.NewEncoder(os.Stdout).Encode(status)
+		if !status.Available {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--capabilities" {
 		if err := verifyCapabilityContracts(); err != nil {
 			fail("capabilities: %v", err)
@@ -788,6 +802,48 @@ func verifyCapabilityContracts() error {
 		}
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"feature pagination", "repeated cursor and read errors", "native enablement acknowledgement", "literal plugin ID and merge payload"}})
+}
+
+func verifyClaudeHealth() error {
+	cases := []struct {
+		name, executable, version, auth, state string
+		versionErr, authErr                    error
+		available, authenticated               bool
+		calls                                  int
+	}{
+		{name: "missing", state: "not-installed"},
+		{name: "version failure", executable: "claude", versionErr: fmt.Errorf("failed"), state: "configuration-error", calls: 1},
+		{name: "empty version", executable: "claude", state: "configuration-error", calls: 1},
+		{name: "non-version output", executable: "claude", version: "Please sign in to continue", state: "configuration-error", calls: 1},
+		{name: "valid", executable: "claude", version: "2.1.278 (Claude Code)", auth: "{\n\t\"loggedIn\": true\n}", state: "ready", available: true, authenticated: true, calls: 2},
+		{name: "alternate boolean", executable: "claude", version: "2.1.278", auth: `{"authenticated":true}`, state: "ready", available: true, authenticated: true, calls: 2},
+		{name: "signed out exit 1", executable: "claude", version: "2.1.278", auth: `{"loggedIn":false}`, authErr: fmt.Errorf("exit 1"), state: "authentication-required", available: true, calls: 2},
+		{name: "unsupported auth command", executable: "claude", version: "2.1.278", auth: "unknown command", authErr: fmt.Errorf("exit 1"), state: "authentication-unknown", available: true, calls: 2},
+		{name: "invalid JSON", executable: "claude", version: "2.1.278", auth: `garbage "loggedIn":true`, state: "authentication-unknown", available: true, calls: 2},
+		{name: "string boolean", executable: "claude", version: "2.1.278", auth: `{"loggedIn":"true"}`, state: "authentication-unknown", available: true, calls: 2},
+		{name: "missing auth field", executable: "claude", version: "2.1.278", auth: `{}`, state: "authentication-unknown", available: true, calls: 2},
+		{name: "true with command error", executable: "claude", version: "2.1.278", auth: `{"loggedIn":true}`, authErr: fmt.Errorf("timeout"), state: "authentication-unknown", available: true, calls: 2},
+		{name: "conflicting legacy field", executable: "claude", version: "2.1.278", auth: `{"loggedIn":false,"authenticated":true}`, state: "authentication-required", available: true, calls: 2},
+	}
+	for _, item := range cases {
+		calls := 0
+		status := probeClaudeRuntime(item.executable, func(_ string, args []string, _ time.Duration) (string, error) {
+			calls++
+			if len(args) == 1 && args[0] == "--version" {
+				return item.version, item.versionErr
+			}
+			return item.auth, item.authErr
+		})
+		if status.Status != item.state || status.Available != item.available || status.Authenticated != item.authenticated || calls != item.calls {
+			return fmt.Errorf("%s: unexpected status %+v (%d calls)", item.name, status, calls)
+		}
+		provider := AgentProviderRuntime{Installed: true, Healthy: true, RuntimeReady: true, Status: "ready"}
+		applyClaudeRuntimeStatus(&provider, status)
+		if provider.Installed != (item.executable != "") || provider.Healthy != item.available || provider.Status != item.state {
+			return fmt.Errorf("%s: provider badge differs from runtime", item.name)
+		}
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "claudeHealthCases": len(cases)})
 }
 
 func verifyCLIDiscovery() error {

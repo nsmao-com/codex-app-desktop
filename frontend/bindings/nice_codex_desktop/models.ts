@@ -241,6 +241,7 @@ export interface ClaudeRuntimeStatus {
     "version": string;
     "executable": string;
     "message": string;
+    "status": string;
 }
 
 /**

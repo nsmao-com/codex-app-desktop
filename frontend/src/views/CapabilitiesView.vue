@@ -57,6 +57,7 @@ import { Textarea } from '@/components/ui/textarea'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type { ExternalRuntimeCatalog, ProviderConfigurationView } from '../../bindings/nice_codex_desktop/models'
 import type { AgentProviderModel } from '@/utils/modelMetadata'
+import { claudeRuntimeStatusKey } from '@/utils/runtimeProviders'
 import { useAppStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore } from '@/stores'
 import {
   openClaudeConfigFile,
@@ -385,7 +386,10 @@ async function loadClaudeCatalog(): Promise<void> {
     const message = error instanceof Error ? error.message : String(error)
     notify('error', t('capabilities.loading'), message)
     claudeCatalog.value = {
-      runtime: claudeStore.runtime,
+      runtime: {
+        available: false, authenticated: false, version: '', executable: '',
+        status: 'configuration-error', message,
+      },
       configPath: '',
       claudeHome: '',
       claudeJsonPath: '',
@@ -1525,20 +1529,18 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                         <div class="rounded-lg border px-3 py-2">
                           <p class="text-[10px] uppercase tracking-wide text-muted-foreground">CLI</p>
                           <p class="mt-1 font-medium">
-                            {{ (claudeCatalog?.runtime.available || claudeProvider?.runtimeReady)
+                            {{ (claudeCatalog ? claudeCatalog.runtime.available : claudeProvider?.healthy)
                               ? t('capabilities.ready')
                               : t('capabilities.unavailable') }}
                           </p>
                           <p class="mt-0.5 font-mono text-[10px] text-muted-foreground">
-                            {{ claudeCatalog?.runtime.version || claudeProvider?.version || '—' }}
+                            {{ (claudeCatalog ? claudeCatalog.runtime.version : claudeProvider?.version) || '—' }}
                           </p>
                         </div>
                         <div class="rounded-lg border px-3 py-2">
                           <p class="text-[10px] uppercase tracking-wide text-muted-foreground">Auth</p>
                           <p class="mt-1 font-medium">
-                            {{ claudeCatalog?.runtime.authenticated
-                              ? t('capabilities.ready')
-                              : t('capabilities.unavailable') }}
+                            {{ t(claudeRuntimeStatusKey(claudeCatalog?.runtime.status || claudeProvider?.status)) }}
                           </p>
                           <p class="mt-0.5 text-[10px] text-muted-foreground">
                             {{ claudeCatalog?.runtime.message || claudeProvider?.message || '—' }}

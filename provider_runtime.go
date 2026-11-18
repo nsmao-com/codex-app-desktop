@@ -170,15 +170,6 @@ func detectAgentProviders(codexDetection codex.Detection) []AgentProviderRuntime
 		id: "opencode", name: "OpenCode", commands: commandCandidates("opencode"),
 		capabilities: []string{"cli", "streaming", "tools", "mcp", "sessions"}, healthArgs: []string{"--version"},
 	})
-	// Fallback health probe when `auth status --json` is unavailable on older CLIs.
-	if claudeProvider.Installed && claudeProvider.Status == "configuration-error" {
-		if _, err := runProbeCommand(claudeProvider.Executable, []string{"--version"}, 3*time.Second); err == nil {
-			claudeProvider.Healthy = true
-			claudeProvider.RuntimeReady = true
-			claudeProvider.Status = providerStatus(true, true, true)
-			claudeProvider.Message = "Claude Code installed"
-		}
-	}
 	if claudeProvider.Installed && claudeProvider.Message == "" {
 		claudeProvider.Message = "Claude Code CLI"
 	}
@@ -204,7 +195,7 @@ func detectAgentProvidersQuick(codexDetection codex.Detection, grokStatus GrokRu
 		Name:             "Claude Code",
 		Kind:             "claude",
 		Installed:        claudeAvailable,
-		Healthy:          claudeAvailable,
+		Healthy:          false,
 		RuntimeReady:     claudeAvailable,
 		Executable:       claudeExecutable,
 		Status:           providerStatus(claudeAvailable, claudeAvailable, true),
@@ -212,6 +203,9 @@ func detectAgentProvidersQuick(codexDetection codex.Detection, grokStatus GrokRu
 		Capabilities:     []string{"cli", "streaming", "tools", "mcp"},
 		Models:           claudeModels,
 		ReasoningEfforts: claudeEfforts,
+	}
+	if claudeAvailable {
+		claudeProvider.Status = "unverified"
 	}
 	geminiModels, geminiEfforts := discoverProviderCatalog("gemini")
 	geminiExecutable := findGeminiExecutable()
@@ -348,6 +342,10 @@ func runProviderProbe(probe providerProbe) AgentProviderRuntime {
 	if probe.id == "gemini" {
 		result.Name = geminiRuntimeDisplayName(executable)
 	}
+	if probe.id == "claude" {
+		applyClaudeRuntimeStatus(&result, probeClaudeRuntime(executable, runProbeCommand))
+		return result
+	}
 	versionOutput, _ := runProbeCommand(executable, []string{"--version"}, 2500*time.Millisecond)
 	result.Version = firstOutputLine(versionOutput)
 
@@ -355,11 +353,6 @@ func runProviderProbe(probe providerProbe) AgentProviderRuntime {
 	if err != nil || containsConfigurationError(output) {
 		result.Status = "configuration-error"
 		result.Message = conciseProbeError(output, err)
-		return result
-	}
-	if probe.id == "claude" && !strings.Contains(strings.ReplaceAll(output, " ", ""), `"loggedIn":true`) {
-		result.Status = "authentication-required"
-		result.Message = "Claude Code is installed but is not signed in"
 		return result
 	}
 	result.Healthy = true

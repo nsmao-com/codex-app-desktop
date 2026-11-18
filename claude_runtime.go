@@ -24,6 +24,7 @@ type ClaudeRuntimeStatus struct {
 	Version       string `json:"version"`
 	Executable    string `json:"executable"`
 	Message       string `json:"message"`
+	Status        string `json:"status"`
 }
 
 // ClaudeSessionSummary is a sidebar row for Claude history.
@@ -132,38 +133,69 @@ func resolveClaudeHome() string {
 }
 
 func detectClaudeRuntime() ClaudeRuntimeStatus {
-	codexEnrich := func() { /* path enrichment via findCommand */ }
-	_ = codexEnrich
-	status := ClaudeRuntimeStatus{}
-	executable := findCommand(commandCandidates("claude"))
+	return probeClaudeRuntime(findCommand(commandCandidates("claude")), runProbeCommand)
+}
+
+func probeClaudeRuntime(executable string, probe func(string, []string, time.Duration) (string, error)) ClaudeRuntimeStatus {
+	status := ClaudeRuntimeStatus{Executable: executable, Status: "not-installed"}
 	if executable == "" {
 		status.Message = "Install Claude Code CLI (claude) to use this runtime"
 		return status
 	}
-	status.Available = true
-	status.Executable = executable
-	if out, err := runProbeCommand(executable, []string{"--version"}, 4*time.Second); err == nil {
-		status.Version = firstOutputLine(out)
-	} else if out != "" {
-		status.Version = firstOutputLine(out)
+	version, err := probe(executable, []string{"--version"}, 4*time.Second)
+	if err != nil || containsConfigurationError(version) || !semverInText.MatchString(version) {
+		status.Status = "configuration-error"
+		status.Message = "Claude Code could not report a valid version; repair or update the CLI in Settings → CLI tools"
+		return status
 	}
-	// auth status --json when available
-	if out, err := runProbeCommand(executable, []string{"auth", "status", "--json"}, 5*time.Second); err == nil {
-		compact := strings.ReplaceAll(out, " ", "")
-		if strings.Contains(compact, `"loggedIn":true`) || strings.Contains(compact, `"authenticated":true`) {
-			status.Authenticated = true
-			status.Message = "Claude Code ready"
-		} else {
-			status.Message = "Claude Code installed (sign-in may be required)"
-		}
-	} else {
-		status.Authenticated = true // version works; treat as usable
-		status.Message = "Claude Code installed"
+	status.Version = normalizeCLIVersion(version)
+	status.Available = true
+	status.Status = "authentication-unknown"
+	status.Message = "Claude Code can start; authentication could not be confirmed. Check sign-in or provider credentials if requests fail"
+	output, authErr := probe(executable, []string{"auth", "status", "--json"}, 5*time.Second)
+	var auth struct {
+		LoggedIn      *bool `json:"loggedIn"`
+		Authenticated *bool `json:"authenticated"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(output)), &auth) != nil {
+		return status
+	}
+	loggedIn := auth.LoggedIn
+	if loggedIn == nil {
+		loggedIn = auth.Authenticated
+	}
+	if loggedIn == nil {
+		return status
+	}
+	// A nonzero exit may accompany an explicit signed-out response. Never infer
+	// authentication from command failure, output substrings or missing fields.
+	if !*loggedIn {
+		status.Status = "authentication-required"
+		status.Message = "Claude Code reports no active authentication; sign in or configure provider credentials"
+	} else if authErr == nil {
+		status.Authenticated = true
+		status.Status = "ready"
+		status.Message = "Claude Code ready"
 	}
 	return status
 }
 
+func applyClaudeRuntimeStatus(provider *AgentProviderRuntime, status ClaudeRuntimeStatus) {
+	provider.Installed = status.Executable != ""
+	provider.Healthy = status.Available
+	// Project-level credentials may differ from the global auth probe; allow a
+	// healthy CLI to attempt a turn without presenting unconfirmed auth as ready.
+	provider.RuntimeReady = status.Available
+	provider.Version = status.Version
+	provider.Executable = status.Executable
+	provider.Status = status.Status
+	provider.Message = status.Message
+}
+
 func (s *AppService) RefreshClaudeRuntime() ClaudeRuntimeStatus {
+	providerProbeCache.Lock()
+	delete(providerProbeCache.entries, "claude")
+	providerProbeCache.Unlock()
 	status := detectClaudeRuntime()
 	s.mu.Lock()
 	if len(s.agentProviders) > 0 {
@@ -173,13 +205,7 @@ func (s *AppService) RefreshClaudeRuntime() ClaudeRuntimeStatus {
 			if next[i].Kind != "claude" {
 				continue
 			}
-			next[i].Installed = status.Available
-			next[i].Healthy = status.Available
-			next[i].RuntimeReady = status.Available
-			next[i].Version = status.Version
-			next[i].Executable = status.Executable
-			next[i].Status = providerStatus(status.Available, status.Available, true)
-			next[i].Message = status.Message
+			applyClaudeRuntimeStatus(&next[i], status)
 		}
 		s.agentProviders = next
 	}

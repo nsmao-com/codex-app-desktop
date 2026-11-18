@@ -98,7 +98,7 @@ import {
   type CLIToolStatus,
   type CLIToolsReport,
 } from '@/utils/cliTools'
-import { antigravityModelEfforts, normalizeAntigravityModelEffort, DEFAULT_GROK_REASONING, CUSTOM_MODEL_LIMIT, normalizeCustomModels, claudeLongContextModel, modelsForClaudeRuntime, modelsForGrokRuntime, modelsForRuntime } from '@/utils/runtimeProviders'
+import { antigravityModelEfforts, normalizeAntigravityModelEffort, DEFAULT_GROK_REASONING, CUSTOM_MODEL_LIMIT, normalizeCustomModels, claudeLongContextModel, claudeRuntimeStatusKey, modelsForClaudeRuntime, modelsForGrokRuntime, modelsForRuntime } from '@/utils/runtimeProviders'
 
 type SettingsPanel =
   | 'general'
@@ -558,14 +558,15 @@ function removeExternalCustomModel(value: string): void {
 const claudeStatus = computed(() => {
   const fromProviders = appStore.agentProviders.find((provider) => provider.kind === 'claude')
   const rt = claudeStore.runtime
-  const ready = Boolean(rt.available || fromProviders?.runtimeReady)
+  const ready = rt.status ? rt.available : Boolean(fromProviders?.runtimeReady)
   return {
     name: 'Claude',
     kind: 'claude',
     runtimeReady: ready,
-    version: rt.version || fromProviders?.version || '',
-    executable: rt.executable || fromProviders?.executable || '',
-    message: fromProviders?.message || rt.message || t('sidebar.claudeRuntimeMissing'),
+    status: rt.status || fromProviders?.status || 'unverified',
+    version: rt.status ? rt.version : fromProviders?.version || '',
+    executable: rt.status ? rt.executable : fromProviders?.executable || '',
+    message: rt.status ? rt.message : fromProviders?.message || t('sidebar.claudeRuntimeMissing'),
     models: fromProviders?.models ?? null,
     reasoningEfforts: fromProviders?.reasoningEfforts ?? null,
   }
@@ -2760,11 +2761,11 @@ wsl --update</code></pre>
                       <p class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/80">{{ claudeStatus.executable }}</p>
                     </SimpleTooltip>
                   </div>
-                  <Badge :variant="claudeStatus.runtimeReady ? 'default' : 'outline'" class="text-[9px]">
-                    {{ claudeStatus.runtimeReady ? t('settings.runtimeReady') : t('settings.runtimeMissing') }}
+                  <Badge :variant="claudeStatus.status === 'ready' ? 'default' : 'outline'" class="max-w-28 whitespace-normal break-words text-[9px]">
+                    {{ t(claudeRuntimeStatusKey(claudeStatus.status)) }}
                   </Badge>
                 </div>
-                <p class="border-b bg-muted/20 px-4 py-2 text-[11px] leading-4 text-muted-foreground">
+                <p class="break-words border-b bg-muted/20 px-4 py-2 text-[11px] leading-4 text-muted-foreground">
                   {{ claudeStatus.message }}
                 </p>
                 <div class="space-y-4 p-4">

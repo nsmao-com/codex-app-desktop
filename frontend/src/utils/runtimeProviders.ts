@@ -14,6 +14,17 @@ export const DEFAULT_CODEX_MODEL = 'gpt-6.2-sol'
 
 export const CUSTOM_MODEL_LIMIT = 24
 
+export function claudeRuntimeStatusKey(status?: string): string {
+  switch (status) {
+    case 'ready': return 'settings.runtimeReady'
+    case 'not-installed': return 'settings.runtimeMissing'
+    case 'configuration-error': return 'settings.cliNeedsRepair'
+    case 'authentication-required': return 'settings.claudeAuthRequired'
+    case 'authentication-unknown': return 'settings.claudeAuthUnknown'
+    default: return 'settings.claudeProbePending'
+  }
+}
+
 /** Match the persisted list: keep the first spelling and the user's order. */
 export function normalizeCustomModels(items: string[]): string[] {
   const seen = new Set<string>()

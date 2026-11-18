@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.26: Show Codex image-input capabilities from the conversation catalog, guide text-only models to vision conversion, and preserve unknown gateway support.</sub></p>
+<p align="center"><sub>v1.6.27: Refresh provider authentication and model state safely, improve Codex discovery, and clarify runtime reload status.</sub></p>
 
 ## Why Nice Codex
 

@@ -1814,6 +1814,7 @@ Object.assign(messages['zh-CN'].common, {
 })
 Object.assign(messages['zh-CN'].settings, {
   cliNeedsRepair: '启动异常', cliUpdateUnknown: '版本未确认', cliRepair: '修复 / 重装',
+  claudeAuthRequired: '需要认证', claudeAuthUnknown: '认证未确认', claudeProbePending: '待检测',
   cliDetails: '路径与诊断', cliExecutable: '实际使用的 CLI', cliInstallCommand: '安装 / 更新命令',
   cliUpdateRetry: '未能确认最新版本，可重新检测；现有 CLI 仍可使用。',
   cliSummary: '{ready} 个可运行 · {updates} 个可更新 · {attention} 个需处理',
@@ -1822,6 +1823,7 @@ Object.assign(messages['zh-CN'].app, { cliRecoveryHint: '已安装过 Codex？�
 Object.assign(messages['en-US'].app, { cliRecoveryHint: 'Already installed Codex? Check again, then open paths and diagnostics to inspect the selected CLI. Restarting the app is not required.' })
 Object.assign(messages['en-US'].settings, {
   cliNeedsRepair: 'Needs repair', cliUpdateUnknown: 'Update not verified', cliRepair: 'Repair / reinstall',
+  claudeAuthRequired: 'Authentication required', claudeAuthUnknown: 'Authentication unconfirmed', claudeProbePending: 'Not checked yet',
   cliDetails: 'Paths and diagnostics', cliExecutable: 'Selected CLI', cliInstallCommand: 'Install / update command',
   cliUpdateRetry: 'Could not verify the latest version. Retry the check; the installed CLI can still be used.',
   cliSummary: '{ready} runnable · {updates} updates · {attention} need attention',

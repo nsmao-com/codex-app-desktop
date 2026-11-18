@@ -1308,27 +1308,32 @@ export const useClaudeStore = defineStore('claude', () => {
     void appStore.loadLocalUsage().catch(() => undefined)
   }
 
+  let runtimeRefreshSequence = 0
   async function refreshRuntime(): Promise<void> {
+    const sequence = ++runtimeRefreshSequence
     try {
-      runtime.value = await refreshClaudeRuntime()
-      // Keep agentProviders badge in sync.
-      const list = [...(appStore.agentProviders ?? [])]
-      const index = list.findIndex((item) => item.kind === 'claude')
-      if (index >= 0) {
-        list[index] = {
-          ...list[index],
-          installed: runtime.value.available,
-          healthy: runtime.value.available,
-          runtimeReady: runtime.value.available,
-          version: runtime.value.version,
-          executable: runtime.value.executable,
-          message: runtime.value.message,
-          status: runtime.value.available ? 'ready' : 'not-installed',
-        }
-        appStore.agentProviders = list
-      }
+      const result = await refreshClaudeRuntime()
+      if (sequence !== runtimeRefreshSequence) return
+      runtime.value = result
     } catch (error) {
-      runtime.value = { ...emptyRuntime(), message: errorMessage(error) }
+      if (sequence !== runtimeRefreshSequence) return
+      runtime.value = { ...emptyRuntime(), status: 'configuration-error', message: errorMessage(error) }
+    }
+    // Keep the provider badge in sync on both a completed probe and RPC failure.
+    const list = [...(appStore.agentProviders ?? [])]
+    const index = list.findIndex((item) => item.kind === 'claude')
+    if (index >= 0) {
+      list[index] = {
+        ...list[index],
+        installed: Boolean(runtime.value.executable),
+        healthy: runtime.value.available,
+        runtimeReady: runtime.value.available,
+        version: runtime.value.version,
+        executable: runtime.value.executable,
+        message: runtime.value.message,
+        status: runtime.value.status || (runtime.value.available ? 'authentication-unknown' : runtime.value.executable ? 'configuration-error' : 'not-installed'),
+      }
+      appStore.agentProviders = list
     }
   }
 
