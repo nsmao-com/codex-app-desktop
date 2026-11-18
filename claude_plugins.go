@@ -30,16 +30,27 @@ type ClaudePluginToggleResult struct {
 	Message  string              `json:"message"`
 }
 
+// ClaudePluginDetails is the native report for the effective plugin in a workspace.
+// Claude resolves merged scope precedence; this is not an individual install's report.
+type ClaudePluginDetails struct {
+	Name      string `json:"name"`
+	Workspace string `json:"workspace"`
+	Report    string `json:"report"`
+}
+
 type claudePluginRecord struct {
-	ID             string   `json:"id"`
-	Version        string   `json:"version"`
-	Scope          string   `json:"scope"`
-	InstallPath    string   `json:"installPath"`
-	ReadFromFolder string   `json:"readFromFolder"`
-	ProjectPath    string   `json:"projectPath"`
-	Enabled        *bool    `json:"enabled"`
-	Errors         []string `json:"errors"`
-	Notes          []string `json:"notes"`
+	ID             string                     `json:"id"`
+	Version        string                     `json:"version"`
+	Scope          string                     `json:"scope"`
+	InstallPath    string                     `json:"installPath"`
+	ReadFromFolder string                     `json:"readFromFolder"`
+	FolderVersion  string                     `json:"folderVersion"`
+	MCPServers     map[string]json.RawMessage `json:"mcpServers"`
+	HasUserConfig  bool                       `json:"hasUserConfig"`
+	ProjectPath    string                     `json:"projectPath"`
+	Enabled        *bool                      `json:"enabled"`
+	Errors         []string                   `json:"errors"`
+	Notes          []string                   `json:"notes"`
 }
 
 func (record claudePluginRecord) view() ClaudePluginView {
@@ -47,7 +58,12 @@ func (record claudePluginRecord) view() ClaudePluginView {
 	if record.ReadFromFolder != "" {
 		path = record.ReadFromFolder
 	}
-	return ClaudePluginView{Name: record.ID, Version: record.Version, Scope: record.Scope, Path: path, ProjectPath: record.ProjectPath, Enabled: record.Enabled, Errors: record.Errors, Notes: record.Notes}
+	names := make([]string, 0, len(record.MCPServers))
+	for name := range record.MCPServers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return ClaudePluginView{Name: record.ID, Version: record.Version, FolderVersion: record.FolderVersion, MCPServerNames: names, HasUserConfig: record.HasUserConfig, Scope: record.Scope, Path: path, ProjectPath: record.ProjectPath, Enabled: record.Enabled, Errors: record.Errors, Notes: record.Notes}
 }
 
 func claudePluginApplies(scope, project, workspace string) bool {
@@ -169,6 +185,51 @@ func findClaudePlugin(catalog ClaudePluginCatalog, name, scope string) *ClaudePl
 		}
 	}
 	return nil
+}
+
+func (s *AppService) ReadClaudePluginDetails(ctx context.Context, name, workspace string) (ClaudePluginDetails, error) {
+	if !validClaudePluginID(name) {
+		return ClaudePluginDetails{}, errors.New("插件名称无效，请重新读取目录")
+	}
+	workspace, err := s.claudePluginWorkspace(workspace)
+	if err != nil {
+		return ClaudePluginDetails{}, err
+	}
+	catalog, err := s.readNativeClaudePlugins(ctx, workspace)
+	if err != nil {
+		return ClaudePluginDetails{}, err
+	}
+	loaded := false
+	for _, plugin := range catalog.Plugins {
+		if plugin.Name == name && plugin.Enabled != nil && *plugin.Enabled && len(plugin.Errors) == 0 {
+			loaded = true
+			break
+		}
+	}
+	if !loaded {
+		return ClaudePluginDetails{}, errors.New("插件未启用、加载失败或安装记录已变化，请重新检测后重试")
+	}
+	if _, err := s.claudePluginWorkspace(workspace); err != nil {
+		return ClaudePluginDetails{}, err
+	}
+	output, err := s.runClaudePluginCommand(ctx, workspace, []string{"plugin", "details", name})
+	if err != nil {
+		if ctx.Err() != nil {
+			return ClaudePluginDetails{}, ctx.Err()
+		}
+		return ClaudePluginDetails{}, errors.New("无法读取插件能力报告，请更新 Claude Code 并检查插件加载状态；未修改插件配置")
+	}
+	if _, err := s.claudePluginWorkspace(workspace); err != nil {
+		return ClaudePluginDetails{}, err
+	}
+	if len(output) > 128*1024 {
+		return ClaudePluginDetails{}, errors.New("插件能力报告过大，请在 Claude Code 中查看")
+	}
+	report := strings.TrimSpace(ansiEscapePattern.ReplaceAllString(output, ""))
+	if report == "" {
+		return ClaudePluginDetails{}, errors.New("Claude 未返回插件能力报告，请更新 CLI 后重试")
+	}
+	return ClaudePluginDetails{Name: name, Workspace: workspace, Report: report}, nil
 }
 
 func (s *AppService) SetClaudePluginEnabled(ctx context.Context, request ClaudePluginToggleRequest) (ClaudePluginToggleResult, error) {

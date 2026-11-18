@@ -109,6 +109,9 @@ export interface ClaudeSkillView {
 export interface ClaudePluginView {
   name: string
   version: string
+  folderVersion: string
+  mcpServerNames: string[] | null
+  hasUserConfig: boolean
   scope: string
   path: string
   projectPath?: string

@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.28：补全 Windows fnm/nvm 安装查找，免重启重新检测 Codex，优化窄窗口连接提示与诊断。</sub></p>
+<p align="center"><sub>v1.6.29：查看 Claude 原生插件能力与 Token 开销，区分实际加载版本，并展示插件提供的 MCP 服务。</sub></p>
 
 ## 为什么是 Nice Codex
 

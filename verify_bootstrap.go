@@ -431,6 +431,24 @@ func verifyClaudePluginChild() {
 		_ = json.NewEncoder(os.Stdout).Encode([]map[string]any{record})
 		return
 	}
+	if args[1] == "details" {
+		if len(args) != 3 || args[2] != "demo@market" {
+			fail("invalid details arguments")
+		}
+		switch mode {
+		case "details-failed":
+			os.Exit(2)
+		case "details-empty":
+			fmt.Print("\x1b[0m  \n")
+		case "details-large":
+			fmt.Print(strings.Repeat("x", 128*1024+1))
+		case "details-cancel":
+			time.Sleep(30 * time.Second)
+		default:
+			fmt.Print("\x1b[32mSkills: demo\x1b[0m\nAlways-on: 120 tokens\n")
+		}
+		return
+	}
 	if len(args) != 5 || args[2] != "demo@market" || args[3] != "--scope" || args[4] != "project" {
 		fail("invalid scoped arguments")
 	}
@@ -470,7 +488,7 @@ func verifyClaudePlugins() error {
 	boolFalse, boolTrue := false, true
 	records := []claudePluginRecord{
 		{ID: "demo@market", Scope: "user", Enabled: &boolTrue, Version: "user-version"},
-		{ID: "demo@market", Scope: "project", ProjectPath: workspace, Enabled: &boolFalse, Version: "project-version", ReadFromFolder: filepath.Join(root, "source")},
+		{ID: "demo@market", Scope: "project", ProjectPath: workspace, Enabled: &boolFalse, Version: "project-version", FolderVersion: "source-version", HasUserConfig: true, MCPServers: map[string]json.RawMessage{"zeta": json.RawMessage(`{"env":{"TOKEN":"fixture-secret"}}`), "alpha": json.RawMessage(`{"url":"private-endpoint"}`)}, ReadFromFolder: filepath.Join(root, "source")},
 		{ID: "demo@market", Scope: "local", ProjectPath: other, Enabled: &boolTrue},
 		{ID: "policy@market", Scope: "managed", Enabled: &boolTrue, Errors: []string{"dependency unavailable"}},
 	}
@@ -481,6 +499,10 @@ func verifyClaudePlugins() error {
 	}
 	if parsed[0].Scope != "project" || parsed[0].Path != filepath.Join(root, "source") || parsed[1].Scope != "user" {
 		return fmt.Errorf("separate scopes or in-place path lost")
+	}
+	viewJSON, _ := json.Marshal(parsed[0])
+	if parsed[0].Version != "project-version" || parsed[0].FolderVersion != "source-version" || !parsed[0].HasUserConfig || strings.Join(parsed[0].MCPServerNames, ",") != "alpha,zeta" || strings.Contains(string(viewJSON), "fixture-secret") || strings.Contains(string(viewJSON), "private-endpoint") {
+		return fmt.Errorf("plugin metadata or MCP privacy invalid")
 	}
 	for _, body := range []string{"null", "{}", "broken", `[{"id":"--all","scope":"user","enabled":true}]`} {
 		if _, err := parseClaudePluginList(body, workspace); err == nil {
@@ -535,6 +557,44 @@ func verifyClaudePlugins() error {
 	if service.providerReloading["claude"] {
 		return fmt.Errorf("mutation guard leaked")
 	}
+	details, err := service.ReadClaudePluginDetails(context.Background(), "demo@market", workspace)
+	if err != nil || details.Name != "demo@market" || details.Workspace != workspace || details.Report != "Skills: demo\nAlways-on: 120 tokens" {
+		return fmt.Errorf("native details invalid: %v", err)
+	}
+	for _, nextMode := range []string{"details-failed", "details-empty", "details-large", "load-error", "override"} {
+		mode = nextMode
+		before := calls
+		if _, err := service.ReadClaudePluginDetails(context.Background(), "demo@market", workspace); err == nil {
+			return fmt.Errorf("invalid details accepted: %s", mode)
+		}
+		if (mode == "load-error" || mode == "override") && calls-before != 1 {
+			return fmt.Errorf("unloaded plugin queried")
+		}
+	}
+	mode = "normal"
+	before = calls
+	if _, err := service.ReadClaudePluginDetails(context.Background(), "--all", workspace); err == nil || calls != before {
+		return fmt.Errorf("invalid details ID accepted")
+	}
+	if _, err := service.ReadClaudePluginDetails(context.Background(), "demo@market", other); err == nil || calls != before {
+		return fmt.Errorf("stale details workspace accepted")
+	}
+	if _, err := service.ReadClaudePluginDetails(context.Background(), "missing@market", workspace); err == nil || calls-before != 1 {
+		return fmt.Errorf("missing plugin details queried")
+	}
+	mode = "details-cancel"
+	detailsCtx, detailsCancel := context.WithTimeout(context.Background(), time.Second)
+	startedDetails := time.Now()
+	_, err = service.ReadClaudePluginDetails(detailsCtx, "demo@market", workspace)
+	detailsCancel()
+	if err == nil || time.Since(startedDetails) > 5*time.Second {
+		return fmt.Errorf("details cancellation ignored")
+	}
+	state, err := os.ReadFile(filepath.Join(workspace, "plugin-state"))
+	if err != nil || string(state) != "true" {
+		return fmt.Errorf("details changed enablement")
+	}
+	mode = "normal"
 	for _, bad := range []ClaudePluginToggleRequest{
 		{Name: "--all", Scope: "user", Workspace: workspace},
 		{Name: "demo@market", Scope: "managed", Workspace: workspace},
@@ -586,7 +646,7 @@ func verifyClaudePlugins() error {
 	if service.providerReloading["claude"] {
 		return fmt.Errorf("guard leaked after cancellation")
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "claudePlugins": []string{"native scopes", "offline cache exclusion", "CLI enablement", "idempotency", "override detection", "malformed responses", "active/concurrent guards", "cancellation"}})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "claudePlugins": []string{"native scopes", "offline cache exclusion", "CLI enablement", "idempotency", "override detection", "malformed responses", "active/concurrent guards", "cancellation", "native details", "details errors and cancellation", "MCP metadata privacy", "installed and loaded versions"}})
 }
 
 // Isolated JSON-RPC fixture exercises the real transport and service boundary.

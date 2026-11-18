@@ -205,6 +205,13 @@ export interface ClaudePluginCatalog {
     "warning": string;
 }
 
+/** Native report for the effective plugin after Claude merges workspace scopes. */
+export interface ClaudePluginDetails {
+    "name": string;
+    "workspace": string;
+    "report": string;
+}
+
 export interface ClaudePluginToggleRequest {
     "name": string;
     "scope": string;
@@ -224,6 +231,9 @@ export interface ClaudePluginToggleResult {
 export interface ClaudePluginView {
     "name": string;
     "version": string;
+    "folderVersion": string;
+    "mcpServerNames": string[] | null;
+    "hasUserConfig": boolean;
     "scope": string;
     "path": string;
     "projectPath": string;

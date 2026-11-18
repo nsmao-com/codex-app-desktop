@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.28: Discover Windows fnm/nvm installations and recover missing Codex without restarting, with clearer compact diagnostics.</sub></p>
+<p align="center"><sub>v1.6.29: Inspect native Claude plugin capabilities and estimated token costs, with loaded versions and MCP service names.</sub></p>
 
 ## Why Nice Codex
 

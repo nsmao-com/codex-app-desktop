@@ -31,14 +31,17 @@ type ClaudeSkillView struct {
 
 // ClaudePluginView is an installed Claude Code plugin.
 type ClaudePluginView struct {
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Scope       string   `json:"scope"`
-	Path        string   `json:"path"`
-	ProjectPath string   `json:"projectPath"`
-	Enabled     *bool    `json:"enabled"`
-	Errors      []string `json:"errors"`
-	Notes       []string `json:"notes"`
+	Name           string   `json:"name"`
+	Version        string   `json:"version"`
+	FolderVersion  string   `json:"folderVersion"`
+	MCPServerNames []string `json:"mcpServerNames"`
+	HasUserConfig  bool     `json:"hasUserConfig"`
+	Scope          string   `json:"scope"`
+	Path           string   `json:"path"`
+	ProjectPath    string   `json:"projectPath"`
+	Enabled        *bool    `json:"enabled"`
+	Errors         []string `json:"errors"`
+	Notes          []string `json:"notes"`
 }
 
 // ClaudeAgentView is a custom agent under ~/.claude/agents or project.

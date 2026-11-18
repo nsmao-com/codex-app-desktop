@@ -1,6 +1,15 @@
 # Nice Codex 项目分析与优化记录
 
-更新日期：2026-11-18。本次迭代版本为 `1.6.20`；下方原始架构分析保留 2026-09-30 的记录。
+更新日期：2026-11-18。本次迭代版本为 `1.6.29`；下方原始架构分析保留 2026-09-30 的记录。
+
+## 2026-11-18：Claude 原生插件报告
+
+- 按官方 CLI 接入 `plugin details <name>`，不附加 scope / JSON 参数，不临时启用插件。报告由 Claude 按当前项目合并配置解析，不声称属于某一安装范围。
+- `plugin list --json` 的 folderVersion 与安装 version 分别展示；hasUserConfig 仅表示支持插件设置；mcpServers 只导出排序后的名称，不向 UI 传完整配置。
+- 现有 verify_bootstrap 的 claude-plugins 验证已覆盖参数、未加载拒绝、空/超大/失败报告、ANSI 清理、取消、只读状态与 MCP 敏感字段隔离；Go vet、pnpm typecheck 通过。
+- 实际 Vue 组件隔离渲染通过 960/390px 换行检查、报告关闭、错误重试、切换项目取消与过期响应过滤；使用模拟后端、基础控件替身与既有 CSS，不能代替新安装包完整 E2E。
+- 本机只读插件列表命令成功，4 条记录均未加载，未修改真实插件启用状态，因此原生成功报告使用隔离 CLI 验证。官方参考：https://code.claude.com/docs/en/plugins-reference 。
+- 本批没有数据库、依赖或锁文件变更；没有本地前端 dev/build，没有新增测试文件。
 
 ## 2026-11-18：插件启停与能力状态核验
 

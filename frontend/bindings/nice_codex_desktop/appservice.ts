@@ -437,6 +437,10 @@ export function ReadClaudePluginCatalog(workspace: string): $CancellablePromise<
     return $Call.ByID(1053406126, workspace);
 }
 
+export function ReadClaudePluginDetails(name: string, workspace: string): $CancellablePromise<$models.ClaudePluginDetails> {
+    return $Call.ByID(339330931, name, workspace);
+}
+
 export function ReadClaudeProjectInstructions(): $CancellablePromise<$models.ProjectInstructionsInfo> {
     return $Call.ByID(1543098932);
 }

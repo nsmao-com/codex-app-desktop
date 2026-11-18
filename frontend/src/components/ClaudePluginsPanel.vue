@@ -17,12 +17,48 @@ const query = shallowRef('')
 const error = shallowRef('')
 const notice = shallowRef('')
 const verified = shallowRef(false)
+const detailsName = shallowRef('')
+const detailsReport = shallowRef('')
+const detailsError = shallowRef('')
+const detailsLoading = shallowRef(false)
+let detailsRevision = 0
+let detailsRequest: ReturnType<typeof backend.ReadClaudePluginDetails> | null = null
 let revision = 0
 let disposed = false
 let readRequest: ReturnType<typeof backend.ReadClaudePluginCatalog> | null = null
 const plugins = computed(() => (catalog.value?.plugins || []).filter(plugin =>
-  `${plugin.name} ${scopeLabel(plugin.scope)} ${plugin.scope} ${plugin.version}`.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase()),
+  `${plugin.name} ${scopeLabel(plugin.scope)} ${plugin.scope} ${plugin.version} ${plugin.folderVersion || ''} ${(plugin.mcpServerNames || []).join(' ')}`.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase()),
 ))
+function clearDetails(): void {
+  detailsRevision++
+  detailsRequest?.cancel()
+  detailsRequest = null
+  detailsName.value = ''
+  detailsReport.value = ''
+  detailsError.value = ''
+  detailsLoading.value = false
+}
+async function showDetails(name: string): Promise<void> {
+  if (loading.value || mutation.value || !catalog.value?.native) return
+  clearDetails()
+  const token = detailsRevision
+  const workspace = props.workspace
+  detailsName.value = name
+  detailsLoading.value = true
+  const request = backend.ReadClaudePluginDetails(name, workspace)
+  detailsRequest = request
+  try {
+    const result = await request
+    if (disposed || token !== detailsRevision || workspace !== props.workspace) return
+    if (result.name !== name || result.workspace !== workspace) throw new Error('插件或项目已变化，请重新检测后查看。')
+    detailsReport.value = result.report
+  } catch (reason) {
+    if (disposed || token !== detailsRevision || workspace !== props.workspace) return
+    detailsError.value = reason instanceof Error ? reason.message : String(reason)
+  } finally {
+    if (token === detailsRevision) { detailsLoading.value = false; detailsRequest = null }
+  }
+}
 function pluginKey(plugin: ClaudePluginView): string {
   return JSON.stringify([plugin.name, plugin.scope, plugin.projectPath, plugin.path, plugin.version])
 }
@@ -35,6 +71,7 @@ function writable(plugin: ClaudePluginView): boolean {
 }
 async function refresh(): Promise<void> {
   if (mutation.value) return
+  clearDetails()
   const token = ++revision
   const workspace = props.workspace
   readRequest?.cancel()
@@ -58,6 +95,7 @@ async function refresh(): Promise<void> {
 }
 async function toggle(plugin: ClaudePluginView): Promise<void> {
   if (mutation.value || loading.value || !writable(plugin)) return
+  clearDetails()
   const workspace = props.workspace
   const token = ++revision
   mutation.value = pluginKey(plugin)
@@ -82,6 +120,7 @@ async function toggle(plugin: ClaudePluginView): Promise<void> {
   }
 }
 watch(() => [props.workspace, props.refreshKey], () => {
+  clearDetails()
   revision++
   readRequest?.cancel()
   catalog.value = null
@@ -89,7 +128,7 @@ watch(() => [props.workspace, props.refreshKey], () => {
   error.value = ''
   if (!mutation.value) void refresh()
 }, { immediate: true })
-onBeforeUnmount(() => { disposed = true; revision++; readRequest?.cancel() })
+onBeforeUnmount(() => { disposed = true; revision++; readRequest?.cancel(); clearDetails() })
 </script>
 
 <template>
@@ -102,6 +141,19 @@ onBeforeUnmount(() => { disposed = true; revision++; readRequest?.cancel() })
     <p v-if="catalog?.warning" role="alert" class="break-words text-xs text-destructive">{{ catalog.warning }}</p>
     <p v-if="error" role="alert" class="break-words text-xs text-destructive">{{ error }}</p>
     <p v-if="notice" role="status" class="break-words text-xs" :class="verified ? 'text-muted-foreground' : 'text-destructive'">{{ notice }}</p>
+    <section v-if="detailsName" class="min-w-0 space-y-3 rounded-lg border bg-muted/20 p-4" :aria-busy="detailsLoading" aria-label="插件能力与开销">
+      <div class="flex min-w-0 flex-wrap items-start justify-between gap-2">
+        <p class="min-w-0 flex-1 break-all text-[13px] font-medium">{{ detailsName }} · 能力与开销</p>
+        <Button type="button" variant="ghost" size="sm" @click="clearDetails">关闭报告</Button>
+      </div>
+      <p class="text-xs leading-5 text-muted-foreground">Claude Code 按当前项目的合并配置解析生效插件；同名插件的报告不区分安装范围。组件清单和 Token 开销来自原生命令，开销是估算值，不是实际用量或账单。</p>
+      <p v-if="detailsLoading" role="status" class="text-xs text-muted-foreground">正在读取原生组件清单与开销…</p>
+      <div v-else-if="detailsError" class="space-y-2">
+        <p role="alert" class="break-words text-xs text-destructive">{{ detailsError }}</p>
+        <Button type="button" variant="outline" size="sm" :disabled="loading || !!mutation" @click="showDetails(detailsName)">重试报告</Button>
+      </div>
+      <pre v-else class="max-h-80 overflow-y-auto whitespace-pre-wrap break-words rounded-md border bg-background p-3 text-[11px] leading-5 [overflow-wrap:anywhere]" tabindex="0" aria-label="Claude 原生插件报告">{{ detailsReport }}</pre>
+    </section>
     <p v-if="loading && !catalog" role="status" class="py-8 text-center text-xs text-muted-foreground">正在读取 Claude 原生插件状态…</p>
     <Card v-for="plugin in plugins" :key="pluginKey(plugin)" class="min-w-0 gap-3 p-4">
       <div class="flex min-w-0 flex-wrap items-start justify-between gap-3">
@@ -109,15 +161,21 @@ onBeforeUnmount(() => { disposed = true; revision++; readRequest?.cancel() })
           <p class="break-all text-[13px] font-medium">{{ plugin.name }}</p>
           <div class="flex flex-wrap gap-1.5">
             <Badge variant="secondary" class="text-[10px]">{{ scopeLabel(plugin.scope) }}</Badge>
-            <Badge v-if="plugin.version" variant="outline" class="text-[10px]">{{ plugin.version }}</Badge>
+            <Badge v-if="plugin.folderVersion" variant="outline" class="max-w-full whitespace-normal break-all text-[10px]">加载 {{ plugin.folderVersion }}</Badge>
+            <Badge v-if="plugin.version && plugin.version !== plugin.folderVersion" variant="outline" class="max-w-full whitespace-normal break-all text-[10px]">{{ plugin.folderVersion ? '安装 ' : '' }}{{ plugin.version }}</Badge>
+            <Badge v-if="plugin.hasUserConfig && catalog?.native" variant="secondary" class="text-[10px]">支持插件设置</Badge>
             <Badge variant="outline" class="text-[10px]">{{ typeof plugin.enabled === 'boolean' && catalog?.native ? (plugin.enabled ? (plugin.errors?.length ? '已启用 · 加载异常' : '原生已启用') : '原生已停用') : '状态未确认' }}</Badge>
           </div>
         </div>
-        <Button v-if="writable(plugin)" type="button" variant="outline" size="sm" :disabled="loading || !!mutation" :aria-label="`${plugin.enabled ? '停用' : '启用'} ${plugin.name} · ${scopeLabel(plugin.scope)}`" @click="toggle(plugin)">
-          {{ mutation === pluginKey(plugin) ? '正在保存…' : plugin.enabled ? '停用插件' : '启用插件' }}
-        </Button>
-        <span v-else class="text-xs text-muted-foreground">只读</span>
+        <div class="flex flex-wrap items-center gap-2">
+          <Button v-if="catalog?.native && plugin.enabled && !plugin.errors?.length" type="button" variant="outline" size="sm" :disabled="loading || !!mutation || detailsLoading" :aria-label="`查看 ${plugin.name} 的生效能力与开销`" @click="showDetails(plugin.name)">能力与开销</Button>
+          <Button v-if="writable(plugin)" type="button" variant="outline" size="sm" :disabled="loading || !!mutation" :aria-label="`${plugin.enabled ? '停用' : '启用'} ${plugin.name} · ${scopeLabel(plugin.scope)}`" @click="toggle(plugin)">
+            {{ mutation === pluginKey(plugin) ? '正在保存…' : plugin.enabled ? '停用插件' : '启用插件' }}
+          </Button>
+          <span v-else class="text-xs text-muted-foreground">只读</span>
+        </div>
       </div>
+      <p v-if="plugin.mcpServerNames?.length && catalog?.native" class="break-words text-[11px] text-muted-foreground [overflow-wrap:anywhere]">MCP 服务（{{ plugin.mcpServerNames.length }}）：{{ plugin.mcpServerNames.join('、') }}</p>
       <p v-if="plugin.projectPath" class="break-all text-[11px] text-muted-foreground">项目：{{ plugin.projectPath }}</p>
       <details v-if="plugin.path || plugin.errors?.length || plugin.notes?.length" :open="!!plugin.errors?.length" class="min-w-0 text-xs text-muted-foreground">
         <summary class="cursor-pointer">加载位置与诊断{{ plugin.errors?.length ? ` · ${plugin.errors.length} 个错误` : '' }}</summary>
