@@ -92,7 +92,6 @@ import {
 import type { SelectOption } from '@/types/codex'
 import { notify } from '@/utils/notify'
 import {
-  checkCLITools,
   cliToolDisplayName,
   installCLITool,
   type CLIToolStatus,
@@ -1733,6 +1732,7 @@ const cliReport = shallowRef<CLIToolsReport | null>(null)
 const cliLoading = shallowRef(false)
 const cliError = shallowRef('')
 const cliInstalling = shallowRef<Record<string, boolean>>({})
+let cliRefreshSequence = 0
 const cliTools = computed(() => cliReport.value?.tools ?? [])
 const cliActionBusy = computed(() => Object.values(cliInstalling.value).some(Boolean))
 const cliSummary = computed(() => ({
@@ -1743,17 +1743,21 @@ const cliSummary = computed(() => ({
 
 async function refreshCLITools(options: { silent?: boolean } = {}): Promise<void> {
   if (cliLoading.value) return
+  const sequence = ++cliRefreshSequence
   cliLoading.value = true
   cliError.value = ''
   try {
-    cliReport.value = await checkCLITools()
+    const report = await appStore.refreshCLITools()
+    if (settingsDisposed || sequence !== cliRefreshSequence) return
+    cliReport.value = report
   } catch (error) {
+    if (settingsDisposed || sequence !== cliRefreshSequence) return
     cliError.value = error instanceof Error ? error.message : String(error)
     if (!options.silent) {
       notify('error', t('settings.cliToolsTitle'), error instanceof Error ? error.message : String(error))
     }
   } finally {
-    cliLoading.value = false
+    if (sequence === cliRefreshSequence) cliLoading.value = false
   }
 }
 
@@ -1779,8 +1783,6 @@ async function installOrUpdateCLITool(tool: CLIToolStatus): Promise<void> {
     }
     if (result.ok) {
       notify('success', tool.name, result.message || t('onboarding.cliInstallOk'))
-      void refreshCLITools({ silent: true })
-      void appStore.refreshRuntimes()
     } else {
       notify('error', tool.name, result.message || t('onboarding.cliInstallFailed'))
     }
@@ -1788,6 +1790,8 @@ async function installOrUpdateCLITool(tool: CLIToolStatus): Promise<void> {
     notify('error', tool.name, error instanceof Error ? error.message : String(error))
   } finally {
     cliInstalling.value = { ...cliInstalling.value, [tool.id]: false }
+    // A failed installer may still have changed PATH or the executable files.
+    void refreshCLITools({ silent: true })
   }
 }
 

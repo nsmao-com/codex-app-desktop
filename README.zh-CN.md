@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.32：Codex Apps 支持查看工具、完整目录分页与开关原生状态确认。</sub></p>
+<p align="center"><sub>v1.6.33：统一 CLI 检测、运行时状态和首次引导状态，避免已安装却显示未检测到。</sub></p>
 
 ## 为什么是 Nice Codex
 

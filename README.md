@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.32: Browse Codex App tools, load complete app catalogs, and confirm native status after toggling apps.</sub></p>
+<p align="center"><sub>v1.6.33: Keep CLI detection, runtime readiness, and onboarding status in sync.</sub></p>
 
 ## Why Nice Codex
 

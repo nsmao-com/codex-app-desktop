@@ -12,7 +12,7 @@ import {
   Terminal,
   AlertCircle,
 } from '@lucide/vue'
-import { computed, onMounted, shallowRef } from 'vue'
+import { computed, onMounted, onUnmounted, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { Badge } from '@/components/ui/badge'
@@ -22,7 +22,6 @@ import { useAppStore, useCodexStore, useWorkspaceStore } from '@/stores'
 import type { AppTheme } from '@/composables/useAppearance'
 import { notify } from '@/utils/notify'
 import {
-  checkCLITools,
   cliToolDisplayName,
   installCLITool,
   type CLIToolStatus,
@@ -45,6 +44,8 @@ const cliReport = shallowRef<CLIToolsReport | null>(null)
 const cliLoading = shallowRef(false)
 const cliInstalling = shallowRef<Record<string, boolean>>({})
 const cliError = shallowRef('')
+let cliRefreshSequence = 0
+let onboardingDisposed = false
 
 const steps = computed(() => [
   t('onboarding.stepWelcome'),
@@ -66,6 +67,7 @@ const themeOptions = computed(() => ([
 ]))
 
 const cliTools = computed(() => cliReport.value?.tools ?? [])
+const cliActionBusy = computed(() => Object.values(cliInstalling.value).some(Boolean))
 
 function selectTheme(next: AppTheme): void {
   theme.value = next
@@ -93,19 +95,23 @@ async function chooseWorkspace(): Promise<void> {
 
 async function refreshCLITools(): Promise<void> {
   if (cliLoading.value) return
+  const sequence = ++cliRefreshSequence
   cliLoading.value = true
   cliError.value = ''
   try {
-    cliReport.value = await checkCLITools()
+    const report = await appStore.refreshCLITools()
+    if (onboardingDisposed || sequence !== cliRefreshSequence) return
+    cliReport.value = report
   } catch (error) {
+    if (onboardingDisposed || sequence !== cliRefreshSequence) return
     cliError.value = error instanceof Error ? error.message : String(error || 'check failed')
   } finally {
-    cliLoading.value = false
+    if (sequence === cliRefreshSequence) cliLoading.value = false
   }
 }
 
 async function installTool(tool: CLIToolStatus): Promise<void> {
-  if (!tool?.id || cliInstalling.value[tool.id]) return
+  if (!tool?.id || cliActionBusy.value || cliLoading.value) return
   cliInstalling.value = { ...cliInstalling.value, [tool.id]: true }
   cliError.value = ''
   try {
@@ -127,8 +133,6 @@ async function installTool(tool: CLIToolStatus): Promise<void> {
     }
     if (result.ok) {
       notify('success', cliToolDisplayName(tool), result.message || t('onboarding.cliInstallOk'))
-      // Soft re-check so version / badges refresh without full app bootstrap.
-      void refreshCLITools()
     } else {
       notify('error', cliToolDisplayName(tool), result.message || t('onboarding.cliInstallFailed'))
       cliError.value = result.message || result.output || ''
@@ -139,6 +143,7 @@ async function installTool(tool: CLIToolStatus): Promise<void> {
     notify('error', cliToolDisplayName(tool), message)
   } finally {
     cliInstalling.value = { ...cliInstalling.value, [tool.id]: false }
+    void refreshCLITools()
   }
 }
 
@@ -170,7 +175,7 @@ function back(): void {
 }
 
 async function finish(): Promise<void> {
-  if (finishing.value) return
+  if (finishing.value || cliLoading.value || cliActionBusy.value) return
   finishing.value = true
   try {
     await appStore.completeOnboarding({
@@ -192,6 +197,10 @@ async function skipWorkspace(): Promise<void> {
 onMounted(() => {
   // Warm detection early so the runtime step feels instant.
   void refreshCLITools()
+})
+onUnmounted(() => {
+  onboardingDisposed = true
+  cliRefreshSequence++
 })
 </script>
 
@@ -285,8 +294,8 @@ onMounted(() => {
 
           <!-- Runtime / CLI tools -->
           <div v-else-if="step === STEP_RUNTIME" key="runtime" class="onboarding-panel space-y-5">
-            <div class="flex items-start justify-between gap-3">
-              <div>
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="min-w-0 flex-1">
                 <h1 class="text-2xl font-semibold tracking-tight sm:text-3xl">{{ t('onboarding.runtimeTitle') }}</h1>
                 <p class="mt-2 text-[14px] text-muted-foreground">{{ t('onboarding.runtimeBody') }}</p>
               </div>
@@ -295,7 +304,7 @@ onMounted(() => {
                 variant="ghost"
                 size="sm"
                 class="h-8 shrink-0 px-2 text-xs"
-                :disabled="cliLoading"
+                :disabled="cliLoading || cliActionBusy"
                 @click="refreshCLITools"
               >
                 <RefreshCw :size="13" class="mr-1" :class="cliLoading ? 'animate-spin' : ''" />
@@ -320,7 +329,7 @@ onMounted(() => {
                 :key="tool.id"
                 class="onboarding-card rounded-2xl border bg-card/90 px-4 py-3.5 backdrop-blur-sm"
               >
-                <div class="flex items-start justify-between gap-3">
+                <div class="flex flex-wrap items-start justify-between gap-3 sm:flex-nowrap">
                   <div class="min-w-0 flex-1">
                     <div class="flex flex-wrap items-center gap-2">
                       <Terminal :size="14" class="shrink-0 text-muted-foreground" />
@@ -335,7 +344,7 @@ onMounted(() => {
                     <p class="mt-1.5 break-all font-mono text-[11px] text-muted-foreground">
                       {{ tool.package }}
                     </p>
-                    <p class="mt-1 text-[11px] text-muted-foreground">
+                    <p class="mt-1 break-words text-[11px] text-muted-foreground">
                       <template v-if="tool.installed">
                         {{ t('onboarding.cliVersion', { version: tool.version || '—' }) }}
                         <span v-if="tool.latestVersion">
@@ -346,6 +355,7 @@ onMounted(() => {
                         {{ t('onboarding.cliInstallHint', { command: tool.installCommand }) }}
                       </template>
                     </p>
+                    <p v-if="!tool.healthy && tool.message" role="status" class="mt-2 break-words text-xs text-destructive">{{ tool.message }}</p>
                   </div>
                   <div class="flex shrink-0 flex-col items-end gap-1.5">
                     <CheckCircle2
@@ -358,7 +368,7 @@ onMounted(() => {
                       type="button"
                       size="sm"
                       class="h-8 text-xs"
-                      :disabled="!tool.canInstall || Boolean(cliInstalling[tool.id])"
+                      :disabled="!tool.canInstall || cliActionBusy || cliLoading"
                       @click="installTool(tool)"
                     >
                       <LoaderCircle
@@ -379,10 +389,10 @@ onMounted(() => {
                 </div>
               </div>
 
-              <p v-if="cliLoading && !cliTools.length" class="text-center text-[12px] text-muted-foreground">
+              <p v-if="cliLoading" role="status" class="text-center text-[12px] text-muted-foreground">
                 {{ t('onboarding.cliChecking') }}
               </p>
-              <p v-if="cliError" class="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
+              <p v-if="cliError" role="alert" class="break-words rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
                 {{ cliError }}
               </p>
             </div>
@@ -420,6 +430,7 @@ onMounted(() => {
               </Button>
             </div>
             <p class="text-[12px] text-muted-foreground">{{ t('onboarding.workspaceHint') }}</p>
+            <p v-if="cliLoading" role="status" class="text-[12px] text-muted-foreground">{{ t('onboarding.cliChecking') }}</p>
           </div>
         </Transition>
         </div>
@@ -431,7 +442,7 @@ onMounted(() => {
           type="button"
           variant="ghost"
           class="h-9"
-          :disabled="finishing || Object.values(cliInstalling).some(Boolean)"
+          :disabled="finishing || cliActionBusy"
           @click="back"
         >
           {{ t('onboarding.back') }}
@@ -443,7 +454,7 @@ onMounted(() => {
             type="button"
             variant="ghost"
             class="h-9"
-            :disabled="finishing"
+            :disabled="finishing || cliLoading || cliActionBusy"
             @click="skipWorkspace"
           >
             {{ t('onboarding.skipForNow') }}
@@ -451,7 +462,7 @@ onMounted(() => {
           <Button
             type="button"
             class="h-9 min-w-[112px]"
-            :disabled="finishing || Object.values(cliInstalling).some(Boolean)"
+            :disabled="finishing || cliActionBusy || (step === STEP_WORKSPACE && cliLoading)"
             @click="next"
           >
             {{ finishing ? t('common.saving') : (step === steps.length - 1 ? t('onboarding.finish') : t('onboarding.continue')) }}

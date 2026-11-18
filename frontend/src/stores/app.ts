@@ -16,6 +16,7 @@ import { useAppearance } from '../composables/useAppearance'
 import type { AppAccent } from '../lib/accents'
 import { notify } from '../utils/notify'
 import { friendlyErrorMessage } from '../utils/errorMessage'
+import { checkCLITools, type CLIToolsReport } from '../utils/cliTools'
 import {
   asNumber,
   asRecord,
@@ -34,7 +35,7 @@ import {
   syncModelMetadata,
 } from '../utils/modelMetadata'
 
-const AppVersionFallback = '1.6.32'
+const AppVersionFallback = '1.6.33'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -168,7 +169,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.6.32')
+  const appVersion = shallowRef('1.6.33')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -293,6 +294,22 @@ export const useAppStore = defineStore('app', () => {
       if (options.throwOnError && sequence === runtimeRefreshSequence) throw error
       // Background discovery remains best-effort; explicit recovery can report failures.
     }
+  }
+
+  let cliCheckPromise: Promise<CLIToolsReport> | null = null
+  function refreshCLITools(): Promise<CLIToolsReport> {
+    if (cliCheckPromise) return cliCheckPromise
+    const pending = (async () => {
+      const report = await checkCLITools()
+      // Wait for workbench readiness as well as inventory before completing a
+      // check. Discovery must not reset preferences or restart active agents.
+      await refreshRuntimes({ throwOnError: true })
+      return report
+    })().finally(() => {
+      if (cliCheckPromise === pending) cliCheckPromise = null
+    })
+    cliCheckPromise = pending
+    return pending
   }
 
   async function refreshTerminalProfiles(): Promise<void> {
@@ -1055,6 +1072,7 @@ export const useAppStore = defineStore('app', () => {
     setWorkspaceOrder,
     bootstrap,
     refreshRuntimes,
+    refreshCLITools,
     refreshModelMetadata,
     refreshTerminalProfiles,
     setActiveRuntime,
