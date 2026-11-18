@@ -357,6 +357,129 @@ func verifyVisionContracts() error {
 	if err != nil || strings.Join(models, ",") != "a,b" {
 		return fmt.Errorf("model catalog mismatch: %v", err)
 	}
+	var pageQueries []string
+	paged := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" || r.Header.Get("x-api-key") != "verify-secret" || r.Header.Get("anthropic-version") != "2023-06-01" || r.Header.Get("Authorization") != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		pageQueries = append(pageQueries, r.URL.Query().Get("after_id"))
+		if r.URL.Query().Get("after_id") == "" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"claude-b"}],"has_more":true,"last_id":"claude-b"}`)
+			return
+		}
+		if r.URL.Query().Get("after_id") == "claude-b" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"claude-a"}],"has_more":false,"last_id":"claude-a"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":[],"has_more":true,"last_id":"unexpected"}`)
+	}))
+	defer paged.Close()
+	models, err = service.ListVisionModels(context.Background(), VisionConfiguration{BaseURL: paged.URL, APIKey: "verify-secret", Protocol: "anthropic"})
+	if err != nil || strings.Join(models, ",") != "claude-a,claude-b" || strings.Join(pageQueries, ",") != ",claude-b" {
+		return fmt.Errorf("anthropic model pagination mismatch: %v / %v / %v", err, models, pageQueries)
+	}
+	looping := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"data":[{"id":"same"}],"has_more":true,"last_id":"same"}`)
+	}))
+	defer looping.Close()
+	if _, err := service.ListVisionModels(context.Background(), VisionConfiguration{BaseURL: looping.URL, APIKey: "verify-secret", Protocol: "anthropic"}); err == nil {
+		return fmt.Errorf("repeated model cursor accepted")
+	}
+	for _, body := range []string{
+		`null`, `{}`, `{"data":null}`, `{"data":"invalid"}`, `{"data":[],"error":{"message":"fixture-secret"}}`,
+		`{"data":[{"id":"a"}],"has_more":true}`, `{"data":[],"has_more":true,"last_id":"a"}`,
+		`{"data":[{"id":"a"}],"has_more":"true"}`, `{"data":[{"id":"a"}],"has_more":true,"last_id":"bad\nvalue"}`,
+	} {
+		invalid := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) }))
+		models, err := service.ListVisionModels(context.Background(), VisionConfiguration{BaseURL: invalid.URL, Protocol: "anthropic"})
+		invalid.Close()
+		if err == nil || models != nil || strings.Contains(err.Error(), "fixture-secret") {
+			return fmt.Errorf("invalid catalog accepted or error leaked")
+		}
+	}
+	for _, mode := range []string{"second-fails", "page-limit", "cursor-encoding", "too-many", "empty"} {
+		var calls atomic.Int32
+		catalogServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			call := calls.Add(1)
+			switch mode {
+			case "second-fails":
+				if call > 1 {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+			case "cursor-encoding":
+				if call > 1 {
+					if r.URL.Query().Get("after_id") != "cursor&after_id=other +中文" || len(r.URL.Query()) != 1 {
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					_, _ = io.WriteString(w, `{"data":[{"id":"second"}],"has_more":false}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"data":[{"id":"first"}],"has_more":true,"last_id":"cursor&after_id=other +中文"}`)
+				return
+			case "too-many":
+				data := make([]map[string]string, 2001)
+				for i := range data {
+					data[i] = map[string]string{"id": fmt.Sprintf("model-%d", i)}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+				return
+			case "empty":
+				_, _ = io.WriteString(w, `{"data":[],"has_more":false}`)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": fmt.Sprint(call)}}, "has_more": true, "last_id": fmt.Sprint(call)})
+		}))
+		models, err := service.ListVisionModels(context.Background(), VisionConfiguration{BaseURL: catalogServer.URL, Protocol: "anthropic"})
+		catalogServer.Close()
+		if mode == "cursor-encoding" || mode == "empty" {
+			if err != nil || (mode == "cursor-encoding" && strings.Join(models, ",") != "first,second") || (mode == "empty" && len(models) != 0) {
+				return fmt.Errorf("valid catalog %s failed: %v", mode, err)
+			}
+		} else if err == nil || models != nil {
+			return fmt.Errorf("incomplete catalog %s reported success", mode)
+		}
+		if mode == "page-limit" && calls.Load() != 20 {
+			return fmt.Errorf("pagination limit not enforced")
+		}
+	}
+	catalogStarted := make(chan struct{})
+	catalogCancelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("after_id") == "" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"first"}],"has_more":true,"last_id":"first"}`)
+			return
+		}
+		close(catalogStarted)
+		<-r.Context().Done()
+	}))
+	defer catalogCancelServer.Close()
+	catalogCtx, catalogCancel := context.WithCancel(context.Background())
+	defer catalogCancel()
+	catalogResult := make(chan error, 1)
+	go func() {
+		models, err := service.ListVisionModels(catalogCtx, VisionConfiguration{BaseURL: catalogCancelServer.URL, Protocol: "anthropic"})
+		if models != nil {
+			catalogResult <- fmt.Errorf("cancelled catalog returned partial models")
+			return
+		}
+		catalogResult <- err
+	}()
+	select {
+	case <-catalogStarted:
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("second catalog page not requested")
+	}
+	catalogCancel()
+	select {
+	case err := <-catalogResult:
+		if err != context.Canceled {
+			return fmt.Errorf("catalog cancellation not preserved: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("catalog cancellation timed out")
+	}
 	started, cancelled := make(chan struct{}), make(chan struct{})
 	cancelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -399,7 +522,7 @@ func verifyVisionContracts() error {
 	if _, err := service.ListVisionModels(context.Background(), VisionConfiguration{BaseURL: redirect.URL, APIKey: "verify-secret"}); err == nil || before != requests.Load() {
 		return fmt.Errorf("redirect followed")
 	}
-	fmt.Println(`{"ok":true,"vision":"three protocols, complete responses, attachment allowlist, limits, model catalog, HTTP cancellation and redirects"}`)
+	fmt.Println(`{"ok":true,"vision":"three protocols, complete responses, attachment allowlist, limits, paginated model catalog, HTTP cancellation and redirects"}`)
 	return nil
 }
 

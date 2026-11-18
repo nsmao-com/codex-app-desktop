@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.30：Codex 重连或切换工作区后自动刷新能力目录，优化 Computer Use 状态与旧响应保护。</sub></p>
+<p align="center"><sub>v1.6.31：视觉模型目录支持 Anthropic 分页、取消读取和数量提示，不完整目录不再误报成功。</sub></p>
 
 ## 为什么是 Nice Codex
 

@@ -15,6 +15,7 @@ const loading = shallowRef(false)
 const saved = shallowRef(false)
 const error = shallowRef('')
 const models = shallowRef<string[]>([])
+const catalogLoaded = shallowRef(false)
 const manual = shallowRef(false)
 let catalogRequest: ReturnType<typeof backend.ListVisionModels> | null = null
 let catalogRevision = 0
@@ -34,12 +35,16 @@ function cancelCatalog(): void {
 watch(() => [draft.value.baseURL, draft.value.apiKey, draft.value.protocol], () => {
   cancelCatalog()
   models.value = []
-})
+  catalogLoaded.value = false
+  error.value = ''
+}, { flush: 'sync' })
 watch(draft, () => { saved.value = false }, { deep: true })
 onBeforeUnmount(cancelCatalog)
 async function loadModels(): Promise<void> {
   if (loading.value || !draft.value.baseURL.trim()) return
   error.value = ''
+  models.value = []
+  catalogLoaded.value = false
   loading.value = true
   const revision = ++catalogRevision
   const request = backend.ListVisionModels({ ...draft.value })
@@ -48,6 +53,7 @@ async function loadModels(): Promise<void> {
     const result = await request
     if (revision !== catalogRevision) return
     models.value = result || []
+    catalogLoaded.value = true
     if (!models.value.length) error.value = '接口未返回模型，可打开手动填写。模型目录不保证每个模型都支持图片。'
   } catch (reason) {
     if (revision === catalogRevision) error.value = reason instanceof Error ? reason.message : String(reason)
@@ -83,12 +89,16 @@ async function save(): Promise<void> {
       <div class="space-y-2">
         <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
           <span>视觉模型</span>
-          <Button type="button" variant="outline" size="sm" :disabled="loading || busy || !draft.baseURL.trim()" @click="loadModels">{{ loading ? '读取中…' : '读取模型列表' }}</Button>
+          <div class="flex flex-wrap items-center gap-2">
+            <Button v-if="loading" type="button" variant="ghost" size="sm" @click="cancelCatalog">取消读取</Button>
+            <Button type="button" variant="outline" size="sm" :disabled="loading || busy || !draft.baseURL.trim()" @click="loadModels">{{ loading ? '读取中…' : '读取模型列表' }}</Button>
+          </div>
         </div>
         <SearchableSelect v-if="!manual" v-model="draft.model" :disabled="busy" :options="options" placeholder="读取列表后选择支持图片的模型" aria-label="视觉模型" />
         <Input v-else v-model="draft.model" autocomplete="off" placeholder="接口不提供目录时，填写完整模型 ID" aria-label="手动填写视觉模型 ID" :disabled="busy" />
         <Button type="button" variant="ghost" size="sm" @click="manual = !manual">{{ manual ? '返回模型选择' : '接口没有目录？手动填写' }}</Button>
         <p class="text-xs leading-5 text-muted-foreground">目录只用于选择，不代表模型已具备图片能力。请选择服务商明确支持图片输入的模型。</p>
+        <p v-if="loading || catalogLoaded" role="status" class="text-xs text-muted-foreground">{{ loading ? '正在读取模型目录，分页接口可能需要稍等…' : `已读取 ${models.length} 个模型` }}</p>
       </div>
       <div class="rounded-lg bg-muted/40 p-3 text-xs leading-6 text-muted-foreground">
         <p>选择“视觉模型转文字”后，发送时会把本条问题和图片提交到上方接口，再将结果作为参考交给主模型。主模型收到描述，不会收到原图。</p>

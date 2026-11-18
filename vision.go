@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -103,38 +104,77 @@ func (s *AppService) ListVisionModels(ctx context.Context, config VisionConfigur
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, visionBase(config)+"/models", nil)
-	if err != nil {
-		return nil, errors.New("无法创建模型目录请求")
-	}
-	visionHeaders(request, config)
-	response, err := visionClient().Do(request)
-	if err != nil {
-		return nil, errors.New("无法读取模型目录，请检查网络或取消状态")
-	}
-	payload, err := readVisionResponse(response)
-	if err != nil {
-		return nil, err
-	}
-	var catalog struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(payload, &catalog) != nil {
-		return nil, errors.New("接口未返回可识别的模型目录，可手动填写服务商提供的模型 ID")
-	}
 	models := []string{}
 	seen := map[string]bool{}
-	for _, model := range catalog.Data {
-		id := strings.TrimSpace(model.ID)
-		if id != "" && len(id) <= 160 && !strings.ContainsAny(id, "\r\n\x00") && !seen[id] {
-			seen[id] = true
-			models = append(models, id)
+	afterID := ""
+	seenCursors := map[string]bool{}
+	for page := 0; page < 20; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
+		endpoint, err := url.Parse(visionBase(config) + "/models")
+		if err != nil {
+			return nil, errors.New("无法创建模型目录请求")
+		}
+		if afterID != "" {
+			query := endpoint.Query()
+			query.Set("after_id", afterID)
+			endpoint.RawQuery = query.Encode()
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+		if err != nil {
+			return nil, errors.New("无法创建模型目录请求")
+		}
+		visionHeaders(request, config)
+		response, err := visionClient().Do(request)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, errors.New("无法读取模型目录，请检查网络或取消状态")
+		}
+		payload, err := readVisionResponse(response)
+		if err != nil {
+			return nil, err
+		}
+		var catalog struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+			HasMore bool            `json:"has_more"`
+			LastID  string          `json:"last_id"`
+			Error   json.RawMessage `json:"error"`
+		}
+		if json.Unmarshal(payload, &catalog) != nil || catalog.Data == nil || (len(catalog.Error) > 0 && string(catalog.Error) != "null") {
+			return nil, errors.New("接口未返回可识别的模型目录，可手动填写服务商提供的模型 ID")
+		}
+		for _, model := range catalog.Data {
+			id := strings.TrimSpace(model.ID)
+			if id != "" && len(id) <= 160 && !strings.ContainsAny(id, "\r\n\x00") && !seen[id] {
+				seen[id] = true
+				models = append(models, id)
+			}
+		}
+		if len(models) > 2000 {
+			return nil, errors.New("模型目录超过 2000 项，请手动填写服务商提供的模型 ID")
+		}
+		// Anthropic's official /v1/models uses after_id/last_id pagination.
+		// OpenAI's /models is unpaginated. Do not guess a gateway's paging API.
+		if !catalog.HasMore {
+			sort.Strings(models)
+			return models, nil
+		}
+		if config.Protocol != "anthropic" {
+			return nil, errors.New("接口返回了未支持的模型分页格式，请手动填写完整模型 ID")
+		}
+		next := strings.TrimSpace(catalog.LastID)
+		if next == "" || len(next) > 1024 || strings.ContainsAny(next, "\r\n\x00") || seenCursors[next] || len(catalog.Data) == 0 {
+			return nil, errors.New("模型目录分页游标无效或重复，请重试或手动填写完整模型 ID")
+		}
+		seenCursors[next] = true
+		afterID = next
 	}
-	sort.Strings(models)
-	return models, nil
+	return nil, errors.New("模型目录超过分页上限，请手动填写服务商提供的模型 ID")
 }
 
 func (s *AppService) AnalyzeComposerImages(ctx context.Context, text string, images []string) (VisionAnalysis, error) {

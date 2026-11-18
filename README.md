@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.30: Keep Codex capabilities fresh across reconnects and workspace changes, with safer Computer Use state handling.</sub></p>
+<p align="center"><sub>v1.6.31: Load complete Anthropic vision model catalogs, cancel pending reads, and report incomplete results clearly.</sub></p>
 
 ## Why Nice Codex
 
