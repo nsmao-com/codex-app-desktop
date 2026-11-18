@@ -1,6 +1,23 @@
 # Nice Codex 项目分析与优化记录
 
-更新日期：2026-11-18。本次迭代版本为 `1.6.19`；下方原始架构分析保留 2026-09-30 的记录。
+更新日期：2026-11-18。本次迭代版本为 `1.6.20`；下方原始架构分析保留 2026-09-30 的记录。
+
+## 2026-11-18：插件启停与能力状态核验
+
+- 新增 Codex 插件启停，调用原生 `config/batchWrite`，以 `plugins` 表 upsert 合并单个 ID 的 enabled 值，避免带点的 ID 被解释为配置路径，也不覆盖其他插件。切换后重新读取目录；配置覆盖、状态读取失败分别提示。
+- 能力列表循环读取 `experimentalFeature/list` 全部分页；本机 Codex 0.169.0 实测返回 215 项，原先 limit=100 会遗漏后半部分。重复游标和读取失败不再返回不完整成功结果。
+- 原生 `experimentalFeature/enablement/set` 只接受部分运行时开关；实测 computer_use 返回空 enablement。现在检查返回确认值，并在成功后读取实际状态，避免假成功。
+- Computer Use 页面继续保存本地偏好，但展示原生返回的 enabled 值，不从本地缺省值推断可用性；配置与原生状态不一致时提示覆盖，已有任务提示使用配置重载。插件安装与系统权限仍需分别就绪。
+- 修复能力刷新正在进行时丢失强制刷新的竞态，插件卡片增加窄窗口换行。
+
+### 本批证据与验证边界
+
+- 官方协议与源码：`https://github.com/openai/codex/blob/main/codex-rs/app-server/src/request_processors/config_processor.rs`、`https://github.com/openai/codex/blob/main/codex-rs/app-server/src/request_processors/catalog_processor.rs`、`https://github.com/openai/codex/blob/main/codex-rs/core-plugins/src/toggles.rs`。先通过 Context7 查询，再读取上游实现及本机验证。
+- 临时 CODEX_HOME 启动真实 app-server：验证 215 项分页、带点插件 ID 的合并写入、其他插件设置保留、无效运行时切换返回空确认。未操作用户真实插件或登录凭据，验证进程已退出。
+- 现有 verify_bootstrap 的 capabilities 检查覆盖分页、错误、重复游标、确认值及插件写入载荷；Go vet 与 pnpm typecheck 通过，Wails 绑定重新生成。
+- 内存执行实际能力 store，验证切换后读取、旧刷新并发和覆盖提示；实际 Computer Use 组件与插件区模板使用模拟后端、基础组件替身和现有 CSS，在 960/390px 下验证无横向溢出、切换参数正确、离线禁止操作与覆盖提示。该隔离验证不等同完整安装包 E2E。
+- 对照资料已定位 `yetone/magpie`、`farion1231/cc-switch`、`deepseek-ai/deepseek-harness`：模型配置保留、图片输入能力按模型声明和凭据分离值得沿用。独立视觉路由与更多运行时适配仍待后续实现，未在本版虚报接入。
+- 本批没有数据库、依赖或锁文件变更，没有本地前端 dev/build，没有新增测试文件。
 
 ## 2026-11-18：CLI 检测与运行时兼容
 

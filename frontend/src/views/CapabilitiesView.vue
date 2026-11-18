@@ -2093,7 +2093,7 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
 
             <TabsContent value="plugins" class="mt-0 space-y-3">
               <Card v-for="plugin in visiblePlugins" :key="plugin.id" class="gap-0 rounded-md py-0 shadow-none">
-                <CardContent class="flex items-start gap-3 py-3">
+                <CardContent class="flex flex-wrap items-start gap-3 py-3">
                   <div class="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-xl border bg-muted text-primary">
                     <img
                       v-if="plugin.logoUrl && !logoFailed(`plugin:${plugin.id}`)"
@@ -2104,18 +2104,31 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                     >
                     <Blocks v-else :size="18" />
                   </div>
-                  <div class="min-w-0 flex-1">
-                    <div class="flex items-center gap-2">
+                  <div class="min-w-0 flex-1 basis-40">
+                    <div class="flex flex-wrap items-center gap-2">
                       <span class="truncate text-xs font-semibold">{{ plugin.displayName }}</span>
                       <Badge v-if="plugin.version" variant="outline" class="text-[9px]">v{{ plugin.version }}</Badge>
                     </div>
                     <p class="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{{ plugin.description || plugin.name }}</p>
-                    <p class="mt-1 text-[10px] text-muted-foreground">{{ plugin.developerName || plugin.marketplaceName }} · {{ plugin.sourceType }}</p>
+                    <p class="mt-1 break-all text-[10px] text-muted-foreground">{{ plugin.developerName || plugin.marketplaceName }} · {{ plugin.sourceType }}</p>
                   </div>
-                  <Button v-if="plugin.installed" variant="outline" size="sm" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="capabilitiesStore.uninstallPlugin(plugin.id)">
-                    <Unplug :size="13" class="mr-1.5" />
-                    {{ t('capabilities.uninstall') }}
-                  </Button>
+                  <div v-if="plugin.installed" class="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      :disabled="capabilitiesStore.capabilityMutation !== '' || capabilitiesStore.capabilitiesLoading"
+                      :aria-label="`${plugin.enabled ? t('capabilities.disablePlugin') : t('capabilities.enablePlugin')} · ${plugin.displayName}`"
+                      :title="plugin.enabled ? t('capabilities.disablePlugin') : t('capabilities.enablePlugin')"
+                      @click="capabilitiesStore.setPluginEnabled(plugin.id, !plugin.enabled)"
+                    >
+                      <Power :size="13" class="mr-1.5" />
+                      {{ plugin.enabled ? t('capabilities.enabled') : t('capabilities.disabled') }}
+                    </Button>
+                    <Button variant="ghost" size="sm" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="capabilitiesStore.uninstallPlugin(plugin.id)">
+                      <Unplug :size="13" class="mr-1.5" />
+                      {{ t('capabilities.uninstall') }}
+                    </Button>
+                  </div>
                   <Button v-else size="sm" :disabled="capabilitiesStore.capabilityMutation !== ''" @click="capabilitiesStore.installPlugin(plugin.id)">
                     <Blocks :size="13" class="mr-1.5" />
                     {{ t('capabilities.install') }}

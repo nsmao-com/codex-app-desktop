@@ -2689,6 +2689,30 @@ func (s *AppService) UninstallPlugin(pluginID string) error {
 	return err
 }
 
+func (s *AppService) SetPluginEnabled(pluginID string, enabled bool) error {
+	edit, err := pluginEnablementEdit(pluginID, enabled)
+	if err != nil {
+		return err
+	}
+	_, err = s.call("config/batchWrite", map[string]any{
+		"edits": []any{edit}, "reloadUserConfig": true,
+	})
+	return err
+}
+
+func pluginEnablementEdit(pluginID string, enabled bool) (map[string]any, error) {
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" || len(pluginID) > 220 || strings.ContainsAny(pluginID, "\r\n\x00") {
+		return nil, errors.New("a valid plugin id is required")
+	}
+	// Merge at the plugins table so dots in a native plugin ID remain literal
+	// and unrelated plugin settings are preserved by the native config writer.
+	return map[string]any{
+		"keyPath": "plugins", "mergeStrategy": "upsert",
+		"value": map[string]any{pluginID: map[string]any{"enabled": enabled}},
+	}, nil
+}
+
 func (s *AppService) ListSkills() (map[string]any, error) {
 	workspace, err := validateWorkspace(s.Settings().Workspace)
 	if err != nil {
@@ -3085,7 +3109,40 @@ func (s *AppService) ListCollaborationModes() (map[string]any, error) {
 }
 
 func (s *AppService) ListExperimentalFeatures() (map[string]any, error) {
-	return s.call("experimentalFeature/list", map[string]any{"limit": 100})
+	return listExperimentalFeaturePages(func(params map[string]any) (map[string]any, error) {
+		return s.call("experimentalFeature/list", params)
+	})
+}
+
+func listExperimentalFeaturePages(fetch func(map[string]any) (map[string]any, error)) (map[string]any, error) {
+	merged := make([]any, 0, 256)
+	cursor := ""
+	seen := map[string]bool{}
+	for page := 0; page < 32; page++ {
+		params := map[string]any{"limit": 100}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		result, err := fetch(params)
+		if err != nil {
+			return nil, err
+		}
+		rows, ok := result["data"].([]any)
+		if !ok {
+			return nil, errors.New("Codex returned an invalid feature list")
+		}
+		merged = append(merged, rows...)
+		next, _ := result["nextCursor"].(string)
+		if next == "" {
+			return map[string]any{"data": merged, "nextCursor": nil}, nil
+		}
+		if seen[next] {
+			return nil, errors.New("Codex feature list repeated a page cursor; please update the CLI")
+		}
+		seen[next] = true
+		cursor = next
+	}
+	return nil, errors.New("Codex feature list exceeded the page limit")
 }
 
 func (s *AppService) SetExperimentalFeature(name string, enabled bool) error {
@@ -3093,10 +3150,22 @@ func (s *AppService) SetExperimentalFeature(name string, enabled bool) error {
 	if name == "" || len(name) > 180 {
 		return errors.New("a valid feature name is required")
 	}
-	_, err := s.call("experimentalFeature/enablement/set", map[string]any{
+	result, err := s.call("experimentalFeature/enablement/set", map[string]any{
 		"enablement": map[string]bool{name: enabled},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	return verifyFeatureEnablement(result, name, enabled)
+}
+
+func verifyFeatureEnablement(result map[string]any, name string, enabled bool) error {
+	values, _ := result["enablement"].(map[string]any)
+	accepted, ok := values[name].(bool)
+	if !ok || accepted != enabled {
+		return fmt.Errorf("Codex did not accept the change to %s; this CLI may not support changing it at runtime", name)
+	}
+	return nil
 }
 
 func (s *AppService) ReadAccount() (map[string]any, error) {

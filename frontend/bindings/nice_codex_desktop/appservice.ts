@@ -774,6 +774,10 @@ export function SetHookEnabled(hookKey: string, enabled: boolean): $CancellableP
     return $Call.ByID(133382174, hookKey, enabled);
 }
 
+export function SetPluginEnabled(pluginID: string, enabled: boolean): $CancellablePromise<void> {
+    return $Call.ByID(106254510, pluginID, enabled);
+}
+
 /**
  * SetPreventSleepActive keeps the machine awake while a Codex turn is running
  * when the user enabled Prevent sleep while running.

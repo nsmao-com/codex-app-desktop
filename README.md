@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.19: Reliable CLI discovery, actionable diagnostics, current model choices and Antigravity compatibility.</sub></p>
+<p align="center"><sub>v1.6.20: Native plugin enable/disable, complete capability discovery, and verified Computer Use status.</sub></p>
 
 ## Why Nice Codex
 

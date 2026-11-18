@@ -27,6 +27,12 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--capabilities" {
+		if err := verifyCapabilityContracts(); err != nil {
+			fail("capabilities: %v", err)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--codex-detect" {
 		detection := codex.Detect()
 		_ = json.NewEncoder(os.Stdout).Encode(detection)
@@ -150,6 +156,57 @@ func main() {
 	if len(problems) > 0 {
 		os.Exit(1)
 	}
+}
+
+func verifyCapabilityContracts() error {
+	page := 0
+	result, err := listExperimentalFeaturePages(func(params map[string]any) (map[string]any, error) {
+		if page > 0 && params["cursor"] != "second" {
+			return nil, fmt.Errorf("cursor was not forwarded")
+		}
+		page++
+		if page == 1 {
+			return map[string]any{"data": []any{map[string]any{"name": "first"}}, "nextCursor": "second"}, nil
+		}
+		return map[string]any{"data": []any{map[string]any{"name": "computer_use", "enabled": false}}}, nil
+	})
+	if err != nil || len(result["data"].([]any)) != 2 || page != 2 {
+		return fmt.Errorf("feature pagination failed: %v", err)
+	}
+	if _, err := listExperimentalFeaturePages(func(map[string]any) (map[string]any, error) {
+		return map[string]any{"data": []any{}, "nextCursor": "repeated"}, nil
+	}); err == nil {
+		return fmt.Errorf("repeated cursor accepted")
+	}
+	if _, err := listExperimentalFeaturePages(func(map[string]any) (map[string]any, error) {
+		return nil, fmt.Errorf("offline")
+	}); err == nil {
+		return fmt.Errorf("feature read failure hidden")
+	}
+	if err := verifyFeatureEnablement(map[string]any{"enablement": map[string]any{}}, "computer_use", true); err == nil {
+		return fmt.Errorf("ignored feature mutation reported success")
+	}
+	if err := verifyFeatureEnablement(map[string]any{"enablement": map[string]any{"memories": false}}, "memories", true); err == nil {
+		return fmt.Errorf("opposite feature value accepted")
+	}
+	if err := verifyFeatureEnablement(map[string]any{"enablement": map[string]any{"memories": false}}, "memories", false); err != nil {
+		return err
+	}
+	pluginID := "computer.tools@market.place"
+	edit, err := pluginEnablementEdit(pluginID, false)
+	if err != nil || edit["keyPath"] != "plugins" || edit["mergeStrategy"] != "upsert" {
+		return fmt.Errorf("plugin mutation not a table merge: %v", err)
+	}
+	value := edit["value"].(map[string]any)
+	if len(value) != 1 || value[pluginID].(map[string]any)["enabled"] != false {
+		return fmt.Errorf("plugin ID or disabled state lost")
+	}
+	for _, invalid := range []string{"", "\n", "bad\x00id", strings.Repeat("x", 221)} {
+		if _, err := pluginEnablementEdit(invalid, true); err == nil {
+			return fmt.Errorf("invalid plugin ID accepted")
+		}
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"feature pagination", "repeated cursor and read errors", "native enablement acknowledgement", "literal plugin ID and merge payload"}})
 }
 
 func verifyCLIDiscovery() error {

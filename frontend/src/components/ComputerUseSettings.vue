@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, shallowRef } from 'vue'
+import { computed, onMounted, shallowRef } from 'vue'
 import { Monitor, RefreshCw } from '@lucide/vue'
 import { useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
@@ -14,17 +14,30 @@ const supported = shallowRef(false)
 const busy = shallowRef(false)
 const error = shallowRef('')
 const saved = shallowRef(false)
+const effectiveEnabled = shallowRef<boolean | null>(null)
+const statusText = computed(() => {
+  if (busy.value) return '正在检测或保存…'
+  if (effectiveEnabled.value === null) return '尚未确认原生状态，请连接 Codex 后重新检测。'
+  return effectiveEnabled.value ? 'CLI 已允许此能力，仍需插件与系统权限就绪。' : 'CLI 当前未允许此能力。'
+})
+
+async function readEffectiveState(): Promise<void> {
+  const feature = normalizeExperimentalFeatures(await backend.ListExperimentalFeatures()).find(item => item.name === 'computer_use')
+  supported.value = Boolean(feature && feature.stage !== 'removed')
+  effectiveEnabled.value = supported.value && feature ? feature.enabled : null
+}
+
 async function refresh(): Promise<void> {
   if (busy.value) return
   busy.value = true
   error.value = ''
   try {
-    const feature = normalizeExperimentalFeatures(await backend.ListExperimentalFeatures()).find(item => item.name === 'computer_use')
-    supported.value = Boolean(feature)
-    enabled.value = await backend.ReadComputerUseSetting()
+    await readEffectiveState()
+    enabled.value = effectiveEnabled.value === true
     saved.value = false
   } catch {
     supported.value = false
+    effectiveEnabled.value = null
     error.value = '无法读取 Codex 能力。请先连接 Codex，再重新检测。'
   } finally { busy.value = false }
 }
@@ -36,6 +49,12 @@ async function toggle(value: boolean): Promise<void> {
     await backend.SaveComputerUseSetting(value)
     enabled.value = value
     saved.value = true
+    try {
+      await readEffectiveState()
+    } catch {
+      effectiveEnabled.value = null
+      error.value = '配置已保存，但无法确认 CLI 状态。请重新检测。'
+    }
   } catch (reason) {
     error.value = reason instanceof Error ? reason.message : String(reason)
   } finally { busy.value = false }
@@ -44,15 +63,16 @@ onMounted(refresh)
 </script>
 
 <template>
-  <SettingsCard title="Computer Use · 电脑操作" description="让 Codex 通过截图、点击和键盘操作应用。检测 CLI 支持后，仅保存 config.toml 中的 features.computer_use；不会自动安装插件或放行应用权限。">
+  <SettingsCard title="Computer Use · 电脑操作" description="通过截图、点击和键盘操作应用。启用前需确认 Codex 支持、插件可用，以及系统权限就绪。">
     <div class="space-y-5 p-5">
       <div class="flex items-center justify-between gap-5">
-        <div class="flex items-center gap-2 text-xs text-muted-foreground"><Monitor :size="16" class="text-primary" />检测 CLI 能力并保存本地开关</div>
-        <Switch :checked="enabled" :disabled="busy || !supported" aria-label="启用 Computer Use" @update:checked="toggle" />
+        <div class="flex min-w-0 items-center gap-2 text-xs text-muted-foreground"><Monitor :size="16" class="shrink-0 text-primary" />允许新会话使用电脑操作</div>
+        <Switch :checked="enabled" :disabled="busy || !supported || effectiveEnabled === null" aria-label="允许新会话使用 Computer Use" @update:checked="toggle" />
       </div>
       <p v-if="error" class="text-xs text-destructive" role="alert">{{ error }}</p>
-      <p v-else-if="saved" class="text-xs text-primary" role="status">配置已保存。请结束当前任务后重新连接 Codex，使新开关生效。管理员策略可能限制此能力。</p>
-      <p v-else class="text-xs text-muted-foreground" aria-live="polite">{{ busy ? '正在检测或保存…' : supported ? (enabled ? '原生能力已开启，仍需插件与系统权限就绪。' : '原生能力已关闭。') : '当前 CLI 未返回 Computer Use 能力，请检查版本和连接。' }}</p>
+      <p v-if="saved" class="text-xs text-muted-foreground" role="status">配置已保存。已有任务请在结束后使用左下角“重新加载配置”。</p>
+      <p class="text-xs text-muted-foreground" aria-live="polite">{{ statusText }}</p>
+      <p v-if="saved && effectiveEnabled !== null && effectiveEnabled !== enabled" class="text-xs text-destructive" role="status">保存值与 CLI 状态不一致，可能被项目配置或管理策略覆盖。请检查配置后重新检测。</p>
       <div class="rounded-xl bg-muted/40 p-4 text-xs leading-6 space-y-2">
         <p>1. 在插件中安装并启用 Computer Use 的服务器与 Skill。</p>
         <p>2. Windows 需保持目标窗口可见，运行时会占用前台鼠标和键盘；macOS 需授予录屏与辅助功能权限。</p>

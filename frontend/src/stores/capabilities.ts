@@ -40,6 +40,7 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
   const capabilityMutation = shallowRef('')
 
   let capabilityRefreshTimer = 0
+  let capabilityLoadPromise: Promise<void> | null = null
 
   const plugins = computed(() => capabilities.value.plugins)
   const skills = computed(() => capabilities.value.skills)
@@ -49,7 +50,20 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
   const features = computed(() => capabilities.value.features)
 
   async function loadCapabilities(force = false): Promise<void> {
-    if (capabilitiesLoading.value) return
+    while (capabilityLoadPromise) {
+      await capabilityLoadPromise
+      if (!force) return
+    }
+    const pending = performLoadCapabilities(force)
+    capabilityLoadPromise = pending
+    try {
+      await pending
+    } finally {
+      if (capabilityLoadPromise === pending) capabilityLoadPromise = null
+    }
+  }
+
+  async function performLoadCapabilities(force: boolean): Promise<void> {
     if (!appStore.codexAvailable) {
       const message = translate('capabilities.connectionRequired')
       capabilityErrors.value = Object.fromEntries(['plugins', 'skills', 'apps', 'mcp', 'hooks', 'features'].map((key) => [key, message]))
@@ -176,6 +190,29 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
     }
   }
 
+  async function setPluginEnabled(pluginID: string, enabled: boolean): Promise<void> {
+    const plugin = capabilities.value.plugins.find((item) => item.id === pluginID)
+    if (!plugin || !plugin.installed || capabilityMutation.value) return
+    capabilityMutation.value = `plugin:${pluginID}`
+    try {
+      await backend.SetPluginEnabled(pluginID, enabled)
+      await loadCapabilities(true)
+      const current = capabilities.value.plugins.find((item) => item.id === pluginID)
+      if (capabilityErrors.value.plugins || !current) {
+        notify('warning', translate('capabilities.pluginSavedUnverified'), capabilityErrors.value.plugins || plugin.displayName)
+      } else if (current.enabled !== enabled) {
+        notify('warning', translate('capabilities.pluginOverridden'), plugin.displayName)
+      } else {
+        notify('success', translate('capabilities.pluginUpdated'), plugin.displayName)
+      }
+    } catch (error) {
+      notify('error', translate('capabilities.pluginUpdateFailed'), errorMessage(error))
+      await loadCapabilities(true)
+    } finally {
+      capabilityMutation.value = ''
+    }
+  }
+
   async function setSkillEnabled(name: string, path: string, enabled: boolean): Promise<void> {
     if (capabilityMutation.value) return
     capabilityMutation.value = `skill:${path}`
@@ -202,11 +239,10 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
     capabilityMutation.value = `feature:${name}`
     try {
       await backend.SetExperimentalFeature(name, enabled)
-      capabilities.value = {
-        ...capabilities.value,
-        features: capabilities.value.features.map((feature) =>
-          feature.name === name ? { ...feature, enabled } : feature,
-        ),
+      await loadCapabilities(true)
+      const current = capabilities.value.features.find((feature) => feature.name === name)
+      if (capabilityErrors.value.features || !current || current.enabled !== enabled) {
+        notify('warning', translate('capabilities.featureUnverified'), capabilityErrors.value.features)
       }
     } catch (error) {
       notify('error', translate('capabilities.featureUpdateFailed'), errorMessage(error))
@@ -399,6 +435,7 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
     loadMCPServerStatus,
     installPlugin,
     uninstallPlugin,
+    setPluginEnabled,
     setSkillEnabled,
     setExperimentalFeature,
     refreshMCPServers,

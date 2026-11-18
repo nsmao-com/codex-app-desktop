@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.19：修复 CLI 已安装却未检测到，增加路径诊断与修复入口，更新模型与 Antigravity 兼容。</sub></p>
+<p align="center"><sub>v1.6.20：新增原生插件启停，完整读取能力目录，修复 Computer Use 状态误报与刷新竞态。</sub></p>
 
 ## 为什么是 Nice Codex
 
