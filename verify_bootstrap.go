@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -23,6 +24,16 @@ import (
 // Smoke-checks the same Bootstrap / ListModelProviders contracts the UI uses,
 // without needing the Wails window or WebView bindings.
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--claude-plugin-child" {
+		verifyClaudePluginChild()
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--claude-plugins" {
+		if err := verifyClaudePlugins(); err != nil {
+			fail("Claude plugins: %v", err)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--vision" {
 		if err := verifyVisionContracts(); err != nil {
 			fail("vision: %v", err)
@@ -359,6 +370,192 @@ func verifyVisionContracts() error {
 	}
 	fmt.Println(`{"ok":true,"vision":"three protocols, complete responses, attachment allowlist, limits, model catalog, HTTP cancellation and redirects"}`)
 	return nil
+}
+
+func verifyClaudePluginChild() {
+	mode := os.Getenv("NICE_PLUGIN_VERIFY_MODE")
+	args := os.Args[2:]
+	cwd, _ := os.Getwd()
+	if len(args) < 2 || args[0] != "plugin" {
+		fail("unexpected plugin command")
+	}
+	if args[1] == "list" {
+		if mode == "bad-list" {
+			fmt.Print("broken")
+			return
+		}
+		state, _ := os.ReadFile(filepath.Join(cwd, "plugin-state"))
+		if mode == "bad-after" && string(state) == "true" {
+			fmt.Print("broken")
+			return
+		}
+		enabled := string(state) == "true"
+		if mode == "override" {
+			enabled = false
+		}
+		record := map[string]any{"id": "demo@market", "scope": "project", "projectPath": cwd, "installPath": filepath.Join(cwd, "installed"), "version": "1", "enabled": enabled}
+		if mode == "load-error" && enabled {
+			record["errors"] = []string{"marketplace not found"}
+		}
+		_ = json.NewEncoder(os.Stdout).Encode([]map[string]any{record})
+		return
+	}
+	if len(args) != 5 || args[2] != "demo@market" || args[3] != "--scope" || args[4] != "project" {
+		fail("invalid scoped arguments")
+	}
+	if mode == "command-failed" {
+		os.Exit(2)
+	}
+	if mode == "cancel" {
+		time.Sleep(30 * time.Second)
+		return
+	}
+	enabled := "false"
+	if args[1] == "enable" {
+		enabled = "true"
+	} else if args[1] != "disable" {
+		fail("invalid action")
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "plugin-state"), []byte(enabled), 0600); err != nil {
+		fail("persist fixture: %v", err)
+	}
+	fmt.Print("OK")
+}
+
+func verifyClaudePlugins() error {
+	root, err := os.MkdirTemp("", "nice-plugin-verify-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(root)
+	home := filepath.Join(root, "home")
+	workspace := filepath.Join(root, "project 中文")
+	other := filepath.Join(root, "other")
+	for _, dir := range []string{home, workspace, other, filepath.Join(home, "plugins", "cache", "market", "stale")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+	}
+	boolFalse, boolTrue := false, true
+	records := []claudePluginRecord{
+		{ID: "demo@market", Scope: "user", Enabled: &boolTrue, Version: "user-version"},
+		{ID: "demo@market", Scope: "project", ProjectPath: workspace, Enabled: &boolFalse, Version: "project-version", ReadFromFolder: filepath.Join(root, "source")},
+		{ID: "demo@market", Scope: "local", ProjectPath: other, Enabled: &boolTrue},
+		{ID: "policy@market", Scope: "managed", Enabled: &boolTrue, Errors: []string{"dependency unavailable"}},
+	}
+	raw, _ := json.Marshal(records)
+	parsed, err := parseClaudePluginList(string(raw), workspace)
+	if err != nil || len(parsed) != 3 {
+		return fmt.Errorf("native scope filtering: %v / %d", err, len(parsed))
+	}
+	if parsed[0].Scope != "project" || parsed[0].Path != filepath.Join(root, "source") || parsed[1].Scope != "user" {
+		return fmt.Errorf("separate scopes or in-place path lost")
+	}
+	for _, body := range []string{"null", "{}", "broken", `[{"id":"--all","scope":"user","enabled":true}]`} {
+		if _, err := parseClaudePluginList(body, workspace); err == nil {
+			return fmt.Errorf("accepted malformed list")
+		}
+	}
+	for _, id := range []string{"", "--all", "a\nb", "a b", strings.Repeat("a", 221)} {
+		if validClaudePluginID(id) {
+			return fmt.Errorf("accepted unsafe ID")
+		}
+	}
+	if got := listClaudePlugins(home, workspace); len(got) != 0 {
+		return fmt.Errorf("cache mistaken for install")
+	}
+	localRaw, _ := json.Marshal(map[string]any{"plugins": map[string]any{"demo@market": records[:3]}})
+	if err := os.WriteFile(filepath.Join(home, "plugins", "installed_plugins.json"), localRaw, 0600); err != nil {
+		return err
+	}
+	local := listClaudePlugins(home, workspace)
+	if len(local) != 2 || local[0].Enabled != nil || local[1].Enabled != nil {
+		return fmt.Errorf("offline inventory state/scope invalid")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	service := &AppService{settings: defaultSettings(), agentProviders: []AgentProviderRuntime{{Kind: "claude", RuntimeReady: true, Executable: executable}}}
+	service.settings.ClaudeWorkspace = workspace
+	original := execCommandContext
+	defer func() { execCommandContext = original }()
+	mode := "normal"
+	calls := 0
+	execCommandContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+		calls++
+		command := exec.CommandContext(ctx, executable, append([]string{"--claude-plugin-child"}, args...)...)
+		command.Env = append(os.Environ(), "NICE_PLUGIN_VERIFY_MODE="+mode)
+		return command
+	}
+	request := ClaudePluginToggleRequest{Name: "demo@market", Scope: "project", Workspace: workspace, Enabled: true}
+	catalog, err := service.ReadClaudePluginCatalog(context.Background(), workspace)
+	if err != nil || !catalog.Native || len(catalog.Plugins) != 1 {
+		return fmt.Errorf("native catalog: %v", err)
+	}
+	result, err := service.SetClaudePluginEnabled(context.Background(), request)
+	if err != nil || !result.Verified || result.Catalog.Plugins[0].Enabled == nil || !*result.Catalog.Plugins[0].Enabled {
+		return fmt.Errorf("toggle verify: %v", err)
+	}
+	before := calls
+	if _, err := service.SetClaudePluginEnabled(context.Background(), request); err != nil || calls-before != 1 {
+		return fmt.Errorf("idempotent toggle: %v", err)
+	}
+	if service.providerReloading["claude"] {
+		return fmt.Errorf("mutation guard leaked")
+	}
+	for _, bad := range []ClaudePluginToggleRequest{
+		{Name: "--all", Scope: "user", Workspace: workspace},
+		{Name: "demo@market", Scope: "managed", Workspace: workspace},
+		{Name: "demo@market", Scope: "project", Workspace: other},
+	} {
+		before := calls
+		if _, err := service.SetClaudePluginEnabled(context.Background(), bad); err == nil || calls != before {
+			return fmt.Errorf("unsafe scope/name passed")
+		}
+	}
+	service.externalRuns = map[string]*externalRun{"claude:active": {}}
+	before = calls
+	if _, err := service.SetClaudePluginEnabled(context.Background(), request); err == nil || calls != before {
+		return fmt.Errorf("active turn not guarded")
+	}
+	service.externalRuns = nil
+	service.providerReloading["claude"] = true
+	if _, err := service.SetClaudePluginEnabled(context.Background(), request); err == nil {
+		return fmt.Errorf("concurrent mutation not guarded")
+	}
+	delete(service.providerReloading, "claude")
+	for _, nextMode := range []string{"override", "bad-after", "load-error", "command-failed", "bad-list"} {
+		mode = nextMode
+		if err := os.WriteFile(filepath.Join(workspace, "plugin-state"), []byte("false"), 0600); err != nil {
+			return err
+		}
+		result, err := service.SetClaudePluginEnabled(context.Background(), request)
+		if (nextMode == "override" || nextMode == "bad-after" || nextMode == "load-error") && (err != nil || result.Verified || result.Message == "") {
+			return fmt.Errorf("unverified save incorrectly accepted: %s", nextMode)
+		}
+		if (nextMode == "command-failed" || nextMode == "bad-list") && err == nil {
+			return fmt.Errorf("failed CLI accepted: %s", nextMode)
+		}
+		if service.providerReloading["claude"] {
+			return fmt.Errorf("guard leaked after %s", nextMode)
+		}
+	}
+	// Cancellation must stop the managed child without blocking future sends.
+	mode = "cancel"
+	if err := os.WriteFile(filepath.Join(workspace, "plugin-state"), []byte("false"), 0600); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	started := time.Now()
+	if _, err := service.SetClaudePluginEnabled(ctx, request); err == nil || time.Since(started) > 5*time.Second {
+		return fmt.Errorf("child cancellation ignored")
+	}
+	if service.providerReloading["claude"] {
+		return fmt.Errorf("guard leaked after cancellation")
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "claudePlugins": []string{"native scopes", "offline cache exclusion", "CLI enablement", "idempotency", "override detection", "malformed responses", "active/concurrent guards", "cancellation"}})
 }
 
 func verifyCapabilityContracts() error {

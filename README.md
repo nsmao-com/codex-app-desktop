@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.21: Independent vision preprocessing, cancellable image analysis, and safer multi-provider image sending.</sub></p>
+<p align="center"><sub>v1.6.22: Native Claude plugin enable/disable, workspace-scoped inventory, and verified loading diagnostics.</sub></p>
 
 ## Why Nice Codex
 

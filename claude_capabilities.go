@@ -31,10 +31,14 @@ type ClaudeSkillView struct {
 
 // ClaudePluginView is an installed Claude Code plugin.
 type ClaudePluginView struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-	Scope   string `json:"scope"`
-	Path    string `json:"path"`
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	Scope       string   `json:"scope"`
+	Path        string   `json:"path"`
+	ProjectPath string   `json:"projectPath"`
+	Enabled     *bool    `json:"enabled"`
+	Errors      []string `json:"errors"`
+	Notes       []string `json:"notes"`
 }
 
 // ClaudeAgentView is a custom agent under ~/.claude/agents or project.
@@ -106,7 +110,7 @@ func (s *AppService) ReadClaudeCapabilities() ClaudeCapabilitiesCatalog {
 		Settings:            summarizeClaudeSettings(settingsPath),
 		MCP:                 listClaudeMCPServers(home, workspace, claudeJSON),
 		Skills:              listClaudeSkills(home, workspace),
-		Plugins:             listClaudePlugins(home),
+		Plugins:             listClaudePlugins(home, workspace),
 		Agents:              listClaudeAgents(home, workspace),
 		Commands:            listClaudeCommands(home, workspace),
 		Hooks:               listClaudeHooks(settingsPath, workspace),
@@ -322,82 +326,39 @@ func listClaudeSkills(home, workspace string) []ClaudeSkillView {
 	return result
 }
 
-func listClaudePlugins(home string) []ClaudePluginView {
-	path := filepath.Join(home, "plugins", "installed_plugins.json")
-	payload, err := os.ReadFile(path)
-	if err != nil || len(payload) == 0 {
-		// Fallback: list cache directories
-		return listClaudePluginsFromCache(home)
-	}
-	var root map[string]any
-	if json.Unmarshal(payload, &root) != nil {
-		return listClaudePluginsFromCache(home)
-	}
-	plugins, _ := root["plugins"].(map[string]any)
-	if plugins == nil {
-		return listClaudePluginsFromCache(home)
-	}
-	result := make([]ClaudePluginView, 0, len(plugins))
-	for name, value := range plugins {
-		view := ClaudePluginView{Name: name}
-		// value is usually an array of install records
-		switch typed := value.(type) {
-		case []any:
-			if len(typed) > 0 {
-				if rec, ok := typed[0].(map[string]any); ok {
-					view.Version = firstString(rec, "version")
-					view.Scope = firstString(rec, "scope")
-					view.Path = firstString(rec, "installPath")
-				}
-			}
-		case map[string]any:
-			view.Version = firstString(typed, "version")
-			view.Scope = firstString(typed, "scope")
-			view.Path = firstString(typed, "installPath", "path")
-		}
-		if view.Path == "" {
-			view.Path = filepath.Join(home, "plugins", "cache")
-		}
-		result = append(result, view)
-	}
-	sort.SliceStable(result, func(i, j int) bool {
-		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
-	})
-	return result
-}
-
-func listClaudePluginsFromCache(home string) []ClaudePluginView {
-	root := filepath.Join(home, "plugins", "cache")
-	entries, err := os.ReadDir(root)
+// Local records are an offline inventory, never proof that a plugin is enabled.
+func listClaudePlugins(home, workspace string) []ClaudePluginView {
+	payload, err := os.ReadFile(filepath.Join(home, "plugins", "installed_plugins.json"))
 	if err != nil {
-		return nil
+		return []ClaudePluginView{}
 	}
-	result := make([]ClaudePluginView, 0)
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		// marketplace folder → plugin folders
-		marketPath := filepath.Join(root, entry.Name())
-		sub, err := os.ReadDir(marketPath)
-		if err != nil {
-			result = append(result, ClaudePluginView{Name: entry.Name(), Path: marketPath, Scope: "cache"})
-			continue
-		}
-		for _, plugin := range sub {
-			if !plugin.IsDir() || strings.HasPrefix(plugin.Name(), ".") {
+	var root struct {
+		Plugins map[string]json.RawMessage `json:"plugins"`
+	}
+	if json.Unmarshal(payload, &root) != nil {
+		return []ClaudePluginView{}
+	}
+	result := []ClaudePluginView{}
+	for name, raw := range root.Plugins {
+		var records []claudePluginRecord
+		if json.Unmarshal(raw, &records) != nil {
+			var record claudePluginRecord
+			if json.Unmarshal(raw, &record) != nil {
 				continue
 			}
-			result = append(result, ClaudePluginView{
-				Name:  plugin.Name() + "@" + entry.Name(),
-				Path:  filepath.Join(marketPath, plugin.Name()),
-				Scope: "cache",
-			})
+			records = []claudePluginRecord{record}
+		}
+		for _, record := range records {
+			record.ID = name
+			if !claudePluginApplies(record.Scope, record.ProjectPath, workspace) {
+				continue
+			}
+			view := record.view()
+			view.Enabled = nil
+			result = append(result, view)
 		}
 	}
-	sort.SliceStable(result, func(i, j int) bool {
-		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
-	})
+	sortClaudePlugins(result)
 	return result
 }
 

@@ -34,7 +34,7 @@ import {
   syncModelMetadata,
 } from '../utils/modelMetadata'
 
-const AppVersionFallback = '1.6.21'
+const AppVersionFallback = '1.6.22'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -168,7 +168,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.6.21')
+  const appVersion = shallowRef('1.6.22')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{

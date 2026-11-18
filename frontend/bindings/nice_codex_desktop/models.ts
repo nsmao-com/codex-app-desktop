@@ -198,6 +198,26 @@ export interface ClaudeMessage {
     "contextTokens"?: number;
 }
 
+export interface ClaudePluginCatalog {
+    "workspace": string;
+    "plugins": ClaudePluginView[] | null;
+    "native": boolean;
+    "warning": string;
+}
+
+export interface ClaudePluginToggleRequest {
+    "name": string;
+    "scope": string;
+    "workspace": string;
+    "enabled": boolean;
+}
+
+export interface ClaudePluginToggleResult {
+    "catalog": ClaudePluginCatalog;
+    "verified": boolean;
+    "message": string;
+}
+
 /**
  * ClaudePluginView is an installed Claude Code plugin.
  */
@@ -206,6 +226,10 @@ export interface ClaudePluginView {
     "version": string;
     "scope": string;
     "path": string;
+    "projectPath": string;
+    "enabled": boolean | null;
+    "errors": string[] | null;
+    "notes": string[] | null;
 }
 
 /**

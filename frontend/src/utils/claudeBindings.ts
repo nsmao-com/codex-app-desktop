@@ -110,6 +110,10 @@ export interface ClaudePluginView {
   version: string
   scope: string
   path: string
+  projectPath?: string
+  enabled?: boolean | null
+  errors?: string[] | null
+  notes?: string[] | null
 }
 
 export interface ClaudeAgentView {

@@ -25,6 +25,7 @@ import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
+import ClaudePluginsPanel from '@/components/ClaudePluginsPanel.vue'
 import GrokIcon from '@/components/icons/GrokIcon.vue'
 import GeminiIcon from '@/components/icons/GeminiIcon.vue'
 import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
@@ -113,6 +114,8 @@ const grokCatalogLoading = shallowRef(false)
 const grokTab = shallowRef<GrokCapTab>('runtime')
 const claudeCatalog = shallowRef<ClaudeCapabilitiesCatalog | null>(null)
 const claudeCatalogLoading = shallowRef(false)
+const claudePluginsRefreshKey = shallowRef(0)
+let claudeCatalogRevision = 0
 const claudeTab = shallowRef<ClaudeCapTab>('runtime')
 const externalTab = shallowRef<'runtime' | 'mcp' | 'skills' | 'instructions'>('runtime')
 const externalCatalog = shallowRef<ExternalRuntimeCatalog | null>(null)
@@ -368,11 +371,17 @@ async function loadGrokCatalog(): Promise<void> {
 }
 
 async function loadClaudeCatalog(): Promise<void> {
+  const revision = ++claudeCatalogRevision
+  const workspace = appStore.settings.claudeWorkspace
   claudeCatalogLoading.value = true
   try {
-    claudeCatalog.value = await readClaudeCapabilities()
+    const next = await readClaudeCapabilities()
+    if (revision !== claudeCatalogRevision || workspace !== appStore.settings.claudeWorkspace) return
+    claudeCatalog.value = next
+    claudePluginsRefreshKey.value++
     void claudeStore.refreshRuntime()
   } catch (error) {
+    if (revision !== claudeCatalogRevision || workspace !== appStore.settings.claudeWorkspace) return
     const message = error instanceof Error ? error.message : String(error)
     notify('error', t('capabilities.loading'), message)
     claudeCatalog.value = {
@@ -397,7 +406,7 @@ async function loadClaudeCatalog(): Promise<void> {
       },
     }
   } finally {
-    claudeCatalogLoading.value = false
+    if (revision === claudeCatalogRevision) claudeCatalogLoading.value = false
   }
 }
 
@@ -629,6 +638,8 @@ onMounted(() => {
 })
 watch(() => appStore.codexAvailable, loadWhenReady)
 watch(() => appStore.activeRuntime, () => {
+  claudeCatalogRevision++
+  claudeCatalogLoading.value = false
   providerConfigurationRequestSequence += 1
   providerContextSaveSequence += 1
   providerRestartSequence += 1
@@ -640,6 +651,11 @@ watch(() => appStore.activeRuntime, () => {
   providerConfiguration.value = null
   externalCatalog.value = null
   loadWhenReady()
+})
+watch(() => appStore.settings.claudeWorkspace, () => {
+  claudeCatalogRevision++
+  claudeCatalog.value = null
+  if (isClaudeMode.value) void loadClaudeCatalog()
 })
 watch(externalMcpScope, () => hydrateExternalEditors())
 watch(
@@ -852,6 +868,7 @@ function onMcpImportPaste(event: ClipboardEvent): void {
 }
 
 onUnmounted(() => {
+  claudeCatalogRevision++
   if (mcpImportParseTimer) window.clearTimeout(mcpImportParseTimer)
 })
 
@@ -1622,24 +1639,11 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                 </template>
 
                 <template v-else-if="claudeTab === 'plugins'">
-                  <Card v-for="plugin in (claudeCatalog?.plugins || [])" :key="plugin.path + plugin.name" class="p-4">
-                    <div class="flex items-start justify-between gap-3">
-                      <div class="min-w-0">
-                        <p class="text-[13px] font-medium">{{ plugin.name }}</p>
-                        <p class="mt-1 font-mono text-[10px] text-muted-foreground">{{ plugin.path }}</p>
-                      </div>
-                      <div class="flex shrink-0 flex-col items-end gap-1">
-                        <Badge v-if="plugin.version" variant="outline" class="text-[9px]">v{{ plugin.version }}</Badge>
-                        <Badge variant="secondary" class="text-[9px]">{{ claudeScopeLabel(plugin.scope || 'user') }}</Badge>
-                      </div>
-                    </div>
-                  </Card>
-                  <div
-                    v-if="!(claudeCatalog?.plugins?.length)"
-                    class="rounded-lg border border-dashed px-4 py-10 text-center text-[12px] text-muted-foreground"
-                  >
-                    {{ t('capabilities.claudePluginsEmpty') }}
-                  </div>
+                  <ClaudePluginsPanel
+                    :workspace="appStore.settings.claudeWorkspace || ''"
+                    :refresh-key="claudePluginsRefreshKey"
+                    @loaded="plugins => { if (claudeCatalog) claudeCatalog = { ...claudeCatalog, plugins } }"
+                  />
                 </template>
 
                 <template v-else-if="claudeTab === 'agents'">

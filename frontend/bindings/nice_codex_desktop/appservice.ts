@@ -425,6 +425,10 @@ export function ReadClaudeGlobalInstructions(): $CancellablePromise<$models.Glob
     return $Call.ByID(2905891186);
 }
 
+export function ReadClaudePluginCatalog(workspace: string): $CancellablePromise<$models.ClaudePluginCatalog> {
+    return $Call.ByID(1053406126, workspace);
+}
+
 export function ReadClaudeProjectInstructions(): $CancellablePromise<$models.ProjectInstructionsInfo> {
     return $Call.ByID(1543098932);
 }
@@ -775,6 +779,10 @@ export function SetAlwaysOnTop(enabled: boolean): $CancellablePromise<void> {
 
 export function SetAppEnabled(appID: string, enabled: boolean): $CancellablePromise<void> {
     return $Call.ByID(2274727570, appID, enabled);
+}
+
+export function SetClaudePluginEnabled(request: $models.ClaudePluginToggleRequest): $CancellablePromise<$models.ClaudePluginToggleResult> {
+    return $Call.ByID(518636096, request);
 }
 
 export function SetExperimentalFeature(name: string, enabled: boolean): $CancellablePromise<void> {
