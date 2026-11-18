@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.29: Inspect native Claude plugin capabilities and estimated token costs, with loaded versions and MCP service names.</sub></p>
+<p align="center"><sub>v1.6.30: Keep Codex capabilities fresh across reconnects and workspace changes, with safer Computer Use state handling.</sub></p>
 
 ## Why Nice Codex
 

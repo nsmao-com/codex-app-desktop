@@ -131,6 +131,9 @@ export const useCodexStore = defineStore('codex', () => {
     version: '',
     workspace: '',
   })
+  watch(() => connection.value.state === 'ready', (ready) => {
+    capabilitiesStore.connectionReady = ready
+  }, { immediate: true, flush: 'sync' })
   const lastTransportMessage = shallowRef('')
   let transportReconnectTimer = 0
   let lastAutomaticTransportRestartAt = 0

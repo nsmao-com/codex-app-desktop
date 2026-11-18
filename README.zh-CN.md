@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.29：查看 Claude 原生插件能力与 Token 开销，区分实际加载版本，并展示插件提供的 MCP 服务。</sub></p>
+<p align="center"><sub>v1.6.30：Codex 重连或切换工作区后自动刷新能力目录，优化 Computer Use 状态与旧响应保护。</sub></p>
 
 ## 为什么是 Nice Codex
 

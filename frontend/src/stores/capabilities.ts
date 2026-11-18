@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, shallowRef } from 'vue'
+import { computed, shallowRef, watch } from 'vue'
 
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import type { CapabilityCatalog, MCPServerView } from '../types/codex'
@@ -38,9 +38,22 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
   const capabilitiesLoading = shallowRef(false)
   const mcpStatusLoading = shallowRef(false)
   const capabilityMutation = shallowRef('')
+  const connectionReady = shallowRef(false)
 
   let capabilityRefreshTimer = 0
   let capabilityLoadPromise: Promise<void> | null = null
+  let contextRevision = 0
+  let requested = false
+
+  watch(() => [appStore.settings.workspace, appStore.codexAvailable, connectionReady.value], () => {
+    contextRevision++
+    capabilities.value = emptyCapabilities()
+    capabilityLoaded.value = {}
+    capabilityErrors.value = {}
+    if (capabilityRefreshTimer) window.clearTimeout(capabilityRefreshTimer)
+    capabilityRefreshTimer = 0
+    if (requested) void loadCapabilities(true)
+  }, { flush: 'sync' })
 
   const plugins = computed(() => capabilities.value.plugins)
   const skills = computed(() => capabilities.value.skills)
@@ -50,6 +63,7 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
   const features = computed(() => capabilities.value.features)
 
   async function loadCapabilities(force = false): Promise<void> {
+    requested = true
     while (capabilityLoadPromise) {
       await capabilityLoadPromise
       if (!force) return
@@ -64,7 +78,10 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
   }
 
   async function performLoadCapabilities(force: boolean): Promise<void> {
-    if (!appStore.codexAvailable) {
+    const revision = contextRevision
+    if (!appStore.codexAvailable || !connectionReady.value) {
+      capabilities.value = emptyCapabilities()
+      capabilityLoaded.value = {}
       const message = translate('capabilities.connectionRequired')
       capabilityErrors.value = Object.fromEntries(['plugins', 'skills', 'apps', 'mcp', 'hooks', 'features'].map((key) => [key, message]))
       return
@@ -87,12 +104,12 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
     capabilitiesLoading.value = true
     try {
       await mapWithConcurrency(pending, 2, ([key, errorKey, loader, normalize]) =>
-        loadCapabilitySection(key, errorKey, loader, normalize),
+        revision === contextRevision ? loadCapabilitySection(key, errorKey, loader, normalize) : Promise.resolve(),
       )
     } finally {
       capabilitiesLoading.value = false
     }
-    loadMCPServerStatus()
+    if (revision === contextRevision) void loadMCPServerStatus()
   }
 
   async function loadCapabilitySection<K extends keyof CapabilityCatalog>(
@@ -101,8 +118,12 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
     loader: () => Promise<unknown>,
     normalize: (value: unknown) => CapabilityCatalog[K],
   ): Promise<void> {
+    const revision = contextRevision
     try {
       const response = await loader()
+      // A disconnect can complete an older RPC after the view has already
+      // switched to the offline state. Never repopulate stale capabilities.
+      if (revision !== contextRevision || !appStore.codexAvailable || !connectionReady.value) return
       const items = normalize(response)
       capabilities.value = { ...capabilities.value, [key]: items }
       capabilityLoaded.value = { ...capabilityLoaded.value, [errorKey]: true }
@@ -110,16 +131,19 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
       if (responseError) setCapabilityError(errorKey, responseError)
       else clearCapabilityError(errorKey)
     } catch (error) {
+      if (revision !== contextRevision || !appStore.codexAvailable || !connectionReady.value) return
       capabilityLoaded.value = { ...capabilityLoaded.value, [errorKey]: false }
       setCapabilityError(errorKey, errorMessage(error))
     }
   }
 
   async function loadMCPServerStatus(): Promise<void> {
-    if (!appStore.codexAvailable || mcpStatusLoading.value) return
+    if (!appStore.codexAvailable || !connectionReady.value || mcpStatusLoading.value) return
+    const revision = contextRevision
     mcpStatusLoading.value = true
     try {
       const response = await backend.ListMCPServerStatus()
+      if (revision !== contextRevision || !appStore.codexAvailable || !connectionReady.value) return
       const result = asRecord(response)
       const status = normalizeMCPServers(response)
       capabilities.value = {
@@ -135,13 +159,14 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
           })),
         }
         setCapabilityError('mcp', translate('capabilities.mcpStatusUnavailable'))
-      } else {
+      } else if (capabilityLoaded.value.mcp) {
         clearCapabilityError('mcp')
       }
     } catch {
-      setCapabilityError('mcp', translate('capabilities.mcpStatusUnavailable'))
+      if (revision === contextRevision && appStore.codexAvailable && connectionReady.value) setCapabilityError('mcp', translate('capabilities.mcpStatusUnavailable'))
     } finally {
       mcpStatusLoading.value = false
+      if (revision !== contextRevision && appStore.codexAvailable && connectionReady.value) void loadMCPServerStatus()
     }
   }
 
@@ -410,7 +435,7 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
   }
 
   function scheduleRefresh(): void {
-    if (!Object.values(capabilities.value).some((items) => items.length > 0)) return
+    if (!requested) return
     if (capabilityRefreshTimer) window.clearTimeout(capabilityRefreshTimer)
     capabilityRefreshTimer = window.setTimeout(() => {
       capabilityRefreshTimer = 0
@@ -419,6 +444,7 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
   }
 
   return {
+    connectionReady,
     capabilities,
     capabilityLoaded,
     capabilityErrors,

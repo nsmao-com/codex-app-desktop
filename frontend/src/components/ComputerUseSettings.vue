@@ -1,65 +1,105 @@
 <script setup lang="ts">
-import { computed, onMounted, shallowRef } from 'vue'
+import { computed, onBeforeUnmount, shallowRef, watch } from 'vue'
 import { Monitor, RefreshCw } from '@lucide/vue'
 import { useRouter } from 'vue-router'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import SettingsCard from '@/components/SettingsCard.vue'
+import { useAppStore } from '@/stores/app'
+import { useCapabilitiesStore } from '@/stores/capabilities'
 import * as backend from '../../bindings/nice_codex_desktop/appservice'
 import { normalizeExperimentalFeatures } from '@/utils/capabilities'
 
 const router = useRouter()
+const appStore = useAppStore()
+const capabilitiesStore = useCapabilitiesStore()
 const enabled = shallowRef(false)
 const supported = shallowRef(false)
 const busy = shallowRef(false)
 const error = shallowRef('')
 const saved = shallowRef(false)
 const effectiveEnabled = shallowRef<boolean | null>(null)
+let revision = 0
+let disposed = false
+let saving = false
+let readRequest: ReturnType<typeof backend.ListExperimentalFeatures> | null = null
 const statusText = computed(() => {
   if (busy.value) return '正在检测或保存…'
   if (effectiveEnabled.value === null) return '尚未确认原生状态，请连接 Codex 后重新检测。'
   return effectiveEnabled.value ? 'CLI 已允许此能力，仍需插件与系统权限就绪。' : 'CLI 当前未允许此能力。'
 })
 
-async function readEffectiveState(): Promise<void> {
-  const feature = normalizeExperimentalFeatures(await backend.ListExperimentalFeatures()).find(item => item.name === 'computer_use')
+async function readEffectiveState(token: number): Promise<void> {
+  const request = backend.ListExperimentalFeatures()
+  readRequest = request
+  const response = await request
+  if (disposed || token !== revision || !capabilitiesStore.connectionReady) return
+  const feature = normalizeExperimentalFeatures(response).find(item => item.name === 'computer_use')
   supported.value = Boolean(feature && feature.stage !== 'removed')
   effectiveEnabled.value = supported.value && feature ? feature.enabled : null
 }
 
 async function refresh(): Promise<void> {
   if (busy.value) return
+  if (!appStore.codexAvailable || !capabilitiesStore.connectionReady) return
+  const token = ++revision
   busy.value = true
   error.value = ''
   try {
-    await readEffectiveState()
+    await readEffectiveState(token)
+    if (disposed || token !== revision) return
     enabled.value = effectiveEnabled.value === true
     saved.value = false
   } catch {
+    if (disposed || token !== revision) return
     supported.value = false
     effectiveEnabled.value = null
     error.value = '无法读取 Codex 能力。请先连接 Codex，再重新检测。'
-  } finally { busy.value = false }
+  } finally { if (token === revision) { busy.value = false; readRequest = null } }
 }
 async function toggle(value: boolean): Promise<void> {
   if (busy.value || !supported.value) return
+  const token = ++revision
+  saving = true
   busy.value = true
   error.value = ''
   try {
     await backend.SaveComputerUseSetting(value)
+    if (disposed || token !== revision) return
     enabled.value = value
     saved.value = true
     try {
-      await readEffectiveState()
+      await readEffectiveState(token)
     } catch {
+      if (disposed || token !== revision) return
       effectiveEnabled.value = null
       error.value = '配置已保存，但无法确认 CLI 状态。请重新检测。'
     }
   } catch (reason) {
+    if (disposed || token !== revision) return
     error.value = reason instanceof Error ? reason.message : String(reason)
-  } finally { busy.value = false }
+  } finally {
+    saving = false
+    if (!disposed) {
+      busy.value = false
+      if (token === revision) readRequest = null
+      else if (appStore.codexAvailable && capabilitiesStore.connectionReady) void refresh()
+    }
+  }
 }
-onMounted(refresh)
+watch(() => [appStore.codexAvailable, capabilitiesStore.connectionReady, appStore.settings.workspace], () => {
+  revision++
+  readRequest?.cancel()
+  readRequest = null
+  busy.value = saving
+  supported.value = false
+  effectiveEnabled.value = null
+  enabled.value = false
+  saved.value = false
+  error.value = ''
+  if (appStore.codexAvailable) void refresh()
+}, { immediate: true, flush: 'sync' })
+onBeforeUnmount(() => { disposed = true; revision++; readRequest?.cancel() })
 </script>
 
 <template>
