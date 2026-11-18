@@ -308,7 +308,7 @@ func (s *AppService) runGrokAPITurn(ctx context.Context, turnID string, request 
 		model = strings.TrimSpace(settings.GrokAPIModel)
 	}
 	if model == "" {
-		model = "grok-4.6"
+		model = "grok-4.7"
 	}
 
 	// Persist user message + build chat history for the API.

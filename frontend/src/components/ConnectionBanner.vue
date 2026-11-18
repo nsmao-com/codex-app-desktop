@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { AlertCircle, FolderOpen, RefreshCw } from '@lucide/vue'
-import { computed } from 'vue'
+import { computed, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRouter } from 'vue-router'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -10,6 +11,18 @@ import { useAppStore, useCodexStore } from '@/stores'
 const appStore = useAppStore()
 const codexStore = useCodexStore()
 const { t } = useI18n()
+const router = useRouter()
+const checking = shallowRef(false)
+const detectedCli = computed(() => appStore.agentProviders.find(provider => provider.kind === 'codex'))
+
+async function recheck(): Promise<void> {
+  if (checking.value) return
+  checking.value = true
+  try {
+    await appStore.refreshRuntimes()
+    if (appStore.codexAvailable && appStore.settings.workspace) await codexStore.connect()
+  } finally { checking.value = false }
+}
 
 const state = computed(() => codexStore.connection.state)
 const isConnecting = computed(() => state.value === 'starting' || state.value === 'initializing')
@@ -26,6 +39,7 @@ const visible = computed(() =>
 )
 
 const title = computed(() => {
+  if (missingCli.value && detectedCli.value?.executable) return t('settings.cliNeedsRepair')
   if (isError.value) return t('app.connectionError')
   if (isConnecting.value) return t('app.connecting')
   if (needsWorkspace.value) return t('app.needWorkspace')
@@ -44,7 +58,7 @@ const description = computed(() => {
       : t('app.needWorkspaceHint')
   }
   if (missingCli.value) {
-    return t('welcome.installHint')
+    return detectedCli.value?.message || t('app.cliRecoveryHint')
   }
   if (canConnect.value) {
     return t('app.notConnectedHint')
@@ -63,11 +77,17 @@ const description = computed(() => {
       <AlertTitle class="text-xs">
         {{ title }}
       </AlertTitle>
-      <AlertDescription class="flex items-center justify-between gap-3 text-[11px]">
-        <span class="line-clamp-2">{{ description }}</span>
-        <div class="flex shrink-0 items-center">
+      <AlertDescription class="flex flex-wrap items-center justify-between gap-3 text-[11px]">
+        <span class="min-w-0 flex-1 break-words">{{ description }}</span>
+        <div class="flex flex-wrap items-center gap-2">
+          <template v-if="missingCli">
+            <Button size="xs" variant="outline" :disabled="checking" @click="recheck">
+              <RefreshCw :size="11" class="mr-1" :class="{ 'animate-spin': checking }" />{{ t('onboarding.cliRecheck') }}
+            </Button>
+            <Button size="xs" variant="outline" @click="router.push({ name: 'settings', query: { section: 'environment' } })">{{ t('settings.cliDetails') }}</Button>
+          </template>
           <Button
-            v-if="needsWorkspace"
+            v-else-if="needsWorkspace"
             size="xs"
             variant="outline"
             @click="codexStore.selectProject()"

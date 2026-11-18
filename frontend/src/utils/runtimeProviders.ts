@@ -10,7 +10,7 @@ export const DEFAULT_CODEX_REASONING = [
   { effort: 'ultra', description: 'Ultra reasoning depth' },
 ] as const
 
-export const DEFAULT_CODEX_MODEL = 'gpt-6-astra'
+export const DEFAULT_CODEX_MODEL = 'gpt-6.2-sol'
 
 export const CUSTOM_MODEL_LIMIT = 24
 
@@ -29,27 +29,33 @@ export function normalizeCustomModels(items: string[]): string[] {
 export function claudeLongContextModel(model: string): string | null {
   const base = model.trim().replace(/\[1m\]$/i, '')
   if (/^(sonnet|opus)$/i.test(base) || /^claude-(sonnet-4-[56]|opus-4-6)(?:-\d{8})?$/i.test(base)) return `${base}[1m]`
-  if (/^(fable|claude-(?:fable-5|sonnet-5|opus-(?:4-[78]|5))(?:[-.].*)?)$/i.test(base)) return base
+  if (/^(fable|claude-(?:fable-5|sonnet-5|haiku-5-5|opus-(?:4-[78]|5))(?:[-.].*)?)$/i.test(base)) return base
   return null
 }
 
 /** agy models: Gemini 3.1 Pro exposes low/high, not the Flash medium variant. */
 export function antigravityModelEfforts<T extends { effort: string }>(model: string, options: T[]): T[] {
   const id = model.trim().toLowerCase()
-  const fixed = id.match(/-(low|medium|high)$/)?.[1]
+  if (id.startsWith('orchestrator')) return []
+  const fixed = id.match(/-(low|medium|high|xhigh)$/)?.[1]
   if (fixed) return options.filter((option) => option.effort === fixed)
   if (id === 'gemini-3.1-pro') return options.filter((option) => option.effort !== 'medium')
+  if (!id.startsWith('gemini-4-hydrogen')) return options.filter((option) => option.effort !== 'xhigh')
   return options
 }
 
 export function normalizeAntigravityModelEffort(model: string, effort: string): string {
-  const options = antigravityModelEfforts(model, ['high', 'medium', 'low'].map((effort) => ({ effort })))
-  return options.some((option) => option.effort === effort) ? effort : options[0]!.effort
+  const options = antigravityModelEfforts(model, ['high', 'medium', 'low', 'xhigh'].map((effort) => ({ effort })))
+  return options.some((option) => option.effort === effort) ? effort : options[0]?.effort || ''
 }
 
 /** Soft fallback when model/list is unavailable. */
 export const FALLBACK_CODEX_MODELS = [
   DEFAULT_CODEX_MODEL,
+  'gpt-6.2-astra',
+  'gpt-6.1-sol',
+  'gpt-6.1-terra',
+  'gpt-6-astra',
   'gpt-6-sol',
   'gpt-6-luna',
   'gpt-5.6-sol',
@@ -64,6 +70,7 @@ export const FALLBACK_CODEX_MODELS = [
 ] as const
 
 export const FALLBACK_GROK_MODELS = [
+  'grok-4.7',
   'grok-4.6',
   'grok-4.5',
   'grok-4',
@@ -272,10 +279,14 @@ const FALLBACK_CLAUDE_MODELS = [
   { model: 'default', displayName: 'Claude Code Default', description: 'Recommended model for the current account and provider', isDefault: true },
   { model: 'claude-opus-5-5', displayName: 'Claude Opus 5.5', description: 'claude-opus-5-5', isDefault: false },
   { model: 'claude-sonnet-5-5', displayName: 'Claude Sonnet 5.5', description: 'claude-sonnet-5-5', isDefault: false },
+  { model: 'claude-fable-5-2', displayName: 'Claude Fable 5.2', description: 'claude-fable-5-2', isDefault: false },
+  { model: 'claude-haiku-5-5', displayName: 'Claude Haiku 5.5', description: 'claude-haiku-5-5', isDefault: false },
   { model: 'claude-fable-5-1', displayName: 'Claude Fable 5.1', description: 'claude-fable-5-1', isDefault: false },
   { model: 'claude-haiku-4-5-20251001', displayName: 'Claude Haiku 4.5', description: 'claude-haiku-4-5-20251001', isDefault: false },
   { model: 'sonnet', displayName: 'Claude Sonnet', description: 'CLI alias `sonnet`; resolved by Claude Code', isDefault: false },
   { model: 'opus', displayName: 'Claude Opus', description: 'alias `opus` → latest Opus', isDefault: false },
+  { model: 'best', displayName: 'Claude Best', description: 'Same model as opus', isDefault: false },
+  { model: 'opusplan', displayName: 'Claude Opus Plan', description: 'Opus planning, Sonnet execution', isDefault: false },
   { model: 'haiku', displayName: 'Claude Haiku', description: 'alias `haiku` → latest Haiku', isDefault: false },
   { model: 'fable', displayName: 'Claude Fable', description: 'alias `fable` → latest Fable', isDefault: false },
 ] as const

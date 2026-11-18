@@ -11,7 +11,9 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-var windowsCodexShimTargetPattern = regexp.MustCompile(`(?i)%(?:dp0%|~dp0)[\\/]+([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
+var windowsCodexShimTargetPattern = regexp.MustCompile(`(?i)%(?:dp0%|~dp0)[\\/]*([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
+var windowsCodexPowerShellTargetPattern = regexp.MustCompile(`(?i)\$basedir[\\/]+([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
+var windowsEnvironmentPattern = regexp.MustCompile(`%([^%]+)%`)
 
 // enrichProcessPath merges Machine/User PATH and common Node/pnpm/npm install
 // directories into this process. GUI apps launched from Explorer often miss
@@ -27,8 +29,8 @@ func enrichProcessPath() {
 	}
 
 	appendUnique := func(dir string) {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
+		dir = strings.Trim(strings.TrimSpace(dir), `"`)
+		if dir == "" || !filepath.IsAbs(dir) {
 			return
 		}
 		clean := filepath.Clean(dir)
@@ -40,7 +42,7 @@ func enrichProcessPath() {
 			return
 		}
 		seen[key] = struct{}{}
-		parts = append([]string{clean}, parts...)
+		parts = append(parts, clean)
 	}
 
 	for _, dir := range registryPathDirs() {
@@ -73,7 +75,14 @@ func readRegistryPATH(root registry.Key, path string) []string {
 	if err != nil {
 		return nil
 	}
-	return splitPathList(os.ExpandEnv(value))
+	// Windows registry PATH uses %NAME%, which os.ExpandEnv does not expand.
+	value = windowsEnvironmentPattern.ReplaceAllStringFunc(value, func(token string) string {
+		if expanded := PersistentEnvironmentValue(token[1 : len(token)-1]); expanded != "" {
+			return expanded
+		}
+		return token
+	})
+	return splitPathList(value)
 }
 
 func persistentEnvironmentValue(name string) string {
@@ -109,6 +118,8 @@ func commonCodexBinDirs() []string {
 	programFilesX86 := os.Getenv("ProgramFiles(x86)")
 
 	candidates := []string{
+		// Official standalone installer: visible junction, outside Node/pnpm.
+		filepath.Join(localAppData, "Programs", "OpenAI", "Codex", "bin"),
 		// Official Grok Build installs here; keep ahead of pnpm shims that may
 		// point at the macOS-only @xai-official/grok npm package.
 		filepath.Join(home, ".grok", "bin"),
@@ -123,6 +134,11 @@ func commonCodexBinDirs() []string {
 		filepath.Join(home, ".volta", "bin"),
 		filepath.Join(programFiles, "nodejs"),
 		filepath.Join(programFilesX86, "nodejs"),
+	}
+	for _, name := range []string{"CODEX_INSTALL_DIR", "PNPM_HOME", "NPM_CONFIG_PREFIX", "NVM_SYMLINK"} {
+		if dir := strings.TrimSpace(PersistentEnvironmentValue(name)); dir != "" {
+			candidates = append(candidates, dir)
+		}
 	}
 
 	if localAppData != "" {
@@ -148,7 +164,7 @@ func splitPathList(value string) []string {
 	raw := strings.Split(value, string(os.PathListSeparator))
 	out := make([]string, 0, len(raw))
 	for _, part := range raw {
-		part = strings.TrimSpace(part)
+		part = strings.Trim(strings.TrimSpace(part), `"`)
 		if part == "" {
 			continue
 		}
@@ -173,6 +189,7 @@ func resolveWindowsExtraCommands() (commandSpec, bool) {
 	}
 
 	candidates := []candidate{
+		{cmd: filepath.Join(localAppData, "Programs", "OpenAI", "Codex", "bin", "codex.exe")},
 		{cmd: filepath.Join(appData, "npm", "codex.cmd"), js: filepath.Join(appData, "npm", "node_modules", "@openai", "codex", "bin", "codex.js"), node: true},
 		{cmd: filepath.Join(localAppData, "pnpm", "codex.CMD")},
 		{cmd: filepath.Join(localAppData, "pnpm", "codex.exe")},
@@ -203,7 +220,7 @@ func resolveWindowsExtraCommands() (commandSpec, bool) {
 			}
 			continue
 		}
-		if strings.EqualFold(filepath.Ext(item.cmd), ".exe") {
+		if strings.EqualFold(filepath.Ext(item.cmd), ".exe") && validWindowsCodexBinary(item.cmd) {
 			return commandSpec{path: item.cmd}, true
 		}
 		if spec, ok := resolveWindowsCodexShim(item.cmd); ok {
@@ -218,7 +235,11 @@ func resolveWindowsCodexShim(commandPath string) (commandSpec, bool) {
 	if err != nil {
 		return commandSpec{}, false
 	}
-	matches := windowsCodexShimTargetPattern.FindAllSubmatch(content, -1)
+	pattern := windowsCodexShimTargetPattern
+	if strings.EqualFold(filepath.Ext(commandPath), ".ps1") {
+		pattern = windowsCodexPowerShellTargetPattern
+	}
+	matches := pattern.FindAllSubmatch(content, -1)
 	if len(matches) == 0 {
 		return commandSpec{}, false
 	}
@@ -230,7 +251,7 @@ func resolveWindowsCodexShim(commandPath string) (commandSpec, bool) {
 		relative := filepath.FromSlash(strings.ReplaceAll(string(match[1]), `\`, `/`))
 		target := filepath.Clean(filepath.Join(filepath.Dir(commandPath), relative))
 		if strings.EqualFold(filepath.Ext(target), ".exe") {
-			if info, err := os.Stat(target); err == nil && !info.IsDir() {
+			if validWindowsCodexBinary(target) {
 				return commandSpec{path: target}, true
 			}
 			continue

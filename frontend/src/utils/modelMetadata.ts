@@ -99,11 +99,7 @@ function providerModelKeys(provider: AgentProviderRuntime, model: AgentProviderM
   const values = [model.model, model.providerId ? `${model.providerId}/${model.model}` : '']
   const kind = normalizeModel(provider.kind)
   if (kind === 'codex') values.push(`openai/${model.model}`)
-  if (kind === 'claude') {
-    if (/sonnet/i.test(model.model)) values.push('claude-sonnet')
-    if (/opus/i.test(model.model)) values.push('claude-opus')
-    if (/haiku/i.test(model.model)) values.push('claude-haiku')
-  }
+  if (kind === 'claude' && model.model.startsWith('claude-')) values.push(`anthropic/${model.model}`)
   if (kind === 'gemini') values.push(`google/${model.model}`)
   if (kind === 'grok') values.push(`x-ai/${model.model}`)
   return values.flatMap(modelKeys)
@@ -113,9 +109,10 @@ function mergeProviders(providers: AgentProviderRuntime[], entries: RemoteModelM
   const index = metadataIndex(entries)
   return providers.map((provider) => ({ ...provider, models: (provider.models || []).map((model) => {
     const keys = providerModelKeys(provider, model)
+    // A prefix is not a model identity: gpt-6, gpt-6-sol and a gateway alias
+    // must never inherit each other's prices or context capacity.
     const remote = keys.map((key) => index.get(key)).find(Boolean)
-      || keys.map((key) => [...index.entries()].find(([candidate]) => candidate.startsWith(key) || key.startsWith(candidate))?.[1]).find(Boolean)
-    const localContext = finiteNumber(model.contextWindow)
+    const localContext = model.contextSource && model.contextSource !== 'local-config' ? undefined : finiteNumber(model.contextWindow)
     if (!remote) return localContext && !model.contextSource ? { ...model, contextSource: 'local-config' } : model
     return {
       ...model,
@@ -183,20 +180,20 @@ function parseSource(source: ModelMetadataSource, payload: unknown, updatedAt: s
 
 export function applyCachedModelMetadata(providers: AgentProviderRuntime[]): AgentProviderRuntime[] { return mergeProviders(providers, readCache()?.entries || []) }
 
-let activeSync: Promise<SyncResult | null> | null = null
+let activeSync: Promise<MetadataCache> | null = null
 export async function syncModelMetadata(providers: AgentProviderRuntime[], force = false): Promise<SyncResult | null> {
   const cached = readCache(); const age = cached?.savedAt ? Date.now() - Date.parse(cached.savedAt) : Number.POSITIVE_INFINITY
   if (!force && cached && Number.isFinite(age) && age < CACHE_TTL_MS) return { providers: applyCachedModelMetadata(providers), cache: cached }
-  if (activeSync) return activeSync
-  activeSync = (async () => {
+  if (!activeSync) activeSync = (async () => {
     const updatedAt = new Date().toISOString()
     const responses = await Promise.allSettled((Object.entries(SOURCE_URLS) as Array<[ModelMetadataSource, string]>).map(async ([source, url]) => ({ source, payload: await fetchJSON(url) })))
     const entries = responses.flatMap((response) => response.status === 'fulfilled' ? parseSource(response.value.source, response.value.payload, updatedAt) : [])
-    if (!entries.length) return null
+    if (!entries.length) throw new Error('Unable to refresh model metadata. Check the network and retry.')
     const nextCache = { savedAt: updatedAt, entries }; writeCache(nextCache)
-    return { providers: mergeProviders(providers, entries), cache: nextCache }
+    return nextCache
   })().finally(() => { activeSync = null })
-  return activeSync
+  const cache = await activeSync
+  return { providers: mergeProviders(providers, cache.entries), cache }
 }
 
 export function modelMetadataCacheInfo(): { savedAt: string; modelCount: number } {

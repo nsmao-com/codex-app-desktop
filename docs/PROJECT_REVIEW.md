@@ -1,6 +1,44 @@
 # Nice Codex 项目分析与优化记录
 
-更新日期：2026-09-30。基于本地 `main` 工作区；本次发布版本为 `1.6.16`。
+更新日期：2026-11-18。本次迭代版本为 `1.6.19`；下方原始架构分析保留 2026-09-30 的记录。
+
+## 2026-11-18：CLI 检测与运行时兼容
+
+### 本批范围与证据
+
+- Codex：修复 PATH 顺序、Windows `%变量%`、cmd/PowerShell shim、旧 npm 布局、空 EXE 占位；补充官方 standalone 的 `%LOCALAPPDATA%/Programs/OpenAI/Codex/bin` 和 `CODEX_INSTALL_DIR`。本机实际检出 0.169.0，registry 最新为 0.169.1。不修改本机安装与凭据。
+- Claude Code：修复 default / best / opusplan 的原生能力保持，加入 Fable 5.2、Haiku 5.5 精确 ID 和 1M 元数据。官方别名仍由账户与平台解析。
+- Grok：添加 4.7 兜底与新配置默认；现有配置保持。核对本机 `grok --help` 的 headless、reasoning、sandbox、resume 参数仍兼容。
+- Gemini / Antigravity：恢复仅安装 Gemini CLI 时的回退；显式刷新时读取 `agy models`，支持 Hydrogen xhigh 和 Orchestrator 不带 effort。列表只展示原生返回的 ID，未把公开目录当作账户授权。
+- OpenCode：本机 1.19.5 的 `run --help` 仍支持 `--format json`、`--variant`、`--auto`；无目录时交给原生默认。官方 V2 权限文档与本机 V1 并存，未将 V2 permissions 字段覆盖进用户 V1 配置。
+- UI：诊断路径、更新失败、启动异常、修复按钮、重新检测入口；长路径与窄窗口换行。元数据只按模型 ID 匹配，避免相似前缀串用。
+
+### 官方资料（核对日期 2026-11-18）
+
+- https://learn.chatgpt.com/docs/whats-new/gpt-62-astra-sol （11 月 17 日发布，gpt-6.2-astra / gpt-6.2-sol）
+- https://learn.chatgpt.com/docs/app-server （model/list 目录及默认值由账户、客户端决定）
+- https://github.com/openai/codex/blob/main/scripts/install/install.ps1 （Windows standalone 安装路径）
+- https://code.claude.com/docs/en/model-config （别名、思考强度与 CLI 版本）
+- https://platform.claude.com/docs/en/models/haiku-5-5/overview
+- https://platform.claude.com/docs/en/models/fable-5-2/overview
+- https://platform.claude.com/docs/en/build-with-claude/context-windows
+- https://antigravity.google/docs/models/ （Hydrogen Extra、Orchestrator 固定配置）
+- https://geminicli.com/docs/get-started/gemini-3/
+- https://docs.x.ai/build/overview
+- https://opencode.ai/docs/cli/commands/
+- https://opencode.ai/docs/permissions/
+
+### 验证与边界
+
+- `go vet ./...`、Darwin/Linux 的 `go vet ./internal/codex`、Wails 绑定重新生成后的 `pnpm typecheck`、`git diff --check`。
+- 现有 `verify_bootstrap.go` 的 discovery / models / reload / fastctx 检查；discovery 使用临时目录和子进程，验证中文空格路径、shim 优先级、占位回退、显式覆盖错误、Claude 别名、Antigravity 参数。不新增测试文件。
+- TypeScript 模块内存执行验证模型目录、Extra / Orchestrator 和精确元数据匹配。
+- 960px / 390px 隔离渲染当前 CLI 区模板（使用现有 CSS、状态夹具与轻量基础控件），未发现横向溢出。这不是完整桌面端操作验证，也不代替正式安装包检查。
+- 未运行本地前端 dev/build，无数据库变更。用户的真实安装、登录、付费模型推理和系统 Computer Use 权限未被修改。
+
+### 持续迭代目标
+
+后续按小版本检查 ZCode、DeepSeek Harness、Magpie、CC Switch 与各原生 CLI 的新能力，优先处理用户反馈的 CLI 漏检和 UI 变形。继续完善插件发现/启停/状态校验、Computer Use 原生能力与权限引导，以及非视觉主模型的独立视觉模型设置。新增适配须先核实上游项目和协议，不以产品名称猜测 API，也不把未接入的能力标为可用。
 
 ## 1. 项目定位与技术结构
 

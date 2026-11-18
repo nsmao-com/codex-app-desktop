@@ -2,6 +2,29 @@
 
 本文件从 1.0.6 版本开始维护。每次发布时在文件顶部新增一个版本，并按“新增、修改、修复”分类记录，可直接作为 GitHub Release 说明的基础。
 
+## 1.6.19 - 2026-11-18
+
+### 新增
+
+- CLI 工具页展示实际执行路径、检测时间、可更新与异常数量、更新检查失败原因，并提供修复 / 重装入口。
+- Codex 无法启动时增加重新检测和路径诊断入口，区分未安装与已安装但启动失败。
+- 补充 GPT-6.2 Astra / Sol、GPT-6.1 Sol / Terra、Claude Fable 5.2 / Haiku 5.5、Grok 4.7 的模型选项；新配置默认使用 GPT-6.2 Sol 和 Grok 4.7，保留已保存选择。
+
+### 修改
+
+- Antigravity 读取账户实时 `agy models` 列表，支持 Hydrogen Extra 思考档位和 Orchestrator 固定配置；保留 Gemini CLI 回退及原生模型 ID。
+- CLI 界面按可运行、启动异常、更新待确认显示状态；长路径与错误信息可展开查看，小窗口操作区支持换行。
+- macOS / Linux 登录 shell PATH 只读取一次并过滤初始化输出；Windows 补充官方 standalone 安装目录和持久环境变量目录。
+- OpenCode 无模型目录时使用原生默认值，不再虚构已连接的 Anthropic 模型。
+
+### 修复
+
+- 修复 PATH 扩展反转优先级、Windows 注册表 `%变量%` 未展开、跨扩展名抢占、PowerShell shim 和 `%~dp0bin` 解析失败造成的 Codex 漏检或旧版本误选。
+- 兼容 Codex 新旧 npm 原生包目录，忽略损坏的 EXE 占位文件；安装后验证 CLI 能启动，避免假成功。
+- 修复 Claude `default`、`best`、`opusplan` 被当作第三方模型而限制工具和 MCP 的问题，并更新模型上下文信息。
+- 修复不同版本模型前缀匹配造成价格 / 上下文串用，以及元数据异步刷新覆盖刚重载的运行时模型列表的问题。
+- 修复更新查询失败仍显示“已是最新”、Gemini CLI 被完全漏检和重载时误报 Antigravity 配置错误的问题。
+
 ## 1.6.18 - 2026-10-02
 
 ### 新增

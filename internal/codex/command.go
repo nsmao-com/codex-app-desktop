@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,9 +18,13 @@ type commandSpec struct {
 	prefixArgs []string
 }
 
+var pathLookupMu sync.Mutex
+
 // EnrichPathForLookups merges common Node/pnpm/npm bin dirs into PATH so GUI
 // apps can resolve globally installed CLIs (codex, grok, node, pnpm, …).
 func EnrichPathForLookups() {
+	pathLookupMu.Lock()
+	defer pathLookupMu.Unlock()
 	enrichProcessPath()
 }
 
@@ -33,8 +38,6 @@ func PersistentEnvironmentValue(name string) string {
 }
 
 func Detect() Detection {
-	enrichProcessPath()
-
 	spec, err := resolveCommand()
 	if err != nil {
 		return Detection{Error: err.Error()}
@@ -95,15 +98,15 @@ func validateCodexBundle(path, version string) error {
 }
 
 func resolveCommand() (commandSpec, error) {
-	enrichProcessPath()
+	EnrichPathForLookups()
 
-	if configured := strings.TrimSpace(os.Getenv("CODEX_BIN")); configured != "" {
+	if configured := strings.Trim(strings.TrimSpace(PersistentEnvironmentValue("CODEX_BIN")), `"`); configured != "" {
 		path, err := filepath.Abs(configured)
 		if err != nil {
 			return commandSpec{}, err
 		}
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			if runtime.GOOS == "windows" && (strings.EqualFold(filepath.Ext(path), ".cmd") || strings.EqualFold(filepath.Ext(path), ".bat")) {
+			if runtime.GOOS == "windows" && (strings.EqualFold(filepath.Ext(path), ".cmd") || strings.EqualFold(filepath.Ext(path), ".bat") || strings.EqualFold(filepath.Ext(path), ".ps1")) {
 				if spec, ok := resolveWindowsCodexShim(path); ok {
 					return spec, nil
 				}
@@ -115,12 +118,22 @@ func resolveCommand() (commandSpec, error) {
 	}
 
 	if runtime.GOOS == "windows" {
-		if path, err := execLookPath("codex.exe"); err == nil {
-			return commandSpec{path: path}, nil
-		}
-
-		if spec, ok := resolveWindowsNPMCommand(); ok {
-			return spec, nil
+		// Respect directory order across extensions: a newer pnpm shim in an
+		// earlier PATH entry must not lose to an old standalone exe farther down.
+		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+			if !filepath.IsAbs(dir) {
+				continue
+			}
+			for _, name := range []string{"codex.exe", "codex.cmd", "codex.bat", "codex.ps1"} {
+				path := filepath.Join(dir, name)
+				if name == "codex.exe" {
+					if validWindowsCodexBinary(path) {
+						return commandSpec{path: path}, nil
+					}
+				} else if spec, ok := resolveWindowsCodexShim(path); ok {
+					return spec, nil
+				}
+			}
 		}
 		if spec, ok := resolveWindowsExtraCommands(); ok {
 			return spec, nil
@@ -184,11 +197,27 @@ func resolveBundledCodexBinary(scriptPath string) (commandSpec, bool) {
 			"node_modules", "@openai", "codex", "vendor", targetTriple, "bin", "codex.exe"))
 	}
 	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return commandSpec{path: candidate}, true
+		// Older npm packages placed the binary in codex/ instead of bin/.
+		for _, binary := range []string{candidate, filepath.Join(filepath.Dir(filepath.Dir(candidate)), "codex", "codex.exe")} {
+			if validWindowsCodexBinary(binary) {
+				return commandSpec{path: binary}, true
+			}
 		}
 	}
 	return commandSpec{}, false
+}
+
+// Package managers sometimes leave an empty native placeholder after a failed
+// install. Ignore it during discovery instead of hiding a working later copy.
+func validWindowsCodexBinary(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	var header [2]byte
+	n, err := file.Read(header[:])
+	return err == nil && n == 2 && header == [2]byte{'M', 'Z'}
 }
 
 func execLookPath(name string) (string, error) {

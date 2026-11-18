@@ -18,7 +18,7 @@ import (
 	"nice_codex_desktop/internal/codex"
 )
 
-var windowsProviderShimTargetPattern = regexp.MustCompile(`(?i)%(?:dp0%|~dp0)[\\/]+([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
+var windowsProviderShimTargetPattern = regexp.MustCompile(`(?i)%(?:dp0%|~dp0)[\\/]*([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
 var windowsPowerShellShimTargetPattern = regexp.MustCompile(`(?i)\$basedir[\\/]+([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
 
 const providerProbeCacheTTL = 30 * time.Second
@@ -254,12 +254,13 @@ func codexAgentProvider(codexDetection codex.Detection) AgentProviderRuntime {
 		ID:           "codex",
 		Name:         "Codex",
 		Kind:         "codex",
-		Installed:    codexDetection.Available,
+		Installed:    codexDetection.Binary != "",
 		Healthy:      codexDetection.Available,
 		RuntimeReady: codexDetection.Available,
 		Version:      codexDetection.Version,
 		Executable:   codexDetection.Binary,
-		Status:       providerStatus(codexDetection.Available, codexDetection.Available, true),
+		Status:       providerStatus(codexDetection.Binary != "", codexDetection.Available, true),
+		Message:      codexDetection.Error,
 		Capabilities: []string{"app-server", "streaming", "reasoning", "tools", "mcp", "skills", "diff", "resume"},
 	}
 }
@@ -335,6 +336,9 @@ func runProviderProbe(probe providerProbe) AgentProviderRuntime {
 	// Keep workbench labels fixed to the supported local runtimes.
 	// Do not append third-party proxy nicknames onto Claude Code.
 	executable := findCommand(probe.commands)
+	if probe.id == "gemini" {
+		executable = findGeminiExecutable()
+	}
 	if executable == "" {
 		result.Message = "CLI executable was not found in PATH"
 		return result
@@ -494,6 +498,8 @@ func officialClaudeModels() []AgentProviderModel {
 	return []AgentProviderModel{
 		{Model: "claude-opus-5-5", DisplayName: "Claude Opus 5.5", Description: "Anthropic model ID: claude-opus-5-5", ContextWindow: 1_000_000},
 		{Model: "claude-sonnet-5-5", DisplayName: "Claude Sonnet 5.5", Description: "Anthropic model ID: claude-sonnet-5-5", ContextWindow: 1_000_000},
+		{Model: "claude-fable-5-2", DisplayName: "Claude Fable 5.2", Description: "Anthropic model ID: claude-fable-5-2", ContextWindow: 1_000_000},
+		{Model: "claude-haiku-5-5", DisplayName: "Claude Haiku 5.5", Description: "Anthropic model ID: claude-haiku-5-5", ContextWindow: 1_000_000},
 		{Model: "claude-fable-5-1", DisplayName: "Claude Fable 5.1", Description: "Anthropic model ID: claude-fable-5-1", ContextWindow: 1_000_000},
 		{Model: "claude-haiku-4-5-20251001", DisplayName: "Claude Haiku 4.5", Description: "Anthropic model ID: claude-haiku-4-5-20251001", ContextWindow: 200_000},
 	}
@@ -506,7 +512,9 @@ func fallbackProviderModels(kind string) []AgentProviderModel {
 			{Model: "default", DisplayName: "Claude Code Default", Description: "Recommended model for the current account and provider", IsDefault: true},
 			{Model: "sonnet", DisplayName: "Claude Sonnet", Description: "CLI alias: sonnet; resolved by Claude Code"},
 			{Model: "opus", DisplayName: "Claude Opus", Description: "CLI alias: opus; resolved by Claude Code"},
-			{Model: "haiku", DisplayName: "Claude Haiku", Description: "alias `haiku` → latest Haiku (e.g. claude-haiku-4-5)", ContextWindow: 200_000},
+			{Model: "haiku", DisplayName: "Claude Haiku", Description: "CLI alias: haiku; resolved by Claude Code"},
+			{Model: "best", DisplayName: "Claude Best", Description: "CLI alias: same model as opus"},
+			{Model: "opusplan", DisplayName: "Claude Opus Plan", Description: "Opus for planning, Sonnet for execution"},
 			{Model: "fable", DisplayName: "Claude Fable", Description: "alias `fable` → latest Fable (e.g. claude-fable-5)", ContextWindow: 1_000_000},
 		}, officialClaudeModels()...)
 	case "gemini":
@@ -518,16 +526,21 @@ func fallbackProviderModels(kind string) []AgentProviderModel {
 			return nil
 		}
 		return []AgentProviderModel{
+			{Model: "gemini-3.1-pro-preview", DisplayName: "Gemini 3.1 Pro Preview", Description: "Requires Gemini CLI account access", ContextWindow: 1_048_576},
+			{Model: "gemini-3-flash-preview", DisplayName: "Gemini 3 Flash Preview", Description: "Requires Gemini CLI account access", ContextWindow: 1_048_576},
 			{Model: "gemini-2.5-pro", DisplayName: "Gemini 2.5 Pro", Description: "Gemini CLI default model fallback", IsDefault: true, ContextWindow: 1_048_576},
 			{Model: "gemini-2.5-flash", DisplayName: "Gemini 2.5 Flash", Description: "Gemini CLI flash model fallback", ContextWindow: 1_048_576},
 		}
 	case "grok":
 		return []AgentProviderModel{
-			{Model: "grok-4.6", DisplayName: "Grok 4.6", Description: "Grok frontier reasoning model", IsDefault: true, ContextWindow: 500_000},
+			{Model: "grok-4.7", DisplayName: "Grok 4.7", Description: "Grok frontier reasoning model", IsDefault: true, ContextWindow: 500_000},
+			{Model: "grok-4.6", DisplayName: "Grok 4.6", Description: "Previous Grok frontier model", ContextWindow: 500_000},
 			{Model: "grok-4.5", DisplayName: "Grok 4.5", Description: "Previous Grok frontier model", ContextWindow: 500_000},
 		}
 	case "opencode":
-		return []AgentProviderModel{{Model: "anthropic/claude-sonnet-4-6", DisplayName: "Claude Sonnet", Description: "OpenCode provider/model", IsDefault: true}}
+		// A static provider/model cannot establish project credentials or access.
+		// An empty selection lets OpenCode resolve its native project default.
+		return nil
 	default:
 		return nil
 	}
@@ -549,7 +562,8 @@ func knownProviderContextWindow(kind, model string) int64 {
 			strings.Contains(lower, "grok-4.3") || strings.Contains(lower, "grok-4-3") {
 			return 1_000_000
 		}
-		if strings.Contains(lower, "grok-4.6") || strings.Contains(lower, "grok-4-6") ||
+		if strings.Contains(lower, "grok-4.7") || strings.Contains(lower, "grok-4-7") ||
+			strings.Contains(lower, "grok-4.6") || strings.Contains(lower, "grok-4-6") ||
 			strings.Contains(lower, "grok-4.5") || strings.Contains(lower, "grok-4-5") {
 			return 500_000
 		}
@@ -569,13 +583,19 @@ func knownProviderContextWindow(kind, model string) int64 {
 		switch lower {
 		case "fable":
 			return 1_000_000
-		case "sonnet", "opus", "haiku":
-			return 200_000
+		case "sonnet", "opus", "haiku", "best", "opusplan", "default":
+			return 0 // Native aliases depend on the account/provider and CLI version.
 		}
 		if !strings.HasPrefix(lower, "claude-") {
 			return 0
 		}
+		if lower == "claude-sonnet-4-6" || lower == "claude-opus-4-6" {
+			return 1_000_000
+		}
 		if strings.Contains(lower, "haiku") {
+			if strings.HasPrefix(lower, "claude-haiku-5-5") {
+				return 1_000_000
+			}
 			return 200_000
 		}
 		if strings.Contains(lower, "fable-5") || strings.Contains(lower, "fable.5") {
@@ -619,6 +639,7 @@ func fallbackReasoningEfforts(kind string) []AgentProviderReasoningEffort {
 				{Effort: "high", DisplayName: "High", Description: "Antigravity model variant with deeper reasoning", IsDefault: true},
 				{Effort: "medium", DisplayName: "Medium", Description: "Antigravity model variant balancing speed and depth"},
 				{Effort: "low", DisplayName: "Low", Description: "Antigravity model variant with faster responses"},
+				{Effort: "xhigh", DisplayName: "Extra", Description: "Extra reasoning on supported Antigravity models"},
 			}
 		}
 		return []AgentProviderReasoningEffort{{Effort: "auto", DisplayName: "Auto", Description: "Gemini chooses the thinking budget for the selected model", IsDefault: true}}
@@ -647,7 +668,7 @@ func normalizeGeminiEffort(value string) string {
 	if defaultGeminiEffort() != "high" {
 		return "auto"
 	}
-	if value == "low" || value == "medium" || value == "high" {
+	if value == "low" || value == "medium" || value == "high" || value == "xhigh" {
 		return value
 	}
 	return "high"
@@ -760,7 +781,7 @@ func discoverClaudeModels(_ string) []AgentProviderModel {
 	}{
 		{alias: "sonnet", family: "Sonnet", prefix: "ANTHROPIC_DEFAULT_SONNET_MODEL"},
 		{alias: "opus", family: "Opus", prefix: "ANTHROPIC_DEFAULT_OPUS_MODEL"},
-		{alias: "haiku", family: "Haiku", prefix: "ANTHROPIC_DEFAULT_HAIKU_MODEL", defaultID: "claude-haiku-4-5"},
+		{alias: "haiku", family: "Haiku", prefix: "ANTHROPIC_DEFAULT_HAIKU_MODEL"},
 		{alias: "fable", family: "Fable", prefix: "ANTHROPIC_DEFAULT_FABLE_MODEL", defaultID: "claude-fable-5"},
 	} {
 		model := configuredEnv(definition.prefix)
@@ -849,6 +870,8 @@ func discoverClaudeModels(_ string) []AgentProviderModel {
 		return model, ""
 	}
 	addModel("default", "Claude Code Default", "Recommended model for the current account and provider", effectiveModel == "" || effectiveModel == "default")
+	addModel("best", "Claude Best", "CLI alias: same model as opus", effectiveModel == "best")
+	addModel("opusplan", "Claude Opus Plan", "Opus planning, Sonnet execution", effectiveModel == "opusplan")
 	// Keep full API IDs distinct from aliases and gateway overrides.
 	for _, official := range officialClaudeModels() {
 		addModel(official.Model, official.DisplayName, official.Description, official.Model == effectiveModel)
@@ -1110,15 +1133,15 @@ func commandCandidates(name string) []string {
 }
 
 // geminiCommandCandidates keeps the internal runtime id (`gemini`) stable while
-// using Antigravity CLI. Legacy Gemini transcripts remain readable, but the old
-// Gemini executable is no longer selected for new turns.
+// preferring Antigravity CLI. Gemini CLI remains a supported fallback when the
+// user only has the original CLI installed.
 func geminiCommandCandidates() []string {
 	// Keep this helper useful to callers that need one ordered list, while
 	// findGeminiExecutable below enforces preference across PATH entries too.
 	if runtime.GOOS == "windows" {
-		return []string{"agy.exe", "agy.cmd", "agy.bat", "agy.ps1", "agy", "antigravity.exe", "antigravity.cmd", "antigravity.bat", "antigravity.ps1", "antigravity"}
+		return append(append(commandCandidates("agy"), commandCandidates("antigravity")...), commandCandidates("gemini")...)
 	}
-	return []string{"agy", "antigravity"}
+	return []string{"agy", "antigravity", "gemini"}
 }
 
 // findGeminiExecutable resolves agy first, then the long Antigravity alias,
@@ -1126,7 +1149,7 @@ func geminiCommandCandidates() []string {
 // intentional: findCommand walks PATH directories first, which otherwise could
 // let an old gemini binary in an early directory shadow agy in a later one.
 func findGeminiExecutable() string {
-	for _, name := range []string{"agy", "antigravity"} {
+	for _, name := range []string{"agy", "antigravity", "gemini"} {
 		if executable := findCommand(commandCandidates(name)); executable != "" {
 			return executable
 		}

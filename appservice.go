@@ -77,7 +77,7 @@ type AppService struct {
 	providerRouter       *providerRouter
 }
 
-const defaultCodexModel = "gpt-6-astra"
+const defaultCodexModel = "gpt-6.2-sol"
 
 const (
 	conversationHistoryPageTurns        = 24
@@ -3905,7 +3905,7 @@ func defaultSettings() UserSettings {
 		ActiveRuntime:             "codex",
 		GrokBackend:               "build",
 		GrokBuildModel:            "",
-		GrokAPIModel:              "grok-4.6",
+		GrokAPIModel:              "grok-4.7",
 		GrokAPIKey:                "",
 		GrokAPIBaseURL:            "",
 		GrokEffort:                "high",

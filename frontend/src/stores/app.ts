@@ -34,7 +34,7 @@ import {
   syncModelMetadata,
 } from '../utils/modelMetadata'
 
-const AppVersionFallback = '1.6.18'
+const AppVersionFallback = '1.6.19'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -167,7 +167,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.6.18')
+  const appVersion = shallowRef('1.6.19')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -405,7 +405,9 @@ export const useAppStore = defineStore('app', () => {
     try {
       const result = await syncModelMetadata(agentProviders.value, force)
       if (result) {
-        agentProviders.value = result.providers
+        // A runtime may reload while the network request is pending. Enrich
+        // its current catalog instead of restoring the old snapshot.
+        agentProviders.value = applyCachedModelMetadata(agentProviders.value)
         modelMetadataLastUpdated.value = result.cache.savedAt
       }
     } catch (error) {

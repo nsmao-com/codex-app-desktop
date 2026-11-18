@@ -345,6 +345,18 @@ func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCu
 		catalog.Skills = listExternalSkills("gemini", catalog.NativeHome, workspace)
 		catalog.Models, _ = discoverProviderCatalog("gemini")
 		catalog.DefaultModel = firstGeminiModel(catalog.Models)
+		if executable := findGeminiExecutable(); isAntigravityExecutable(executable) {
+			// Query only on an explicit catalog refresh, never on Bootstrap. The
+			// account's live list includes new/retired models and fixed variants.
+			if output, err := runProbeCommand(executable, []string{"models"}, 8*time.Second); err == nil {
+				if models := parseAntigravityModels(output, catalog.DefaultModel); len(models) > 0 {
+					catalog.Models = models
+					if catalog.DefaultModel != "" && !hasDefaultModel(models) {
+						catalog.Models = append(catalog.Models, AgentProviderModel{Model: catalog.DefaultModel, DisplayName: catalog.DefaultModel, Description: "Configured locally; verify account access", IsDefault: true})
+					}
+				}
+			}
+		}
 		catalog.ActiveProvider = geminiActiveProvider(catalog.ConfigPath)
 		catalog.Providers = []ExternalProviderView{{
 			ID: "gemini", Name: "Gemini API / OAuth", Source: catalog.ProviderSource,
@@ -387,6 +399,23 @@ func (s *AppService) readExternalRuntimeCatalog(runtime, workspace string, useCu
 		catalog.ReadOnlyNotice = "provider、model、MCP、指令、历史和 usage 均来自 OpenCode 原生配置/数据库。"
 	}
 	return catalog, nil
+}
+
+// agy models emits ID<TAB>display name; ignore progress/error prose. Preserve
+// exact IDs, including Orchestrator names and model-specific effort suffixes.
+func parseAntigravityModels(output, selected string) []AgentProviderModel {
+	models := make([]AgentProviderModel, 0)
+	seen := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		id, label, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		id, label = strings.TrimSpace(id), strings.TrimSpace(label)
+		if !ok || id == "" || label == "" || seen[id] || len(id) > 160 {
+			continue
+		}
+		seen[id] = true
+		models = append(models, AgentProviderModel{Model: id, DisplayName: label, Description: "Available from agy models", IsDefault: id == selected, ContextWindow: knownProviderContextWindow("gemini", id)})
+	}
+	return models
 }
 
 func (s *AppService) currentRuntimeWorkspace(runtime string) string {

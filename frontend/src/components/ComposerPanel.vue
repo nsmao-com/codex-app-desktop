@@ -725,8 +725,8 @@ const externalModelCatalog = computed(() => {
 const displayModel = computed(() => {
   if (isGrokMode.value) {
     return composerGrokSession.value?.model || (appStore.settings.grokBackend === 'api'
-      ? (appStore.settings.grokAPIModel || appStore.settings.grokBuildModel || 'grok-4.6')
-      : (appStore.settings.grokBuildModel || appStore.settings.grokAPIModel || 'grok-4.6'))
+      ? (appStore.settings.grokAPIModel || appStore.settings.grokBuildModel || 'grok-4.7')
+      : (appStore.settings.grokBuildModel || appStore.settings.grokAPIModel || 'grok-4.7'))
   }
   if (isClaudeMode.value) {
     return composerClaudeSession.value?.model || appStore.settings.claudeModel || 'sonnet'
@@ -899,6 +899,7 @@ const selectedEffortLabel = computed(() => {
 
 const EFFORT_ORDER = ['auto', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
 const effortOptions = computed(() => {
+  if (isGeminiMode.value && displayModel.value.toLowerCase().startsWith('orchestrator')) return []
   const options = reasoningOptions.value.map((item) => ({
     value: item.effort,
     label: 'displayName' in item && item.displayName ? String(item.displayName) : item.effort.charAt(0).toUpperCase() + item.effort.slice(1),

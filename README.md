@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.18: Codex FastCtx integration, runtime configuration reload, reliable custom models and one-click 1M context settings.</sub></p>
+<p align="center"><sub>v1.6.19: Reliable CLI discovery, actionable diagnostics, current model choices and Antigravity compatibility.</sub></p>
 
 ## Why Nice Codex
 

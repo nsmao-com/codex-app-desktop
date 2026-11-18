@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,8 +36,8 @@ func enrichProcessPath() {
 			return
 		}
 		seen[clean] = struct{}{}
-		// Prepend so user-managed tools win over system stubs.
-		parts = append([]string{clean}, parts...)
+		// Preserve the caller's selected CLI and the shell's directory order.
+		parts = append(parts, clean)
 	}
 
 	// Finder/Dock applications do not run the user's login shell and therefore
@@ -55,7 +56,15 @@ func enrichProcessPath() {
 	}
 }
 
+var shellPathOnce sync.Once
+var shellPathDirs []string
+
 func loginShellPath() []string {
+	shellPathOnce.Do(func() { shellPathDirs = readLoginShellPath() })
+	return shellPathDirs
+}
+
+func readLoginShellPath() []string {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		return nil
 	}
@@ -70,11 +79,16 @@ func loginShellPath() []string {
 	defer cancel()
 	// `-ilc` loads the same interactive/login environment as a terminal. The
 	// command itself is a shell builtin and emits only PATH.
-	output, err := exec.CommandContext(ctx, shell, "-ilc", "printf '%s' \"$PATH\"").Output()
+	output, err := exec.CommandContext(ctx, shell, "-ilc", "printf '\\n__NICE_CODEX_PATH__%s\\n' \"$PATH\"").Output()
 	if err != nil {
 		return nil
 	}
-	return splitPathList(strings.TrimSpace(string(output)))
+	for _, line := range strings.Split(string(output), "\n") {
+		if value, ok := strings.CutPrefix(line, "__NICE_CODEX_PATH__"); ok {
+			return splitPathList(value)
+		}
+	}
+	return nil
 }
 
 func persistentEnvironmentValue(string) string {

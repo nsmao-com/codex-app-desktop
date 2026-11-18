@@ -7,13 +7,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
+
+	"nice_codex_desktop/internal/codex"
 )
 
 // Smoke-checks the same Bootstrap / ListModelProviders contracts the UI uses,
 // without needing the Wails window or WebView bindings.
 func main() {
+	if os.Getenv("NICE_CODEX_VERIFY_CHILD") == "1" && len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println("codex-cli 0.169.1")
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--discovery" {
+		if err := verifyCLIDiscovery(); err != nil {
+			fail("CLI discovery: %v", err)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--codex-detect" {
+		detection := codex.Detect()
+		_ = json.NewEncoder(os.Stdout).Encode(detection)
+		if !detection.Available {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--reload" {
 		if err := verifyRuntimeReload(); err != nil {
 			fail("runtime reload: %v", err)
@@ -129,6 +150,110 @@ func main() {
 	if len(problems) > 0 {
 		os.Exit(1)
 	}
+}
+
+func verifyCLIDiscovery() error {
+	for _, alias := range []string{"default", "best", "opusplan", "sonnet[1m]", "haiku", "claude-haiku-5-5"} {
+		if args := appendClaudeCompatibilityArgs([]string{"-p", "hello"}, alias); len(args) != 2 {
+			return fmt.Errorf("native Claude alias %s lost native tools", alias)
+		}
+	}
+	for _, model := range []string{"claude-haiku-5-5", "claude-fable-5-2"} {
+		if knownProviderContextWindow("claude", model) != 1_000_000 {
+			return fmt.Errorf("wrong context: %s", model)
+		}
+	}
+	settings := defaultSettings()
+	settings.Model, settings.Effort = "Orchestrator (Carbon)", "high"
+	args, _ := externalCommandArgsForExecutable("gemini", "agy.exe", "", "", settings, "hello")
+	if strings.Contains(strings.Join(args, " "), "--effort") {
+		return fmt.Errorf("Orchestrator received effort")
+	}
+	settings.Model, settings.Effort = "gemini-4-hydrogen-xhigh", "high"
+	args, _ = externalCommandArgsForExecutable("gemini", "agy.exe", "", "", settings, "hello")
+	if !strings.Contains(strings.Join(args, " "), "--effort xhigh") {
+		return fmt.Errorf("Extra effort lost")
+	}
+	if len(fallbackProviderModels("opencode")) != 0 {
+		return fmt.Errorf("OpenCode fallback invents a connected provider")
+	}
+	if runtime.GOOS == "windows" {
+		root, err := os.MkdirTemp("", "nicecodex-discovery-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(root)
+		for _, key := range []string{"PATH", "CODEX_BIN", "NICE_CODEX_VERIFY_CHILD"} {
+			value, exists := os.LookupEnv(key)
+			defer func(key, value string, exists bool) {
+				if exists {
+					_ = os.Setenv(key, value)
+				} else {
+					_ = os.Unsetenv(key)
+				}
+			}(key, value, exists)
+		}
+		_ = os.Setenv("NICE_CODEX_VERIFY_CHILD", "1")
+		_ = os.Unsetenv("CODEX_BIN")
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		binary, err := os.ReadFile(self)
+		if err != nil {
+			return err
+		}
+		first, second := filepath.Join(root, "首选 CLI"), filepath.Join(root, "second")
+		for _, dir := range []string{filepath.Join(first, "bin"), second} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return err
+			}
+		}
+		preferred := filepath.Join(first, "bin", "codex.exe")
+		fallback := filepath.Join(second, "codex.exe")
+		for _, path := range []string{preferred, fallback} {
+			if err := os.WriteFile(path, binary, 0o700); err != nil {
+				return err
+			}
+		}
+		shim := filepath.Join(first, "codex.cmd")
+		if err := os.WriteFile(shim, []byte("@\"%~dp0bin\\codex.exe\" %*\r\n"), 0o600); err != nil {
+			return err
+		}
+		_ = os.Setenv("PATH", first+string(os.PathListSeparator)+second)
+		for i := 0; i < 3; i++ {
+			detection := codex.Detect()
+			if !detection.Available || detection.Binary != preferred {
+				return fmt.Errorf("PATH/shim priority changed: %+v", detection)
+			}
+		}
+		if err := os.Remove(shim); err != nil {
+			return err
+		}
+		shim = filepath.Join(first, "codex.ps1")
+		if err := os.WriteFile(shim, []byte("& \"$basedir/bin/codex.exe\" $args"), 0o600); err != nil {
+			return err
+		}
+		_ = os.Setenv("CODEX_BIN", shim)
+		if detection := codex.Detect(); !detection.Available || detection.Binary != preferred {
+			return fmt.Errorf("PowerShell override failed: %+v", detection)
+		}
+		_ = os.Unsetenv("CODEX_BIN")
+		if err := os.Remove(shim); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(first, "codex.exe"), []byte("placeholder"), 0o600); err != nil {
+			return err
+		}
+		if detection := codex.Detect(); !detection.Available || detection.Binary != fallback {
+			return fmt.Errorf("broken placeholder masks working CLI: %+v", detection)
+		}
+		_ = os.Setenv("CODEX_BIN", filepath.Join(root, "missing.exe"))
+		if codex.Detect().Available {
+			return fmt.Errorf("invalid explicit override silently ignored")
+		}
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"PATH order and repeated discovery", "Windows cmd/PowerShell shims and Unicode paths", "broken placeholder fallback", "explicit override errors", "Claude native aliases", "Claude model context", "Antigravity Extra and Orchestrator", "OpenCode native default"}})
 }
 
 // Isolated contract checks: no real Codex configuration, package installation or MCP server.
@@ -411,7 +536,7 @@ func verifyModelConfiguration() error {
 	if defaults != 1 {
 		return fmt.Errorf("expected exactly one default model")
 	}
-	for model, expected := range map[string]int64{"sonnet": 200_000, "opus": 200_000, "sonnet[1m]": 1_000_000, "claude-sonnet-4-6": 200_000, "claude-opus-4-6[1m]": 1_000_000, "claude-opus-4-8": 1_000_000, "claude-haiku-4-5": 200_000, "gateway-unknown": 0} {
+	for model, expected := range map[string]int64{"sonnet": 0, "opus": 0, "sonnet[1m]": 1_000_000, "claude-sonnet-4-6": 1_000_000, "claude-opus-4-6[1m]": 1_000_000, "claude-opus-4-8": 1_000_000, "claude-haiku-4-5": 200_000, "gateway-unknown": 0} {
 		if got := knownProviderContextWindow("claude", model); got != expected {
 			return fmt.Errorf("%s context = %d, want %d", model, got, expected)
 		}

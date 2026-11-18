@@ -1790,6 +1790,20 @@ Object.assign(messages['en-US'].chat, {
 Object.assign(messages['zh-CN'].common, {
   default: '默认',
 })
+Object.assign(messages['zh-CN'].settings, {
+  cliNeedsRepair: '启动异常', cliUpdateUnknown: '版本未确认', cliRepair: '修复 / 重装',
+  cliDetails: '路径与诊断', cliExecutable: '实际使用的 CLI', cliInstallCommand: '安装 / 更新命令',
+  cliUpdateRetry: '未能确认最新版本，可重新检测；现有 CLI 仍可使用。',
+  cliSummary: '{ready} 个可运行 · {updates} 个可更新 · {attention} 个需处理',
+})
+Object.assign(messages['zh-CN'].app, { cliRecoveryHint: '已安装过 Codex？先重新检测；仍无法启动时，打开路径与诊断检查实际 CLI 和修复原因，无需先重启应用。' })
+Object.assign(messages['en-US'].app, { cliRecoveryHint: 'Already installed Codex? Check again, then open paths and diagnostics to inspect the selected CLI. Restarting the app is not required.' })
+Object.assign(messages['en-US'].settings, {
+  cliNeedsRepair: 'Needs repair', cliUpdateUnknown: 'Update not verified', cliRepair: 'Repair / reinstall',
+  cliDetails: 'Paths and diagnostics', cliExecutable: 'Selected CLI', cliInstallCommand: 'Install / update command',
+  cliUpdateRetry: 'Could not verify the latest version. Retry the check; the installed CLI can still be used.',
+  cliSummary: '{ready} runnable · {updates} updates · {attention} need attention',
+})
 Object.assign(messages['en-US'].common, {
   default: 'Default',
 })

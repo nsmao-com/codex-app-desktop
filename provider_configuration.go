@@ -361,7 +361,7 @@ func providerConfigurationView(provider AgentProviderRuntime, settings UserSetti
 		}
 	case "gemini":
 		view.PermissionModes = []string{"default", "plan", "yolo"}
-		if _, legacyModel := readProviderJSONMap(providerConfigPath("gemini"))["model"].(map[string]any); legacyModel {
+		if _, legacyModel := readProviderJSONMap(providerConfigPath("gemini"))["model"].(map[string]any); legacyModel && isAntigravityExecutable(provider.Executable) {
 			view.Warnings = append(view.Warnings, "Antigravity settings.json 的 model 是旧版 Gemini CLI 对象配置，agy 会报告 invalid value；请备份后移除该对象，再通过模型选择器或 agy /config 设置模型。")
 		}
 	case "opencode":

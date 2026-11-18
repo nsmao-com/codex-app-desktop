@@ -181,7 +181,7 @@ const sandbox = shallowRef(appStore.settings.sandbox)
 const approvalPolicy = shallowRef(appStore.settings.approvalPolicy)
 const grokBackend = shallowRef(appStore.settings.grokBackend === 'api' ? 'api' : 'build')
 const grokBuildModel = shallowRef(appStore.settings.grokBuildModel || '')
-const grokAPIModel = shallowRef(appStore.settings.grokAPIModel || 'grok-4.6')
+const grokAPIModel = shallowRef(appStore.settings.grokAPIModel || 'grok-4.7')
 const grokEffort = shallowRef(appStore.settings.grokEffort || 'high')
 const grokSandbox = shallowRef(appStore.settings.grokSandbox || 'workspace-write')
 const grokApprovalPolicy = shallowRef(appStore.settings.grokApprovalPolicy || 'on-request')
@@ -1263,7 +1263,7 @@ function syncModelDrafts(): void {
   if (model.value === modelDraftBaseline.model) model.value = settings.model
   if (claudeModel.value === (modelDraftBaseline.claudeModel || 'sonnet')) claudeModel.value = settings.claudeModel || 'sonnet'
   if (grokBuildModel.value === (modelDraftBaseline.grokBuildModel || '')) grokBuildModel.value = settings.grokBuildModel || ''
-  if (grokAPIModel.value === (modelDraftBaseline.grokAPIModel || 'grok-4.6')) grokAPIModel.value = settings.grokAPIModel || 'grok-4.6'
+  if (grokAPIModel.value === (modelDraftBaseline.grokAPIModel || 'grok-4.7')) grokAPIModel.value = settings.grokAPIModel || 'grok-4.7'
   for (const [draft, key] of [[customModels, 'customModels'], [claudeCustomModels, 'claudeCustomModels'], [grokCustomModels, 'grokCustomModels']] as const) {
     if (JSON.stringify(draft.value) === JSON.stringify(modelDraftBaseline[key] ?? [])) {
       draft.value = normalizeCustomModels(settings[key] ?? [])
@@ -1553,7 +1553,7 @@ function appendCustomModel(items: string[], value: string): string[] | null {
 
 function removeGrokCustomModel(value: string): void {
   grokCustomModels.value = grokCustomModels.value.filter((item) => item !== value)
-  if (grokAPIModel.value.toLowerCase() === value.toLowerCase()) grokAPIModel.value = 'grok-4.6'
+  if (grokAPIModel.value.toLowerCase() === value.toLowerCase()) grokAPIModel.value = 'grok-4.7'
   if (grokBuildModel.value.toLowerCase() === value.toLowerCase()) grokBuildModel.value = ''
 }
 
@@ -1726,14 +1726,24 @@ async function reconnectCodexRuntime(options: { silent?: boolean } = {}): Promis
 
 const cliReport = shallowRef<CLIToolsReport | null>(null)
 const cliLoading = shallowRef(false)
+const cliError = shallowRef('')
 const cliInstalling = shallowRef<Record<string, boolean>>({})
 const cliTools = computed(() => cliReport.value?.tools ?? [])
+const cliActionBusy = computed(() => Object.values(cliInstalling.value).some(Boolean))
+const cliSummary = computed(() => ({
+  ready: cliTools.value.filter(tool => tool.healthy).length,
+  updates: cliTools.value.filter(tool => tool.updateAvailable).length,
+  attention: cliTools.value.filter(tool => !tool.healthy).length,
+}))
 
 async function refreshCLITools(options: { silent?: boolean } = {}): Promise<void> {
+  if (cliLoading.value) return
   cliLoading.value = true
+  cliError.value = ''
   try {
     cliReport.value = await checkCLITools()
   } catch (error) {
+    cliError.value = error instanceof Error ? error.message : String(error)
     if (!options.silent) {
       notify('error', t('settings.cliToolsTitle'), error instanceof Error ? error.message : String(error))
     }
@@ -1743,7 +1753,7 @@ async function refreshCLITools(options: { silent?: boolean } = {}): Promise<void
 }
 
 async function installOrUpdateCLITool(tool: CLIToolStatus): Promise<void> {
-  if (!tool?.id || cliInstalling.value[tool.id]) return
+  if (!tool?.id || cliActionBusy.value || cliLoading.value) return
   cliInstalling.value = { ...cliInstalling.value, [tool.id]: true }
   try {
     const result = await installCLITool(tool.id)
@@ -1778,7 +1788,9 @@ async function installOrUpdateCLITool(tool: CLIToolStatus): Promise<void> {
 
 function cliToolStatusLabel(tool: CLIToolStatus): string {
   if (!tool.installed) return t('onboarding.cliMissing')
+  if (!tool.healthy) return t('settings.cliNeedsRepair')
   if (tool.updateAvailable) return t('onboarding.cliUpdateAvailable')
+  if (!tool.updateChecked) return t('settings.cliUpdateUnknown')
   return t('onboarding.cliReady')
 }
 
@@ -1944,7 +1956,7 @@ async function save(): Promise<void> {
       approvalPolicy: isCodexSettings.value ? approvalPolicy.value : appStore.settings.approvalPolicy,
       grokBackend: isGrokSettings.value ? (grokBackend.value === 'api' ? 'api' : 'build') : appStore.settings.grokBackend,
       grokBuildModel: grokBuildModel.value.trim(),
-      grokAPIModel: grokAPIModel.value.trim() || 'grok-4.6',
+      grokAPIModel: grokAPIModel.value.trim() || 'grok-4.7',
       grokAPIKey: isGrokSettings.value ? grokAPIKey.value.trim() : appStore.settings.grokAPIKey,
       grokAPIBaseURL: isGrokSettings.value ? grokAPIBaseURL.value.trim() : appStore.settings.grokAPIBaseURL,
       grokEffort: isGrokSettings.value ? (grokEffort.value || 'high') : appStore.settings.grokEffort,
@@ -3615,13 +3627,18 @@ wsl --update</code></pre>
                     variant="outline"
                     size="sm"
                     class="h-8 shrink-0 text-xs"
-                    :disabled="cliLoading"
+                    :disabled="cliLoading || cliActionBusy"
                     @click="refreshCLITools()"
                   >
                     <RefreshCw :size="12" class="mr-1.5" :class="cliLoading ? 'animate-spin' : ''" />
                     {{ t('onboarding.cliRecheck') }}
                   </Button>
                 </div>
+                <div v-if="cliReport" class="flex flex-wrap items-center gap-3 border-b bg-muted/30 px-4 py-2.5 text-xs" role="status">
+                  <span>{{ t('settings.cliSummary', cliSummary) }}</span>
+                  <span class="ml-auto text-[11px] text-muted-foreground">{{ new Date(cliReport.checkedAt * 1000).toLocaleTimeString() }}</span>
+                </div>
+                <p v-if="cliError" role="alert" class="border-b px-4 py-3 text-xs text-destructive">{{ cliError }}</p>
                 <div
                   v-if="cliReport && !cliReport.nodeAvailable"
                   class="border-b bg-amber-500/10 px-4 py-2.5 text-[11px] text-amber-900 dark:text-amber-100"
@@ -3646,19 +3663,19 @@ wsl --update</code></pre>
                   <div
                     v-for="tool in cliTools"
                     :key="tool.id"
-                    class="flex items-start justify-between gap-3 px-4 py-3"
+                    class="flex flex-wrap items-start justify-between gap-3 px-4 py-4 sm:flex-nowrap"
                   >
                     <div class="min-w-0 flex-1">
                       <div class="flex flex-wrap items-center gap-2">
                         <p class="text-[13px] font-medium">{{ cliToolDisplayName(tool) }}</p>
                         <Badge
-                          :variant="tool.installed && !tool.updateAvailable ? 'default' : 'outline'"
+                          :variant="tool.installed && !tool.healthy ? 'destructive' : 'outline'"
                           class="text-[9px]"
                         >
                           {{ cliToolStatusLabel(tool) }}
                         </Badge>
                       </div>
-                      <p class="mt-1 font-mono text-[11px] text-muted-foreground">{{ tool.package }}</p>
+                      <p class="mt-1 break-all font-mono text-[11px] text-muted-foreground">{{ tool.package }}</p>
                       <p class="mt-0.5 text-[11px] text-muted-foreground">
                         <template v-if="tool.installed">
                           {{ t('onboarding.cliVersion', { version: tool.version || '—' }) }}
@@ -3670,14 +3687,23 @@ wsl --update</code></pre>
                           {{ t('onboarding.cliInstallHint', { command: tool.installCommand }) }}
                         </template>
                       </p>
+                      <p v-if="!tool.healthy && tool.message" role="status" class="mt-2 break-words text-xs text-destructive">{{ tool.message }}</p>
+                      <p v-if="tool.updateError" class="mt-2 text-xs text-amber-700 dark:text-amber-300">{{ t('settings.cliUpdateRetry') }}</p>
+                      <details class="mt-2 text-[11px] text-muted-foreground">
+                        <summary class="cursor-pointer rounded-sm py-1 focus-visible:outline focus-visible:outline-2">{{ t('settings.cliDetails') }}</summary>
+                        <dl class="mt-2 space-y-2">
+                          <div v-if="tool.executable"><dt>{{ t('settings.cliExecutable') }}</dt><dd class="select-text break-all font-mono">{{ tool.executable }}</dd></div>
+                          <div><dt>{{ t('settings.cliInstallCommand') }}</dt><dd class="select-text break-all font-mono">{{ tool.installCommand }}</dd></div>
+                          <div v-if="tool.updateError"><dt>{{ t('settings.cliUpdateUnknown') }}</dt><dd class="break-words">{{ tool.updateError }}</dd></div>
+                        </dl>
+                      </details>
                     </div>
                     <Button
-                      v-if="!tool.installed || tool.updateAvailable"
                       type="button"
                       variant="outline"
                       size="sm"
                       class="h-8 shrink-0 text-xs"
-                      :disabled="!tool.canInstall || Boolean(cliInstalling[tool.id])"
+                      :disabled="!tool.canInstall || cliActionBusy || cliLoading"
                       @click="installOrUpdateCLITool(tool)"
                     >
                       <RefreshCw
@@ -3689,14 +3715,13 @@ wsl --update</code></pre>
                       {{
                         cliInstalling[tool.id]
                           ? t('onboarding.cliInstalling')
-                          : tool.installed
-                            ? t('onboarding.cliUpdate')
-                            : t('onboarding.cliInstall')
+                          : !tool.installed
+                            ? t('onboarding.cliInstall')
+                            : tool.updateAvailable || !tool.updateChecked
+                              ? t('onboarding.cliUpdate')
+                              : t('settings.cliRepair')
                       }}
                     </Button>
-                    <Badge v-else variant="outline" class="shrink-0 text-[10px]">
-                      {{ t('settings.cliToolsUpToDate') }}
-                    </Badge>
                   </div>
                   <p
                     v-if="cliLoading && !cliTools.length"

@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.18：内置 Codex FastCtx、运行时配置重载，修复自定义模型并增加一键 1M 上下文设置。</sub></p>
+<p align="center"><sub>v1.6.19：修复 CLI 已安装却未检测到，增加路径诊断与修复入口，更新模型与 Antigravity 兼容。</sub></p>
 
 ## 为什么是 Nice Codex
 

@@ -92,6 +92,7 @@ async function chooseWorkspace(): Promise<void> {
 }
 
 async function refreshCLITools(): Promise<void> {
+  if (cliLoading.value) return
   cliLoading.value = true
   cliError.value = ''
   try {
@@ -143,7 +144,9 @@ async function installTool(tool: CLIToolStatus): Promise<void> {
 
 function toolStatusLabel(tool: CLIToolStatus): string {
   if (!tool.installed) return t('onboarding.cliMissing')
+  if (!tool.healthy) return t('settings.cliNeedsRepair')
   if (tool.updateAvailable) return t('onboarding.cliUpdateAvailable')
+  if (!tool.updateChecked) return t('settings.cliUpdateUnknown')
   return t('onboarding.cliReady')
 }
 
@@ -323,7 +326,7 @@ onMounted(() => {
                       <Terminal :size="14" class="shrink-0 text-muted-foreground" />
                       <p class="text-[13px] font-medium">{{ cliToolDisplayName(tool) }}</p>
                       <Badge
-                        :variant="tool.installed && !tool.updateAvailable ? 'default' : 'outline'"
+                        :variant="tool.installed && !tool.healthy ? 'destructive' : 'outline'"
                         class="text-[9px]"
                       >
                         {{ toolStatusLabel(tool) }}
@@ -346,7 +349,7 @@ onMounted(() => {
                   </div>
                   <div class="flex shrink-0 flex-col items-end gap-1.5">
                     <CheckCircle2
-                      v-if="tool.installed && !tool.updateAvailable"
+                      v-if="tool.healthy && tool.updateChecked && !tool.updateAvailable"
                       :size="18"
                       class="text-emerald-500"
                     />

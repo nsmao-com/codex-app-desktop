@@ -1924,7 +1924,7 @@ func externalCommandArgsForExecutable(provider, executable, sessionID, workspace
 			if strings.EqualFold(model, "gemini-3.1-pro") && effort == "medium" {
 				effort = "high"
 			}
-			for _, variant := range []string{"low", "medium", "high"} {
+			for _, variant := range []string{"low", "medium", "high", "xhigh"} {
 				if strings.HasSuffix(strings.ToLower(model), "-"+variant) {
 					effort = variant
 					break
@@ -1933,8 +1933,13 @@ func externalCommandArgsForExecutable(provider, executable, sessionID, workspace
 			// Antigravity 1.1.25 requires an explicit variant whenever --model is
 			// provided. Migrate the former Gemini "auto" value at dispatch too so
 			// already-open sessions cannot fail before settings are persisted.
-			if model != "" && !isExternalEffort(effort, "low", "medium", "high") {
+			if model != "" && !isExternalEffort(effort, "low", "medium", "high", "xhigh") {
 				effort = "high"
+			}
+			// Orchestrator has a fixed planner/executor configuration; --effort
+			// is invalid even when an older session retained a thinking level.
+			if strings.HasPrefix(strings.ToLower(model), "orchestrator") {
+				effort = ""
 			}
 			return append(args, antigravityPermissionArgs(settings.GeminiSandbox, settings.GeminiApprovalPolicy, effort)...), generatedSessionID
 		}
@@ -1987,7 +1992,7 @@ func externalCommandArgsForExecutable(provider, executable, sessionID, workspace
 func appendClaudeCompatibilityArgs(args []string, model string) []string {
 	model = strings.ToLower(strings.TrimSpace(model))
 	model = strings.TrimSuffix(model, "[1m]")
-	if model == "" || model == "sonnet" || model == "opus" || model == "haiku" || model == "fable" || strings.HasPrefix(model, "claude-") {
+	if model == "" || model == "default" || model == "best" || model == "opusplan" || model == "sonnet" || model == "opus" || model == "haiku" || model == "fable" || strings.HasPrefix(model, "claude-") {
 		return args
 	}
 	return append(args,
@@ -2065,7 +2070,7 @@ func antigravityPermissionArgs(sandbox, approvalPolicy, effort string) []string 
 		// as a boolean switch.
 		args = append(args, "--sandbox")
 	}
-	if isExternalEffort(effort, "low", "medium", "high") {
+	if isExternalEffort(effort, "low", "medium", "high", "xhigh") {
 		args = append(args, "--effort", effort)
 	}
 	return args

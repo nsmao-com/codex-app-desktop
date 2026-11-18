@@ -37,6 +37,9 @@ type CLIToolStatus struct {
 	Package         string `json:"package"`
 	InstallCommand  string `json:"installCommand"`
 	Installed       bool   `json:"installed"`
+	Healthy         bool   `json:"healthy"`
+	UpdateChecked   bool   `json:"updateChecked"`
+	UpdateError     string `json:"updateError"`
 	Executable      string `json:"executable"`
 	Version         string `json:"version"`
 	LatestVersion   string `json:"latestVersion"`
@@ -262,7 +265,7 @@ func (s *AppService) InstallCLITool(toolID string) (CLIToolActionResult, error) 
 			Tool:    tool,
 		}, errors.New(msg)
 	}
-	if !tool.Installed {
+	if !tool.Healthy {
 		return CLIToolActionResult{
 			OK:      false,
 			Message: fmt.Sprintf("Install finished but CLI was not found in pnpm home (%s). Restart Nice Codex and check the pnpm installation.", pnpmHome),
@@ -376,7 +379,7 @@ func (s *AppService) installOrUpdateGrokCLI() (CLIToolActionResult, error) {
 			Tool:    tool,
 		}, errors.New(msg)
 	}
-	if !tool.Installed {
+	if !tool.Healthy {
 		return CLIToolActionResult{
 			OK:      false,
 			Message: "Installer finished but Grok Build was not found under ~/.grok/bin. Run the official install from https://x.ai/cli, then restart Nice Codex.",
@@ -442,7 +445,7 @@ func (s *AppService) installOrUpdateAntigravityCLI() (CLIToolActionResult, error
 		}
 		return CLIToolActionResult{OK: false, Message: message, Output: text, Tool: tool}, errors.New(message)
 	}
-	if !tool.Installed || !isAntigravityExecutable(tool.Executable) {
+	if !tool.Healthy || !isAntigravityExecutable(tool.Executable) {
 		message := "Installer finished but agy was not found. Restart Nice Codex or add the Antigravity CLI directory to PATH."
 		return CLIToolActionResult{OK: false, Message: message, Output: text, Tool: tool}, errors.New(message)
 	}
@@ -580,7 +583,8 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 	switch spec.id {
 	case cliToolCodex:
 		det := codex.Detect()
-		status.Installed = det.Available
+		status.Installed = det.Binary != ""
+		status.Healthy = det.Available
 		status.Executable = det.Binary
 		status.Version = normalizeCLIVersion(det.Version)
 		status.Message = det.Error
@@ -589,6 +593,7 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 		invalidateGrokRuntimeProbeCache()
 		gr := detectGrokRuntime()
 		status.Installed = gr.BuildAvailable
+		status.Healthy = gr.BuildAvailable
 		status.Executable = gr.BuildExecutable
 		status.Version = normalizeCLIVersion(gr.BuildVersion)
 		// Grok Build can install/update without Node when the binary already exists,
@@ -598,6 +603,7 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 		status.InstallCommand = officialGrokInstallCommand()
 		if status.Installed && status.Executable != "" && !looksLikeNPMGrokShim(status.Executable) {
 			if check, err := probeGrokUpdateCheck(status.Executable); err == nil {
+				status.UpdateChecked = true
 				if v := normalizeCLIVersion(check.CurrentVersion); v != "" {
 					status.Version = v
 				}
@@ -609,6 +615,8 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 				} else {
 					status.UpdateAvailable = check.UpdateAvailable
 				}
+			} else {
+				status.UpdateError = err.Error()
 			}
 		}
 	case cliToolClaude, cliToolOpenCode:
@@ -617,6 +625,9 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 		if status.Installed {
 			if output, err := runProbeCommand(status.Executable, []string{"--version"}, 4*time.Second); err == nil {
 				status.Version = normalizeCLIVersion(firstOutputLine(output))
+				status.Healthy = status.Version != ""
+			} else {
+				status.Message = conciseProbeError(output, err)
 			}
 		}
 	case cliToolGemini:
@@ -644,6 +655,9 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 		if status.Installed {
 			if output, err := runProbeCommand(status.Executable, []string{"--version"}, 4*time.Second); err == nil {
 				status.Version = normalizeCLIVersion(firstOutputLine(output))
+				status.Healthy = status.Version != ""
+			} else {
+				status.Message = conciseProbeError(output, err)
 			}
 		}
 	}
@@ -657,14 +671,21 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 	if npmManaged {
 		latest, err := fetchNPMLatestVersion(spec.npmPkg)
 		if err == nil {
+			status.UpdateChecked = true
 			status.LatestVersion = latest
 			if status.Installed && status.Version != "" && latest != "" {
 				status.UpdateAvailable = compareSemver(latest, status.Version) > 0
 			}
+		} else {
+			status.UpdateError = err.Error()
 		}
 	}
 
 	switch {
+	case status.Installed && !status.Healthy:
+		if status.Message == "" {
+			status.Message = "CLI was found but its version check failed; repair the installation and retry"
+		}
 	case spec.id == cliToolCodex && status.Message != "":
 		// Keep the actionable missing-bundle diagnostic, not just "Not installed".
 	case spec.id == cliToolGrok && !status.Installed:
@@ -673,14 +694,16 @@ func probeCLITool(spec cliPackageSpec, pm string, nodeOK bool) CLIToolStatus {
 		status.Message = "Antigravity CLI (agy) ready"
 	case spec.id == cliToolGemini && status.Executable == "":
 		status.Message = "Not installed — uses the official Antigravity CLI installer"
-	case spec.id != cliToolGrok && spec.id != cliToolGemini && !nodeOK:
+	case !status.Installed && spec.id != cliToolGrok && spec.id != cliToolGemini && !nodeOK:
 		status.Message = "Install Node.js and pnpm first"
-	case spec.id != cliToolGrok && pm == "":
+	case !status.Installed && spec.id != cliToolGrok && pm == "":
 		status.Message = "Install pnpm first"
 	case !status.Installed:
 		status.Message = "Not installed"
 	case status.UpdateAvailable:
 		status.Message = fmt.Sprintf("Update available: %s → %s", status.Version, status.LatestVersion)
+	case !status.UpdateChecked:
+		status.Message = "Installed; latest version has not been verified"
 	default:
 		status.Message = "Up to date"
 	}

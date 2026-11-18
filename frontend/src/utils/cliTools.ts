@@ -14,6 +14,9 @@ export interface CLIToolStatus {
   package: string
   installCommand: string
   installed: boolean
+  healthy: boolean
+  updateChecked: boolean
+  updateError: string
   executable: string
   version: string
   latestVersion: string
