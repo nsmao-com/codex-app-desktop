@@ -1830,6 +1830,8 @@ Object.assign(messages['en-US'].common, {
   default: 'Default',
 })
 Object.assign(messages['zh-CN'].chat, {
+  catalogLoadFailed: '未能读取此会话的模型目录，已保留当前模型与自定义选项',
+  catalogRetainedEffort: '保留当前推理强度，等待服务商能力确认',
   runtimeReadyHere: '{runtime} 工作区已就绪',
   runtimeTitle: '想让 {runtime} 做什么？',
   runtimeDescription: '描述目标即可。{runtime} 会按照自己的原生配置在当前工作区中规划与执行。',
@@ -1837,6 +1839,8 @@ Object.assign(messages['zh-CN'].chat, {
   runtimeRetrying: '{runtime} 暂时遇到问题，正在自动重试…',
 })
 Object.assign(messages['en-US'].chat, {
+  catalogLoadFailed: 'Could not load this conversation’s models. Current and custom choices are preserved.',
+  catalogRetainedEffort: 'Retain the current effort until provider capabilities are confirmed',
   grokTraceBug: 'Explain the current error',
   grokTraceBugPrompt: 'Read this project and the current error clues, explain the most likely cause, then propose the smallest Grok fix.',
   grokUnderstandCodebase: 'Explain this repo',

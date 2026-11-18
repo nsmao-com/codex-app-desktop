@@ -60,6 +60,8 @@ import { SimpleTooltip } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
 import { useAppStore, useArenaStore, useCapabilitiesStore, useClaudeStore, useCodexStore, useDialogStore, useGrokStore, useWorkspaceStore } from '@/stores'
 import type { WorkspaceRuntime } from '@/stores/app'
+import type { ModelOption } from '@/types/codex'
+import { friendlyErrorMessage } from '@/utils/errorMessage'
 import { useComposerWorkspaceSwitcher } from '@/composables/useComposerWorkspaceSwitcher'
 import { useRuntimeMode } from '@/composables/useRuntimeMode'
 import {
@@ -754,8 +756,40 @@ const selectedModel = computed(() => {
   if (isGeminiMode.value || isOpenCodeMode.value) {
     return externalModelCatalog.value.find((model) => model.model === displayModel.value)
   }
-  return appStore.models.find((model) => model.model === displayModel.value)
+  return composerCodexModels.value.find((model) => model.model === displayModel.value)
 })
+const scopedCodexSession = computed(() => isCodexMode.value && composerTimelineThread.value
+  && (composerTimelineThread.value.backendRef || composerTimelineThread.value.modelProvider)
+  && !composerTimelineThread.value.id.startsWith('pending-thread-') ? composerTimelineThread.value : null)
+const scopedCodexModels = shallowRef<ModelOption[]>([])
+const scopedModelsLoading = shallowRef(false)
+const scopedModelsError = shallowRef('')
+const scopedModelsRefresh = shallowRef(0)
+const composerCodexModels = computed(() => scopedCodexSession.value ? scopedCodexModels.value : appStore.models)
+watch(
+  [() => scopedCodexSession.value?.id, () => scopedCodexSession.value?.modelProvider,
+    () => scopedCodexSession.value?.backendRef, () => codexStore.connection.state,
+    () => appStore.models, scopedModelsRefresh],
+  async (_, __, onCleanup) => {
+    let current = true
+    onCleanup(() => { current = false })
+    scopedCodexModels.value = []
+    scopedModelsError.value = ''
+    scopedModelsLoading.value = false
+    const session = scopedCodexSession.value
+    if (!session || codexStore.connection.state !== 'ready') return
+    scopedModelsLoading.value = true
+    try {
+      const models = await codexStore.readThreadModels(session.id)
+      if (current) scopedCodexModels.value = models
+    } catch (error) {
+      if (current) scopedModelsError.value = friendlyErrorMessage(error)
+    } finally {
+      if (current) scopedModelsLoading.value = false
+    }
+  },
+  { immediate: true },
+)
 const selectableModels = computed(() => {
   if (isGrokMode.value) {
     return modelsForGrokRuntime(
@@ -774,7 +808,7 @@ const selectableModels = computed(() => {
   if (isGeminiMode.value || isOpenCodeMode.value) {
     return externalModelCatalog.value
   }
-  return modelsForRuntime(appStore.models, appStore.settings.customModels ?? [], displayModel.value)
+  return modelsForRuntime(composerCodexModels.value, appStore.settings.customModels ?? [], displayModel.value, Boolean(scopedCodexSession.value))
 })
 const composerModelOptions = computed(() => (selectableModels.value ?? []).map((model) => {
   const description = 'description' in model && typeof model.description === 'string'
@@ -840,6 +874,9 @@ const reasoningOptions = computed(() => {
     ])
   }
   const fromModel = selectedModel.value?.supportedReasoningEfforts ?? []
+  if (isCodexMode.value && scopedCodexSession.value && !fromModel.length) {
+    return [{ effort: displayEffort.value, description: t('chat.catalogRetainedEffort') }]
+  }
   return fromModel.length ? fromModel : [...DEFAULT_CODEX_REASONING]
 })
 /** Selected permission preset: ask | auto | strict — labels always match menu items. */
@@ -2424,7 +2461,7 @@ async function applyModelSelection(value: string): Promise<void> {
 
   let effort = displayEffort.value
   let serviceTier = appStore.settings.serviceTier
-  const model = appStore.models.find((item) => item.model === modelID)
+  const model = composerCodexModels.value.find((item) => item.model === modelID)
   if (model) {
     const supported = model.supportedReasoningEfforts
     effort = supported.some((option) => option.effort === effort)
@@ -3120,6 +3157,14 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         </button>
       </div>
 
+      <div v-if="isCodexMode && scopedModelsError" role="status" class="flex min-w-0 flex-wrap items-start gap-2 rounded-md bg-muted/40 px-2 py-1.5 text-[11px]">
+        <div class="min-w-0 flex-1 basis-44">
+          <p class="font-medium">{{ t('chat.catalogLoadFailed') }}</p>
+          <p class="mt-0.5 break-words leading-4 text-muted-foreground">{{ scopedModelsError }}</p>
+        </div>
+        <Button type="button" variant="ghost" size="xs" class="shrink-0" @click="scopedModelsRefresh++">{{ t('common.retry') }}</Button>
+      </div>
+
       <Textarea
         ref="composerInput"
         v-model="modelValue"
@@ -3381,6 +3426,7 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
         </div>
 
         <div class="ml-auto flex min-w-0 items-center gap-0.5">
+          <LoaderCircle v-if="isCodexMode && scopedModelsLoading" :size="12" class="shrink-0 animate-spin text-muted-foreground" :aria-label="t('common.loading')" role="status" />
           <SearchableSelect
             v-model="composerModelSelection"
             class="h-7 w-auto border-0 bg-transparent px-2 text-[11px] text-muted-foreground shadow-none hover:bg-muted/50"

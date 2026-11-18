@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.23: Preserve Codex conversation providers after reload, explain blocked routes, and continue in a new branch with the current configuration.</sub></p>
+<p align="center"><sub>v1.6.24: Load Codex model catalogs per conversation provider, preserve current choices on failure, and retry without mixing models across arena panes.</sub></p>
 
 ## Why Nice Codex
 

@@ -788,6 +788,11 @@ export const useCodexStore = defineStore('codex', () => {
   }
 
   let modelsLoadSequence = 0
+  async function readThreadModels(threadID: string) {
+    const response = await backend.ListThreadModels(threadID)
+    return normalizeModels(asRecord(response).data)
+  }
+
   async function acceptReloadedCodexConfiguration(catalog: Record<string, unknown>): Promise<void> {
     ++modelsLoadSequence
     loadedThreadIDs.clear()
@@ -6122,6 +6127,7 @@ export const useCodexStore = defineStore('codex', () => {
     loadRecentProjectThreads,
     reloadProject,
     loadModels,
+    readThreadModels,
     acceptReloadedCodexConfiguration,
     loadModelProviders,
     createThread,

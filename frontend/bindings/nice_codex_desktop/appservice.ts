@@ -306,6 +306,14 @@ export function ListSystemFonts(): $CancellablePromise<$models.SystemFont[] | nu
     return $Call.ByID(1974567495);
 }
 
+/**
+ * ListThreadModels uses the thread's saved native route, never the app-server's
+ * possibly changed default. Each composer (including arena panes) owns its result.
+ */
+export function ListThreadModels(threadID: string): $CancellablePromise<{ [_ in string]?: any } | null> {
+    return $Call.ByID(714409796, threadID);
+}
+
 export function ListThreads(search: string): $CancellablePromise<{ [_ in string]?: any } | null> {
     return $Call.ByID(3185449219, search);
 }

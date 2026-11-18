@@ -155,6 +155,7 @@ export function selectCodexCatalog(codexModels: ModelOption[]): ModelOption[] {
 export function mergeCodexCatalog(
   codexModels: ModelOption[],
   customModels: string[] = [],
+  nativeProvider = false,
 ): ModelOption[] {
   const custom = normalizeCustomModels(customModels)
   const customIDs = new Set(custom.map((id) => id.toLowerCase()))
@@ -165,7 +166,7 @@ export function mergeCodexCatalog(
     const key = id.toLowerCase()
     if (!id || seen.has(key)) continue
     if (item.isCustom && !customIDs.has(key)) continue
-    if (!customIDs.has(key) && !selectCodexCatalog([item]).length) continue
+    if (!nativeProvider && !customIDs.has(key) && !selectCodexCatalog([item]).length) continue
     seen.add(key)
     options.push({ ...item, model: id, displayName: customIDs.has(key) ? id : cleanModelDisplayName(id, item.displayName) })
   }
@@ -174,6 +175,9 @@ export function mergeCodexCatalog(
     seen.add(id.toLowerCase())
     options.push({ ...stubCodexModel(id), displayName: id, isCustom: true })
   }
+  // A native provider catalog can legitimately contain gateway models or no
+  // models. Do not advertise built-in OpenAI choices on a different route.
+  if (nativeProvider) return options
   if (!options.length) {
     for (const id of FALLBACK_CODEX_MODELS) {
       options.push(stubCodexModel(id))
@@ -222,8 +226,9 @@ export function modelsForRuntime(
   codexModels: ModelOption[],
   customModels: string[] = [],
   preferredModel = '',
+  nativeProvider = false,
 ): Array<{ model: string; displayName: string; isDefault: boolean }> {
-  const catalog = mergeCodexCatalog(codexModels, customModels)
+  const catalog = mergeCodexCatalog(codexModels, customModels, nativeProvider)
   // A saved/session model can be absent while the native catalog is refreshing.
   if (preferredModel.trim() && !catalog.some((item) => item.model === preferredModel.trim())) {
     const index = catalog.findIndex((item) => item.model.toLowerCase() === preferredModel.trim().toLowerCase())

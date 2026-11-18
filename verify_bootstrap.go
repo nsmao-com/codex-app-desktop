@@ -616,6 +616,16 @@ func verifyCodexProviderChild() {
 			}
 		case "thread/read":
 			result["thread"] = map[string]any{"id": request.Params["threadId"], "modelProvider": "saved-route", "cwd": os.Getenv("NICE_CODEX_PROVIDER_VERIFY_ROOT")}
+		case "model/list":
+			if request.Params["modelProvider"] != "saved-route" {
+				fail("model catalog used the default route instead of the saved provider")
+			}
+			if request.Params["cursor"] == "second" {
+				result["data"] = []any{map[string]any{"model": "saved-model-2"}}
+			} else {
+				result["data"] = []any{map[string]any{"model": "saved-model"}}
+				result["nextCursor"] = "second"
+			}
 		case "thread/fork":
 			if request.Params["modelProvider"] != "current-route" || request.Params["model"] != "current-model" {
 				fail("fork used stale configuration")
@@ -635,6 +645,15 @@ func verifyCodexProviderChild() {
 }
 
 func verifyCodexProviderIdentity() error {
+	for _, catalog := range []map[string]any{
+		{"data": []any{}, "nextCursor": "repeated"},
+		{"data": []any{}, "nextCursor": 123},
+		{"data": "invalid"},
+	} {
+		if _, err := listCodexModelPages("saved-route", func(string, any) (map[string]any, error) { return catalog, nil }); err == nil {
+			return fmt.Errorf("invalid model catalog accepted")
+		}
+	}
 	root, err := os.MkdirTemp("", "nicecodex-provider-verify-")
 	if err != nil {
 		return err
@@ -666,6 +685,10 @@ func verifyCodexProviderIdentity() error {
 	defer service.client.Stop()
 	source := &SessionRecord{ID: "source", BackendRef: "saved-native", Workspace: root, ProviderID: "stale-route", Model: "saved-model", Effort: "high", Name: "Original"}
 	service.sessions[source.ID] = source
+	catalog, err := service.ListThreadModels(source.ID)
+	if err != nil || catalog["modelProvider"] != "saved-route" || len(catalog["data"].([]any)) != 2 || source.ProviderID != "stale-route" {
+		return fmt.Errorf("thread catalog provider/pagination/read-only identity: %v", err)
+	}
 	response, err := service.ResumeThread(source.ID)
 	if err != nil || response["modelProvider"] != "saved-route" || source.ProviderID != "saved-route" {
 		return fmt.Errorf("resume identity repair: %v", err)
@@ -697,13 +720,16 @@ func verifyCodexProviderIdentity() error {
 	}
 	draft := &SessionRecord{ID: "draft", Workspace: root}
 	service.sessions[draft.ID] = draft
+	if _, err := service.ListThreadModels(draft.ID); err == nil {
+		return fmt.Errorf("unassigned session used default provider catalog")
+	}
 	if _, err := service.ensureCodexBackendThread(draft, service.Settings(), root); err != nil || draft.ProviderID != "current-route" || draft.Model != "current-model" {
 		return fmt.Errorf("start identity not persisted: %v", err)
 	}
 	if codexProviderAdmissionError(fmt.Errorf("permission denied reading a file")) {
 		return fmt.Errorf("unrelated error misclassified")
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"resume saved provider", "repair stale identity", "atomic provider guard", "structured admission errors", "error data redaction", "fork current native config", "source/history preservation", "start identity persistence"}})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"thread provider catalog pagination", "invalid/repeated catalog cursor", "unassigned provider guard", "resume saved provider", "repair stale identity", "atomic provider guard", "structured admission errors", "error data redaction", "fork current native config", "source/history preservation", "start identity persistence"}})
 }
 
 func verifyCapabilityContracts() error {

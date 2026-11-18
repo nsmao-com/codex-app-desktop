@@ -2573,6 +2573,39 @@ func (s *AppService) ListModels() (map[string]any, error) {
 	return s.listModels(false)
 }
 
+// ListThreadModels uses the thread's saved native route, never the app-server's
+// possibly changed default. Each composer (including arena panes) owns its result.
+func (s *AppService) ListThreadModels(threadID string) (map[string]any, error) {
+	session := s.sessionForID(strings.TrimSpace(threadID))
+	if session == nil || isExternalSession(session) {
+		return nil, errors.New("a Codex session is required")
+	}
+	provider := strings.TrimSpace(session.ProviderID)
+	if session.BackendRef != "" {
+		result, err := s.call("thread/read", map[string]any{"threadId": session.BackendRef, "includeTurns": false})
+		if err != nil {
+			return nil, err
+		}
+		thread, ok := result["thread"].(map[string]any)
+		if !ok || !samePath(firstMapString(thread, "cwd"), session.Workspace) {
+			return nil, errors.New("Codex returned an invalid thread workspace")
+		}
+		provider = strings.TrimSpace(firstMapString(thread, "modelProvider"))
+		if provider == "" {
+			return nil, errors.New("Codex did not report this thread's model provider")
+		}
+	}
+	if provider == "" {
+		return nil, errors.New("Codex has not assigned this session a model provider yet")
+	}
+	result, err := listCodexModelPages(provider, s.call)
+	if err != nil {
+		return nil, err
+	}
+	result["modelProvider"] = provider
+	return result, nil
+}
+
 func (s *AppService) listModels(strict bool) (map[string]any, error) {
 	configured := readCodexConfiguredModel()
 	s.mu.Lock()
@@ -2585,32 +2618,49 @@ func (s *AppService) listModels(strict bool) (map[string]any, error) {
 		return ensureConfiguredModelInList(map[string]any{"data": []any{}}, configured), nil
 	}
 
+	result, err := listCodexModelPages("", s.call)
+	if err != nil {
+		if strict {
+			return nil, err
+		}
+		return ensureConfiguredModelInList(map[string]any{"data": []any{}}, configured), nil
+	}
+	return ensureConfiguredModelInList(result, configured), nil
+}
+
+func listCodexModelPages(provider string, call func(string, any) (map[string]any, error)) (map[string]any, error) {
 	merged := make([]any, 0, 64)
-	var cursor any
-	for page := 0; page < 8; page++ {
+	cursor := ""
+	seen := map[string]bool{}
+	for page := 0; page < 32; page++ {
 		params := map[string]any{"limit": 100, "includeHidden": true}
-		if cursor != nil {
+		if provider != "" {
+			params["modelProvider"] = provider
+		}
+		if cursor != "" {
 			params["cursor"] = cursor
 		}
-		result, err := s.call("model/list", params)
+		result, err := call("model/list", params)
 		if err != nil {
-			if strict {
-				return nil, err
-			}
-			if len(merged) == 0 {
-				return ensureConfiguredModelInList(map[string]any{"data": []any{}}, configured), nil
-			}
-			break
+			return nil, err
 		}
-		chunk, _ := result["data"].([]any)
+		chunk, ok := result["data"].([]any)
+		if !ok {
+			return nil, errors.New("Codex returned an invalid model catalog")
+		}
 		merged = append(merged, chunk...)
 		next := result["nextCursor"]
 		if next == nil || next == "" {
-			break
+			return map[string]any{"data": merged}, nil
 		}
-		cursor = next
+		value, ok := next.(string)
+		if !ok || seen[value] {
+			return nil, errors.New("Codex returned an invalid or repeated model catalog cursor")
+		}
+		seen[value] = true
+		cursor = value
 	}
-	return ensureConfiguredModelInList(map[string]any{"data": merged}, configured), nil
+	return nil, errors.New("Codex model catalog exceeds the safe page limit")
 }
 
 func readCodexConfiguredModel() string {
