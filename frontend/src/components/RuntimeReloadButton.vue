@@ -72,17 +72,25 @@ async function reload(): Promise<void> {
       effort ||= next.openCodeEffort
     }
     await app.savePreferences(next, { silent: true })
+    let preservedCodexSessions = false
     for (const id of sessions) {
       if (runtime === 'claude') claude.patchSessionPreferences(id, model, effort)
       else if (runtime === 'grok') grok.patchSessionPreferences(id, model, effort)
       else {
         const thread = codex.threads.find((item) => item.id === id) || (codex.activeThread?.id === id ? codex.activeThread : undefined)
-        const modelProvider = runtime === 'codex' ? result.modelProvider : undefined
+        // Only a known unallocated draft can change routes. Unknown/older
+        // metadata must not be interpreted as the official OpenAI provider.
+        const draft = id.startsWith('pending-thread-') || thread?.backendRef === ''
+        if (runtime === 'codex' && !draft && (!thread?.modelProvider || thread.modelProvider !== result.modelProvider)) {
+          preservedCodexSessions = true
+          continue
+        }
+        const modelProvider = runtime === 'codex' && draft ? result.modelProvider : undefined
         await codex.updateSessionPreferences({ sessionId: id, model, modelProvider, effort, collaborationMode: thread?.collaborationMode || '', resetModel: true })
         codex.patchSessionPreferences(id, model, effort, modelProvider, undefined, true)
       }
     }
-    notify('success', t('sidebar.reloadDone', { name }), t('sidebar.reloadDoneHint'))
+    notify('success', t('sidebar.reloadDone', { name }), t(preservedCodexSessions ? 'sidebar.reloadPreservedHint' : 'sidebar.reloadDoneHint'))
   } catch (error) {
     notify('error', t('sidebar.reloadFailed', { name }), error instanceof Error ? error.message : String(error))
   } finally {

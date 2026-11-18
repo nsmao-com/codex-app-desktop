@@ -18,7 +18,7 @@ import { useTerminalStore } from './terminal'
 import { useWorkspaceStore } from './workspace'
 import { notify } from '../utils/notify'
 import { addCodexWarning, loadCodexWarnings, normalizeCodexWarning, saveCodexWarnings } from '../utils/codexWarnings'
-import { friendlyErrorMessage } from '../utils/errorMessage'
+import { friendlyErrorMessage, isCodexProviderAdmissionError } from '../utils/errorMessage'
 import { sameWorkspacePath as sameWorkspace, workspaceKey } from '../utils/workspacePath'
 import { savePersistedQueues, loadPersistedQueues } from '../utils/persistedQueues'
 import {
@@ -1173,7 +1173,7 @@ export const useCodexStore = defineStore('codex', () => {
         thread = {
           ...thread,
           model: latestPreferences.model || thread.model,
-          modelProvider: latestPreferences.modelProvider || thread.modelProvider,
+          modelProvider: thread.modelProvider || latestPreferences.modelProvider,
           effort: latestPreferences.effort || thread.effort,
           collaborationMode: latestPreferences.collaborationMode || thread.collaborationMode,
           ...(latestPreferences.goal !== undefined ? threadGoalState(latestPreferences) : {}),
@@ -2211,7 +2211,7 @@ export const useCodexStore = defineStore('codex', () => {
             thread = {
               ...resumed,
               model: latestPreferences.model || resumed.model,
-              modelProvider: latestPreferences.modelProvider || resumed.modelProvider,
+              modelProvider: resumed.modelProvider || latestPreferences.modelProvider,
               effort: latestPreferences.effort || resumed.effort,
               collaborationMode: latestPreferences.collaborationMode || resumed.collaborationMode,
               ...(latestPreferences.goal !== undefined ? threadGoalState(latestPreferences) : {}),
@@ -2228,7 +2228,8 @@ export const useCodexStore = defineStore('codex', () => {
               })
             }
           }
-        } catch {
+        } catch (error) {
+          if (isCodexProviderAdmissionError(error)) throw error
           // Backend SendMessage also auto-resumes; continue and surface errors there.
         }
         if (!submissionStillOwnsThread(resolvedThreadID)) return
@@ -2397,6 +2398,7 @@ export const useCodexStore = defineStore('codex', () => {
       continueDraining = finished
     } catch (error) {
       const message = errorMessage(error)
+      const providerBlocked = runtimeIDForThread(resolvedThreadID) === 'codex' && isCodexProviderAdmissionError(error)
       const capacityError = /selected model is at capacity|model is at capacity|at capacity/i.test(message)
       if (capacityError) {
         const attempts = capacityRetryAttempts.get(queuedMessage.id) ?? 0
@@ -2479,7 +2481,7 @@ export const useCodexStore = defineStore('codex', () => {
           pendingCollaborationModeByThread.delete(resolvedThreadID)
           if (resolvedThreadID !== threadID) pendingCollaborationModeByThread.delete(threadID)
           markItemFailed(ownerID, queuedMessage.localItemId)
-          setTurnFeedback(ownerID, { state: 'failed', message, turnId: '' })
+          setTurnFeedback(ownerID, { state: 'failed', message, turnId: '', providerBlocked })
           patchQueuedMessage(ownerID, queuedMessage.id, { state: 'failed', error: message })
           notify('error', translate('notifications.messageNotSent'), message)
           finishPendingThreadSubmission(ownerID, submission, false)
@@ -2490,7 +2492,7 @@ export const useCodexStore = defineStore('codex', () => {
       pendingCollaborationModeByThread.delete(resolvedThreadID)
       if (resolvedThreadID !== threadID) pendingCollaborationModeByThread.delete(threadID)
       markItemFailed(resolvedThreadID, queuedMessage.localItemId)
-      setTurnFeedback(resolvedThreadID, { state: 'failed', message, turnId: '' })
+      setTurnFeedback(resolvedThreadID, { state: 'failed', message, turnId: '', providerBlocked })
       patchQueuedMessage(resolvedThreadID, queuedMessage.id, { state: 'failed', error: message })
       notify('error', translate('notifications.messageNotSent'), message)
     } finally {

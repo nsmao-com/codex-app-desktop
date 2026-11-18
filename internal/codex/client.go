@@ -471,7 +471,20 @@ func (c *Client) handleMessage(message wireMessage) {
 			return
 		}
 		if message.Error != nil {
-			channel <- rpcResult{err: errors.New(message.Error.Message)}
+			errorText := message.Error.Message
+			// Preserve the structured provider-admission discriminator emitted by
+			// newer Codex servers. The app layer can then explain that a switched
+			// provider makes the old thread read-only and offer a fork.
+			var details struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(message.Error.Data, &details) == nil {
+				switch details.Type {
+				case "modelProviderMismatch", "modelProviderNotConfigured", "modelProviderPolicyConflict":
+					errorText = "[" + details.Type + "] " + errorText
+				}
+			}
+			channel <- rpcResult{err: errors.New(errorText)}
 			return
 		}
 		channel <- rpcResult{result: message.Result}

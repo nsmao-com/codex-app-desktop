@@ -55,6 +55,48 @@ func sessionsPath(settingsPath string) string {
 	return filepath.Join(filepath.Dir(settingsPath), "sessions.json")
 }
 
+// Codex's saved route is authoritative, including for records written before
+// provider identity was persisted and forks created under a different default.
+func applyCodexSessionIdentity(record *SessionRecord, result map[string]any) bool {
+	if record == nil || isExternalSession(record) {
+		return false
+	}
+	thread, _ := result["thread"].(map[string]any)
+	provider := strings.TrimSpace(firstMapString(thread, "modelProvider"))
+	if provider == "" {
+		provider = strings.TrimSpace(firstMapString(result, "modelProvider"))
+	}
+	changed := false
+	if provider != "" && externalProviderKind(provider) == "" && provider != record.ProviderID {
+		record.ProviderID = provider
+		changed = true
+	}
+	if record.Model == "" {
+		model := strings.TrimSpace(firstMapString(result, "model"))
+		if model == "" {
+			model = strings.TrimSpace(firstMapString(thread, "model"))
+		}
+		if model != "" {
+			record.Model = model
+			changed = true
+		}
+	}
+	return changed
+}
+
+func codexProviderAdmissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	for _, marker := range []string{"modelprovidermismatch", "modelprovidernotconfigured", "modelproviderpolicyconflict", "cannot change this thread's model provider", "model provider mismatch"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return strings.Contains(text, "model provider") && (strings.Contains(text, "not configured") || strings.Contains(text, "read-only") || strings.Contains(text, "policy conflict"))
+}
+
 func (s *AppService) loadSessions() map[string]*SessionRecord {
 	result := make(map[string]*SessionRecord)
 	if err := s.readLocalJSON("sessions", sessionsPath(s.settingsPath), &result); err != nil {

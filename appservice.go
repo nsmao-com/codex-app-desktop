@@ -1011,6 +1011,10 @@ func (s *AppService) UpdateSessionPreferences(request SessionPreferencesRequest)
 			s.mu.Unlock()
 			return errors.New("invalid Codex model provider")
 		}
+		if record.BackendRef != "" && provider != record.ProviderID {
+			s.mu.Unlock()
+			return errors.New("Cannot change this thread's model provider on resume. Continue in a new chat instead.")
+		}
 	}
 	previousGoalSession := cloneSession(record)
 	effectiveGoal := normalizeSessionGoal(record.Goal)
@@ -1205,6 +1209,11 @@ func (s *AppService) ResumeThread(threadID string) (map[string]any, error) {
 	backendID := s.codexBackendID(threadID, workspace)
 	result, err := s.loadBackendThread(backendID, workspace, settings, session)
 	if err != nil {
+		// Opening history uses thread/read; provider admission failures must reach
+		// the sender rather than reporting a successful resume.
+		if codexProviderAdmissionError(err) {
+			return nil, err
+		}
 		// Fall back to local index if the backend thread is gone.
 		if session != nil {
 			s.rememberThread(threadID, workspace)
@@ -1246,7 +1255,25 @@ func (s *AppService) ForkThread(threadID string) (map[string]any, error) {
 	if err := s.ensureThreadInWorkspace(backendID, workspace); err != nil {
 		return nil, err
 	}
-	result, err := s.call("thread/fork", map[string]any{"threadId": backendID, "cwd": workspace})
+	// A fork is the supported escape hatch when the source thread retained a
+	// provider that no longer matches the current Codex configuration. Pass the
+	// current model/provider so the new thread is writable after an auth switch.
+	forkParams := map[string]any{"threadId": backendID, "cwd": workspace}
+	configuration, err := s.call("config/read", map[string]any{"cwd": workspace, "includeLayers": false})
+	if err != nil {
+		return nil, err
+	}
+	config, _ := configuration["config"].(map[string]any)
+	forkProvider := strings.TrimSpace(firstMapString(config, "model_provider"))
+	if forkProvider == "" {
+		forkProvider = "openai"
+	}
+	forkParams["modelProvider"] = forkProvider
+	forkModel := strings.TrimSpace(firstMapString(config, "model"))
+	if model := forkModel; model != "" {
+		forkParams["model"] = model
+	}
+	result, err := s.call("thread/fork", forkParams)
 	if err != nil {
 		return nil, err
 	}
@@ -1276,11 +1303,18 @@ func (s *AppService) ForkThread(threadID string) (map[string]any, error) {
 		record.WorkMode = source.WorkMode
 		record.Name = source.Name + " (fork)"
 	}
+	if source == nil || source.ProviderID != forkProvider {
+		record.Effort = strings.TrimSpace(firstMapString(config, "model_reasoning_effort"))
+	}
+	record.Model = forkModel
+	record.ProviderID = forkProvider
+	applyCodexSessionIdentity(record, result)
 	s.mu.Lock()
 	s.upsertSessionLocked(record)
 	s.mu.Unlock()
 	s.rememberThread(record.ID, workspace)
-	return s.sessionResponse(record), nil
+	s.attachSessionIdentity(result, record, record.ID)
+	return result, nil
 }
 
 func (s *AppService) ArchiveThread(threadID string) error {
@@ -5039,21 +5073,15 @@ func (s *AppService) loadBackendThread(backendID, workspace string, settings Use
 		"approvalPolicy": normalizeApproval(settings.ApprovalPolicy),
 	}
 	model := strings.TrimSpace(settings.Model)
-	providerID := strings.TrimSpace(settings.ModelProvider)
 	if session != nil {
-		if session.Model != "" {
-			model = session.Model
-		}
-		if session.ProviderID != "" {
-			providerID = session.ProviderID
-		}
+		model = strings.TrimSpace(session.Model)
 	}
-	if externalProviderKind(providerID) == "" && model != "" {
+	if model != "" {
 		params["model"] = model
 	}
-	if externalProviderKind(providerID) == "" && providerID != "" {
-		params["modelProvider"] = providerID
-	}
+	// Resume must use the provider saved by Codex itself. Local metadata can be
+	// stale after a reload in older NiceCodex releases; overriding it here both
+	// breaks resume and hides the authoritative provider returned by the server.
 	if s.codexUsesPagedHistory() {
 		// Resume is a dispatch preflight, not a history download. New CLIs warn
 		// on every full-history resume; the timeline uses the read/paging path.
@@ -5233,6 +5261,7 @@ func (s *AppService) ensureCodexBackendThread(session *SessionRecord, settings U
 		return "", errors.New("session could not claim the allocated Codex thread")
 	}
 	record = s.sessions[session.ID]
+	applyCodexSessionIdentity(record, result)
 	if name, ok := result["thread"].(map[string]any); ok {
 		if value, _ := name["name"].(string); value != "" && (record.Name == "" || record.Name == "New task") {
 			record.Name = value
@@ -5256,6 +5285,11 @@ func (s *AppService) attachSessionIdentity(result map[string]any, session *Sessi
 	collaborationMode := ""
 	workMode := "code"
 	if session != nil {
+		s.mu.Lock()
+		if record := s.sessions[session.ID]; record != nil && !isExternalSession(record) && applyCodexSessionIdentity(record, result) {
+			_ = s.persistSessionsLocked()
+		}
+		s.mu.Unlock()
 		if current := s.sessionForIDAny(session.ID); current != nil {
 			session = current
 		}
@@ -5282,10 +5316,11 @@ func (s *AppService) attachSessionIdentity(result map[string]any, session *Sessi
 	result["workMode"] = workMode
 	if thread, ok := result["thread"].(map[string]any); ok {
 		thread["id"] = id
-		backendRef := ""
+		backendRef := sessionID
 		if session != nil {
 			backendRef = session.BackendRef
 		}
+		thread["backendRef"] = backendRef
 		if turnID := s.codexActiveTurnID(id, sessionID, backendRef); turnID != "" && turnID != "active" {
 			thread["activeTurnId"] = turnID
 		}

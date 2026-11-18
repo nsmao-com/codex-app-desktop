@@ -342,6 +342,8 @@ const paneSessionPending = computed(() => {
   if (isClaudeMode.value) return id.startsWith('pending-claude-')
   return id.startsWith('pending-thread-')
 })
+const paneProviderBlocked = computed(() => isCodexMode.value
+  && codexStore.threadFeedback(paneSessionId.value)?.providerBlocked === true)
 const panePendingRequest = computed(() => isArenaPane.value
   ? codexStore.pendingRequestForThread(paneSessionId.value)
   : codexStore.pendingRequest)
@@ -841,6 +843,28 @@ function commitFromBar(): void {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+    </div>
+
+    <div
+      v-if="paneProviderBlocked"
+      role="status"
+      class="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-4 py-3"
+    >
+      <div class="min-w-0 flex-1 basis-56">
+        <p class="text-xs font-medium">{{ t('threadActions.providerBlockedTitle') }}</p>
+        <p class="mt-1 break-words text-xs leading-5 text-muted-foreground">{{ t('errors.codexProviderBlocked') }}</p>
+      </div>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        class="h-auto min-h-8 max-w-full whitespace-normal text-left text-xs"
+        :disabled="codexStore.threadIsBusy(paneSessionId) || Boolean(codexStore.threadMutationForThread(paneSessionId))"
+        @click="forkThread"
+      >
+        <Copy :size="13" class="mr-1.5 shrink-0" aria-hidden="true" />
+        {{ t('threadActions.continueInNewChat') }}
+      </Button>
     </div>
 
     <div

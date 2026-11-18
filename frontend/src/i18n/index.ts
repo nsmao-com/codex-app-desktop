@@ -401,6 +401,7 @@ const messages = {
       reloadHint: '重新加载 {name} 的认证配置与模型；Codex 会重启连接。请先停止该服务商正在运行的任务。',
       reloadDone: '{name} 配置已重新加载',
       reloadDoneHint: '认证状态、模型列表和当前会话的模型选择已刷新。',
+      reloadPreservedHint: '认证与新对话的默认模型已刷新。旧对话保留原服务商与模型；若无法续聊，请创建对话分支使用新配置。',
       reloadFailed: '{name} 配置重新加载未完成',
       reorderProject: '拖拽调整“{name}”的项目顺序，也可使用上下方向键',
       workspace: '工作区',
@@ -1310,6 +1311,8 @@ const messages = {
     },
     threadActions: {
       title: '对话操作',
+      providerBlockedTitle: '此对话的服务商暂不可用',
+      continueInNewChat: '在新对话中继续',
       fork: '创建对话分支',
       compact: '压缩上下文',
       archive: '归档对话',
@@ -1625,6 +1628,7 @@ const messages = {
       reloadHint: 'Reload {name} authentication and models; Codex reconnects. Stop running tasks for this provider first.',
       reloadDone: '{name} configuration reloaded',
       reloadDoneHint: 'Authentication, model catalog and current conversation model selections have been refreshed.',
+      reloadPreservedHint: 'Authentication and defaults for new chats were refreshed. Existing chats retain their provider and model. Fork a conversation to use the new configuration if it cannot continue.',
       reloadFailed: '{name} configuration reload incomplete',
       reorderProject: 'Drag to reorder “{name}”; the Up and Down arrow keys also work',
       workspace: 'Workspace', chooseFolder: 'Choose a folder', chooseAnother: 'Choose another folder', newTask: 'New task', threads: 'Threads', searchLabel: 'Search threads', searchPlaceholder: 'Search tasks', noSearchResults: 'No tasks match your search.', firstTask: 'Your workspace is ready for its first task.', switchToCodeHint: 'You are in Cowork mode. Past chats are usually under Code.', switchToCoworkHint: 'You are in Code mode. Switch to Cowork to see chats from that mode.', noPreview: 'No message preview', signIn: 'Sign in to Codex', chatgptAccount: 'Use your ChatGPT account', codexAccount: 'Codex account', openSettings: 'Open settings', now: 'now', projectLoadFailed: 'Project conversations could not be loaded', retryProject: 'Reload', toggle: 'Toggle sidebar', loadMore: 'Show {count} more', runningInBackground: 'This conversation is running in the background', customize: 'Capabilities', recents: 'Recent conversations', code: 'Code', cowork: 'Cowork', runtimeCodex: 'Switch to Codex', runtimeClaude: 'Switch to Claude', runtimeGrok: 'Switch to Grok', runtimeSwitchFailed: 'Could not switch runtime', claudeEmpty: 'Claude Code', claudeEmptyHint: 'Claude Code detected. In-app chat will expand later; use the claude CLI in a terminal for now.', claudeRuntimeMissing: 'Claude Code CLI (claude) not found. Install it, then restart Nice Codex.', claudeReady: 'Claude Code ready', grokEmpty: 'No Grok sessions yet.', grokEmptyHint: 'Start a new task to chat via Grok Build or the Grok API.', grokRuntimeMissing: 'No usable Grok Build / API configuration detected.', grokBindingsStale: 'Backend bindings are stale. Fully quit and restart NiceCodex (or restart wails dev), then switch to Grok again.', archived: 'Archived', archivedEmpty: 'No archived conversations.', restore: 'Restore', signOut: 'Sign out', newTaskInProject: 'New chat in this project', pin: 'Pin conversation', unpin: 'Unpin conversation', renameHint: 'Double-click to rename', usageHint: 'View token usage', usageTitle: 'Token usage', usageSubtitle: 'Local stats from ~/.codex session history, then accumulates new turns.', usageSubtitleGrok: 'Local stats: accumulates Grok turns from NiceCodex (Build CLI / API).', usageSubtitleClaude: 'Local stats: accumulates Claude Code turns from NiceCodex.', usageSubtitleGemini: 'Local stats from cumulative Gemini CLI native session usage.', usageSubtitleOpenCode: 'Local stats from cumulative OpenCode native session database usage.', usageToday: 'Today', usageWeek: '7 days', usageTwoWeeks: '14 days', usageMonth: '30 days', usageCumulative: 'Cumulative', usageRangeTotal: 'Range total', usageRangeMeta: '{days} days · avg {avg}/day · {count} active days', usageAggregateMeta: 'Lifetime total {count} tokens (daily detail may be unavailable)', usageEmpty: 'No usage data in this range', usagePeakDaily: 'Peak daily', usageLifetimeShort: 'Lifetime {count}', usageInput: 'Input', usageCached: 'Cached', usageOutput: 'Output', usageReasoning: 'Reasoning', usageBreakdown: 'Breakdown',
@@ -1746,6 +1750,8 @@ const messages = {
       finish: 'Get started',
     },
     threadActions: {
+      providerBlockedTitle: 'This conversation’s provider is unavailable',
+      continueInNewChat: 'Continue in a new chat',
       title: 'Conversation actions', fork: 'Fork conversation', compact: 'Compact context', archive: 'Archive conversation', rename: 'Rename conversation', renamePrompt: 'Enter a new conversation name', renamed: 'Conversation renamed', renameFailed: 'Could not rename conversation', delete: 'Delete conversation', deleteConfirm: 'Permanently delete this conversation? This cannot be undone.', deleted: 'Conversation deleted', deletedHint: 'Removed from the local index and Codex thread store.', deleteFailed: 'Could not delete conversation', unarchive: 'Restore conversation', unarchived: 'Conversation restored', unarchivedHint: 'It is back in the task list.', unarchiveFailed: 'Could not restore conversation', review: 'Review changes', reviewThreadName: 'Code review', reviewStarted: 'Review started', reviewStartedHint: 'Codex is reviewing the current changes with the official Review flow.', reviewFailed: 'Could not start review', reviewNeedThread: 'Review unavailable', reviewNeedThreadHint: 'Send at least one message before using /review.', forked: 'Conversation forked', forkFailed: 'Could not fork conversation', archived: 'Conversation archived', archivedHint: 'Restore it from Settings → Archived.', archiveFailed: 'Could not archive conversation', busyActionBlocked: 'Task still running', busyActionBlockedHint: 'Stop this task and wait for it to finish stopping before archiving or deleting the conversation.', compacting: 'Compacting context', compactingHint: 'Codex will preserve key details and free context space.', compactFailed: 'Could not compact context',
     },
     palette: {
@@ -1859,6 +1865,7 @@ Object.assign(messages['en-US'].chat, {
 Object.assign(messages['zh-CN'], {
   errors: {
     canceled: '已取消本次请求。',
+    codexProviderBlocked: 'Codex 无法使用此对话保存的服务商。可恢复原服务商配置后重试，或创建新分支使用当前配置。历史与未发送的消息、附件仍保留在原对话。',
     invalidKey: '密钥无效或未配置，请到设置里检查。',
     forbidden: '当前账号没有权限执行这次操作。',
     rateLimited: '请求太频繁，请稍后再试。',
@@ -1945,6 +1952,7 @@ Object.assign(messages['en-US'].notifications as Record<string, string>, {
 Object.assign(messages['en-US'], {
   errors: {
     canceled: 'This request was cancelled.',
+    codexProviderBlocked: 'Codex cannot use this conversation’s saved provider. Restore its configuration and retry, or fork with the current configuration. History, unsent messages and attachments remain in the original chat.',
     invalidKey: 'The API key is missing or invalid. Check Settings.',
     forbidden: 'This account does not have permission for that action.',
     rateLimited: 'Too many requests. Please wait a moment and try again.',

@@ -24,6 +24,16 @@ import (
 // Smoke-checks the same Bootstrap / ListModelProviders contracts the UI uses,
 // without needing the Wails window or WebView bindings.
 func main() {
+	if os.Getenv("NICE_CODEX_PROVIDER_VERIFY_CHILD") == "1" {
+		verifyCodexProviderChild()
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--codex-providers" {
+		if err := verifyCodexProviderIdentity(); err != nil {
+			fail("Codex providers: %v", err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--claude-plugin-child" {
 		verifyClaudePluginChild()
 		return
@@ -556,6 +566,144 @@ func verifyClaudePlugins() error {
 		return fmt.Errorf("guard leaked after cancellation")
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "claudePlugins": []string{"native scopes", "offline cache exclusion", "CLI enablement", "idempotency", "override detection", "malformed responses", "active/concurrent guards", "cancellation"}})
+}
+
+// Isolated JSON-RPC fixture exercises the real transport and service boundary.
+// It never starts a model request or reads a user's Codex home.
+func verifyCodexProviderChild() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println("codex-cli 0.169.0")
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "debug" {
+		fmt.Println(`{"models":[{"slug":"gpt-6-astra"}]}`)
+		return
+	}
+	decoder, encoder := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)
+	for {
+		var request struct {
+			ID     any            `json:"id"`
+			Method string         `json:"method"`
+			Params map[string]any `json:"params"`
+		}
+		if decoder.Decode(&request) != nil {
+			return
+		}
+		if request.ID == nil {
+			continue
+		}
+		result := map[string]any{}
+		response := map[string]any{"id": request.ID, "result": result}
+		providerError := func(kind string) {
+			delete(response, "result")
+			response["error"] = map[string]any{"code": -32600, "message": "Route unavailable", "data": map[string]any{"type": kind, "sensitiveDetail": "must-not-cross-bridge"}}
+		}
+		switch request.Method {
+		case "initialize":
+			result["userAgent"] = "provider-verifier"
+		case "config/read":
+			result["config"] = map[string]any{"model_provider": "current-route", "model": "current-model", "model_reasoning_effort": "medium"}
+		case "thread/resume":
+			if _, overridden := request.Params["modelProvider"]; overridden {
+				fail("resume overrode saved provider")
+			}
+			id := firstMapString(request.Params, "threadId")
+			if strings.HasPrefix(id, "blocked-") {
+				providerError(strings.TrimPrefix(id, "blocked-"))
+			} else {
+				result["modelProvider"] = "saved-route"
+				result["thread"] = map[string]any{"id": id, "modelProvider": "saved-route", "cwd": os.Getenv("NICE_CODEX_PROVIDER_VERIFY_ROOT")}
+			}
+		case "thread/read":
+			result["thread"] = map[string]any{"id": request.Params["threadId"], "modelProvider": "saved-route", "cwd": os.Getenv("NICE_CODEX_PROVIDER_VERIFY_ROOT")}
+		case "thread/fork":
+			if request.Params["modelProvider"] != "current-route" || request.Params["model"] != "current-model" {
+				fail("fork used stale configuration")
+			}
+			result["model"], result["modelProvider"] = "current-model", "current-route"
+			result["thread"] = map[string]any{"id": "fork-native", "modelProvider": "current-route", "turns": []any{map[string]any{"id": "historic-turn"}}}
+		case "thread/start":
+			result["model"], result["modelProvider"] = "current-model", "current-route"
+			result["thread"] = map[string]any{"id": "start-native", "modelProvider": "current-route"}
+		default:
+			result["goal"] = nil
+		}
+		if encoder.Encode(response) != nil {
+			return
+		}
+	}
+}
+
+func verifyCodexProviderIdentity() error {
+	root, err := os.MkdirTemp("", "nicecodex-provider-verify-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(root)
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	for key, value := range map[string]string{"CODEX_BIN": executable, "CODEX_HOME": root, "NICE_CODEX_PROVIDER_VERIFY_CHILD": "1", "NICE_CODEX_PROVIDER_VERIFY_ROOT": root} {
+		previous, existed := os.LookupEnv(key)
+		defer func() {
+			if existed {
+				_ = os.Setenv(key, previous)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		}()
+		if err := os.Setenv(key, value); err != nil {
+			return err
+		}
+	}
+	service := &AppService{settings: defaultSettings(), settingsPath: filepath.Join(root, "settings.json"), sessions: map[string]*SessionRecord{}, allowedThreads: map[string]string{}}
+	service.settings.Workspace = root
+	service.client = codex.NewClient(nil)
+	if err := service.client.Start(context.Background(), root, codex.ClientInfo{}); err != nil {
+		return err
+	}
+	defer service.client.Stop()
+	source := &SessionRecord{ID: "source", BackendRef: "saved-native", Workspace: root, ProviderID: "stale-route", Model: "saved-model", Effort: "high", Name: "Original"}
+	service.sessions[source.ID] = source
+	response, err := service.ResumeThread(source.ID)
+	if err != nil || response["modelProvider"] != "saved-route" || source.ProviderID != "saved-route" {
+		return fmt.Errorf("resume identity repair: %v", err)
+	}
+	other := "different-route"
+	if err := service.UpdateSessionPreferences(SessionPreferencesRequest{SessionID: source.ID, ModelProvider: &other, Model: "wrong-model"}); !codexProviderAdmissionError(err) || source.Model != "saved-model" || source.ProviderID != "saved-route" {
+		return fmt.Errorf("provider mutation was not atomic: %v", err)
+	}
+	for _, kind := range []string{"modelProviderMismatch", "modelProviderNotConfigured", "modelProviderPolicyConflict"} {
+		source.BackendRef = "blocked-" + kind
+		_, err := service.ResumeThread(source.ID)
+		if !codexProviderAdmissionError(err) || strings.Contains(err.Error(), "must-not-cross-bridge") {
+			return fmt.Errorf("structured provider error lost/leaked: %v", err)
+		}
+	}
+	source.BackendRef = "saved-native"
+	response, err = service.ForkThread(source.ID)
+	if err != nil {
+		return err
+	}
+	forkID := threadIDFromResult(response)
+	fork := service.sessions[forkID]
+	if fork == nil || forkID == source.ID || fork.ProviderID != "current-route" || fork.Model != "current-model" || fork.Effort != "medium" || source.ProviderID != "saved-route" || source.Model != "saved-model" {
+		return fmt.Errorf("fork identity or source changed")
+	}
+	thread, _ := response["thread"].(map[string]any)
+	if thread["backendRef"] != "fork-native" || len(thread["turns"].([]any)) != 1 {
+		return fmt.Errorf("fork history/identity lost")
+	}
+	draft := &SessionRecord{ID: "draft", Workspace: root}
+	service.sessions[draft.ID] = draft
+	if _, err := service.ensureCodexBackendThread(draft, service.Settings(), root); err != nil || draft.ProviderID != "current-route" || draft.Model != "current-model" {
+		return fmt.Errorf("start identity not persisted: %v", err)
+	}
+	if codexProviderAdmissionError(fmt.Errorf("permission denied reading a file")) {
+		return fmt.Errorf("unrelated error misclassified")
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"resume saved provider", "repair stale identity", "atomic provider guard", "structured admission errors", "error data redaction", "fork current native config", "source/history preservation", "start identity persistence"}})
 }
 
 func verifyCapabilityContracts() error {

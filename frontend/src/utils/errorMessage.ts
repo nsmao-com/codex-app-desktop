@@ -6,10 +6,18 @@ export function rawErrorText(error: unknown): string {
   return ''
 }
 
+export function isCodexProviderAdmissionError(error: unknown): boolean {
+  const raw = rawErrorText(error).toLowerCase()
+  return /modelprovidermismatch|modelprovidernotconfigured|modelproviderpolicyconflict|cannot change this thread's model provider|model provider mismatch/.test(raw)
+    || (/model provider/.test(raw) && /not configured|read-only|policy conflict/.test(raw))
+}
+
 export function friendlyErrorMessage(error: unknown, fallback = translate('notifications.unexpected')): string {
   const raw = rawErrorText(error).trim()
   if (!raw) return fallback
   const lower = raw.toLowerCase()
+
+  if (isCodexProviderAdmissionError(error)) return translate('errors.codexProviderBlocked')
 
   if (/canceled|cancelled|context canceled|context cancelled/.test(lower)) {
     return translate('errors.canceled')

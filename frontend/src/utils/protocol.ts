@@ -157,6 +157,7 @@ export function normalizeThread(value: unknown): ThreadSummary | null {
     cliVersion: asString(record.cliVersion),
     model: asString(record.model),
     modelProvider: asString(record.modelProvider),
+    backendRef: typeof record.backendRef === 'string' ? record.backendRef : undefined,
     effort: asString(record.effort),
     collaborationMode: asString(record.collaborationMode, 'default') || 'default',
     workMode: asString(record.workMode, 'code') || 'code',

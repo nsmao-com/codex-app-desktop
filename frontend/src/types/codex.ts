@@ -13,6 +13,7 @@ export interface ThreadSummary {
   cliVersion: string
   model: string
   modelProvider: string
+  backendRef?: string
   effort?: string
   collaborationMode?: string
   workMode?: string
@@ -44,6 +45,7 @@ export interface TurnFeedback {
   message: string
   turnId: string
   intentional?: boolean
+  providerBlocked?: boolean
 }
 
 export type QueuedMessageState = 'queued' | 'sending' | 'paused' | 'failed'

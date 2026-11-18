@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.22: Native Claude plugin enable/disable, workspace-scoped inventory, and verified loading diagnostics.</sub></p>
+<p align="center"><sub>v1.6.23: Preserve Codex conversation providers after reload, explain blocked routes, and continue in a new branch with the current configuration.</sub></p>
 
 ## Why Nice Codex
 
