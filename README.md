@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.24: Load Codex model catalogs per conversation provider, preserve current choices on failure, and retry without mixing models across arena panes.</sub></p>
+<p align="center"><sub>v1.6.25: Detect and start a healthy Codex installation when a broken copy appears earlier on PATH, while preserving explicit executable overrides.</sub></p>
 
 ## Why Nice Codex
 

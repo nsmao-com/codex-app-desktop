@@ -193,16 +193,16 @@ func splitPathList(value string) []string {
 	return out
 }
 
-func resolveWindowsExtraCommands() (commandSpec, bool) {
-	return commandSpec{}, false
+func windowsExtraCommands() []commandSpec {
+	return nil
 }
 
 func resolveWindowsCodexShim(_ string) (commandSpec, bool) {
 	return commandSpec{}, false
 }
 
-// resolveUnixExtraCommands looks for codex outside PATH (npm global, homebrew).
-func resolveUnixExtraCommands() (commandSpec, bool) {
+// unixExtraCommands looks for codex outside PATH (npm global, homebrew).
+func unixExtraCommands() []commandSpec {
 	home, _ := os.UserHomeDir()
 	candidates := []string{}
 	// Official OpenAI standalone installer installs the visible launcher into
@@ -231,6 +231,7 @@ func resolveUnixExtraCommands() (commandSpec, bool) {
 		"/usr/local/lib/node_modules/@openai/codex/bin/codex.js",
 	)
 
+	var specs []commandSpec
 	for _, path := range candidates {
 		info, err := os.Stat(path)
 		if err != nil || info.IsDir() {
@@ -241,14 +242,16 @@ func resolveUnixExtraCommands() (commandSpec, bool) {
 			if err != nil {
 				continue
 			}
-			return commandSpec{path: nodePath, prefixArgs: []string{path}}, true
+			specs = append(specs, commandSpec{path: nodePath, prefixArgs: []string{path}})
+			continue
 		}
 		// npm/pnpm shims are normally executable, but Finder-launched apps can
 		// encounter copied scripts without the executable bit. Accept a readable
 		// shebang script and run it through its interpreter so detection still
 		// works without changing the user's file permissions.
 		if info.Mode()&0o111 != 0 {
-			return commandSpec{path: path}, true
+			specs = append(specs, commandSpec{path: path})
+			continue
 		}
 		file, readErr := os.ReadFile(path)
 		if readErr != nil || !strings.HasPrefix(string(file), "#!") {
@@ -258,9 +261,9 @@ func resolveUnixExtraCommands() (commandSpec, bool) {
 		if strings.Contains(line, "node") {
 			nodePath, nodeErr := execLookPath("node")
 			if nodeErr == nil {
-				return commandSpec{path: nodePath, prefixArgs: []string{path}}, true
+				specs = append(specs, commandSpec{path: nodePath, prefixArgs: []string{path}})
 			}
 		}
 	}
-	return commandSpec{}, false
+	return specs
 }

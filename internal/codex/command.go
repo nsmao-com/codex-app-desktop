@@ -38,19 +38,51 @@ func PersistentEnvironmentValue(name string) string {
 }
 
 func Detect() Detection {
-	spec, err := resolveCommand()
-	if err != nil {
-		return Detection{Error: err.Error()}
-	}
-	return detectResolvedCommand(spec)
+	_, detection := resolveDetectedCommand(context.Background())
+	return detection
 }
 
-func detectResolvedCommand(spec commandSpec) Detection {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// Detection and startup share the same ordered candidates and health checks.
+// Keep the first failure for diagnostics if no installation is usable.
+func resolveDetectedCommand(parent context.Context) (commandSpec, Detection) {
+	specs, err := resolveCommandCandidates()
+	if err != nil {
+		return commandSpec{}, Detection{Error: err.Error()}
+	}
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
+	defer cancel()
+	seen := map[string]bool{}
+	var failure Detection
+	for _, spec := range specs {
+		key := spec.path + "\x00" + strings.Join(spec.prefixArgs, "\x00")
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		detection := detectResolvedCommand(ctx, spec)
+		if detection.Available {
+			return spec, detection
+		}
+		if failure.Error == "" {
+			failure = detection
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return commandSpec{}, failure
+}
+
+func detectResolvedCommand(parent context.Context, spec commandSpec) Detection {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 
 	args := append(append([]string{}, spec.prefixArgs...), "--version")
 	command := exec.CommandContext(ctx, spec.path, args...)
+	command.WaitDelay = 500 * time.Millisecond
 	configureProcess(command)
 	output, versionErr := command.CombinedOutput()
 	version := strings.TrimSpace(string(output))
@@ -59,6 +91,9 @@ func detectResolvedCommand(spec commandSpec) Detection {
 			Binary: spec.path,
 			Error:  fmt.Sprintf("Codex CLI could not start (%v); repair the CLI installation and retry", versionErr),
 		}
+	}
+	if version == "" {
+		return Detection{Binary: spec.path, Error: "Codex CLI did not report a version; repair the CLI installation and retry"}
 	}
 	if err := validateCodexBundle(spec.path, version); err != nil {
 		return Detection{Binary: spec.path, Version: version, Error: err.Error()}
@@ -97,26 +132,27 @@ func validateCodexBundle(path, version string) error {
 	return nil
 }
 
-func resolveCommand() (commandSpec, error) {
+func resolveCommandCandidates() ([]commandSpec, error) {
 	EnrichPathForLookups()
 
 	if configured := strings.Trim(strings.TrimSpace(PersistentEnvironmentValue("CODEX_BIN")), `"`); configured != "" {
 		path, err := filepath.Abs(configured)
 		if err != nil {
-			return commandSpec{}, err
+			return nil, err
 		}
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			if runtime.GOOS == "windows" && (strings.EqualFold(filepath.Ext(path), ".cmd") || strings.EqualFold(filepath.Ext(path), ".bat") || strings.EqualFold(filepath.Ext(path), ".ps1")) {
 				if spec, ok := resolveWindowsCodexShim(path); ok {
-					return spec, nil
+					return []commandSpec{spec}, nil
 				}
-				return commandSpec{}, errors.New("CODEX_BIN points to an unsupported Windows command shim")
+				return nil, errors.New("CODEX_BIN points to an unsupported Windows command shim")
 			}
-			return commandSpec{path: path}, nil
+			return []commandSpec{{path: path}}, nil
 		}
-		return commandSpec{}, errors.New("CODEX_BIN does not point to an executable file")
+		return nil, errors.New("CODEX_BIN does not point to an executable file")
 	}
 
+	var specs []commandSpec
 	if runtime.GOOS == "windows" {
 		// Respect directory order across extensions: a newer pnpm shim in an
 		// earlier PATH entry must not lose to an old standalone exe farther down.
@@ -128,29 +164,33 @@ func resolveCommand() (commandSpec, error) {
 				path := filepath.Join(dir, name)
 				if name == "codex.exe" {
 					if validWindowsCodexBinary(path) {
-						return commandSpec{path: path}, nil
+						specs = append(specs, commandSpec{path: path})
 					}
 				} else if spec, ok := resolveWindowsCodexShim(path); ok {
-					return spec, nil
+					specs = append(specs, spec)
 				}
 			}
 		}
-		if spec, ok := resolveWindowsExtraCommands(); ok {
-			return spec, nil
-		}
+		specs = append(specs, windowsExtraCommands()...)
 	}
 
 	// macOS/Linux GUI apps often miss Homebrew/nvm PATH — scan known install roots.
 	if runtime.GOOS != "windows" {
-		if path, err := execLookPath("codex"); err == nil {
-			return commandSpec{path: path}, nil
+		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+			if !filepath.IsAbs(dir) {
+				continue
+			}
+			if path, err := execLookPath(filepath.Join(dir, "codex")); err == nil {
+				specs = append(specs, commandSpec{path: path})
+			}
 		}
-		if spec, ok := resolveUnixExtraCommands(); ok {
-			return spec, nil
-		}
+		specs = append(specs, unixExtraCommands()...)
 	}
 
-	return commandSpec{}, errors.New("Codex CLI was not found; install it with pnpm add -g @openai/codex, then restart Nice Codex (GUI apps need Node/pnpm on PATH — macOS: Homebrew/nvm/fnm bins)")
+	if len(specs) == 0 {
+		return nil, errors.New("Codex CLI was not found; install it with pnpm add -g @openai/codex, then restart Nice Codex (GUI apps need Node/pnpm on PATH — macOS: Homebrew/nvm/fnm bins)")
+	}
+	return specs, nil
 }
 
 func resolveWindowsNPMCommand() (commandSpec, bool) {

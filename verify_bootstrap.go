@@ -24,6 +24,17 @@ import (
 // Smoke-checks the same Bootstrap / ListModelProviders contracts the UI uses,
 // without needing the Wails window or WebView bindings.
 func main() {
+	if os.Getenv("NICE_CODEX_VERIFY_CHILD") == "1" && len(os.Args) == 2 && os.Args[1] == "--version" {
+		executable, _ := os.Executable()
+		if strings.Contains(filepath.Dir(executable), "broken-start") {
+			os.Exit(3)
+		}
+		if strings.Contains(filepath.Dir(executable), "empty-version") {
+			return
+		}
+		fmt.Println("codex-cli 0.169.1")
+		return
+	}
 	if os.Getenv("NICE_CODEX_PROVIDER_VERIFY_CHILD") == "1" {
 		verifyCodexProviderChild()
 		return
@@ -48,10 +59,6 @@ func main() {
 		if err := verifyVisionContracts(); err != nil {
 			fail("vision: %v", err)
 		}
-		return
-	}
-	if os.Getenv("NICE_CODEX_VERIFY_CHILD") == "1" && len(os.Args) == 2 && os.Args[1] == "--version" {
-		fmt.Println("codex-cli 0.169.1")
 		return
 	}
 	if len(os.Args) == 2 && os.Args[1] == "--discovery" {
@@ -814,7 +821,7 @@ func verifyCLIDiscovery() error {
 			return err
 		}
 		defer os.RemoveAll(root)
-		for _, key := range []string{"PATH", "CODEX_BIN", "NICE_CODEX_VERIFY_CHILD"} {
+		for _, key := range []string{"PATH", "CODEX_BIN", "NICE_CODEX_VERIFY_CHILD", "NICE_CODEX_PROVIDER_VERIFY_CHILD", "NICE_CODEX_PROVIDER_VERIFY_ROOT"} {
 			value, exists := os.LookupEnv(key)
 			defer func(key, value string, exists bool) {
 				if exists {
@@ -879,12 +886,56 @@ func verifyCLIDiscovery() error {
 		if detection := codex.Detect(); !detection.Available || detection.Binary != fallback {
 			return fmt.Errorf("broken placeholder masks working CLI: %+v", detection)
 		}
+		if err := os.WriteFile(filepath.Join(first, "codex.exe"), []byte("MZ damaged executable"), 0o600); err != nil {
+			return err
+		}
+		if detection := codex.Detect(); !detection.Available || detection.Binary != fallback {
+			return fmt.Errorf("damaged executable masks working CLI: %+v", detection)
+		}
+		brokenDir := filepath.Join(root, "broken-start")
+		bundleDir := filepath.Join(root, "vendor", "x86_64-pc-windows-msvc", "bin")
+		for _, dir := range []string{brokenDir, filepath.Join(root, "empty-version"), bundleDir} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(dir, "codex.exe"), binary, 0o700); err != nil {
+				return err
+			}
+			_ = os.Setenv("PATH", dir+string(os.PathListSeparator)+second)
+			if detection := codex.Detect(); !detection.Available || detection.Binary != fallback {
+				return fmt.Errorf("unhealthy installation masks working CLI: %+v", detection)
+			}
+			_ = os.Setenv("CODEX_BIN", filepath.Join(dir, "codex.exe"))
+			if detection := codex.Detect(); detection.Available || detection.Binary != filepath.Join(dir, "codex.exe") || detection.Error == "" {
+				return fmt.Errorf("explicit unhealthy installation ignored or diagnostic lost: %+v", detection)
+			}
+			_ = os.Unsetenv("CODEX_BIN")
+		}
+		_ = os.Setenv("NICE_CODEX_PROVIDER_VERIFY_CHILD", "1")
+		_ = os.Setenv("NICE_CODEX_PROVIDER_VERIFY_ROOT", root)
+		client := codex.NewClient(nil)
+		if err := client.Start(context.Background(), root, codex.ClientInfo{}); err != nil {
+			client.Stop()
+			return fmt.Errorf("startup did not use healthy fallback: %w", err)
+		}
+		status := client.Status()
+		client.Stop()
+		if status.Binary != fallback || !status.Running {
+			return fmt.Errorf("startup and detection disagree: %+v", status)
+		}
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := client.Start(cancelled, root, codex.ClientInfo{}); err == nil || client.Status().Running {
+			client.Stop()
+			return fmt.Errorf("cancelled discovery still started app-server")
+		}
+		_ = os.Unsetenv("NICE_CODEX_PROVIDER_VERIFY_CHILD")
 		_ = os.Setenv("CODEX_BIN", filepath.Join(root, "missing.exe"))
 		if codex.Detect().Available {
 			return fmt.Errorf("invalid explicit override silently ignored")
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"PATH order and repeated discovery", "Windows cmd/PowerShell shims and Unicode paths", "broken placeholder fallback", "explicit override errors", "Claude native aliases", "Claude model context", "Antigravity Extra and Orchestrator", "OpenCode native default"}})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"PATH order and repeated discovery", "Windows cmd/PowerShell shims and Unicode paths", "broken placeholder and damaged PE fallback", "failed/empty version and incomplete bundle fallback", "startup uses detected fallback", "cancelled startup", "explicit override errors and diagnostics", "Claude native aliases", "Claude model context", "Antigravity Extra and Orchestrator", "OpenCode native default"}})
 }
 
 // Isolated contract checks: no real Codex configuration, package installation or MCP server.

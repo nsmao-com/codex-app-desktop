@@ -101,12 +101,7 @@ func (c *Client) Start(ctx context.Context, workspace string, info ClientInfo) e
 	c.mu.Unlock()
 	c.emit(Event{Type: "status", Data: c.Status()})
 
-	spec, err := resolveCommand()
-	if err != nil {
-		c.failStart(err, workspace)
-		return err
-	}
-	detection := detectResolvedCommand(spec)
+	spec, detection := resolveDetectedCommand(ctx)
 	if !detection.Available {
 		err := errors.New(detection.Error)
 		c.failStart(err, workspace)

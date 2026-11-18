@@ -173,11 +173,11 @@ func splitPathList(value string) []string {
 	return out
 }
 
-func resolveUnixExtraCommands() (commandSpec, bool) {
-	return commandSpec{}, false
+func unixExtraCommands() []commandSpec {
+	return nil
 }
 
-func resolveWindowsExtraCommands() (commandSpec, bool) {
+func windowsExtraCommands() []commandSpec {
 	home, _ := os.UserHomeDir()
 	appData := os.Getenv("APPDATA")
 	localAppData := os.Getenv("LOCALAPPDATA")
@@ -200,6 +200,7 @@ func resolveWindowsExtraCommands() (commandSpec, bool) {
 		{cmd: filepath.Join(home, ".local", "bin", "codex.cmd")},
 	}
 
+	var specs []commandSpec
 	for _, item := range candidates {
 		if item.cmd == "" {
 			continue
@@ -216,18 +217,19 @@ func resolveWindowsExtraCommands() (commandSpec, bool) {
 				continue
 			}
 			if spec, ok := resolveBundledCodexBinary(item.js); ok {
-				return spec, true
+				specs = append(specs, spec)
 			}
 			continue
 		}
 		if strings.EqualFold(filepath.Ext(item.cmd), ".exe") && validWindowsCodexBinary(item.cmd) {
-			return commandSpec{path: item.cmd}, true
+			specs = append(specs, commandSpec{path: item.cmd})
+			continue
 		}
 		if spec, ok := resolveWindowsCodexShim(item.cmd); ok {
-			return spec, true
+			specs = append(specs, spec)
 		}
 	}
-	return commandSpec{}, false
+	return specs
 }
 
 func resolveWindowsCodexShim(commandPath string) (commandSpec, bool) {
