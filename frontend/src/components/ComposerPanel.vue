@@ -79,6 +79,7 @@ import {
   normalizeAntigravityModelEffort,
   DEFAULT_GROK_REASONING,
   formatModelLabel,
+  modelImageCapability,
   modelsForClaudeRuntime,
   modelsForGrokRuntime,
   modelsForRuntime,
@@ -1983,6 +1984,10 @@ function canAdmitSubmissionSynchronously(submission: ComposerSubmission): boolea
 }
 
 const useVision = shallowRef(Boolean(appStore.settings.vision?.defaultEnabled))
+const imageCapability = computed(() => isCodexMode.value
+  ? modelImageCapability(composerCodexModels.value.find((model) => model.model === displayModel.value))
+  : 'unknown')
+const imageCapabilityHint = computed(() => t(`chat.imageCapability${imageCapability.value === 'supported' ? 'Supported' : imageCapability.value === 'unsupported' ? 'Unsupported' : 'Unknown'}`))
 const visionBusy = shallowRef(false)
 const visionError = shallowRef('')
 let visionRequest: ReturnType<typeof backend.AnalyzeComposerImages> | null = null
@@ -1996,7 +2001,7 @@ function cancelVision(): void {
 function visionDraftSignature(): string {
   return JSON.stringify([props.draftKey, modelValue.value, attachedImages.value, paneRuntime.value,
     paneId.value, composerSessionId.value, composerTargetWorkspace(paneRuntime.value, composerSessionId.value),
-    composerMode.value, useVision.value, appStore.settings.vision])
+    composerMode.value, displayModel.value, useVision.value, appStore.settings.vision])
 }
 watch(visionDraftSignature, () => {
   if (visionRequest) cancelVision()
@@ -2866,12 +2871,13 @@ function setPermission(mode: 'ask' | 'auto' | 'strict'): void {
 
       <div v-if="!isGoalComposer && attachedImages.length" class="min-w-0 space-y-2 rounded-lg border border-border/60 p-2 text-xs">
         <div class="flex flex-wrap items-center gap-2">
-          <Button type="button" size="sm" :variant="!useVision ? 'secondary' : 'ghost'" :aria-pressed="!useVision" @click="useVision = false">原图直传</Button>
-          <Button type="button" size="sm" :variant="useVision ? 'secondary' : 'ghost'" :aria-pressed="useVision" @click="useVision = true">视觉模型转文字</Button>
-          <Button type="button" size="sm" variant="ghost" @click="router.push({ name: 'settings', query: { section: 'vision' } })">视觉设置</Button>
+          <Button type="button" size="sm" class="h-auto min-h-8 max-w-full whitespace-normal break-words text-left" :variant="!useVision ? 'secondary' : 'ghost'" :aria-pressed="!useVision" @click="useVision = false">{{ t('chat.imageDirect') }}</Button>
+          <Button type="button" size="sm" class="h-auto min-h-8 max-w-full whitespace-normal break-words text-left" :variant="useVision ? 'secondary' : 'ghost'" :aria-pressed="useVision" @click="useVision = true">{{ t('chat.imageConvert') }}</Button>
+          <Button type="button" size="sm" class="h-auto min-h-8 max-w-full whitespace-normal break-words text-left" variant="ghost" @click="router.push({ name: 'settings', query: { section: 'vision' } })">{{ t('chat.imageSettings') }}</Button>
         </div>
-        <p v-if="useVision" class="break-all leading-5 text-muted-foreground">{{ appStore.settings.vision?.model || '请先配置视觉模型' }} · {{ appStore.settings.vision?.baseURL || '尚未设置接口' }}。发送时该接口会收到本条问题和图片；主模型只收到分析文字。</p>
-        <div v-if="visionBusy" role="status" class="flex flex-wrap items-center gap-2"><LoaderCircle :size="14" class="animate-spin" /><span>正在分析图片，草稿会保留…</span><Button type="button" size="sm" variant="outline" @click="cancelVision">取消分析</Button></div>
+        <p v-if="isCodexMode && !useVision" role="status" class="break-words leading-5" :class="imageCapability === 'unsupported' ? 'text-foreground' : 'text-muted-foreground'">{{ imageCapabilityHint }}</p>
+        <p v-if="useVision" class="break-all leading-5 text-muted-foreground">{{ t('chat.imageDestination', { model: appStore.settings.vision?.model || t('chat.imageModelMissing'), endpoint: appStore.settings.vision?.baseURL || t('chat.imageEndpointMissing') }) }}</p>
+        <div v-if="visionBusy" role="status" class="flex flex-wrap items-center gap-2"><LoaderCircle :size="14" class="shrink-0 animate-spin" /><span class="min-w-0 flex-1 break-words">{{ t('chat.imageAnalyzing') }}</span><Button type="button" size="sm" class="h-auto min-h-8 max-w-full whitespace-normal" variant="outline" @click="cancelVision">{{ t('chat.imageCancel') }}</Button></div>
         <p v-if="visionError" role="alert" class="break-words text-destructive">{{ visionError }}</p>
       </div>
 

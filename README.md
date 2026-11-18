@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.25: Detect and start a healthy Codex installation when a broken copy appears earlier on PATH, while preserving explicit executable overrides.</sub></p>
+<p align="center"><sub>v1.6.26: Show Codex image-input capabilities from the conversation catalog, guide text-only models to vision conversion, and preserve unknown gateway support.</sub></p>
 
 ## Why Nice Codex
 

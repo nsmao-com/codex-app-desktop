@@ -212,6 +212,11 @@ export function normalizeModel(value: unknown): ModelOption | null {
   const record = asRecord(value)
   const id = asString(record.id, asString(record.model, asString(record.slug)))
   if (!id) return null
+  const rawModalities = record.inputModalities ?? record.input_modalities
+  const inputModalities = Array.isArray(rawModalities)
+    && rawModalities.every((modality) => typeof modality === 'string' && modality.trim())
+    ? [...new Set(rawModalities.map((modality: string) => modality.trim().toLowerCase()))]
+    : undefined
   const catalogTiers = asArray(record.serviceTiers).map((tier) => {
     const entry = asRecord(tier)
     return {
@@ -234,6 +239,7 @@ export function normalizeModel(value: unknown): ModelOption | null {
     displayName: asString(record.displayName, asString(record.display_name, id)),
     description: asString(record.description),
     isDefault: record.isDefault === true,
+    inputModalities,
     defaultReasoningEffort: asString(record.defaultReasoningEffort, asString(record.default_reasoning_level, 'high')),
     defaultServiceTier: asString(record.defaultServiceTier),
     serviceTiers,

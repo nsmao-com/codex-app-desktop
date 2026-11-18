@@ -145,6 +145,15 @@ function looksLikeOtherRuntime(text: string): boolean {
     || /^(sonnet|opus|haiku|fable)$/.test(text)
 }
 
+/** Preserve unknown capability rather than guessing from a model name. */
+export function modelImageCapability(model?: Pick<ModelOption, 'inputModalities'>): 'supported' | 'unsupported' | 'unknown' {
+  const modalities = model?.inputModalities
+  if (modalities?.includes('image')) return 'supported'
+  // Missing, empty, malformed and future modalities are not a negative claim.
+  if (modalities?.length && modalities.every((value) => value === 'text')) return 'unsupported'
+  return 'unknown'
+}
+
 /** Keep Codex IDs and provider aliases; exclude models from other runtimes. */
 export function selectCodexCatalog(codexModels: ModelOption[]): ModelOption[] {
   return codexModels.filter((item) => looksLikeOpenAI(item.model.toLowerCase())

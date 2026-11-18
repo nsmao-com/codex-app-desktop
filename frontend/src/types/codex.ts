@@ -132,6 +132,8 @@ export interface ModelOption {
   isDefault: boolean
   /** Synthetic entry from the saved custom list, not the native model catalog. */
   isCustom?: boolean
+  /** Native catalog declaration; absent means unknown, not text-only. */
+  inputModalities?: string[]
   defaultReasoningEffort: string
   defaultServiceTier: string
   serviceTiers: Array<{
