@@ -877,7 +877,7 @@ func verifyCLIDiscovery() error {
 			return err
 		}
 		defer os.RemoveAll(root)
-		for _, key := range []string{"PATH", "CODEX_BIN", "NICE_CODEX_VERIFY_CHILD", "NICE_CODEX_PROVIDER_VERIFY_CHILD", "NICE_CODEX_PROVIDER_VERIFY_ROOT"} {
+		for _, key := range []string{"PATH", "CODEX_BIN", "FNM_DIR", "NVM_HOME", "NICE_CODEX_NODE_ROOT", "NICE_CODEX_NODE_PARENT", "NICE_CODEX_CYCLE_A", "NICE_CODEX_CYCLE_B", "NICE_CODEX_VERIFY_CHILD", "NICE_CODEX_PROVIDER_VERIFY_CHILD", "NICE_CODEX_PROVIDER_VERIFY_ROOT"} {
 			value, exists := os.LookupEnv(key)
 			defer func(key, value string, exists bool) {
 				if exists {
@@ -896,6 +896,69 @@ func verifyCLIDiscovery() error {
 		binary, err := os.ReadFile(self)
 		if err != nil {
 			return err
+		}
+		fnmRoot, nvmRoot := filepath.Join(root, "fnm 中文"), filepath.Join(root, "nvm versions")
+		fnmDefault := filepath.Join(fnmRoot, "aliases", "default")
+		quotedBin := filepath.Join(root, "quoted bin")
+		for _, dir := range []string{
+			fnmDefault, quotedBin,
+			filepath.Join(fnmRoot, "node-versions", "v22.10.0", "installation"),
+			filepath.Join(fnmRoot, "node-versions", "v22.9.0", "installation"),
+			filepath.Join(fnmRoot, "node-versions", ".downloads", "installation"),
+			filepath.Join(nvmRoot, "v22.10.0"), filepath.Join(nvmRoot, "v9.11.0"),
+			filepath.Join(nvmRoot, "v9999999999999999999999999.0.0"),
+		} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return err
+			}
+		}
+		_ = os.Setenv("NICE_CODEX_NODE_ROOT", root)
+		_ = os.Setenv("NICE_CODEX_NODE_PARENT", "%NICE_CODEX_NODE_ROOT%")
+		_ = os.Setenv("FNM_DIR", `%NICE_CODEX_NODE_PARENT%\fnm 中文`)
+		_ = os.Setenv("NVM_HOME", nvmRoot)
+		_ = os.Setenv("NICE_CODEX_CYCLE_A", "%NICE_CODEX_CYCLE_B%")
+		_ = os.Setenv("NICE_CODEX_CYCLE_B", "%NICE_CODEX_CYCLE_A%")
+		_ = os.Setenv("PATH", root+`;"%NICE_CODEX_NODE_PARENT%\quoted bin";%NICE_CODEX_CYCLE_A%`)
+		codex.EnrichPathForLookups()
+		managerPaths := filepath.SplitList(os.Getenv("PATH"))
+		pathIndex := func(path string) int {
+			for index, candidate := range managerPaths {
+				if strings.EqualFold(candidate, path) {
+					return index
+				}
+			}
+			return -1
+		}
+		for _, paths := range [][]string{
+			{root, quotedBin, fnmDefault, filepath.Join(fnmRoot, "node-versions", "v22.10.0", "installation"), filepath.Join(fnmRoot, "node-versions", "v22.9.0", "installation")},
+			{filepath.Join(nvmRoot, "v22.10.0"), filepath.Join(nvmRoot, "v9.11.0")},
+		} {
+			previous := -1
+			for _, path := range paths {
+				index := pathIndex(path)
+				if index <= previous {
+					return fmt.Errorf("manager installation missing or incorrectly ordered: %s", path)
+				}
+				previous = index
+			}
+		}
+		for _, path := range []string{filepath.Join(fnmRoot, "node-versions", ".downloads", "installation"), filepath.Join(nvmRoot, "v9999999999999999999999999.0.0")} {
+			if pathIndex(path) >= 0 {
+				return fmt.Errorf("non-installation directory added to PATH: %s", path)
+			}
+		}
+		for _, dir := range []string{fnmDefault, filepath.Join(nvmRoot, "v22.10.0")} {
+			path := filepath.Join(managerPaths[pathIndex(dir)], "codex.exe")
+			if err := os.WriteFile(path, binary, 0o700); err != nil {
+				return err
+			}
+			_ = os.Setenv("PATH", dir)
+			if detection := codex.Detect(); !detection.Available || detection.Binary != path {
+				return fmt.Errorf("discovered manager CLI was not runnable: %+v", detection)
+			}
+			if err := os.Remove(path); err != nil {
+				return err
+			}
 		}
 		first, second := filepath.Join(root, "首选 CLI"), filepath.Join(root, "second")
 		for _, dir := range []string{filepath.Join(first, "bin"), second} {
@@ -991,7 +1054,7 @@ func verifyCLIDiscovery() error {
 			return fmt.Errorf("invalid explicit override silently ignored")
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"PATH order and repeated discovery", "Windows cmd/PowerShell shims and Unicode paths", "broken placeholder and damaged PE fallback", "failed/empty version and incomplete bundle fallback", "startup uses detected fallback", "cancelled startup", "explicit override errors and diagnostics", "Claude native aliases", "Claude model context", "Antigravity Extra and Orchestrator", "OpenCode native default"}})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"PATH order and repeated discovery", "fnm/nvm paths and numeric version ordering", "nested/cyclic Windows environment expansion", "Windows cmd/PowerShell shims and Unicode paths", "broken placeholder and damaged PE fallback", "failed/empty version and incomplete bundle fallback", "startup uses detected fallback", "cancelled startup", "explicit override errors and diagnostics", "Claude native aliases", "Claude model context", "Antigravity Extra and Orchestrator", "OpenCode native default"}})
 }
 
 // Isolated contract checks: no real Codex configuration, package installation or MCP server.

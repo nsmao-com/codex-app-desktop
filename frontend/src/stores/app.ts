@@ -34,7 +34,7 @@ import {
   syncModelMetadata,
 } from '../utils/modelMetadata'
 
-const AppVersionFallback = '1.6.27'
+const AppVersionFallback = '1.6.28'
 const workspaceOrderStorageKey = 'nice-codex.workspaceOrder.v1'
 
 export type WorkspaceRuntime = 'codex' | 'claude' | 'grok' | 'gemini' | 'opencode'
@@ -168,7 +168,7 @@ export const useAppStore = defineStore('app', () => {
   const workspace = shallowRef<WorkspaceInfo | null>(null)
   const codexAvailable = shallowRef(false)
   const codexVersion = shallowRef('')
-  const appVersion = shallowRef('1.6.27')
+  const appVersion = shallowRef('1.6.28')
   const updateRepo = shallowRef('nsmao-com/codex-app-desktop')
   const systemFonts = shallowRef<Array<{ family: string; source: string }>>([])
   const updateInfo = shallowRef<{
@@ -278,16 +278,20 @@ export const useAppStore = defineStore('app', () => {
   }
 
   /** Soft re-detect CLIs / providers without full-screen bootstrap spinner. */
-  async function refreshRuntimes(): Promise<void> {
+  let runtimeRefreshSequence = 0
+  async function refreshRuntimes(options: { throwOnError?: boolean } = {}): Promise<void> {
+    const sequence = ++runtimeRefreshSequence
     try {
       const data = await backend.Bootstrap()
+      if (sequence !== runtimeRefreshSequence) return
       codexAvailable.value = data.codex.available
       codexVersion.value = data.codex.version
       agentProviders.value = applyCachedModelMetadata(data.agentProviders ?? [])
       terminalProfiles.value = data.terminalProfiles ?? terminalProfiles.value
       void refreshModelMetadata()
-    } catch {
-      // best-effort
+    } catch (error) {
+      if (options.throwOnError && sequence === runtimeRefreshSequence) throw error
+      // Background discovery remains best-effort; explicit recovery can report failures.
     }
   }
 

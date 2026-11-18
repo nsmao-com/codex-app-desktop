@@ -188,7 +188,7 @@ func resolveCommandCandidates() ([]commandSpec, error) {
 	}
 
 	if len(specs) == 0 {
-		return nil, errors.New("Codex CLI was not found; install it with pnpm add -g @openai/codex, then restart Nice Codex (GUI apps need Node/pnpm on PATH — macOS: Homebrew/nvm/fnm bins)")
+		return nil, errors.New("Codex CLI was not found. If already installed, check again or open Settings → CLI tools to inspect paths and repair the installation. Otherwise install with pnpm add -g @openai/codex, then check again")
 	}
 	return specs, nil
 }

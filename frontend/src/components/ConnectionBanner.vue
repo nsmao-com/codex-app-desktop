@@ -13,14 +13,18 @@ const codexStore = useCodexStore()
 const { t } = useI18n()
 const router = useRouter()
 const checking = shallowRef(false)
+const checkError = shallowRef('')
 const detectedCli = computed(() => appStore.agentProviders.find(provider => provider.kind === 'codex'))
 
 async function recheck(): Promise<void> {
   if (checking.value) return
   checking.value = true
+  checkError.value = ''
   try {
-    await appStore.refreshRuntimes()
+    await appStore.refreshRuntimes({ throwOnError: true })
     if (appStore.codexAvailable && appStore.settings.workspace) await codexStore.connect()
+  } catch (error) {
+    checkError.value = error instanceof Error ? error.message : String(error)
   } finally { checking.value = false }
 }
 
@@ -30,7 +34,7 @@ const isError = computed(() => state.value === 'error')
 const isIdleDisconnected = computed(() => state.value === 'disconnected' || state.value === 'stopping')
 const needsWorkspace = computed(() => isIdleDisconnected.value && !appStore.settings.workspace)
 const canConnect = computed(() => isIdleDisconnected.value && Boolean(appStore.settings.workspace) && appStore.codexAvailable)
-const missingCli = computed(() => isIdleDisconnected.value && !appStore.codexAvailable)
+const missingCli = computed(() => !appStore.codexAvailable)
 
 // A normal launch initializes the local app-server silently. Reserve the banner
 // for states where the user can actually take action.
@@ -40,15 +44,17 @@ const visible = computed(() =>
 
 const title = computed(() => {
   if (missingCli.value && detectedCli.value?.executable) return t('settings.cliNeedsRepair')
+  if (missingCli.value) return t('app.cliMissing')
   if (isError.value) return t('app.connectionError')
   if (isConnecting.value) return t('app.connecting')
   if (needsWorkspace.value) return t('app.needWorkspace')
-  if (missingCli.value) return t('app.cliMissing')
   if (canConnect.value) return t('app.notConnected')
   return t('app.disconnected')
 })
 
 const description = computed(() => {
+  if (checkError.value) return checkError.value
+  if (missingCli.value) return t('app.cliRecoveryHint')
   if (isConnecting.value || isError.value) {
     return codexStore.connection.message || t('app.connectionHint')
   }
@@ -56,9 +62,6 @@ const description = computed(() => {
     return appStore.codexAvailable
       ? t('app.needWorkspaceHintReady')
       : t('app.needWorkspaceHint')
-  }
-  if (missingCli.value) {
-    return detectedCli.value?.message || t('app.cliRecoveryHint')
   }
   if (canConnect.value) {
     return t('app.notConnectedHint')
@@ -77,11 +80,13 @@ const description = computed(() => {
       <AlertTitle class="text-xs">
         {{ title }}
       </AlertTitle>
-      <AlertDescription class="flex flex-wrap items-center justify-between gap-3 text-[11px]">
-        <span class="min-w-0 flex-1 break-words">{{ description }}</span>
+      <AlertDescription class="min-w-0 space-y-3 text-[11px]">
+        <div class="min-w-0 space-y-1 break-words" role="status" aria-live="polite">
+          <p>{{ description }}</p>
+        </div>
         <div class="flex flex-wrap items-center gap-2">
           <template v-if="missingCli">
-            <Button size="xs" variant="outline" :disabled="checking" @click="recheck">
+            <Button size="xs" variant="outline" :disabled="checking" :aria-busy="checking" @click="recheck">
               <RefreshCw :size="11" class="mr-1" :class="{ 'animate-spin': checking }" />{{ t('onboarding.cliRecheck') }}
             </Button>
             <Button size="xs" variant="outline" @click="router.push({ name: 'settings', query: { section: 'environment' } })">{{ t('settings.cliDetails') }}</Button>
@@ -105,6 +110,10 @@ const description = computed(() => {
             {{ t('common.reconnect') }}
           </Button>
         </div>
+        <details v-if="missingCli && detectedCli?.message" class="text-muted-foreground">
+          <summary class="cursor-pointer">{{ t('app.cliDiagnosticDetails') }}</summary>
+          <p class="mt-1 [overflow-wrap:anywhere]">{{ detectedCli.message }}</p>
+        </details>
       </AlertDescription>
     </Alert>
   </div>

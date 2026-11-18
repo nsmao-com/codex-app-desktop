@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.27: Refresh provider authentication and model state safely, improve Codex discovery, and clarify runtime reload status.</sub></p>
+<p align="center"><sub>v1.6.28: Discover Windows fnm/nvm installations and recover missing Codex without restarting, with clearer compact diagnostics.</sub></p>
 
 ## Why Nice Codex
 

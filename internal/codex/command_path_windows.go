@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
@@ -14,6 +16,7 @@ import (
 var windowsCodexShimTargetPattern = regexp.MustCompile(`(?i)%(?:dp0%|~dp0)[\\/]*([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
 var windowsCodexPowerShellTargetPattern = regexp.MustCompile(`(?i)\$basedir[\\/]+([^"\r\n]+?\.(?:exe|js|cjs|mjs))`)
 var windowsEnvironmentPattern = regexp.MustCompile(`%([^%]+)%`)
+var windowsNodeVersionPattern = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)$`)
 
 // enrichProcessPath merges Machine/User PATH and common Node/pnpm/npm install
 // directories into this process. GUI apps launched from Explorer often miss
@@ -22,14 +25,14 @@ var windowsEnvironmentPattern = regexp.MustCompile(`%([^%]+)%`)
 // rewriting the permanent User PATH — which is why some users only see Codex
 // after installing Wails.
 func enrichProcessPath() {
-	parts := splitPathList(os.Getenv("PATH"))
+	parts := splitPathList(expandWindowsEnvironment(os.Getenv("PATH")))
 	seen := make(map[string]struct{}, len(parts)+16)
 	for _, part := range parts {
 		seen[strings.ToLower(filepath.Clean(part))] = struct{}{}
 	}
 
 	appendUnique := func(dir string) {
-		dir = strings.Trim(strings.TrimSpace(dir), `"`)
+		dir = strings.Trim(strings.TrimSpace(expandWindowsEnvironment(dir)), `"`)
 		if dir == "" || !filepath.IsAbs(dir) {
 			return
 		}
@@ -76,13 +79,27 @@ func readRegistryPATH(root registry.Key, path string) []string {
 		return nil
 	}
 	// Windows registry PATH uses %NAME%, which os.ExpandEnv does not expand.
-	value = windowsEnvironmentPattern.ReplaceAllStringFunc(value, func(token string) string {
-		if expanded := PersistentEnvironmentValue(token[1 : len(token)-1]); expanded != "" {
-			return expanded
+	return splitPathList(expandWindowsEnvironment(value))
+}
+
+// Persisted paths can reference another persisted variable which Explorer has
+// not inherited yet. Keep unknown/cyclic references intact and bound expansion.
+func expandWindowsEnvironment(value string) string {
+	seen := make(map[string]bool)
+	for depth := 0; depth < 8 && !seen[value]; depth++ {
+		seen[value] = true
+		next := windowsEnvironmentPattern.ReplaceAllStringFunc(value, func(token string) string {
+			if expanded := PersistentEnvironmentValue(token[1 : len(token)-1]); expanded != "" {
+				return expanded
+			}
+			return token
+		})
+		if next == value {
+			break
 		}
-		return token
-	})
-	return splitPathList(value)
+		value = next
+	}
+	return value
 }
 
 func persistentEnvironmentValue(name string) string {
@@ -135,11 +152,12 @@ func commonCodexBinDirs() []string {
 		filepath.Join(programFiles, "nodejs"),
 		filepath.Join(programFilesX86, "nodejs"),
 	}
-	for _, name := range []string{"CODEX_INSTALL_DIR", "PNPM_HOME", "NPM_CONFIG_PREFIX", "NVM_SYMLINK"} {
+	for _, name := range []string{"CODEX_INSTALL_DIR", "PNPM_HOME", "NPM_CONFIG_PREFIX", "NVM_SYMLINK", "FNM_MULTISHELL_PATH"} {
 		if dir := strings.TrimSpace(PersistentEnvironmentValue(name)); dir != "" {
 			candidates = append(candidates, dir)
 		}
 	}
+	candidates = append(candidates, windowsNodeManagerBinDirs()...)
 
 	if localAppData != "" {
 		entries, err := os.ReadDir(filepath.Join(localAppData, "fnm_multishells"))
@@ -158,6 +176,90 @@ func commonCodexBinDirs() []string {
 	}
 
 	return candidates
+}
+
+// GUI launches need not have an active fnm shell or nvm symlink. Prefer each
+// manager's default alias, then inspect only its installed vX.Y.Z directories.
+// Existing PATH entries retain priority; do not change the manager's selection.
+func windowsNodeManagerBinDirs() []string {
+	home, _ := os.UserHomeDir()
+	type installRoot struct {
+		path string
+		fnm  bool
+	}
+	roots := []installRoot{
+		{PersistentEnvironmentValue("FNM_DIR"), true},
+		{PersistentEnvironmentValue("NVM_HOME"), false},
+	}
+	for _, base := range []string{os.Getenv("APPDATA"), os.Getenv("LOCALAPPDATA")} {
+		if base != "" {
+			roots = append(roots, installRoot{filepath.Join(base, "fnm"), true}, installRoot{filepath.Join(base, "nvm"), false})
+		}
+	}
+	if home != "" {
+		roots = append(roots, installRoot{filepath.Join(home, ".fnm"), true})
+	}
+	if base := PersistentEnvironmentValue("XDG_DATA_HOME"); base != "" {
+		roots = append(roots, installRoot{filepath.Join(base, "fnm"), true})
+	}
+	var defaults, installations []string
+	seen := make(map[string]bool)
+	for _, root := range roots {
+		root.path = strings.Trim(strings.TrimSpace(expandWindowsEnvironment(root.path)), `"`)
+		if !filepath.IsAbs(root.path) {
+			continue
+		}
+		root.path = filepath.Clean(root.path)
+		key := strings.ToLower(root.path)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if root.fnm {
+			defaults = append(defaults, filepath.Join(root.path, "aliases", "default"))
+			root.path = filepath.Join(root.path, "node-versions")
+		}
+		entries, err := os.ReadDir(root.path)
+		if err != nil {
+			continue
+		}
+		type versionDir struct {
+			path    string
+			version [3]uint64
+		}
+		var versions []versionDir
+		for _, entry := range entries {
+			match := windowsNodeVersionPattern.FindStringSubmatch(entry.Name())
+			if !entry.IsDir() || len(match) != 4 {
+				continue
+			}
+			item := versionDir{path: filepath.Join(root.path, entry.Name())}
+			valid := true
+			for i := range item.version {
+				item.version[i], err = strconv.ParseUint(match[i+1], 10, 64)
+				valid = valid && err == nil
+			}
+			if !valid {
+				continue
+			}
+			if root.fnm {
+				item.path = filepath.Join(item.path, "installation")
+			}
+			versions = append(versions, item)
+		}
+		sort.SliceStable(versions, func(i, j int) bool {
+			for part := range versions[i].version {
+				if versions[i].version[part] != versions[j].version[part] {
+					return versions[i].version[part] > versions[j].version[part]
+				}
+			}
+			return false
+		})
+		for _, version := range versions {
+			installations = append(installations, version.path)
+		}
+	}
+	return append(defaults, installations...)
 }
 
 func splitPathList(value string) []string {

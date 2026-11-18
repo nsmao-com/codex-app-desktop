@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.27：安全刷新各服务商认证与模型状态，改进 Codex 查找，并明确运行时配置重载状态。</sub></p>
+<p align="center"><sub>v1.6.28：补全 Windows fnm/nvm 安装查找，免重启重新检测 Codex，优化窄窗口连接提示与诊断。</sub></p>
 
 ## 为什么是 Nice Codex
 
