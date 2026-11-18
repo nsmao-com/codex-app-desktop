@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.31: Load complete Anthropic vision model catalogs, cancel pending reads, and report incomplete results clearly.</sub></p>
+<p align="center"><sub>v1.6.32: Browse Codex App tools, load complete app catalogs, and confirm native status after toggling apps.</sub></p>
 
 ## Why Nice Codex
 

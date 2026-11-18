@@ -26,6 +26,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import ClaudePluginsPanel from '@/components/ClaudePluginsPanel.vue'
+import CodexAppTools from '@/components/CodexAppTools.vue'
 import GrokIcon from '@/components/icons/GrokIcon.vue'
 import GeminiIcon from '@/components/icons/GeminiIcon.vue'
 import OpenCodeIcon from '@/components/icons/OpenCodeIcon.vue'
@@ -2164,7 +2165,7 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
             </TabsContent>
 
             <TabsContent value="apps" class="mt-0 space-y-3">
-              <p class="text-[11px] text-muted-foreground">{{ t('capabilities.appsManageHint') }}</p>
+              <p class="text-[11px] text-muted-foreground">{{ t('capabilities.appsCatalogHint') }}</p>
               <Card v-for="app in visibleApps" :key="app.id" class="gap-0 rounded-md py-0 shadow-none">
                 <CardContent class="flex items-center gap-3 py-3">
                   <div class="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-xl border bg-muted text-primary">
@@ -2178,16 +2179,18 @@ async function removeRuntimeMcpServer(provider: RuntimeMcpProvider, name: string
                     <AppWindow v-else :size="18" />
                   </div>
                   <div class="min-w-0 flex-1">
-                    <p class="text-xs font-semibold">{{ app.name }}</p>
+                    <p class="break-words text-xs font-semibold">{{ app.name }}</p>
                     <p class="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">{{ app.description }}</p>
                     <p class="mt-1 text-[10px] text-muted-foreground">{{ app.pluginNames.join(' · ') }}</p>
                   </div>
                   <Switch
                     :checked="app.enabled"
-                    :disabled="capabilitiesStore.capabilityMutation !== ''"
+                    :disabled="capabilitiesStore.capabilityMutation !== '' || capabilitiesStore.capabilitiesLoading || !capabilitiesStore.connectionReady"
+                    :aria-label="app.name"
                     @update:checked="capabilitiesStore.setAppEnabled(app.id, $event as boolean)"
                   />
                 </CardContent>
+                <CodexAppTools :app="app" />
               </Card>
             </TabsContent>
 

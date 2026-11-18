@@ -407,16 +407,27 @@ export const useCapabilitiesStore = defineStore('capabilities', () => {
   }
 
   async function setAppEnabled(appID: string, enabled: boolean): Promise<void> {
-    if (!appID || capabilityMutation.value) return
+    const app = capabilities.value.apps.find((item) => item.id === appID)
+    if (!app || capabilityMutation.value || capabilitiesLoading.value || !connectionReady.value || !appStore.codexAvailable) return
+    const revision = contextRevision
     capabilityMutation.value = `app:${appID}`
     try {
       await backend.SetAppEnabled(appID, enabled)
-      capabilities.value = {
-        ...capabilities.value,
-        apps: capabilities.value.apps.map((app) => app.id === appID ? { ...app, enabled } : app),
+      if (revision !== contextRevision) return
+      await loadCapabilities(true)
+      if (revision !== contextRevision) return
+      const current = capabilities.value.apps.find((item) => item.id === appID)
+      if (capabilityErrors.value.apps || !current) {
+        notify('warning', translate('capabilities.appSavedUnverified'), capabilityErrors.value.apps || app.name)
+      } else if (current.enabled !== enabled) {
+        notify('warning', translate('capabilities.appOverridden'), app.name)
+      } else {
+        notify('success', translate('capabilities.appUpdated'), app.name)
       }
     } catch (error) {
+      if (revision !== contextRevision) return
       notify('error', translate('capabilities.appUpdateFailed'), errorMessage(error))
+      await loadCapabilities(true)
     } finally {
       capabilityMutation.value = ''
     }

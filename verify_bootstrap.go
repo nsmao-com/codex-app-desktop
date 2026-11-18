@@ -937,6 +937,61 @@ func verifyCodexProviderIdentity() error {
 }
 
 func verifyCapabilityContracts() error {
+	appPage := 0
+	apps, appErr := listAppPages(func(params map[string]any) (map[string]any, error) {
+		if params["limit"] != 100 || params["forceRefetch"] != (appPage == 0) {
+			return nil, fmt.Errorf("incorrect app pagination parameters")
+		}
+		if appPage > 0 && params["cursor"] != "second" {
+			return nil, fmt.Errorf("app cursor lost")
+		}
+		appPage++
+		if appPage == 1 {
+			return map[string]any{"data": []any{map[string]any{"id": "first"}}, "nextCursor": "second"}, nil
+		}
+		return map[string]any{"data": []any{map[string]any{"id": "second"}}, "nextCursor": nil}, nil
+	})
+	if appErr != nil || appPage != 2 || len(apps["data"].([]any)) != 2 {
+		return fmt.Errorf("app pagination failed: %v", appErr)
+	}
+	for _, scenario := range []string{"error", "data", "cursor", "repeat", "oversized-cursor", "limit", "rows"} {
+		page := 0
+		result, err := listAppPages(func(map[string]any) (map[string]any, error) {
+			page++
+			if page == 1 {
+				return map[string]any{"data": []any{}, "nextCursor": "next"}, nil
+			}
+			switch scenario {
+			case "error":
+				return nil, fmt.Errorf("offline")
+			case "data":
+				return map[string]any{"data": "invalid"}, nil
+			case "cursor":
+				return map[string]any{"data": []any{}, "nextCursor": 123}, nil
+			case "repeat":
+				return map[string]any{"data": []any{}, "nextCursor": "next"}, nil
+			case "oversized-cursor":
+				return map[string]any{"data": []any{}, "nextCursor": strings.Repeat("x", 16385)}, nil
+			case "rows":
+				return map[string]any{"data": make([]any, 10001)}, nil
+			default:
+				return map[string]any{"data": []any{}, "nextCursor": fmt.Sprint(page)}, nil
+			}
+		})
+		if err == nil || result != nil {
+			return fmt.Errorf("app %s returned partial success", scenario)
+		}
+	}
+	empty, err := listAppPages(func(map[string]any) (map[string]any, error) { return map[string]any{"data": []any{}}, nil })
+	if err != nil || len(empty["data"].([]any)) != 0 {
+		return fmt.Errorf("empty app directory rejected")
+	}
+	service := &AppService{}
+	for _, id := range []string{"", "x\ny", "x\x00y", strings.Repeat("x", 181)} {
+		if _, err := service.ReadAppDetails(context.Background(), id); err == nil || !strings.Contains(err.Error(), "应用标识") {
+			return fmt.Errorf("invalid app ID reached transport")
+		}
+	}
 	page := 0
 	result, err := listExperimentalFeaturePages(func(params map[string]any) (map[string]any, error) {
 		if page > 0 && params["cursor"] != "second" {
@@ -984,7 +1039,7 @@ func verifyCapabilityContracts() error {
 			return fmt.Errorf("invalid plugin ID accepted")
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"feature pagination", "repeated cursor and read errors", "native enablement acknowledgement", "literal plugin ID and merge payload"}})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "checks": []string{"app pagination and first-page refetch", "app malformed response, cursor, page and row limits", "app detail ID validation", "feature pagination", "repeated cursor and read errors", "native enablement acknowledgement", "literal plugin ID and merge payload"}})
 }
 
 func verifyClaudeHealth() error {

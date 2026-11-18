@@ -2824,8 +2824,59 @@ func (s *AppService) SetSkillEnabled(request SkillConfigRequest) (map[string]any
 	return s.call("skills/config/write", params)
 }
 
-func (s *AppService) ListApps() (map[string]any, error) {
-	return s.call("app/list", map[string]any{"forceRefetch": true, "limit": 100})
+func (s *AppService) ListApps(ctx context.Context) (map[string]any, error) {
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	return listAppPages(func(params map[string]any) (map[string]any, error) {
+		return s.callWithContext(ctx, "app/list", params, 45*time.Second)
+	})
+}
+
+func listAppPages(fetch func(map[string]any) (map[string]any, error)) (map[string]any, error) {
+	apps := []any{}
+	cursor := ""
+	seen := map[string]bool{}
+	for page := 0; page < 32; page++ {
+		params := map[string]any{"limit": 100, "forceRefetch": page == 0}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		result, err := fetch(params)
+		if err != nil {
+			return nil, err
+		}
+		rows, ok := result["data"].([]any)
+		if !ok {
+			return nil, errors.New("Codex 返回了无效的应用目录，请更新 CLI 后重试")
+		}
+		apps = append(apps, rows...)
+		if len(apps) > 10000 {
+			return nil, errors.New("Codex 应用目录过大，请更新 CLI 后重试")
+		}
+		next, ok := result["nextCursor"].(string)
+		if result["nextCursor"] != nil && !ok {
+			return nil, errors.New("Codex 应用目录分页格式无效")
+		}
+		if next == "" {
+			return map[string]any{"data": apps, "nextCursor": nil}, nil
+		}
+		if len(next) > 16384 || seen[next] {
+			return nil, errors.New("Codex 应用目录分页游标无效或重复，请重新读取")
+		}
+		seen[next] = true
+		cursor = next
+	}
+	return nil, errors.New("Codex 应用目录超过分页上限，请更新 CLI 后重试")
+}
+
+// ReadAppDetails returns public, display-only native tool summaries. Reading
+// metadata does not connect an app or grant permission to execute its tools.
+func (s *AppService) ReadAppDetails(ctx context.Context, appID string) (map[string]any, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" || len(appID) > 180 || strings.ContainsAny(appID, "\r\n\x00") {
+		return nil, errors.New("应用标识无效，请重新读取目录")
+	}
+	return s.callWithContext(ctx, "app/read", map[string]any{"appIds": []string{appID}, "includeTools": true}, 30*time.Second)
 }
 
 func (s *AppService) ListMCPServers() (map[string]any, error) {
@@ -4028,14 +4079,20 @@ func (s *AppService) call(method string, params any) (map[string]any, error) {
 }
 
 func (s *AppService) callWithTimeout(method string, params any, timeout time.Duration) (map[string]any, error) {
+	return s.callWithContext(s.serviceContext(), method, params, timeout)
+}
+
+func (s *AppService) callWithContext(parent context.Context, method string, params any, timeout time.Duration) (map[string]any, error) {
 	s.mu.Lock()
 	client := s.client
 	s.mu.Unlock()
 	if client == nil {
 		return nil, errors.New("Codex app-server is not running")
 	}
-	ctx, cancel := context.WithTimeout(s.serviceContext(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	stop := context.AfterFunc(s.serviceContext(), cancel)
+	defer stop()
 	raw, err := client.Request(ctx, method, params)
 	if err != nil {
 		return nil, err

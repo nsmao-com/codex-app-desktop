@@ -33,7 +33,7 @@
   </a>
 </p>
 
-<p align="center"><sub>v1.6.31：视觉模型目录支持 Anthropic 分页、取消读取和数量提示，不完整目录不再误报成功。</sub></p>
+<p align="center"><sub>v1.6.32：Codex Apps 支持查看工具、完整目录分页与开关原生状态确认。</sub></p>
 
 ## 为什么是 Nice Codex
 

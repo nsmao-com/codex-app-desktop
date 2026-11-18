@@ -425,6 +425,14 @@ export function ReadAccountUsage(): $CancellablePromise<{ [_ in string]?: any } 
     return $Call.ByID(3812997328);
 }
 
+/**
+ * ReadAppDetails returns public, display-only native tool summaries. Reading
+ * metadata does not connect an app or grant permission to execute its tools.
+ */
+export function ReadAppDetails(appID: string): $CancellablePromise<{ [_ in string]?: any } | null> {
+    return $Call.ByID(3670495977, appID);
+}
+
 export function ReadClaudeCapabilities(): $CancellablePromise<$models.ClaudeCapabilitiesCatalog> {
     return $Call.ByID(3255146774);
 }
